@@ -1,0 +1,4 @@
+[submodule "testsuite"]
+	path = tests/spec
+	url = https://github.com/WebAssembly/testsuite.git
+	shallow = true
