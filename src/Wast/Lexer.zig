@@ -116,7 +116,7 @@ pub const Token = struct {
         "keyword_unknown",
     };
 
-    const Tag: type = @Type(std.builtin.Type{ .@"enum" = .{
+    pub const Tag: type = @Type(std.builtin.Type{ .@"enum" = .{
         .is_exhaustive = true,
         .tag_type = u16,
         .decls = &[0]std.builtin.Type.Declaration{},

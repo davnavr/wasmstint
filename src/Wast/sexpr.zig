@@ -7,6 +7,7 @@ const Lexer = @import("Lexer.zig");
 
 pub const Token = Lexer.Token;
 pub const Offset = Lexer.Offset;
+pub const Error = @import("Error.zig");
 
 /// An S-expression.
 pub const Value = packed struct(u32) {
@@ -28,6 +29,22 @@ pub const Value = packed struct(u32) {
     fn initList(list: List.Id) Value {
         return Value{ .tag = .list, .case = .{ .list = list } };
     }
+
+    pub fn getList(value: Value) ?List.Id {
+        return if (value.tag == .list) value.case.list else null;
+    }
+
+    pub const Unpacked = union(enum) {
+        atom: TokenId,
+        list: List.Id,
+    };
+
+    pub fn unpacked(value: Value) Unpacked {
+        return switch (value.tag) {
+            .atom => Unpacked{ .atom = value.case.atom },
+            .list => Unpacked{ .list = value.case.list },
+        };
+    }
 };
 
 pub const List = struct {
@@ -46,7 +63,7 @@ pub const List = struct {
     pub const Id = enum(u31) {
         _,
 
-        fn create(list: List, arena: *std.MultiArrayList(List), gpa: Allocator) error{OutOfMemory}!Id {
+        fn create(list: List, arena: *std.MultiArrayList(List), gpa: Allocator) Allocator.Error!Id {
             const i = std.math.cast(u31, arena.len) orelse return error.OutOfMemory;
             try arena.append(gpa, list);
             return @enumFromInt(i);
@@ -61,7 +78,7 @@ pub const List = struct {
 pub const TokenId = enum(u31) {
     _,
 
-    fn create(token: Token, arena: *std.MultiArrayList(Token), gpa: Allocator) error{OutOfMemory}!TokenId {
+    fn create(token: Token, arena: *std.MultiArrayList(Token), gpa: Allocator) Allocator.Error!TokenId {
         const i = std.math.cast(u31, arena.len) orelse return error.OutOfMemory;
         try arena.append(gpa, token);
         return @enumFromInt(i);
@@ -72,38 +89,11 @@ pub const TokenId = enum(u31) {
     }
 };
 
-pub const Error = struct {
-    value: Value,
-    tag: Tag,
-    extra: union {
-        /// Set when `.tag == Tag.expected_token`.
-        expected_token: Token.Tag,
-    } = undefined,
-
-    pub const Tag = enum {
-        unexpected,
-        // missing_closing_quotation_mark,
-        // missing_block_comment_end,
-        missing_closing_parenthesis,
-        expected_token,
-    };
-};
-
-fn appendError(
-    errors: *std.SegmentedList(Error, 0),
-    tag: Error.Tag,
-    value: Value,
-    gpa: Allocator,
-) error{OutOfMemory}!void {
-    try errors.append(gpa, .{ .tag = tag, .value = value });
-}
-
 /// Stores allocations for parsed S-expressions.
 pub const Tree = struct {
     /// The UTF-8 source code.
     source: []const u8,
     values: List.Contents,
-    errors: std.SegmentedList(Error, 0),
     arenas: struct {
         values: std.ArrayListUnmanaged(Value),
         tokens: std.MultiArrayList(Token),
@@ -114,7 +104,8 @@ pub const Tree = struct {
         lexer: Lexer,
         gpa: Allocator,
         scratch: *std.heap.ArenaAllocator,
-    ) error{OutOfMemory}!Tree {
+        errors: *Error.List,
+    ) Allocator.Error!Tree {
         // TODO: Get an actual estimate of average bytes/token
         const bytes_per_token: usize = 16;
 
@@ -122,7 +113,6 @@ pub const Tree = struct {
         var tree = Tree{
             .source = lexer.utf8.bytes,
             .values = .{ .start = undefined, .count = 0 },
-            .errors = {},
             .arenas = .{
                 .values = .empty,
                 .tokens = .empty,
@@ -151,10 +141,7 @@ pub const Tree = struct {
         while (lexer.next()) |tok| {
             defer prev_tok = tok;
             switch (tok.tag) {
-                .reserved => {
-                    const id = try TokenId.create(tok, &tree.arenas.tokens, gpa);
-                    try appendError(&tree.errors, .unexpected, Value.initAtom(id), gpa);
-                },
+                .reserved => try errors.appendUnexpected(Value.initAtom(try TokenId.create(tok, &tree.arenas.tokens, gpa))),
                 .open_paren => {
                     try list_stack.headers.append(
                         scratch.allocator(),
@@ -165,8 +152,7 @@ pub const Tree = struct {
                     0 => unreachable,
                     1 => {
                         // Unmatched closing parenthesis.
-                        const id = try TokenId.create(tok, &tree.arenas.tokens, gpa);
-                        try appendError(&tree.errors, .unexpected, Value.initAtom(id), gpa);
+                        try errors.appendUnexpected(Value.initAtom(try TokenId.create(tok, &tree.arenas.tokens, gpa)));
                     },
                     else => {
                         const popped_list: ListHeader = list_stack.headers.pop() orelse unreachable;
@@ -210,8 +196,7 @@ pub const Tree = struct {
                     },
                 },
                 .unexpected_eof => {
-                    const id = try TokenId.create(tok, &tree.arenas.tokens, gpa);
-                    try appendError(&tree.errors, .unexpected, Value.initAtom(id), gpa);
+                    try errors.appendUnexpected(Value.initAtom(try TokenId.create(tok, &tree.arenas.tokens, gpa)));
                     break;
                 },
                 else => {
@@ -226,7 +211,7 @@ pub const Tree = struct {
 
         if (list_stack.headers.count() > 1) {
             const previous_token = prev_tok.?;
-            try appendError(&tree.errors, .missing_closing_parenthesis, Value.initAtom(previous_token), gpa);
+            try errors.appendUnexpected(Value.initAtom(previous_token));
 
             while (list_stack.headers.count() > 1) {
                 // TODO: Refactor this duplicated code from `.close_paren` case.
@@ -299,12 +284,12 @@ pub const Tree = struct {
         script: []const u8,
         gpa: Allocator,
         scratch: *std.heap.ArenaAllocator,
+        errors: *Error.List,
     ) error{ OutOfMemory, InvalidUtf8 }!Tree {
-        return parseFromLexer(try Lexer.init(script), gpa, scratch);
+        return parseFromLexer(try Lexer.init(script), gpa, scratch, errors);
     }
 
     pub fn deinit(tree: *Tree, gpa: Allocator) void {
-        tree.errors.deinit(gpa);
         tree.arenas.values.deinit(gpa);
         tree.arenas.tokens.deinit(gpa);
         tree.arenas.lists.deinit(gpa);
