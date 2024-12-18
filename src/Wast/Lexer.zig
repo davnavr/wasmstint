@@ -10,13 +10,15 @@ utf8: std.unicode.Utf8Iterator,
 
 const Lexer = @This();
 
-const Token = struct {
-    /// The index of the first byte of the token.
+/// Byte offsets into UTF-8 source code.
+pub const Offset = struct {
     start: usize,
-    /// The index after the last byte of the token.
-    ///
-    /// This should always be greater than the `start`.
     end: usize,
+};
+
+pub const Token = struct {
+    /// Refers to the first byte and the byte after the last byte of the token.
+    offset: Offset,
     /// Indicates what kind of token was parsed.
     ///
     /// - `reserved`: Used for malformed and nonsensical syntax.
@@ -45,7 +47,7 @@ const Token = struct {
         "type",
         "mut",
 
-        // These are treated as `unknown` keywords
+        // These are treated as `keyword_unknown`.
         // "offset=",
         // "align=",
         // `nan:0x`, // keyword only when sign is omitted
@@ -209,7 +211,7 @@ pub fn next(lexer: *Lexer) ?Token {
     var token: Token = undefined;
     state: switch (State.start) {
         .start => {
-            token.start = lexer.utf8.i;
+            token.offset.start = lexer.utf8.i;
             switch (lexer.utf8.bytes[lexer.utf8.i]) {
                 // Either a block comment start or an opening parenthesis.
                 '(' => {
@@ -589,13 +591,13 @@ pub fn next(lexer: *Lexer) ?Token {
         },
     }
 
-    token.end = lexer.utf8.i;
-    std.debug.assert(token.start < token.end);
-    std.debug.assert(token.start <= lexer.utf8.bytes.len);
-    std.debug.assert(token.end <= lexer.utf8.bytes.len);
+    token.offset.end = lexer.utf8.i;
+    std.debug.assert(token.offset.start < token.offset.end);
+    std.debug.assert(token.offset.start <= lexer.utf8.bytes.len);
+    std.debug.assert(token.offset.end <= lexer.utf8.bytes.len);
 
     if (token.tag == .keyword_unknown) {
-        if (Token.keyword_lookup.get(lexer.utf8.bytes[token.start + 1 .. token.end])) |keyword|
+        if (Token.keyword_lookup.get(lexer.utf8.bytes[token.offset.start + 1 .. token.offset.end])) |keyword|
             token.tag = keyword;
     }
 
@@ -608,15 +610,15 @@ test "all token types" {
     );
 
     const expected = [_]?Token{
-        Token{ .start = 0, .end = 1, .tag = Token.Tag.open_paren },
-        .{ .start = 1, .end = 2, .tag = .close_paren },
-        .{ .start = 2, .end = 8, .tag = .id },
-        .{ .start = 9, .end = 16, .tag = .string_literal },
-        .{ .start = 17, .end = 23, .tag = .integer },
-        .{ .start = 24, .end = 28, .tag = .float },
-        .{ .start = 30, .end = 32, .tag = .integer },
-        .{ .start = 45, .end = 52, .tag = .keyword_unknown },
-        .{ .start = 55, .end = 63, .tag = .float },
+        Token{ .offset = .{ .start = 0, .end = 1 }, .tag = Token.Tag.open_paren },
+        .{ .offset = .{ .start = 1, .end = 2 }, .tag = .close_paren },
+        .{ .offset = .{ .start = 2, .end = 8 }, .tag = .id },
+        .{ .offset = .{ .start = 9, .end = 16 }, .tag = .string_literal },
+        .{ .offset = .{ .start = 17, .end = 23 }, .tag = .integer },
+        .{ .offset = .{ .start = 24, .end = 28 }, .tag = .float },
+        .{ .offset = .{ .start = 30, .end = 32 }, .tag = .integer },
+        .{ .offset = .{ .start = 45, .end = 52 }, .tag = .keyword_unknown },
+        .{ .offset = .{ .start = 55, .end = 63 }, .tag = .float },
         null,
     };
 
