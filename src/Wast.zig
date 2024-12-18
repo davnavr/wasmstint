@@ -4,6 +4,7 @@
 //! [`.wast`]: https://github.com/WebAssembly/spec/blob/d52e42df1314521c6e4cd7331593f2901e1d7b43/interpreter/README.md
 
 pub const Lexer = @import("Wast/Lexer.zig");
+pub const sexpr = @import("Wast/sexpr.zig");
 
 test {
     _ = Lexer;
