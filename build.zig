@@ -13,12 +13,22 @@ pub fn build(b: *std.Build) void {
         .test_unit = b.step("test-unit", "Run unit tests"),
     };
 
+    const root_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+    });
+    const global_allocator_mod = b.createModule(.{
+        .root_source_file = b.path("src/GlobalAllocator.zig"),
+    });
+
     const run_wast_exe = b.addExecutable(.{
         .name = "wasmstint-wast",
         .root_source_file = b.path("src/tools/run_wast.zig"),
         .target = proj_options.target,
         .optimize = proj_options.optimize,
     });
+
+    run_wast_exe.root_module.addImport("wasmstint", root_mod);
+    run_wast_exe.root_module.addImport("GlobalAllocator", global_allocator_mod);
 
     const run_wast_cmd = b.addRunArtifact(run_wast_exe);
     if (b.args) |args| {
