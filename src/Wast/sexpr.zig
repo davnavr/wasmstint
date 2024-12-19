@@ -30,6 +30,10 @@ pub const Value = packed struct(u32) {
         return Value{ .tag = .list, .case = .{ .list = list } };
     }
 
+    pub fn getAtom(value: Value) ?TokenId {
+        return if (value.tag == .atom) value.case.atom else null;
+    }
+
     pub fn getList(value: Value) ?List.Id {
         return if (value.tag == .list) value.case.list else null;
     }
@@ -86,6 +90,15 @@ pub const TokenId = enum(u31) {
 
     pub fn tag(id: TokenId, tree: *const Tree) Token.Tag {
         return tree.arenas.tokens.slice().items(.tag)[@intFromEnum(id)];
+    }
+
+    pub fn offset(id: TokenId, tree: *const Tree) *const Offset {
+        return &tree.arenas.tokens.slice().items(.offset)[@intFromEnum(id)];
+    }
+
+    pub fn contents(id: TokenId, tree: *const Tree) []const u8 {
+        const loc = id.offset(tree);
+        return tree.source[loc.start..][0..loc.end];
     }
 };
 
@@ -296,3 +309,12 @@ pub const Tree = struct {
         tree.* = undefined;
     }
 };
+
+pub fn parseAtom(sexpr: *[]const Value) error{ EndOfStream, InvalidParse }!TokenId {
+    if (sexpr.*.len == 0) return error.EndOfStream;
+
+    if (sexpr.*[0].getAtom()) |atom| {
+        sexpr.* = sexpr.*[1..];
+        return atom;
+    } else return error.InvalidParse;
+}

@@ -141,6 +141,10 @@ pub const Token = struct {
             entry.* = .{ keyword, @field(Tag, "keyword_" ++ keyword) };
         break :kvs entries;
     });
+
+    pub fn contents(token: *const Token, src: []const u8) []const u8 {
+        return src[token.offset.start..][0..token.offset.end];
+    }
 };
 
 pub fn initUtf8(utf8: std.unicode.Utf8Iterator) Lexer {
@@ -371,6 +375,14 @@ pub fn next(lexer: *Lexer) ?Token {
 
                             if ((0xD800 <= code_point and code_point < 0xE000) or 0x110000 <= code_point)
                                 continue :state .reserved;
+                        },
+                        // Hexadecimal escape sequence.
+                        '0'...'9', 'a'...'f', 'A'...'F' => {
+                            const second_digit = lexer.utf8.nextCodepoint() orelse continue :state .reserved;
+                            switch (second_digit) {
+                                '0'...'9', 'a'...'f', 'A'...'F' => {},
+                                else => continue :state .reserved,
+                            }
                         },
                         // Invalid escape sequence
                         else => continue :state .reserved,
