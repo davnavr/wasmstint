@@ -193,11 +193,6 @@ fn remainingInputStartsWith(lexer: *const Lexer, match: []const u8) bool {
 ///
 /// [*white space*]: https://webassembly.github.io/spec/core/text/lexical.html#white-space
 pub fn next(lexer: *Lexer) ?Token {
-    if (lexer.utf8.i == lexer.utf8.bytes.len) {
-        @branchHint(.unlikely);
-        return null;
-    }
-
     const State = enum {
         start,
         open_paren,
@@ -216,6 +211,11 @@ pub fn next(lexer: *Lexer) ?Token {
     var token: Token = undefined;
     state: switch (State.start) {
         .start => {
+            if (lexer.utf8.i == lexer.utf8.bytes.len) {
+                @branchHint(.unlikely);
+                return null;
+            }
+
             token.offset.start = lexer.utf8.i;
             switch (lexer.utf8.bytes[lexer.utf8.i]) {
                 // Either a block comment start or an opening parenthesis.
