@@ -141,51 +141,11 @@ pub const StringEscape = union(enum) {
             return .{ .escaped = seq };
         }
 
-        pub const AllocPrint = union(enum) {
-            allocated: std.ArrayListUnmanaged(u8),
-            original: []const u8,
-
-            pub fn deinit(print: *AllocPrint, allocator: std.mem.Allocator) void {
-                switch (print.*) {
-                    .original => {},
-                    .allocated => |*buf| buf.deinit(allocator),
-                }
-
-                print.* = undefined;
-            }
-
-            pub fn bytes(print: *const AllocPrint) []const u8 {
-                return switch (print.*) {
-                    .original => |s| s,
-                    .allocated => |*buf| buf.items,
-                };
-            }
-        };
-
-        pub fn allocPrint(iter: Iterator, allocator: std.mem.Allocator) error{OutOfMemory}!AllocPrint {
+        pub fn allocPrint(iter: Iterator, allocator: std.mem.Allocator) error{OutOfMemory}!std.ArrayListUnmanaged(u8) {
             var iterator = iter;
 
-            const first = iterator.next() orelse return .{ .original = iterator.remaining };
-            const second = iterator.next();
-
-            if (first == .literal and second == null) {
-                return .{ .original = first.literal };
-            }
-
-            var buf = try std.ArrayListUnmanaged(u8).initCapacity(
-                allocator,
-                std.math.add(
-                    usize,
-                    first.bytes().len,
-                    if (second != null) second.?.bytes().len else 0,
-                ) catch return error.OutOfMemory,
-            );
+            var buf = std.ArrayListUnmanaged(u8).empty;
             errdefer buf.deinit(allocator);
-
-            buf.appendSliceAssumeCapacity(first.bytes());
-
-            if (second) |second_escape|
-                buf.appendSliceAssumeCapacity(second_escape.bytes());
 
             while (iterator.next()) |escape| {
                 const append = escape.bytes();
@@ -206,11 +166,15 @@ pub const StringEscape = union(enum) {
                 }
             }
 
-            return .{ .allocated = buf };
+            return buf;
         }
     };
 };
 
+/// Iterates over the contents of a string, translating escape sequences.
+///
+/// When parsing string literal tokens, as an optimization callers can check if
+/// any escape sequences are even present.
 pub fn string(contents: []const u8) StringEscape.Iterator {
     if (contents.len > 0) {
         std.debug.assert(contents[0] != '\"');
@@ -238,9 +202,9 @@ test unsignedInteger {
 test string {
     const test_case = struct {
         fn run(input: [:0]const u8, expected: [:0]const u8) !void {
-            var print = try string(input).allocPrint(std.testing.allocator);
-            defer print.deinit(std.testing.allocator);
-            try std.testing.expectEqualStrings(expected, print.bytes());
+            var buf = try string(input).allocPrint(std.testing.allocator);
+            defer buf.deinit(std.testing.allocator);
+            try std.testing.expectEqualStrings(expected, buf.items);
         }
     };
 
