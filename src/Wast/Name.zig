@@ -50,7 +50,7 @@ pub const Cache = struct {
 
         const entry = try cache.lookup.getOrPut(allocator, actual_name);
         if (!entry.found_existing and entry.index > std.math.maxInt(std.meta.Tag(Id))) {
-            cache.lookup.pop();
+            _ = cache.lookup.pop();
             return error.OutOfMemory;
         } else {
             return @enumFromInt(@as(u32, @intCast(entry.index)));
@@ -64,22 +64,40 @@ pub const Cache = struct {
 };
 
 pub fn parse(
-    values: *[]const sexpr.Value,
+    parser: *sexpr.Parser,
     tree: *const sexpr.Tree,
     cache_allocator: Allocator,
     cache_string_arena: *std.heap.ArenaAllocator,
     cache: *Cache,
     scratch: *std.heap.ArenaAllocator,
-) error{ OutOfMemory, EndOfStream, InvalidUtf8, InvalidParse }!Id {
-    const atom = try sexpr.parseAtom(values);
-    return switch (atom.tag(tree)) {
-        .string, .string_raw => try cache.intern(
-            cache_allocator,
-            cache_string_arena,
-            atom,
-            tree,
-            scratch,
-        ),
-        else => error.InvalidParse,
+    parent: sexpr.Value,
+) error{OutOfMemory}!sexpr.Parser.Result(Id) {
+    const atom: sexpr.TokenId = switch (parser.parseAtomInList(.string, parent)) {
+        .ok => |ok| ok,
+        .err => |err| return .{ .err = err },
     };
+
+    switch (atom.tag(tree)) {
+        .string, .string_raw => {
+            const id = cache.intern(
+                cache_allocator,
+                cache_string_arena,
+                atom,
+                tree,
+                scratch,
+            ) catch |e| return switch (e) {
+                error.OutOfMemory => |oom| oom,
+                error.InvalidUtf8 => .{ .err = sexpr.Error.initInvalidUtf8(sexpr.Value.initAtom(atom)) },
+            };
+
+            return .{ .ok = id };
+        },
+        else => return .{
+            .err = sexpr.Error.initExpectedToken(
+                sexpr.Value.initAtom(atom),
+                .string,
+                .at_value,
+            ),
+        },
+    }
 }

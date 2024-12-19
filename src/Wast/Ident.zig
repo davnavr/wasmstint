@@ -68,21 +68,34 @@ pub fn index(ident: Ident, tree: *const sexpr.Tree) Index {
 }
 
 pub fn parse(
-    values: *[]const sexpr.Value,
+    parser: *sexpr.Parser,
     tree: *const sexpr.Tree,
     cache: *Cache,
     cache_allocator: Allocator,
-) error{ OutOfMemory, Overflow }!Ident {
-    const atom = sexpr.parseAtom(values) catch |e| switch (e) {
-        error.EndOfStream, error.InvalidParse => return Ident.none,
-    };
+) Allocator.Error!sexpr.Parser.Result(Ident) {
+    var lookahead = parser.*;
+    const atom = (lookahead.parseValue() catch return .{ .ok = Ident.none }).getAtom() orelse
+        return .{ .ok = Ident.none };
 
     const contents = atom.contents(tree);
-    return switch (atom.tag(tree)) {
-        .id => Ident.initSymbolic(atom, try cache.intern(contents[1..], cache_allocator)),
-        .integer => Ident.initNumeric(atom, try value.unsignedInteger(u32, contents)),
-        else => Ident.none,
-    };
+    switch (atom.tag(tree)) {
+        .id => {
+            parser.* = lookahead;
+            const ident = try cache.intern(contents[1..], cache_allocator);
+            return .{ .ok = Ident.initSymbolic(atom, ident) };
+        },
+        .integer => {
+            parser.* = lookahead;
+            const n = value.unsignedInteger(u32, contents) catch |e| switch (e) {
+                error.Overflow => return .{
+                    .err = sexpr.Error.initIntegerLiteralOverflow(sexpr.Value.initAtom(atom), 32),
+                },
+            };
+
+            return .{ .ok = Ident.initNumeric(atom, n) };
+        },
+        else => return .{ .ok = Ident.none },
+    }
 }
 
 pub const Interned = enum(u32) {
@@ -99,9 +112,9 @@ pub const Cache = struct {
     pub const empty = Cache{ .lookup = .empty };
 
     pub fn intern(cache: *Cache, ident: []const u8, gpa: Allocator) Allocator.Error!Interned {
-        const entry = try cache.lookup.getOrPut(gpa, ident, .{});
+        const entry = try cache.lookup.getOrPut(gpa, ident);
         if (!entry.found_existing and entry.index > std.math.maxInt(std.meta.Tag(Interned))) {
-            cache.lookup.pop();
+            _ = cache.lookup.pop();
             return error.OutOfMemory;
         } else {
             return @enumFromInt(@as(std.meta.Tag(Interned), @intCast(entry.index)));

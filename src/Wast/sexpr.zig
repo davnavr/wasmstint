@@ -22,11 +22,11 @@ pub const Value = packed struct(u32) {
         list,
     };
 
-    fn initAtom(token: TokenId) Value {
+    pub fn initAtom(token: TokenId) Value {
         return Value{ .tag = .atom, .case = .{ .atom = token } };
     }
 
-    fn initList(list: List.Id) Value {
+    pub fn initList(list: List.Id) Value {
         return Value{ .tag = .list, .case = .{ .list = list } };
     }
 
@@ -60,7 +60,7 @@ pub const List = struct {
         count: u32,
 
         pub fn values(contents: Contents, tree: *const Tree) []const Value {
-            return tree.arenas.values.items[contents.start..][0..contents.count];
+            return (tree.arenas.values.items[contents.start..])[0..contents.count];
         }
     };
 
@@ -74,7 +74,7 @@ pub const List = struct {
         }
 
         pub fn contents(id: Id, tree: *const Tree) *const Contents {
-            return tree.arenas.lists.slice().items(.contents)[@intFromEnum(id)];
+            return &tree.arenas.lists.slice().items(.contents)[@intFromEnum(id)];
         }
     };
 };
@@ -119,12 +119,14 @@ pub const Tree = struct {
         scratch: *std.heap.ArenaAllocator,
         errors: *Error.List,
     ) Allocator.Error!Tree {
+        var lex = lexer;
+
         // TODO: Get an actual estimate of average bytes/token
         const bytes_per_token: usize = 16;
 
         // Allocated in `gpa`.
         var tree = Tree{
-            .source = lexer.utf8.bytes,
+            .source = lex.utf8.bytes,
             .values = .{ .start = undefined, .count = 0 },
             .arenas = .{
                 .values = .empty,
@@ -135,7 +137,7 @@ pub const Tree = struct {
 
         errdefer tree.deinit(gpa);
 
-        try tree.tokens.ensureTotalCapacity(gpa, lexer.utf8.bytes.len / bytes_per_token);
+        try tree.arenas.tokens.ensureTotalCapacity(gpa, lex.utf8.bytes.len / bytes_per_token);
 
         const ListHeader = struct {
             open_paren_offset: usize,
@@ -144,34 +146,44 @@ pub const Tree = struct {
 
         // Allocated in `scratch`.
         var list_stack = .{
-            .headers = std.SegmentedList(ListHeader, 8){},
-            .contents = std.SegmentedList(Value, 16){},
+            .headers = headers: {
+                var headers = std.SegmentedList(ListHeader, 8){};
+                headers.append(gpa, .{ .open_paren_offset = undefined }) catch unreachable;
+                break :headers headers;
+            },
+            .contents = contents: {
+                var contents = std.SegmentedList(Value, 16){};
+                _ = &contents;
+                break :contents contents;
+            },
         };
 
-        list_stack.headers.append(gpa, .{ .open_paren_offset = undefined }) catch unreachable;
-
         var prev_tok: ?Token = null;
-        while (lexer.next()) |tok| {
+        while (lex.next()) |tok| {
             defer prev_tok = tok;
             switch (tok.tag) {
-                .reserved => try errors.appendUnexpected(Value.initAtom(try TokenId.create(tok, &tree.arenas.tokens, gpa))),
+                .reserved => {
+                    const value = Value.initAtom(try TokenId.create(tok, &tree.arenas.tokens, gpa));
+                    try errors.append(Error.initUnexpectedValue(value, .at_value));
+                },
                 .open_paren => {
                     try list_stack.headers.append(
                         scratch.allocator(),
-                        .{ .open_paren_offset = tok.start },
+                        .{ .open_paren_offset = tok.offset.start },
                     );
                 },
                 .close_paren => switch (list_stack.headers.count()) {
                     0 => unreachable,
                     1 => {
                         // Unmatched closing parenthesis.
-                        try errors.appendUnexpected(Value.initAtom(try TokenId.create(tok, &tree.arenas.tokens, gpa)));
+                        const value = Value.initAtom(try TokenId.create(tok, &tree.arenas.tokens, gpa));
+                        try errors.append(Error.initUnexpectedValue(value, .at_value));
                     },
                     else => {
                         const popped_list: ListHeader = list_stack.headers.pop() orelse unreachable;
 
                         {
-                            const prev_list_count = list_stack.headers.at(list_stack.headers.count() - 1).*.count;
+                            const prev_list_count = &list_stack.headers.at(list_stack.headers.count() - 1).count;
                             prev_list_count.* = std.math.add(u32, prev_list_count.*, 1) catch return error.OutOfMemory;
                         }
 
@@ -183,7 +195,6 @@ pub const Tree = struct {
 
                         try tree.arenas.values.resize(
                             gpa,
-                            undefined,
                             std.math.add(usize, tree.arenas.values.items.len, popped_list.count) catch
                                 return error.OutOfMemory,
                         );
@@ -209,14 +220,15 @@ pub const Tree = struct {
                     },
                 },
                 .unexpected_eof => {
-                    try errors.appendUnexpected(Value.initAtom(try TokenId.create(tok, &tree.arenas.tokens, gpa)));
+                    const value = Value.initAtom(try TokenId.create(tok, &tree.arenas.tokens, gpa));
+                    try errors.append(Error.initUnexpectedValue(value, .at_value));
                     break;
                 },
                 else => {
                     const value = Value.initAtom(try TokenId.create(tok, &tree.arenas.tokens, gpa));
                     // Append token to the current list.
                     try list_stack.contents.append(scratch.allocator(), value);
-                    const current_count = list_stack.headers.at(list_stack.headers.count() - 1).*.count;
+                    const current_count = &list_stack.headers.at(list_stack.headers.count() - 1).count;
                     current_count.* = std.math.add(u32, current_count.*, 1) catch return error.OutOfMemory;
                 },
             }
@@ -224,14 +236,17 @@ pub const Tree = struct {
 
         if (list_stack.headers.count() > 1) {
             const previous_token = prev_tok.?;
-            try errors.appendUnexpected(Value.initAtom(previous_token));
+            {
+                const value = Value.initAtom(try TokenId.create(previous_token, &tree.arenas.tokens, gpa));
+                try errors.append(Error.initUnexpectedValue(value, .at_value));
+            }
 
             while (list_stack.headers.count() > 1) {
                 // TODO: Refactor this duplicated code from `.close_paren` case.
                 const popped_list: ListHeader = list_stack.headers.pop() orelse unreachable;
 
                 {
-                    const prev_list_count = list_stack.headers.at(list_stack.headers.count() - 1).*.count;
+                    const prev_list_count = &list_stack.headers.at(list_stack.headers.count() - 1).count;
                     prev_list_count.* = std.math.add(u32, prev_list_count.*, 1) catch return error.OutOfMemory;
                 }
 
@@ -243,7 +258,6 @@ pub const Tree = struct {
 
                 try tree.arenas.values.resize(
                     gpa,
-                    undefined,
                     std.math.add(usize, tree.arenas.values.items.len, popped_list.count) catch
                         return error.OutOfMemory,
                 );
@@ -267,30 +281,29 @@ pub const Tree = struct {
 
                 try list_stack.contents.append(scratch.allocator(), Value.initList(new_list));
             }
-
-            {
-                const top_level_list_header: ListHeader = list_stack.headers.pop();
-                std.debug.assert(list_stack.contents.count() == top_level_list_header.count);
-
-                tree.values = .{
-                    .count = top_level_list_header.count,
-                    .start = std.math.cast(u32, tree.arenas.values.items.len) orelse
-                        return error.OutOfMemory,
-                };
-
-                try tree.arenas.values.resize(
-                    gpa,
-                    undefined,
-                    std.math.add(usize, tree.arenas.values.items.len, tree.values.count) catch
-                        return error.OutOfMemory,
-                );
-
-                list_stack.contents.writeToSlice(tree.arenas.values.items[tree.values.start..][0..tree.values.count], 0);
-            }
-
-            std.debug.assert(list_stack.headers.count() == 0);
-            return tree;
         }
+
+        {
+            const top_level_list_header: ListHeader = list_stack.headers.pop().?;
+            std.debug.assert(list_stack.contents.count() == top_level_list_header.count);
+
+            tree.values = .{
+                .count = top_level_list_header.count,
+                .start = std.math.cast(u32, tree.arenas.values.items.len) orelse
+                    return error.OutOfMemory,
+            };
+
+            try tree.arenas.values.resize(
+                gpa,
+                std.math.add(usize, tree.arenas.values.items.len, tree.values.count) catch
+                    return error.OutOfMemory,
+            );
+
+            list_stack.contents.writeToSlice(tree.arenas.values.items[tree.values.start..][0..tree.values.count], 0);
+        }
+
+        std.debug.assert(list_stack.headers.count() == 0);
+        return tree;
     }
 
     pub fn parseFromSlice(
@@ -310,11 +323,67 @@ pub const Tree = struct {
     }
 };
 
-pub fn parseAtom(sexpr: *[]const Value) error{ EndOfStream, InvalidParse }!TokenId {
-    if (sexpr.*.len == 0) return error.EndOfStream;
+pub const Parser = struct {
+    sexpr: []const Value,
+    i: usize,
 
-    if (sexpr.*[0].getAtom()) |atom| {
-        sexpr.* = sexpr.*[1..];
-        return atom;
-    } else return error.InvalidParse;
-}
+    pub fn init(sexpr: []const Value) Parser {
+        return .{ .sexpr = sexpr, .i = 0 };
+    }
+
+    pub fn Result(comptime T: type) type {
+        return union(enum) {
+            ok: T,
+            err: Error,
+        };
+    }
+
+    pub fn remaining(parser: *const Parser) []const Value {
+        return parser.sexpr[parser.i..];
+    }
+
+    pub fn isEmpty(parser: *const Parser) bool {
+        return parser.i == parser.sexpr.len;
+    }
+
+    pub fn parseValue(parser: *Parser) error{EndOfStream}!Value {
+        if (parser.i < parser.sexpr.len) {
+            const value = parser.sexpr[parser.i];
+            parser.i += 1;
+            return value;
+        } else {
+            return error.EndOfStream;
+        }
+    }
+
+    pub fn parseAtom(parser: *Parser, expected: ?Token.Tag) error{EndOfStream}!Result(TokenId) {
+        const value = try parser.parseValue();
+        return if (value.getAtom()) |atom|
+            .{ .ok = atom }
+        else
+            .{
+                .err = if (expected) |expected_tag|
+                    Error.initExpectedToken(value, expected_tag, .at_value)
+                else
+                    Error.initUnexpectedValue(value, .at_value),
+            };
+    }
+
+    pub fn parseAtomInList(parser: *Parser, expected: ?Token.Tag, list: Value) Result(TokenId) {
+        return parser.parseAtom(expected) catch |e| switch (e) {
+            error.EndOfStream => .{
+                .err = if (expected) |expected_tag|
+                    Error.initExpectedToken(list, expected_tag, .at_list_end)
+                else
+                    Error.initUnexpectedValue(list, .at_list_end),
+            },
+        };
+    }
+
+    pub fn expectEmpty(parser: *Parser, errors: *Error.List) Allocator.Error!void {
+        for (parser.remaining()) |value|
+            try errors.append(Error.initUnexpectedValue(value, .at_value));
+
+        parser.i = parser.sexpr.len;
+    }
+};
