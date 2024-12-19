@@ -24,7 +24,8 @@ pub const Token = struct {
     /// - `reserved`: Used for malformed and nonsensical syntax.
     /// - `id`: Used for symbolic [*identifiers*] in place of numeric WebAssembly indices.
     ///   - The `start` index points to the starting `$` character.
-    /// - `string_literal`, `string_escaped`: Used for string literals.
+    /// - `string`, `string_raw`: Used for string literals known to be guaranteed valid UTF-8 or
+    ///     containing a hexadecimal escape respectively.
     ///   - The `start` and `end` indices refer to the opening and closing quotation marks (`"`) respectively.
     /// - `unexpected_eof`: Used for block comments or string literals missing a closing `;)` or quotation mark (`"`).
     ///
@@ -108,8 +109,8 @@ pub const Token = struct {
         "open_paren",
         "close_paren",
         "id",
-        "string_literal",
-        "string_escaped",
+        "string",
+        "string_raw",
         "float",
         "integer",
         "unexpected_eof",
@@ -247,7 +248,7 @@ pub fn next(lexer: *Lexer) ?Token {
                     continue :state .start;
                 } else return null,
                 '\"' => {
-                    token.tag = .string_literal;
+                    token.tag = .string;
                     lexer.utf8.i += 1;
                     continue :state .string;
                 },
@@ -380,19 +381,17 @@ pub fn next(lexer: *Lexer) ?Token {
                         '0'...'9', 'a'...'f', 'A'...'F' => {
                             const second_digit = lexer.utf8.nextCodepoint() orelse continue :state .reserved;
                             switch (second_digit) {
-                                '0'...'9', 'a'...'f', 'A'...'F' => {},
+                                '0'...'9', 'a'...'f', 'A'...'F' => token.tag = .string_raw,
                                 else => continue :state .reserved,
                             }
                         },
                         // Invalid escape sequence
                         else => continue :state .reserved,
                     }
-
-                    token.tag = .string_escaped;
                 },
-                '\"' => {
-                    std.debug.assert(token.tag == .string_literal or token.tag == .string_escaped);
-                    continue :state .end;
+                '\"' => switch (token.tag) {
+                    .string, .string_raw => continue :state .end,
+                    else => unreachable,
                 },
                 else => {},
             }
@@ -625,7 +624,7 @@ test "all token types" {
         Token{ .offset = .{ .start = 0, .end = 1 }, .tag = Token.Tag.open_paren },
         .{ .offset = .{ .start = 1, .end = 2 }, .tag = .close_paren },
         .{ .offset = .{ .start = 2, .end = 8 }, .tag = .id },
-        .{ .offset = .{ .start = 9, .end = 16 }, .tag = .string_literal },
+        .{ .offset = .{ .start = 9, .end = 16 }, .tag = .string },
         .{ .offset = .{ .start = 17, .end = 23 }, .tag = .integer },
         .{ .offset = .{ .start = 24, .end = 28 }, .tag = .float },
         .{ .offset = .{ .start = 30, .end = 32 }, .tag = .integer },
