@@ -14,9 +14,13 @@ inner: packed struct(u64) {
         symbolic: Interned,
         numeric: u32,
     },
-},
+} align(@alignOf(u32)),
 
 const Ident = @This();
+
+comptime {
+    std.debug.assert(@alignOf(Ident) == @alignOf(u32));
+}
 
 pub const none = Ident{
     .inner = .{
