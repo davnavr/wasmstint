@@ -70,7 +70,7 @@ pub fn parse(
     cache_string_arena: *std.heap.ArenaAllocator,
     cache: *Cache,
     scratch: *std.heap.ArenaAllocator,
-    parent: sexpr.Value,
+    parent: sexpr.List.Id,
 ) error{OutOfMemory}!sexpr.Parser.Result(Id) {
     const atom: sexpr.TokenId = switch (parser.parseAtomInList(.string, parent)) {
         .ok => |ok| ok,

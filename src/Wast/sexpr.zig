@@ -369,13 +369,24 @@ pub const Parser = struct {
             };
     }
 
-    pub fn parseAtomInList(parser: *Parser, expected: ?Token.Tag, list: Value) Result(TokenId) {
+    pub fn parseList(parser: *Parser) error{EndOfStream}!Result(List.Id) {
+        const value = try parser.parseValue();
+        return if (value.getList()) |list|
+            .{ .ok = list }
+        else
+            .{ .err = Error.initUnexpectedValue(value, .at_value) };
+    }
+
+    pub fn parseAtomInList(parser: *Parser, expected: ?Token.Tag, list: List.Id) Result(TokenId) {
         return parser.parseAtom(expected) catch |e| switch (e) {
-            error.EndOfStream => .{
-                .err = if (expected) |expected_tag|
-                    Error.initExpectedToken(list, expected_tag, .at_list_end)
-                else
-                    Error.initUnexpectedValue(list, .at_list_end),
+            error.EndOfStream => err: {
+                const list_value = Value.initList(list);
+                break :err .{
+                    .err = if (expected) |expected_tag|
+                        Error.initExpectedToken(list_value, expected_tag, .at_list_end)
+                    else
+                        Error.initUnexpectedValue(list_value, .at_list_end),
+                };
             },
         };
     }
