@@ -1,10 +1,12 @@
 //! Parsing of values in the WebAssembly [grammar].
 //!
-//! These are intended to parse the contents of a `Lexer.Token`.
+//! These are intended to parse the contents of a `Lexer.Token`, and assume that the contents of the
+//! token are already in the correct format.
 //!
 //! [grammar]: https://webassembly.github.io/spec/core/text/values.html
 
 const std = @import("std");
+const floating_point = @import("../float.zig");
 
 fn hexDigitValue(digit: u8) u4 {
     return switch (digit) {
@@ -76,6 +78,61 @@ pub fn signedInteger(comptime T: type, token: []const u8) error{Overflow}!T {
     };
 
     return std.math.cast(T, value) orelse return error.Overflow;
+}
+
+pub fn float(comptime F: type, token: []const u8) error{InvalidNanPayload}!floating_point.Bits(F) {
+    comptime switch (F) {
+        f32, f64 => {},
+        else => @compileError("unsupported float type: " ++ @typeName(F)),
+    };
+
+    std.debug.assert(token.len > 0);
+
+    if (token.len >= 3 and std.mem.indexOfScalar(u8, token[0..@min(token.len, 4)], 'n') != null) {
+        const f: struct { digits: []const u8, sign: u1 } = switch (token[0]) {
+            '+' => .{
+                .digits = token[1..],
+                .sign = 0,
+            },
+            '-' => .{
+                .digits = token[1..],
+                .sign = 1,
+            },
+            else => .{
+                .digits = token,
+                .sign = 0,
+            },
+        };
+
+        std.debug.assert(f.digits.len >= 3);
+
+        if (std.mem.eql(u8, "inf", f.digits)) {
+            return floating_point.inf(F, f.sign);
+        } else if (std.mem.eql(u8, "nan", f.digits[0..3])) {
+            if (f.digits.len == 3) {
+                return floating_point.canonicalNan(F, f.sign);
+            } else {
+                std.debug.assert(f.digits[3] == ':');
+                const payload_digits = f.digits[4..];
+                const payload = unsignedInteger(floating_point.Mantissa(F), payload_digits) catch |e| switch (e) {
+                    error.Overflow => return error.InvalidNanPayload,
+                };
+
+                if (payload == 0) return error.InvalidNanPayload; // infinity
+
+                return floating_point.infOrNan(F, f.sign, payload);
+            }
+        } else {
+            unreachable;
+        }
+    }
+
+    // Zig' floating point parser works with the same syntax used in WASM.
+    const f: F = std.fmt.parseFloat(F, token) catch |e| switch (e) {
+        error.InvalidCharacter => unreachable,
+    };
+
+    return @bitCast(f);
 }
 
 pub const StringEscape = union(enum) {
@@ -238,6 +295,22 @@ test signedInteger {
     try std.testing.expectEqual(std.math.minInt(i32), signedInteger(i32, "-0x8000_0000"));
     try std.testing.expectError(error.Overflow, signedInteger(i32, "-0xFFFF_FFFF"));
     try std.testing.expectError(error.Overflow, signedInteger(i32, "-0x8000_0001"));
+}
+
+test float {
+    try std.testing.expectEqual(0x4049_0FDB, float(f32, "3.14159265"));
+    try std.testing.expectEqual(0xBF99_999A, float(f32, "-1.2"));
+    try std.testing.expectEqual(0, float(f32, "+0.00"));
+    try std.testing.expectEqual(0x8000_0000, float(f32, "-0"));
+
+    try std.testing.expectEqual(0x4F2B_BABB, float(f32, "0xABBA_BABA"));
+    try std.testing.expectEqual(0x4491_A228, float(f32, "0x1234.45P-2"));
+
+    try std.testing.expectEqual(0x7F80_0000, float(f32, "inf"));
+    try std.testing.expectEqual(0xFF80_0000, float(f32, "-inf"));
+    try std.testing.expectEqual(0x7FC0_0000, float(f32, "nan"));
+    try std.testing.expectEqual(0xFFC0_0000, float(f32, "-nan"));
+    try std.testing.expectEqual(0x7F80_CAFE, float(f32, "nan:0xCAFE"));
 }
 
 test string {
