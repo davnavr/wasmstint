@@ -66,10 +66,10 @@ pub fn initExpectedToken(value: Value, expected: Token.Tag, location: ExpectedLo
     };
 }
 
-pub fn initIntegerLiteralOverflow(integer: Value, width: u8) Error {
+pub fn initIntegerLiteralOverflow(integer: sexpr.TokenId, width: u8) Error {
     std.debug.assert(width > 0);
     return .{
-        .value = integer,
+        .value = Value.initAtom(integer),
         .tag = .integer_literal_overflow,
         .extra = .{ .integer_literal_overflow = .{ .width = width } },
     };

@@ -91,9 +91,7 @@ pub fn parse(
         .integer => {
             parser.* = lookahead;
             const n = value.unsignedInteger(u32, contents) catch |e| switch (e) {
-                error.Overflow => return .{
-                    .err = sexpr.Error.initIntegerLiteralOverflow(sexpr.Value.initAtom(atom), 32),
-                },
+                error.Overflow => return .{ .err = sexpr.Error.initIntegerLiteralOverflow(atom, 32) },
             };
 
             return .{ .ok = Ident.initNumeric(atom, n) };

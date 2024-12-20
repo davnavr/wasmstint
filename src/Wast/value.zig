@@ -80,6 +80,19 @@ pub fn signedInteger(comptime T: type, token: []const u8) error{Overflow}!T {
     return std.math.cast(T, value) orelse return error.Overflow;
 }
 
+pub fn uninterpretedInteger(comptime T: type, token: []const u8) error{Overflow}!T {
+    const bit_width = @typeInfo(T).int.bits + 1;
+    const signed_value = try signedInteger(std.meta.Int(.signed, bit_width), token);
+
+    const Unsigned = std.meta.Int(.unsigned, bit_width);
+    const Signed = std.meta.Int(.signed, bit_width);
+
+    return if (signed_value >= 0)
+        @bitCast(std.math.cast(Unsigned, signed_value) orelse return error.Overflow)
+    else
+        @bitCast(std.math.cast(Signed, signed_value) orelse return error.Overflow);
+}
+
 pub fn float(comptime F: type, token: []const u8) error{InvalidNanPayload}!floating_point.Bits(F) {
     comptime switch (F) {
         f32, f64 => {},
