@@ -21,6 +21,7 @@ pub fn unsignedInteger(comptime T: type, token: []const u8) error{Overflow}!T {
     }
 
     std.debug.assert(token.len > 0);
+    std.debug.assert(token[0] != '_');
     std.debug.assert(token[token.len - 1] != '_');
 
     // Round number of bits up to a multiple of 8.
@@ -47,6 +48,34 @@ pub fn unsignedInteger(comptime T: type, token: []const u8) error{Overflow}!T {
     }
 
     return std.math.cast(T, decoded) orelse error.Overflow;
+}
+
+pub fn signedInteger(comptime T: type, token: []const u8) error{Overflow}!T {
+    comptime {
+        std.debug.assert(@typeInfo(T).int.signedness == .signed);
+    }
+
+    std.debug.assert(token.len > 0);
+    std.debug.assert(token[0] != '_');
+    std.debug.assert(token[token.len - 1] != '_');
+
+    const digits: []const u8 = switch (token[0]) {
+        '+', '-' => token[1..],
+        '0'...'9', 'a'...'f', 'A'...'F' => token,
+        else => unreachable,
+    };
+
+    const magnitude = @as(
+        std.meta.Int(.signed, @typeInfo(T).int.bits + 1),
+        try unsignedInteger(std.meta.Int(.unsigned, @typeInfo(T).int.bits), digits),
+    );
+
+    const value = switch (token[0]) {
+        '-' => -magnitude,
+        else => magnitude,
+    };
+
+    return std.math.cast(T, value) orelse return error.Overflow;
 }
 
 pub const StringEscape = union(enum) {
@@ -197,6 +226,18 @@ test unsignedInteger {
     try std.testing.expectEqual(123_456, unsignedInteger(u64, "123_456"));
     try std.testing.expectEqual(std.math.maxInt(u32), unsignedInteger(u32, "0xFFFF_FFFF"));
     try std.testing.expectError(error.Overflow, unsignedInteger(u32, "0x1_FFFF_FFFF"));
+}
+
+test signedInteger {
+    try std.testing.expectEqual(32, signedInteger(i32, "32"));
+    try std.testing.expectEqual(-5, signedInteger(i32, "-5"));
+    try std.testing.expectEqual(123, signedInteger(i32, "+123"));
+    try std.testing.expectEqual(0xABBA, signedInteger(i64, "0xABBA"));
+    try std.testing.expectEqual(std.math.maxInt(i32), signedInteger(i32, "2_147_483_647"));
+    try std.testing.expectEqual(std.math.minInt(i32), signedInteger(i32, "-2_147_483_648"));
+    try std.testing.expectEqual(std.math.minInt(i32), signedInteger(i32, "-0x8000_0000"));
+    try std.testing.expectError(error.Overflow, signedInteger(i32, "-0xFFFF_FFFF"));
+    try std.testing.expectError(error.Overflow, signedInteger(i32, "-0x8000_0001"));
 }
 
 test string {
