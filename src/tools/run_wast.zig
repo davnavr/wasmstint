@@ -1,4 +1,5 @@
 const std = @import("std");
+const ArenaAllocator = std.heap.ArenaAllocator;
 const wasmstint = @import("wasmstint");
 
 const Arguments = struct {
@@ -13,10 +14,7 @@ const Arguments = struct {
         });
     };
 
-    fn parse(
-        arena: *std.heap.ArenaAllocator,
-        scratch: *std.heap.ArenaAllocator,
-    ) !Arguments {
+    fn parse(arena: *ArenaAllocator, scratch: *ArenaAllocator) !Arguments {
         var arguments = Arguments{
             .run = &[0][:0]const u8{},
         };
@@ -55,21 +53,26 @@ pub fn main() !u8 {
     defer global_allocator.deinit();
     const gpa = global_allocator.allocator();
 
-    var arguments_arena = std.heap.ArenaAllocator.init(gpa);
+    var arguments_arena = ArenaAllocator.init(gpa);
     defer arguments_arena.deinit();
 
-    var scratch = std.heap.ArenaAllocator.init(gpa);
+    var scratch = ArenaAllocator.init(gpa);
     defer scratch.deinit();
 
-    var file_arena = std.heap.ArenaAllocator.init(gpa);
+    const arguments = try Arguments.parse(&arguments_arena, &scratch);
+
+    var file_arena = ArenaAllocator.init(gpa);
     defer file_arena.deinit();
 
-    const arguments = try Arguments.parse(&arguments_arena, &scratch);
+    var parse_arena = ArenaAllocator.init(gpa);
+    defer parse_arena.deinit();
+
+    const file_max_bytes = @as(usize, 1) << 21; // 2 miB
 
     const cwd = std.fs.cwd();
     for (arguments.run) |script_path| {
         const script_buf: []const u8 = buf: {
-            _ = file_arena.reset(.retain_capacity);
+            _ = file_arena.reset(.{ .retain_with_limit = file_max_bytes });
 
             const script_file = cwd.openFileZ(script_path, .{}) catch |e| {
                 std.debug.print("Could not open script file {s}: {!}", .{ script_path, e });
@@ -77,18 +80,46 @@ pub fn main() !u8 {
             };
             defer script_file.close();
 
-            break :buf script_file.readToEndAlloc(
-                file_arena.allocator(),
-                @as(usize, 1) << 21, // 2 miB
-            ) catch |e| {
+            break :buf script_file.readToEndAlloc(file_arena.allocator(), file_max_bytes) catch |e| {
                 if (e != error.OutOfMemory) std.debug.print("Could not read script file {s}", .{script_path});
                 return e;
             };
         };
 
-        //const script_tokenizer = wasmstint.Wast.Lexer;
+        _ = parse_arena.reset(.retain_capacity);
+        _ = scratch.reset(.retain_capacity);
+        var errors = wasmstint.Wast.Error.List.init(parse_arena.allocator());
+        const script = wasmstint.Wast.parseFromSlice(script_buf, parse_arena.allocator(), &scratch, &errors) catch |e| {
+            std.debug.print("Error parsing script file {s}", .{script_path});
+            // TODO: Don't return, log that this script failed
+            return e;
+        };
 
-        _ = script_buf;
+        if (errors.list.count() > 0) {
+            @branchHint(.unlikely);
+            const raw_stderr = std.io.getStdErr();
+            var buf_stderr = std.io.bufferedWriter(raw_stderr.writer());
+
+            var w = buf_stderr.writer();
+            var line_col = wasmstint.Wast.LineCol.FromOffset.init(script_buf);
+
+            var errors_iter = errors.list.constIterator(0);
+            while (errors_iter.next()) |err| {
+                try w.print(
+                    "{s}:{}: error: ",
+                    .{
+                        script_path,
+                        // For some errors, use the "end" offset
+                        line_col.locate(err.offset(&script.tree).start) catch unreachable,
+                    },
+                );
+
+                try err.print(&script.tree, w);
+                try w.writeByte('\n');
+            }
+
+            try buf_stderr.flush();
+        }
     }
 
     return 0;

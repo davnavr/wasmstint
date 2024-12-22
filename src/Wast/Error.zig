@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const sexpr = @import("sexpr.zig");
 const Value = sexpr.Value;
 const Token = sexpr.Token;
+const LineCol = @import("LineCol.zig");
 
 value: Value,
 tag: Tag,
@@ -25,13 +26,61 @@ pub const Tag = enum {
     unexpected_value,
     // missing_closing_quotation_mark,
     // missing_block_comment_end,
-    missing_closing_parenthesis,
+    // missing_closing_parenthesis,
     expected_token,
     invalid_utf8,
     integer_literal_overflow,
 };
 
 const Error = @This();
+
+pub fn offset(err: *const Error, tree: *const sexpr.Tree) *const sexpr.Offset {
+    return switch (err.value.tag) {
+        .atom => err.value.case.atom.offset(tree),
+        .list => err.value.case.list.parenthesis(tree),
+    };
+}
+
+pub fn print(err: *const Error, tree: *const sexpr.Tree, writer: anytype) !void {
+    switch (err.tag) {
+        .unexpected_value => {
+            _ = try writer.write("unexpected ");
+            switch (err.value.tag) {
+                .list => {
+                    _ = try writer.write("list");
+                },
+                .atom => {
+                    try writer.print("token {}", .{err.value.case.atom.tag(tree)});
+                },
+            }
+        },
+        .expected_token => {
+            const expected_token = err.extra.expected_token;
+            try writer.print("expected token {}, but got", .{expected_token.tag});
+            switch (err.value.tag) {
+                .list => {
+                    _ = try writer.write("list");
+                },
+                .atom => {
+                    try writer.print("token {}", .{err.value.case.atom.tag(tree)});
+                },
+            }
+        },
+        .invalid_utf8 => {
+            _ = try writer.write("name string literal must be valid UTF-8");
+        },
+        .integer_literal_overflow => {
+            _ = try writer.print("not a valid literal for {}-bit integers", .{err.extra.integer_literal_overflow.width});
+        },
+    }
+
+    switch (err.extra.unexpected_value) {
+        .at_value => {},
+        .at_list_end => {
+            _ = try writer.write(" at end of containing list");
+        },
+    }
+}
 
 comptime {
     std.debug.assert(@sizeOf(Error) == 12);

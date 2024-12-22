@@ -76,6 +76,10 @@ pub const List = struct {
         pub fn contents(id: Id, tree: *const Tree) *const Contents {
             return &tree.arenas.lists.slice().items(.contents)[@intFromEnum(id)];
         }
+
+        pub fn parenthesis(id: Id, tree: *const Tree) *const Offset {
+            return &tree.arenas.lists.slice().items(.parenthesis)[@intFromEnum(id)];
+        }
     };
 };
 
