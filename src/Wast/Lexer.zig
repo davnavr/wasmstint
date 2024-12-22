@@ -564,6 +564,11 @@ pub fn next(lexer: *Lexer) ?Token {
 
             continue :state .end;
         } else {
+            // Parse a leading zero to allow hexadecimal processing to occur
+            if (lexer.remainingInputStartsWith("0")) {
+                lexer.utf8.i += 1;
+            }
+
             continue :state .digits;
         },
         .reserved => {
@@ -617,7 +622,7 @@ pub fn next(lexer: *Lexer) ?Token {
 
 test "all token types" {
     var lexer = try Lexer.init(
-        "()$hello \"world\" 0xABCD\t3.14\r\n42 (; hello ;) keyword   +nan:0x3",
+        "()$hello \"world\" 0xABCD\t3.14\r\n42 (; hello ;) keyword   +nan:0x3 -0x80",
     );
 
     const expected = [_]?Token{
@@ -630,6 +635,7 @@ test "all token types" {
         .{ .offset = .{ .start = 30, .end = 32 }, .tag = .integer },
         .{ .offset = .{ .start = 45, .end = 52 }, .tag = .keyword_unknown },
         .{ .offset = .{ .start = 55, .end = 63 }, .tag = .float },
+        .{ .offset = .{ .start = 64, .end = 69 }, .tag = .integer },
         null,
     };
 
