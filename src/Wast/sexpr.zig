@@ -391,6 +391,48 @@ pub const Parser = struct {
         };
     }
 
+    fn ParsedToken(comptime T: type) type {
+        return struct { token: TokenId, value: T };
+    }
+
+    pub fn parseUninterpretedInteger(
+        parser: *Parser,
+        comptime T: type,
+        tree: *const Tree,
+    ) error{EndOfStream}!Result(ParsedToken(T)) {
+        const atom: TokenId = switch (try parser.parseAtom(.integer)) {
+            .ok => |ok| ok,
+            .err => |err| return .{ .err = err },
+        };
+
+        switch (atom.tag(tree)) {
+            .integer => return .{
+                .ok = .{
+                    .token = atom,
+                    .value = @import("value.zig").uninterpretedInteger(T, atom.contents(tree)) catch |e| switch (e) {
+                        error.Overflow => return .{
+                            .err = Error.initIntegerLiteralOverflow(atom, @typeInfo(T).int.bits),
+                        },
+                    },
+                },
+            },
+            else => return .{ .err = Error.initExpectedToken(Value.initAtom(atom), .integer, .at_value) },
+        }
+    }
+
+    pub fn parseUninterpretedIntegerInList(
+        parser: *Parser,
+        comptime T: type,
+        list: List.Id,
+        tree: *const Tree,
+    ) Result(ParsedToken(T)) {
+        return parser.parseUninterpretedInteger(T, tree) catch |e| switch (e) {
+            error.EndOfStream => .{ .err = Error.initExpectedToken(Value.initList(list), .integer, .at_list_end) },
+        };
+    }
+
+    // pub fn parseListWithAtom
+
     pub fn expectEmpty(parser: *Parser, errors: *Error.List) Allocator.Error!void {
         for (parser.remaining()) |value|
             try errors.append(Error.initUnexpectedValue(value, .at_value));

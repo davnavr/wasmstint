@@ -12,7 +12,7 @@ extra: union {
         tag: Token.Tag,
         location: ExpectedLocation,
     },
-    integer_literal_overflow: struct { width: u8 },
+    integer_literal_overflow: struct { width: u16 },
 },
 
 pub const ExpectedLocation = enum {
@@ -66,7 +66,7 @@ pub fn initExpectedToken(value: Value, expected: Token.Tag, location: ExpectedLo
     };
 }
 
-pub fn initIntegerLiteralOverflow(integer: sexpr.TokenId, width: u8) Error {
+pub fn initIntegerLiteralOverflow(integer: sexpr.TokenId, width: u16) Error {
     std.debug.assert(width > 0);
     return .{
         .value = Value.initAtom(integer),

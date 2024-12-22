@@ -26,8 +26,7 @@ pub fn unsignedInteger(comptime T: type, token: []const u8) error{Overflow}!T {
     std.debug.assert(token[0] != '_');
     std.debug.assert(token[token.len - 1] != '_');
 
-    // Round number of bits up to a multiple of 8.
-    const Decoded = std.meta.Int(.unsigned, ((@typeInfo(T).int.bits + 7) / 8) * 8);
+    const Decoded = std.math.ByteAlignedInt(T);
     var decoded: Decoded = 0;
     if (std.mem.startsWith(u8, token, "0x")) {
         std.debug.assert(token[2] != '_');
