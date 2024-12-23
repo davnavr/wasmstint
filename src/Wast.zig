@@ -16,10 +16,9 @@ pub const LineCol = @import("Wast/LineCol.zig");
 
 const value = @import("Wast/value.zig");
 
-tree: sexpr.Tree,
-interned_ids: Ident.Cache,
-interned_names: Name.Cache,
-arena: ArenaAllocator.State,
+tree: *const sexpr.Tree,
+interned_ids: Ident.Cache.Entries,
+interned_names: Name.Cache.Entries,
 commands: std.MultiArrayList(Command),
 
 pub const Command = struct {
@@ -142,26 +141,31 @@ pub const Const = union(enum) {
 
 const Wast = @This();
 
-pub fn parseFromTree(
-    tree: sexpr.Tree,
-    gpa: Allocator,
-    scratch: *ArenaAllocator,
+pub fn parse(
+    tree: *const sexpr.Tree,
+    arena: *ArenaAllocator,
+    alloca: *ArenaAllocator,
     errors: *Error.List,
 ) error{OutOfMemory}!Wast {
+    // `alloca` is used for allocations that live for the rest of this function call.
+    var scratch = ArenaAllocator.init(alloca.allocator());
+    defer scratch.deinit();
+
+    const commands_values = tree.values.values(tree);
+
     var commands = std.MultiArrayList(Command).empty;
-    var arena = ArenaAllocator.init(gpa);
+    try commands.ensureTotalCapacity(arena.allocator(), commands_values.len);
+
     var interned_ids = Ident.Cache.empty;
     var interned_names = Name.Cache.empty;
 
-    const commands_values = tree.values.values(&tree);
-    try commands.ensureTotalCapacity(gpa, commands_values.len);
     for (commands_values) |cmd_value| {
         const cmd_list = cmd_value.getList() orelse {
             try errors.append(Error.initUnexpectedValue(cmd_value, .at_value));
             continue;
         };
 
-        var cmd_parser = sexpr.Parser.init(cmd_list.contents(&tree).values(&tree));
+        var cmd_parser = sexpr.Parser.init(cmd_list.contents(tree).values(tree));
 
         const cmd_keyword_id = switch (cmd_parser.parseAtomInList(.keyword_unknown, cmd_list)) {
             .ok => |ok| ok,
@@ -171,7 +175,7 @@ pub fn parseFromTree(
             },
         };
 
-        const cmd: Command.Inner = cmd: switch (cmd_keyword_id.tag(&tree)) {
+        const cmd: Command.Inner = cmd: switch (cmd_keyword_id.tag(tree)) {
             .keyword_module => {
                 // TODO: Parse id, then check for binary or quote keyword
                 unreachable;
@@ -180,12 +184,12 @@ pub fn parseFromTree(
                 _ = scratch.reset(.retain_capacity);
                 const name_result = try Name.parse(
                     &cmd_parser,
-                    &tree,
-                    gpa,
-                    &arena,
+                    tree,
+                    alloca,
                     &interned_names,
-                    scratch,
+                    arena,
                     cmd_list,
+                    &scratch,
                 );
 
                 const name = switch (name_result) {
@@ -196,20 +200,15 @@ pub fn parseFromTree(
                     },
                 };
 
-                const id_result = try Ident.parse(&cmd_parser, &tree, &interned_ids, gpa);
-
-                const register = Command.Register{
-                    .name = name,
-                    .id = switch (id_result) {
-                        .ok => |ok| ok,
-                        .err => |err| {
-                            try errors.append(err);
-                            continue;
-                        },
+                const id = switch (try Ident.parse(&cmd_parser, tree, &interned_ids, alloca)) {
+                    .ok => |ok| ok,
+                    .err => |err| {
+                        try errors.append(err);
+                        continue;
                     },
                 };
 
-                break :cmd .{ .register = register };
+                break :cmd .{ .register = Command.Register{ .name = name, .id = id } };
             },
             else => {
                 try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(cmd_keyword_id), .at_value));
@@ -217,41 +216,17 @@ pub fn parseFromTree(
             },
         };
 
-        commands.appendAssumeCapacity(Command{
-            .keyword = cmd_keyword_id,
-            .inner = cmd,
-        });
+        commands.appendAssumeCapacity(Command{ .keyword = cmd_keyword_id, .inner = cmd });
 
         try cmd_parser.expectEmpty(errors);
     }
 
     return Wast{
         .tree = tree,
-        .interned_ids = interned_ids,
-        .interned_names = interned_names,
-        .arena = arena.state,
+        .interned_ids = try interned_ids.entries(arena),
+        .interned_names = try interned_names.entries(arena),
         .commands = commands,
     };
-}
-
-pub fn parseFromSlice(
-    script: []const u8,
-    gpa: Allocator,
-    scratch: *ArenaAllocator,
-    errors: *Error.List,
-) error{ OutOfMemory, InvalidUtf8 }!Wast {
-    const tree = try sexpr.Tree.parseFromSlice(script, gpa, scratch, errors);
-    _ = scratch.reset(.retain_capacity);
-    return parseFromTree(tree, gpa, scratch, errors);
-}
-
-pub fn deinit(wast: *Wast, gpa: Allocator) void {
-    wast.commands.deinit(gpa);
-    wast.arena.promote(gpa).deinit();
-    wast.tree.deinit(gpa);
-    wast.interned_ids.deinit(gpa);
-    wast.interned_names.deinit(gpa);
-    wast.* = undefined;
 }
 
 test {

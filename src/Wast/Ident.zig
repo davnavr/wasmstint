@@ -75,7 +75,7 @@ pub fn parse(
     parser: *sexpr.Parser,
     tree: *const sexpr.Tree,
     cache: *Cache,
-    cache_allocator: Allocator,
+    cache_arena: *std.heap.ArenaAllocator,
 ) Allocator.Error!sexpr.Parser.Result(Ident) {
     var lookahead = parser.*;
     const atom = (lookahead.parseValue() catch return .{ .ok = Ident.none }).getAtom() orelse
@@ -85,7 +85,7 @@ pub fn parse(
     switch (atom.tag(tree)) {
         .id => {
             parser.* = lookahead;
-            const ident = try cache.intern(contents[1..], cache_allocator);
+            const ident = try cache.intern(contents[1..], cache_arena);
             return .{ .ok = Ident.initSymbolic(atom, ident) };
         },
         .integer => {
@@ -103,8 +103,8 @@ pub fn parse(
 pub const Interned = enum(u32) {
     _,
 
-    pub fn get(id: Interned, cache: *const Cache) []const u8 {
-        return cache.lookup.keys()[@intFromEnum(id)];
+    pub fn get(id: Interned, cache: Cache.Entries) []const u8 {
+        return cache.identifiers[@intFromEnum(id)];
     }
 };
 
@@ -113,8 +113,8 @@ pub const Cache = struct {
 
     pub const empty = Cache{ .lookup = .empty };
 
-    pub fn intern(cache: *Cache, ident: []const u8, gpa: Allocator) Allocator.Error!Interned {
-        const entry = try cache.lookup.getOrPut(gpa, ident);
+    pub fn intern(cache: *Cache, ident: []const u8, arena: *std.heap.ArenaAllocator) Allocator.Error!Interned {
+        const entry = try cache.lookup.getOrPut(arena.allocator(), ident);
         if (!entry.found_existing and entry.index > std.math.maxInt(std.meta.Tag(Interned))) {
             _ = cache.lookup.pop();
             return error.OutOfMemory;
@@ -123,8 +123,15 @@ pub const Cache = struct {
         }
     }
 
-    pub fn deinit(cache: *Cache, gpa: Allocator) void {
-        cache.lookup.deinit(gpa);
-        cache.* = undefined;
+    pub fn get(cache: *const Cache, id: Interned) []const u8 {
+        return cache.lookup.keys()[@intFromEnum(id)];
     }
+
+    pub fn entries(cache: *const Cache, arena: *std.heap.ArenaAllocator) Allocator.Error!Entries {
+        return .{ .identifiers = try arena.allocator().dupe([]const u8, cache.lookup.keys()) };
+    }
+
+    pub const Entries = struct {
+        identifiers: []const []const u8,
+    };
 };

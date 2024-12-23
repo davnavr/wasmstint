@@ -87,9 +87,13 @@ pub fn main() !u8 {
         };
 
         _ = parse_arena.reset(.retain_capacity);
-        _ = scratch.reset(.retain_capacity);
         var errors = wasmstint.Wast.Error.List.init(parse_arena.allocator());
-        const script = wasmstint.Wast.parseFromSlice(script_buf, parse_arena.allocator(), &scratch, &errors) catch |e| {
+
+        _ = scratch.reset(.retain_capacity);
+        const script_tree = try wasmstint.Wast.sexpr.Tree.parseFromSlice(script_buf, parse_arena.allocator(), &scratch, &errors);
+
+        _ = scratch.reset(.retain_capacity);
+        const script = wasmstint.Wast.parse(&script_tree, &parse_arena, &scratch, &errors) catch |e| {
             std.debug.print("Error parsing script file {s}", .{script_path});
             // TODO: Don't return, log that this script failed
             return e;
@@ -110,16 +114,18 @@ pub fn main() !u8 {
                     .{
                         script_path,
                         // For some errors, use the "end" offset
-                        line_col.locate(err.offset(&script.tree).start) catch unreachable,
+                        line_col.locate(err.offset(&script_tree).start) catch unreachable,
                     },
                 );
 
-                try err.print(&script.tree, w);
+                try err.print(&script_tree, w);
                 try w.writeByte('\n');
             }
 
             try buf_stderr.flush();
         }
+
+        _ = script;
     }
 
     return 0;
