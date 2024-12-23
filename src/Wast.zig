@@ -27,15 +27,11 @@ pub const Command = struct {
 
     pub const Register = struct {
         /// The `module` name string used to access values from the registered module.
-        name: Name.Id,
+        name: Name,
         /// Identifies which module to register for imports.
         ///
         /// If `.none`, then the latest initialized module is used.
         id: Ident,
-
-        comptime {
-            std.debug.assert(@sizeOf(Register) == 12);
-        }
     };
 
     pub const Action = struct {
@@ -44,10 +40,10 @@ pub const Command = struct {
         /// If `.none`, then the latest initialized module is used.
         module: Ident,
         /// The name of the function or global export to invoke or get.
-        name: Name.Id,
+        name: Name,
         /// The `invoke` or `get` keyword.
         keyword: sexpr.TokenId,
-        target: Target,
+        target: Target align(@alignOf(u32)),
 
         pub const Target = union(enum) {
             get,
@@ -63,12 +59,12 @@ pub const Command = struct {
 
     pub const Inner = union(enum) {
         //module: ,
-        register: Register,
-        //action,
+        register: *const Register,
+        //action: *const Action,
     };
 
     comptime {
-        std.debug.assert(@sizeOf(Inner) <= 16);
+        std.debug.assert(@sizeOf(Inner) <= @sizeOf([2]usize));
     }
 };
 
@@ -182,6 +178,8 @@ pub fn parse(
             },
             .keyword_register => {
                 _ = scratch.reset(.retain_capacity);
+                const register = try arena.allocator().create(Command.Register);
+
                 const name_result = try Name.parse(
                     &cmd_parser,
                     tree,
@@ -208,7 +206,8 @@ pub fn parse(
                     },
                 };
 
-                break :cmd .{ .register = Command.Register{ .name = name, .id = id } };
+                register.* = .{ .name = name, .id = id };
+                break :cmd .{ .register = register };
             },
             else => {
                 try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(cmd_keyword_id), .at_value));

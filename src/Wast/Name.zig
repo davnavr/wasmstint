@@ -11,6 +11,8 @@ const value = @import("value.zig");
 token: sexpr.TokenId,
 id: Id,
 
+const Name = @This();
+
 pub const Id = enum(u32) {
     _,
 
@@ -79,7 +81,7 @@ pub fn parse(
     name_arena: *ArenaAllocator,
     parent: sexpr.List.Id,
     scratch: *ArenaAllocator,
-) error{OutOfMemory}!sexpr.Parser.Result(Id) {
+) error{OutOfMemory}!sexpr.Parser.Result(Name) {
     const atom: sexpr.TokenId = switch (parser.parseAtomInList(.string, parent)) {
         .ok => |ok| ok,
         .err => |err| return .{ .err = err },
@@ -92,7 +94,7 @@ pub fn parse(
                 error.InvalidUtf8 => .{ .err = sexpr.Error.initInvalidUtf8(sexpr.Value.initAtom(atom)) },
             };
 
-            return .{ .ok = id };
+            return .{ .ok = .{ .token = atom, .id = id } };
         },
         else => return .{
             .err = sexpr.Error.initExpectedToken(
