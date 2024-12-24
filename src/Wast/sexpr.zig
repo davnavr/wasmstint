@@ -395,6 +395,12 @@ pub const Parser = struct {
         };
     }
 
+    pub fn parseListInList(parser: *Parser, list: List.Id) Result(List.Id) {
+        return parser.parseList() catch |e| switch (e) {
+            error.EndOfStream => .{ .err = Error.initUnexpectedValue(Value.initList(list), .at_list_end) },
+        };
+    }
+
     fn ParsedToken(comptime T: type) type {
         return struct { token: TokenId, value: T };
     }

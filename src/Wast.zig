@@ -32,6 +32,7 @@ const Caches = struct {
 };
 
 pub const Module = struct {
+    // keyword: sexpr.TokenId,
     name: Ident,
     format: Format.Ptr(.@"const"),
 
@@ -175,6 +176,39 @@ pub const Module = struct {
             },
         };
     }
+
+    pub fn parse(
+        parser: *sexpr.Parser,
+        tree: *const sexpr.Tree,
+        arenas: *Arenas,
+        caches: *Caches,
+        parent: sexpr.List.Id,
+        errors: *Error.List,
+    ) error{OutOfMemory}!ParseResult(Module) {
+        const module_list: sexpr.List.Id = switch (parser.parseListInList(parent)) {
+            .ok => |ok| ok,
+            .err => |err| return .{ .err = err },
+        };
+
+        var contents = sexpr.Parser.init(module_list.contents(tree).values(tree));
+
+        const module_token: sexpr.TokenId = switch (contents.parseAtomInList(.keyword_module, module_list)) {
+            .ok => |ok| ok,
+            .err => |err| return .{ .err = err },
+        };
+
+        switch (module_token.tag(tree)) {
+            .keyword_module => {
+                const module = try parseContents(&contents, tree, arenas, caches, errors);
+                if (module == .ok)
+                    try contents.expectEmpty(errors);
+                return module;
+            },
+            else => return .{
+                .err = Error.initExpectedToken(sexpr.Value.initAtom(module_token), .keyword_module, .at_value),
+            },
+        }
+    }
 };
 
 pub const Command = struct {
@@ -259,13 +293,7 @@ pub const Command = struct {
             parent: sexpr.List.Id,
             errors: *Error.List,
         ) error{OutOfMemory}!ParseResult(*const Action) {
-            const action_list_result = parser.parseList() catch |e| switch (e) {
-                error.EndOfStream => return .{
-                    .err = Error.initExpectedToken(sexpr.Value.initList(parent), .open_paren, .at_list_end),
-                },
-            };
-
-            const action_list: sexpr.List.Id = switch (action_list_result) {
+            const action_list: sexpr.List.Id = switch (parser.parseListInList(parent)) {
                 .ok => |ok| ok,
                 .err => |err| return .{ .err = err },
             };
@@ -338,13 +366,22 @@ pub const Command = struct {
         failure: Failure,
     };
 
+    /// Asserts that a module does not pass validation.
+    pub const AssertInvalid = struct {
+        module: Module,
+        failure: Failure,
+    };
+
     pub const Inner = InlineTaggedUnion(union {
         module: Module,
         register: Register,
         action: Action,
         assert_return: AssertReturn,
-        assert_trap: AssertTrap,
+        assert_trap: AssertTrap, // TODO: Need assert_trap to also accept <module>
         // assert_exhaustion: AssertExhaustion,
+        // assert_malformed: AssertMalformed, // TODO: Since this probably only uses quote/binary module, no need to have separate error list
+        assert_invalid: AssertInvalid,
+        // assert_unlinkable: AssertUnlinkable,
     });
 
     comptime {
@@ -651,8 +688,30 @@ pub fn parse(
                 break :cmd .{ .assert_trap = &assert_trap.value };
             },
             // .keyword_assert_exhaustion => {},
-            // .keyword_assert_malformed => {}, // TODO: Need separate *Module parser
-            // .keyword_assert_invalid => {}, // TODO: Need separate *Module parser
+            // .keyword_assert_malformed => {},
+            .keyword_assert_invalid => {
+                const assert_invalid = try Command.Inner.allocate(arenas.out.allocator(), .assert_invalid);
+                const module = switch (try Module.parse(&cmd_parser, tree, &arenas, &caches, cmd_list, errors)) {
+                    .ok => |ok| ok,
+                    .err => |err| {
+                        try errors.append(err);
+                        continue;
+                    },
+                };
+
+                assert_invalid.value = Command.AssertInvalid{
+                    .module = module,
+                    .failure = switch (try Command.Failure.parseInList(&cmd_parser, tree, cmd_list, arenas.scratch)) {
+                        .ok => |ok| ok,
+                        .err => |err| {
+                            try errors.append(err);
+                            continue;
+                        },
+                    },
+                };
+
+                break :cmd .{ .assert_invalid = &assert_invalid.value };
+            },
             else => {
                 try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(cmd_keyword_id), .at_value));
                 continue;
