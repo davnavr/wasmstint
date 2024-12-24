@@ -31,6 +31,152 @@ const Caches = struct {
     names: Name.Cache = .empty,
 };
 
+pub const Module = struct {
+    name: Ident,
+    format: Format.Ptr(.@"const"),
+
+    pub const Format = InlineTaggedUnion(union {
+        text: Text,
+        binary: Binary,
+        quote: Quote,
+    });
+
+    /// A module in the [WebAssembly Text] format.
+    ///
+    /// [WebAssembly Text]: https://webassembly.github.io/spec/core/index.html
+    pub const Text = struct {
+        fields: std.MultiArrayList(Field),
+
+        pub const Field = struct {
+            keyword: sexpr.TokenId,
+            contents: Contents.Ptr(.@"const"),
+        };
+
+        pub const Contents = InlineTaggedUnion(union {});
+
+        pub fn parseFields(
+            contents: *sexpr.Parser,
+            tree: *const sexpr.Tree,
+            arenas: *Arenas,
+            caches: *Caches,
+            errors: *Error.List,
+        ) error{OutOfMemory}!std.MultiArrayList(Field) {
+            var fields = std.MultiArrayList(Field).empty;
+            try fields.ensureTotalCapacity(arenas.out.allocator(), contents.remaining().len);
+
+            // TODO: Module parsing
+            _ = tree;
+            _ = caches;
+            _ = errors;
+
+            return fields;
+        }
+    };
+
+    pub const Binary = struct {
+        keyword: sexpr.TokenId,
+        contents: []const String,
+    };
+
+    pub const Quote = struct {
+        keyword: sexpr.TokenId,
+        contents: []const String,
+    };
+
+    pub const String = struct {
+        token: sexpr.TokenId,
+
+        /// The contents of the string literal without translating escape sequences.
+        pub fn rawContents(string: String, tree: *const sexpr.Tree) []const u8 {
+            switch (string.token.tag(tree)) {
+                .string, .string_raw => {},
+                else => unreachable,
+            }
+
+            const contents = string.token.contents(tree);
+            return contents[1 .. contents.len - 1];
+        }
+    };
+
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        tree: *const sexpr.Tree,
+        arenas: *Arenas,
+        caches: *Caches,
+        errors: *Error.List,
+    ) error{OutOfMemory}!ParseResult(Module) {
+        const name = switch (try Ident.parse(contents, tree, arenas.parse, &caches.ids)) {
+            .ok => |ok| ok,
+            .err => |err| return .{ .err = err },
+        };
+
+        const format: Format.Union(.@"const") = format: {
+            text: {
+                var lookahead = contents.*;
+                const peeked_value = lookahead.parseValue() catch break :text;
+                const peeked_atom = peeked_value.getAtom() orelse break :text;
+
+                const quoted_format: Format.Tag = switch (peeked_atom.tag(tree)) {
+                    .keyword_binary => .binary,
+                    .keyword_quote => .quote,
+                    else => return .{ .err = Error.initUnexpectedValue(sexpr.Value.initAtom(peeked_atom), .at_value) },
+                };
+
+                contents.* = lookahead;
+                lookahead = undefined;
+
+                var strings = try std.ArrayListUnmanaged(String).initCapacity(
+                    arenas.out.allocator(),
+                    contents.remaining().len,
+                );
+
+                for (0..strings.capacity) |_| {
+                    const string_atom: sexpr.TokenId = switch (contents.parseAtom(.string) catch break) {
+                        .ok => |ok| ok,
+                        .err => |err| {
+                            try errors.append(err);
+                            continue;
+                        },
+                    };
+
+                    switch (string_atom.tag(tree)) {
+                        .string, .string_raw => strings.appendAssumeCapacity(String{ .token = string_atom }),
+                        else => try errors.append(
+                            Error.initExpectedToken(
+                                sexpr.Value.initAtom(string_atom),
+                                .string,
+                                .at_value,
+                            ),
+                        ),
+                    }
+                }
+
+                std.debug.assert(contents.isEmpty());
+
+                switch (quoted_format) {
+                    .text => unreachable,
+                    inline else => |format_tag| {
+                        const quoted = try Format.allocate(arenas.out.allocator(), format_tag);
+                        quoted.value = .{ .keyword = peeked_atom, .contents = strings.items };
+                        break :format @unionInit(Format.Union(.@"const"), @tagName(format_tag), &quoted.value);
+                    },
+                }
+            }
+
+            const wat = try Format.allocate(arenas.out.allocator(), .text);
+            wat.value = Text{ .fields = try Text.parseFields(contents, tree, arenas, caches, errors) };
+            break :format .{ .text = &wat.value };
+        };
+
+        return .{
+            .ok = Module{
+                .name = name,
+                .format = Format.Ptr(.@"const").init(format),
+            },
+        };
+    }
+};
+
 pub const Command = struct {
     keyword: sexpr.TokenId,
     inner: Inner.Ptr(.@"const"),
@@ -193,7 +339,7 @@ pub const Command = struct {
     };
 
     pub const Inner = InlineTaggedUnion(union {
-        //module: ,
+        module: Module,
         register: Register,
         action: Action,
         assert_return: AssertReturn,
@@ -372,10 +518,18 @@ pub fn parse(
         };
 
         const cmd: Command.Inner.Union(.@"const") = cmd: switch (cmd_keyword_id.tag(tree)) {
-            // .keyword_module => {
-            //     // TODO: Parse id, then check for binary or quote keyword
-            //     unreachable;
-            // },
+            .keyword_module => {
+                const module = try Command.Inner.allocate(arenas.out.allocator(), .module);
+                module.value = switch (try Module.parseContents(&cmd_parser, tree, &arenas, &caches, errors)) {
+                    .ok => |ok| ok,
+                    .err => |err| {
+                        try errors.append(err);
+                        continue;
+                    },
+                };
+
+                break :cmd .{ .module = &module.value };
+            },
             .keyword_register => {
                 const register = try Command.Inner.allocate(arenas.out.allocator(), .register);
 
