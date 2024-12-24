@@ -91,7 +91,7 @@ pub fn parse(
         .string, .string_raw => {
             const id = cache.intern(cache_arena, atom, name_arena, tree, scratch) catch |e| return switch (e) {
                 error.OutOfMemory => |oom| oom,
-                error.InvalidUtf8 => .{ .err = sexpr.Error.initInvalidUtf8(sexpr.Value.initAtom(atom)) },
+                error.InvalidUtf8 => .{ .err = sexpr.Error.initInvalidUtf8(atom) },
             };
 
             return .{ .ok = .{ .token = atom, .id = id } };

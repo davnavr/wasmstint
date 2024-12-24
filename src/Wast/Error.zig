@@ -50,7 +50,7 @@ pub fn print(err: *const Error, tree: *const sexpr.Tree, writer: anytype) !void 
                     _ = try writer.write("list");
                 },
                 .atom => {
-                    try writer.print("token {}", .{err.value.case.atom.tag(tree)});
+                    try writer.print("token {s}", .{@tagName(err.value.case.atom.tag(tree))});
                 },
             }
         },
@@ -62,7 +62,7 @@ pub fn print(err: *const Error, tree: *const sexpr.Tree, writer: anytype) !void 
                     _ = try writer.write("list");
                 },
                 .atom => {
-                    try writer.print("token {}", .{err.value.case.atom.tag(tree)});
+                    try writer.print("token {s}", .{@tagName(err.value.case.atom.tag(tree))});
                 },
             }
         },
@@ -94,9 +94,9 @@ pub fn initUnexpectedValue(value: Value, location: ExpectedLocation) Error {
     };
 }
 
-pub fn initInvalidUtf8(string: Value) Error {
+pub fn initInvalidUtf8(string: sexpr.TokenId) Error {
     return .{
-        .value = string,
+        .value = Value.initAtom(string),
         .tag = .invalid_utf8,
         .extra = undefined,
     };

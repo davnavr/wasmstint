@@ -93,7 +93,12 @@ pub fn main() !u8 {
         const script_tree = try wasmstint.Wast.sexpr.Tree.parseFromSlice(script_buf, parse_arena.allocator(), &scratch, &errors);
 
         _ = scratch.reset(.retain_capacity);
-        const script = wasmstint.Wast.parse(&script_tree, &parse_arena, &scratch, &errors) catch |e| {
+        const script = wasmstint.Wast.parse(
+            &script_tree,
+            &parse_arena,
+            &errors,
+            &scratch,
+        ) catch |e| {
             std.debug.print("Error parsing script file {s}", .{script_path});
             // TODO: Don't return, log that this script failed
             return e;

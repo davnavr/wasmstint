@@ -16,6 +16,8 @@ pub const LineCol = @import("Wast/LineCol.zig");
 
 const value = @import("Wast/value.zig");
 
+const ParseResult = sexpr.Parser.Result;
+
 tree: *const sexpr.Tree,
 interned_ids: Ident.Cache.Entries,
 interned_names: Name.Cache.Entries,
@@ -51,12 +53,162 @@ pub const Command = struct {
                 arguments: std.MultiArrayList(Const),
             },
         };
+
+        pub fn parseContents(
+            contents: *sexpr.Parser,
+            tree: *const sexpr.Tree,
+            arena: *ArenaAllocator,
+            target: std.meta.Tag(Target),
+            target_token: sexpr.TokenId,
+            parent_list: sexpr.List.Id,
+            alloca: *ArenaAllocator,
+            interned_ids: *Ident.Cache,
+            interned_names: *Name.Cache,
+            scratch: *ArenaAllocator,
+            errors: *Error.List,
+        ) error{OutOfMemory}!ParseResult(*const Action) {
+            const action = try arena.allocator().create(Action);
+
+            const module = switch (try Ident.parse(contents, tree, interned_ids, alloca)) {
+                .ok => |ok| ok,
+                .err => |err| return .{ .err = err },
+            };
+
+            const name = switch (try Name.parse(contents, tree, alloca, interned_names, alloca, parent_list, scratch)) {
+                .ok => |ok| ok,
+                .err => |err| return .{ .err = err },
+            };
+
+            const parsed_target: Target = switch (target) {
+                .invoke => .{
+                    .invoke = .{
+                        .arguments = try parseConstOrResultList(contents, Const, tree, arena, errors),
+                    },
+                },
+                .get => Target.get,
+            };
+
+            try contents.expectEmpty(errors);
+
+            action.* = Action{
+                .module = module,
+                .name = name,
+                .keyword = target_token,
+                .target = parsed_target,
+            };
+
+            return .{ .ok = action };
+        }
+
+        pub fn parse(
+            parser: *sexpr.Parser,
+            tree: *const sexpr.Tree,
+            arena: *ArenaAllocator,
+            parent: sexpr.List.Id,
+            alloca: *ArenaAllocator,
+            interned_ids: *Ident.Cache,
+            interned_names: *Name.Cache,
+            scratch: *ArenaAllocator,
+            errors: *Error.List,
+        ) error{OutOfMemory}!ParseResult(*const Action) {
+            const action_list_result = parser.parseList() catch |e| switch (e) {
+                error.EndOfStream => return .{
+                    .err = Error.initExpectedToken(sexpr.Value.initList(parent), .open_paren, .at_list_end),
+                },
+            };
+
+            const action_list: sexpr.List.Id = switch (action_list_result) {
+                .ok => |ok| ok,
+                .err => |err| return .{ .err = err },
+            };
+
+            var contents = sexpr.Parser.init(action_list.contents(tree).values(tree));
+            const action_keyword: sexpr.TokenId = switch (contents.parseAtomInList(.keyword_unknown, action_list)) {
+                .ok => |ok| ok,
+                .err => |err| return .{ .err = err },
+            };
+
+            const target: std.meta.Tag(Target) = switch (action_keyword.tag(tree)) {
+                .keyword_invoke => .invoke,
+                .keyword_get => .get,
+                else => return .{ .err = Error.initUnexpectedValue(sexpr.Value.initAtom(action_keyword), .at_value) },
+            };
+
+            return parseContents(
+                &contents,
+                tree,
+                arena,
+                target,
+                action_keyword,
+                action_list,
+                alloca,
+                interned_ids,
+                interned_names,
+                scratch,
+                errors,
+            );
+        }
+    };
+
+    pub const AssertReturn = struct {
+        action: *const Action,
+        results: std.MultiArrayList(Result),
+    };
+
+    pub const Failure = struct {
+        msg: []const u8,
+
+        pub fn parseInList(
+            parser: *sexpr.Parser,
+            tree: *const sexpr.Tree,
+            list: sexpr.List.Id,
+            scratch: *ArenaAllocator,
+        ) error{OutOfMemory}!ParseResult(Failure) {
+            const atom: sexpr.TokenId = switch (parser.parseAtomInList(.string, list)) {
+                .ok => |ok| ok,
+                .err => |err| return .{ .err = err },
+            };
+
+            switch (atom.tag(tree)) {
+                .string => {
+                    const contents = atom.contents(tree);
+                    const msg = contents[1 .. contents.len - 1];
+                    std.debug.assert(std.unicode.utf8ValidateSlice(msg));
+                    return .{ .ok = .{ .msg = msg } };
+                },
+                .string_raw => {
+                    const contents = atom.contents(tree);
+                    const msg = contents[1 .. contents.len - 1];
+                    const failure = Failure{ .msg = (try value.string(msg).allocPrint(scratch.allocator())).items };
+                    return if (std.unicode.utf8ValidateSlice(failure.msg))
+                        .{ .ok = failure }
+                    else
+                        .{ .err = Error.initInvalidUtf8(atom) };
+                },
+                else => return .{
+                    .err = Error.initExpectedToken(sexpr.Value.initAtom(atom), .string, .at_value),
+                },
+            }
+        }
+    };
+
+    pub const AssertTrap = struct {
+        action: *const Action,
+        failure: Failure,
+    };
+
+    pub const AssertExhaustion = struct {
+        action: *const Action,
+        failure: Failure,
     };
 
     pub const Inner = InlineTaggedUnion(union {
         //module: ,
         register: Register,
-        //action: Action,
+        action: Action,
+        assert_return: AssertReturn,
+        assert_trap: AssertTrap,
+        // assert_exhaustion: AssertExhaustion,
     });
 
     comptime {
@@ -70,8 +222,8 @@ pub fn parseConstOrResult(
     tree: *const sexpr.Tree,
     arena: *ArenaAllocator,
     errors: *Error.List,
-) error{ OutOfMemory, EndOfStream }!sexpr.Parser.Result(T) {
-    comptime std.debug.assert(@typeInfo(T.Inner).@"union".tag_type != null);
+) error{ OutOfMemory, EndOfStream }!ParseResult(T) {
+    comptime std.debug.assert(@typeInfo(T.Value).@"union".tag_type != null);
 
     _ = arena; // Might be used for large v128 values.
 
@@ -80,25 +232,21 @@ pub fn parseConstOrResult(
         .err => |err| return .{ .err = err },
     };
 
-    var list_parser = parser.init(list.contents(tree));
+    var list_parser = sexpr.Parser.init(list.contents(tree).values(tree));
 
     const keyword: sexpr.TokenId = switch (list_parser.parseAtomInList(.keyword_unknown, list)) {
         .ok => |ok| ok,
         .err => |err| return .{ .err = err },
     };
 
-    const parsed: T.Inner = switch (keyword.tag(tree)) {
-        .@"keyword_i32.const" => T.Inner{
-            .i32 = switch (list_parser.parseUninterpretedIntegerInList(i32, list, tree)) {
-                .ok => |ok| ok,
-                .err => |err| return .{ .err = err },
-            },
+    const parsed: struct { sexpr.TokenId, T.Value } = switch (keyword.tag(tree)) {
+        .@"keyword_i32.const" => switch (list_parser.parseUninterpretedIntegerInList(i32, list, tree)) {
+            .ok => |ok| .{ ok.token, T.Value{ .i32 = ok.value } },
+            .err => |err| return .{ .err = err },
         },
-        .@"keyword_i64.const" => T.Inner{
-            .i64 = switch (list_parser.parseUninterpretedIntegerInList(i64, list, tree)) {
-                .ok => |ok| ok,
-                .err => |err| return .{ .err = err },
-            },
+        .@"keyword_i64.const" => switch (list_parser.parseUninterpretedIntegerInList(i64, list, tree)) {
+            .ok => |ok| .{ ok.token, T.Value{ .i64 = ok.value } },
+            .err => |err| return .{ .err = err },
         },
         .keyword_unknown => return .{
             .err = Error.initUnexpectedValue(sexpr.Value.initAtom(keyword), .at_value),
@@ -109,14 +257,48 @@ pub fn parseConstOrResult(
     };
 
     try list_parser.expectEmpty(errors);
-    return .{ .ok = T{ .keyword = sexpr.TokenId, .inner = parsed } };
+    return .{
+        .ok = T{
+            .keyword = keyword,
+            .value_token = parsed.@"0",
+            .value = parsed.@"1",
+        },
+    };
+}
+
+pub fn parseConstOrResultList(
+    contents: *sexpr.Parser,
+    comptime T: type,
+    tree: *const sexpr.Tree,
+    arena: *ArenaAllocator,
+    errors: *Error.List,
+) error{OutOfMemory}!std.MultiArrayList(T) {
+    var values = std.MultiArrayList(T).empty;
+    const count = contents.remaining().len;
+    try values.setCapacity(arena.allocator(), count);
+
+    for (0..count) |_| {
+        const val_result = parseConstOrResult(contents, T, tree, arena, errors) catch |e| switch (e) {
+            error.OutOfMemory => |oom| return oom,
+            error.EndOfStream => unreachable,
+        };
+
+        switch (val_result) {
+            .ok => |val| values.appendAssumeCapacity(val),
+            .err => |err| try errors.append(err),
+        }
+    }
+
+    std.debug.assert(contents.isEmpty());
+    return values;
 }
 
 pub const Const = struct {
     keyword: sexpr.TokenId,
-    inner: Inner,
+    value_token: sexpr.TokenId,
+    value: Value,
 
-    pub const Inner = union(enum) {
+    pub const Value = union(enum) {
         i32: i32,
         f32: u32,
         i64: i64,
@@ -127,15 +309,16 @@ pub const Const = struct {
     };
 
     comptime {
-        std.debug.assert(@sizeOf(Inner) <= 16);
+        std.debug.assert(@sizeOf(Value) <= 16);
     }
 };
 
 pub const Result = struct {
     keyword: sexpr.TokenId,
-    inner: Inner,
+    value_token: sexpr.TokenId,
+    value: Value,
 
-    pub const Inner = union(enum) {
+    pub const Value = union(enum) {
         i32: i32,
         f32: u32,
         i64: i64,
@@ -151,7 +334,7 @@ pub const Result = struct {
     pub const NanPattern = enum { canonical, arithmetic };
 
     comptime {
-        std.debug.assert(@sizeOf(Inner) <= 16);
+        std.debug.assert(@sizeOf(Value) <= 16);
     }
 };
 
@@ -160,8 +343,8 @@ const Wast = @This();
 pub fn parse(
     tree: *const sexpr.Tree,
     arena: *ArenaAllocator,
-    alloca: *ArenaAllocator,
     errors: *Error.List,
+    alloca: *ArenaAllocator,
 ) error{OutOfMemory}!Wast {
     // `alloca` is used for allocations that live for the rest of this function call.
     var scratch = ArenaAllocator.init(alloca.allocator());
@@ -176,6 +359,8 @@ pub fn parse(
     var interned_names = Name.Cache.empty;
 
     for (commands_values) |cmd_value| {
+        _ = scratch.reset(.retain_capacity);
+
         const cmd_list = cmd_value.getList() orelse {
             try errors.append(Error.initUnexpectedValue(cmd_value, .at_value));
             continue;
@@ -183,7 +368,7 @@ pub fn parse(
 
         var cmd_parser = sexpr.Parser.init(cmd_list.contents(tree).values(tree));
 
-        const cmd_keyword_id = switch (cmd_parser.parseAtomInList(.keyword_unknown, cmd_list)) {
+        const cmd_keyword_id = switch (cmd_parser.parseAtomInList(null, cmd_list)) {
             .ok => |ok| ok,
             .err => |err| {
                 try errors.append(err);
@@ -192,12 +377,11 @@ pub fn parse(
         };
 
         const cmd: Command.Inner.Union(.@"const") = cmd: switch (cmd_keyword_id.tag(tree)) {
-            .keyword_module => {
-                // TODO: Parse id, then check for binary or quote keyword
-                unreachable;
-            },
+            // .keyword_module => {
+            //     // TODO: Parse id, then check for binary or quote keyword
+            //     unreachable;
+            // },
             .keyword_register => {
-                _ = scratch.reset(.retain_capacity);
                 const register = try Command.Inner.allocate(arena.allocator(), .register);
 
                 const name_result = try Name.parse(
@@ -226,9 +410,128 @@ pub fn parse(
                     },
                 };
 
-                register.value = .{ .name = name, .id = id };
+                register.value = Command.Register{ .name = name, .id = id };
                 break :cmd .{ .register = &register.value };
             },
+            .keyword_invoke => {
+                const action_result = try Command.Action.parseContents(
+                    &cmd_parser,
+                    tree,
+                    arena,
+                    .invoke,
+                    cmd_keyword_id,
+                    cmd_list,
+                    alloca,
+                    &interned_ids,
+                    &interned_names,
+                    &scratch,
+                    errors,
+                );
+
+                break :cmd .{
+                    .action = switch (action_result) {
+                        .ok => |action| action,
+                        .err => |err| {
+                            try errors.append(err);
+                            continue;
+                        },
+                    },
+                };
+            },
+            .keyword_get => {
+                const action_result = try Command.Action.parseContents(
+                    &cmd_parser,
+                    tree,
+                    arena,
+                    .get,
+                    cmd_keyword_id,
+                    cmd_list,
+                    alloca,
+                    &interned_ids,
+                    &interned_names,
+                    &scratch,
+                    errors,
+                );
+
+                break :cmd .{
+                    .action = switch (action_result) {
+                        .ok => |action| action,
+                        .err => |err| {
+                            try errors.append(err);
+                            continue;
+                        },
+                    },
+                };
+            },
+            .keyword_assert_return => {
+                const assert_return = try Command.Inner.allocate(arena.allocator(), .assert_return);
+
+                const action_result = try Command.Action.parse(
+                    &cmd_parser,
+                    tree,
+                    arena,
+                    cmd_list,
+                    alloca,
+                    &interned_ids,
+                    &interned_names,
+                    &scratch,
+                    errors,
+                );
+
+                const action = switch (action_result) {
+                    .ok => |ok| ok,
+                    .err => |err| {
+                        try errors.append(err);
+                        continue;
+                    },
+                };
+
+                assert_return.value = Command.AssertReturn{
+                    .action = action,
+                    .results = try parseConstOrResultList(&cmd_parser, Result, tree, arena, errors),
+                };
+
+                break :cmd .{ .assert_return = &assert_return.value };
+            },
+            .keyword_assert_trap => {
+                const assert_trap = try Command.Inner.allocate(arena.allocator(), .assert_trap);
+
+                const action_result = try Command.Action.parse(
+                    &cmd_parser,
+                    tree,
+                    arena,
+                    cmd_list,
+                    alloca,
+                    &interned_ids,
+                    &interned_names,
+                    &scratch,
+                    errors,
+                );
+
+                const action = switch (action_result) {
+                    .ok => |ok| ok,
+                    .err => |err| {
+                        try errors.append(err);
+                        continue;
+                    },
+                };
+
+                assert_trap.value = Command.AssertTrap{
+                    .action = action,
+                    .failure = switch (try Command.Failure.parseInList(&cmd_parser, tree, cmd_list, &scratch)) {
+                        .ok => |ok| ok,
+                        .err => |err| {
+                            try errors.append(err);
+                            continue;
+                        },
+                    },
+                };
+
+                break :cmd .{ .assert_trap = &assert_trap.value };
+            },
+            // .keyword_assert_exhaustion => {},
+            // .keyword_assert_malformed => {}, // TODO: Need separate *Module parser
+            // .keyword_assert_invalid => {}, // TODO: Need separate *Module parser
             else => {
                 try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(cmd_keyword_id), .at_value));
                 continue;

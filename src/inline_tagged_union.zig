@@ -88,8 +88,8 @@ pub fn InlineTaggedUnion(comptime T: type) type {
 
                 pub fn init(u: Union(constness)) Self {
                     switch (u) {
-                        inline else => |case| {
-                            const parent: constness.SinglePtr(Tagged(@as(Tag, u))) = @fieldParentPtr("value", case);
+                        inline else => |case, tag| {
+                            const parent: constness.SinglePtr(Tagged(tag)) = @fieldParentPtr("value", case);
 
                             comptime {
                                 std.debug.assert(@sizeOf(Tag) == @sizeOf(@TypeOf(parent.tag)));
