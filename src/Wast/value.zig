@@ -80,8 +80,8 @@ pub fn signedInteger(comptime T: type, token: []const u8) error{Overflow}!T {
 }
 
 pub fn uninterpretedInteger(comptime T: type, token: []const u8) error{Overflow}!T {
-    const bit_width = @typeInfo(T).int.bits + 1;
-    const signed_value = try signedInteger(std.meta.Int(.signed, bit_width), token);
+    const bit_width = @typeInfo(T).int.bits;
+    const signed_value = try signedInteger(std.meta.Int(.signed, bit_width + 1), token);
 
     const Unsigned = std.meta.Int(.unsigned, bit_width);
     const Signed = std.meta.Int(.signed, bit_width);

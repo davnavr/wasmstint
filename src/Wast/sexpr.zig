@@ -102,7 +102,7 @@ pub const TokenId = enum(u31) {
 
     pub fn contents(id: TokenId, tree: *const Tree) []const u8 {
         const loc = id.offset(tree);
-        return tree.source[loc.start..][0..loc.end];
+        return tree.source[loc.start..loc.end];
     }
 };
 
