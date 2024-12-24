@@ -613,32 +613,16 @@ pub fn next(lexer: *Lexer) ?Token {
     std.debug.assert(token.offset.end <= lexer.utf8.bytes.len);
 
     if (token.tag == .keyword_unknown) {
-        if (Token.keyword_lookup.get(lexer.utf8.bytes[token.offset.start + 1 .. token.offset.end])) |keyword|
+        std.debug.assert(token.offset.end > token.offset.start);
+        if (Token.keyword_lookup.get(lexer.utf8.bytes[token.offset.start..token.offset.end])) |keyword|
             token.tag = keyword;
     }
 
     return token;
 }
 
-test "all token types" {
-    var lexer = try Lexer.init(
-        "()$hello \"world\" 0xABCD\t3.14\r\n42 (; hello ;) keyword   +nan:0x3 -0x80",
-    );
-
-    const expected = [_]?Token{
-        Token{ .offset = .{ .start = 0, .end = 1 }, .tag = Token.Tag.open_paren },
-        .{ .offset = .{ .start = 1, .end = 2 }, .tag = .close_paren },
-        .{ .offset = .{ .start = 2, .end = 8 }, .tag = .id },
-        .{ .offset = .{ .start = 9, .end = 16 }, .tag = .string },
-        .{ .offset = .{ .start = 17, .end = 23 }, .tag = .integer },
-        .{ .offset = .{ .start = 24, .end = 28 }, .tag = .float },
-        .{ .offset = .{ .start = 30, .end = 32 }, .tag = .integer },
-        .{ .offset = .{ .start = 45, .end = 52 }, .tag = .keyword_unknown },
-        .{ .offset = .{ .start = 55, .end = 63 }, .tag = .float },
-        .{ .offset = .{ .start = 64, .end = 69 }, .tag = .integer },
-        null,
-    };
-
+fn lexerSuccessfulTest(input: [:0]const u8, expected: []const ?Token) !void {
+    var lexer = try Lexer.init(input);
     for (expected, 0..) |tok, i| {
         const actual = lexer.next();
         std.testing.expectEqual(tok, actual) catch |e| {
@@ -649,4 +633,34 @@ test "all token types" {
             return e;
         };
     }
+}
+
+test "all token types" {
+    try lexerSuccessfulTest(
+        "()$hello \"world\" 0xABCD\t3.14\r\n42 (; hello ;) keyword   +nan:0x3 -0x80",
+        &[_]?Token{
+            .{ .offset = .{ .start = 0, .end = 1 }, .tag = Token.Tag.open_paren },
+            .{ .offset = .{ .start = 1, .end = 2 }, .tag = .close_paren },
+            .{ .offset = .{ .start = 2, .end = 8 }, .tag = .id },
+            .{ .offset = .{ .start = 9, .end = 16 }, .tag = .string },
+            .{ .offset = .{ .start = 17, .end = 23 }, .tag = .integer },
+            .{ .offset = .{ .start = 24, .end = 28 }, .tag = .float },
+            .{ .offset = .{ .start = 30, .end = 32 }, .tag = .integer },
+            .{ .offset = .{ .start = 45, .end = 52 }, .tag = .keyword_unknown },
+            .{ .offset = .{ .start = 55, .end = 63 }, .tag = .float },
+            .{ .offset = .{ .start = 64, .end = 69 }, .tag = .integer },
+            null,
+        },
+    );
+}
+
+test "keywords" {
+    try lexerSuccessfulTest(
+        "module i32.const",
+        &[_]?Token{
+            .{ .offset = .{ .start = 0, .end = 6 }, .tag = .keyword_module },
+            .{ .offset = .{ .start = 7, .end = 16 }, .tag = .@"keyword_i32.const" },
+            null,
+        },
+    );
 }
