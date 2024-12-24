@@ -4,8 +4,8 @@
 //! [`.wast`]: https://github.com/WebAssembly/spec/blob/d52e42df1314521c6e4cd7331593f2901e1d7b43/interpreter/README.md
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
+const InlineTaggedUnion = @import("inline_tagged_union.zig").InlineTaggedUnion;
 
 pub const Lexer = @import("Wast/Lexer.zig");
 pub const sexpr = @import("Wast/sexpr.zig");
@@ -23,7 +23,7 @@ commands: std.MultiArrayList(Command),
 
 pub const Command = struct {
     keyword: sexpr.TokenId,
-    inner: Inner,
+    inner: Inner.Ptr(.@"const"),
 
     pub const Register = struct {
         /// The `module` name string used to access values from the registered module.
@@ -43,95 +43,115 @@ pub const Command = struct {
         name: Name,
         /// The `invoke` or `get` keyword.
         keyword: sexpr.TokenId,
-        target: Target align(@alignOf(u32)),
+        target: Target,
 
         pub const Target = union(enum) {
             get,
             invoke: struct {
-                arguments: Const.PackedList,
+                arguments: std.MultiArrayList(Const),
             },
         };
-
-        comptime {
-            std.debug.assert(@sizeOf(Target) <= 16);
-        }
     };
 
-    pub const Inner = union(enum) {
+    pub const Inner = InlineTaggedUnion(union {
         //module: ,
-        register: *const Register,
-        //action: *const Action,
-    };
+        register: Register,
+        //action: Action,
+    });
 
     comptime {
-        std.debug.assert(@sizeOf(Inner) <= @sizeOf([2]usize));
+        std.debug.assert(@alignOf(Register) == @alignOf(u32));
     }
 };
 
-pub const Const = union(enum) {
-    i32: i32,
-    f32: u32,
-    i64: i64,
-    f64: u64,
-    // v128: *const [u8; 16],
-    // ref_null,
-    // ref_host: usize,
+pub fn parseConstOrResult(
+    parser: *sexpr.Parser,
+    comptime T: type,
+    tree: *const sexpr.Tree,
+    arena: *ArenaAllocator,
+    errors: *Error.List,
+) error{ OutOfMemory, EndOfStream }!sexpr.Parser.Result(T) {
+    comptime std.debug.assert(@typeInfo(T.Inner).@"union".tag_type != null);
 
-    // Field containing <num>.const or other keyword not included
+    _ = arena; // Might be used for large v128 values.
 
-    pub const PackedList = extern struct {
-        len: u32,
-        ptr: [*]align(@alignOf(u32)) Const,
+    const list: sexpr.List.Id = switch (try parser.parseList()) {
+        .ok => |ok| ok,
+        .err => |err| return .{ .err = err },
+    };
+
+    var list_parser = parser.init(list.contents(tree));
+
+    const keyword: sexpr.TokenId = switch (list_parser.parseAtomInList(.keyword_unknown, list)) {
+        .ok => |ok| ok,
+        .err => |err| return .{ .err = err },
+    };
+
+    const parsed: T.Inner = switch (keyword.tag(tree)) {
+        .@"keyword_i32.const" => T.Inner{
+            .i32 = switch (list_parser.parseUninterpretedIntegerInList(i32, list, tree)) {
+                .ok => |ok| ok,
+                .err => |err| return .{ .err = err },
+            },
+        },
+        .@"keyword_i64.const" => T.Inner{
+            .i64 = switch (list_parser.parseUninterpretedIntegerInList(i64, list, tree)) {
+                .ok => |ok| ok,
+                .err => |err| return .{ .err = err },
+            },
+        },
+        .keyword_unknown => return .{
+            .err = Error.initUnexpectedValue(sexpr.Value.initAtom(keyword), .at_value),
+        },
+        else => return .{
+            .err = Error.initExpectedToken(sexpr.Value.initAtom(keyword), .keyword_unknown, .at_value),
+        },
+    };
+
+    try list_parser.expectEmpty(errors);
+    return .{ .ok = T{ .keyword = sexpr.TokenId, .inner = parsed } };
+}
+
+pub const Const = struct {
+    keyword: sexpr.TokenId,
+    inner: Inner,
+
+    pub const Inner = union(enum) {
+        i32: i32,
+        f32: u32,
+        i64: i64,
+        f64: u64,
+        // v128: *const [u8; 16],
+        // ref_null: enum { func, extern },
+        ref_extern: u32,
     };
 
     comptime {
-        std.debug.assert(@sizeOf(Const) <= 16);
-        std.debug.assert(@sizeOf(PackedList) <= 12);
+        std.debug.assert(@sizeOf(Inner) <= 16);
     }
+};
 
-    pub fn parse(
-        parser: *sexpr.Parser,
-        tree: *const sexpr.Tree,
-        arena: *ArenaAllocator,
-        errors: *Error.List,
-    ) error{ OutOfMemory, EndOfStream }!sexpr.Parser.Result(Const) {
-        _ = arena; // Might be used for large v128 values.
+pub const Result = struct {
+    keyword: sexpr.TokenId,
+    inner: Inner,
 
-        const list: sexpr.List.Id = switch (try parser.parseList()) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
+    pub const Inner = union(enum) {
+        i32: i32,
+        f32: u32,
+        i64: i64,
+        f64: u64,
+        // v128: *const [u8; 16],
+        f32_nan: NanPattern,
+        f64_nan: NanPattern,
+        // ref_null: enum { func, extern },
+        ref_extern: ?u32,
+        ref_func,
+    };
 
-        var list_parser = parser.init(list.contents(tree));
+    pub const NanPattern = enum { canonical, arithmetic };
 
-        const keyword: sexpr.TokenId = switch (list_parser.parseAtomInList(.keyword_unknown, list)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
-
-        const parsed: Const = switch (keyword.tag(tree)) {
-            .@"keyword_i32.const" => Const{
-                .i32 = switch (list_parser.parseUninterpretedIntegerInList(i32, list, tree)) {
-                    .ok => |ok| ok,
-                    .err => |err| return .{ .err = err },
-                },
-            },
-            .@"keyword_i64.const" => Const{
-                .i64 = switch (list_parser.parseUninterpretedIntegerInList(i64, list, tree)) {
-                    .ok => |ok| ok,
-                    .err => |err| return .{ .err = err },
-                },
-            },
-            .keyword_unknown => return .{
-                .err = Error.initUnexpectedValue(sexpr.Value.initAtom(keyword), .at_value),
-            },
-            else => return .{
-                .err = Error.initExpectedToken(sexpr.Value.initAtom(keyword), .keyword_unknown, .at_value),
-            },
-        };
-
-        try list_parser.expectEmpty(errors);
-        return .{ .ok = parsed };
+    comptime {
+        std.debug.assert(@sizeOf(Inner) <= 16);
     }
 };
 
@@ -150,7 +170,7 @@ pub fn parse(
     const commands_values = tree.values.values(tree);
 
     var commands = std.MultiArrayList(Command).empty;
-    try commands.ensureTotalCapacity(arena.allocator(), commands_values.len);
+    try commands.setCapacity(arena.allocator(), commands_values.len);
 
     var interned_ids = Ident.Cache.empty;
     var interned_names = Name.Cache.empty;
@@ -171,14 +191,14 @@ pub fn parse(
             },
         };
 
-        const cmd: Command.Inner = cmd: switch (cmd_keyword_id.tag(tree)) {
+        const cmd: Command.Inner.Union(.@"const") = cmd: switch (cmd_keyword_id.tag(tree)) {
             .keyword_module => {
                 // TODO: Parse id, then check for binary or quote keyword
                 unreachable;
             },
             .keyword_register => {
                 _ = scratch.reset(.retain_capacity);
-                const register = try arena.allocator().create(Command.Register);
+                const register = try Command.Inner.allocate(arena.allocator(), .register);
 
                 const name_result = try Name.parse(
                     &cmd_parser,
@@ -206,8 +226,8 @@ pub fn parse(
                     },
                 };
 
-                register.* = .{ .name = name, .id = id };
-                break :cmd .{ .register = register };
+                register.value = .{ .name = name, .id = id };
+                break :cmd .{ .register = &register.value };
             },
             else => {
                 try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(cmd_keyword_id), .at_value));
@@ -215,7 +235,10 @@ pub fn parse(
             },
         };
 
-        commands.appendAssumeCapacity(Command{ .keyword = cmd_keyword_id, .inner = cmd });
+        commands.appendAssumeCapacity(Command{
+            .keyword = cmd_keyword_id,
+            .inner = Command.Inner.Ptr(.@"const").init(cmd),
+        });
 
         try cmd_parser.expectEmpty(errors);
     }
