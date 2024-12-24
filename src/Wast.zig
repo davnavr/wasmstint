@@ -14,14 +14,22 @@ pub const Name = @import("Wast/Name.zig");
 pub const Error = @import("Wast/Error.zig");
 pub const LineCol = @import("Wast/LineCol.zig");
 
+const Arenas = @import("Wast/Arenas.zig");
 const value = @import("Wast/value.zig");
 
 const ParseResult = sexpr.Parser.Result;
 
 tree: *const sexpr.Tree,
-interned_ids: Ident.Cache.Entries,
-interned_names: Name.Cache.Entries,
+interned: struct {
+    ids: Ident.Cache.Entries,
+    names: Name.Cache.Entries,
+},
 commands: std.MultiArrayList(Command),
+
+const Caches = struct {
+    ids: Ident.Cache = .empty,
+    names: Name.Cache = .empty,
+};
 
 pub const Command = struct {
     keyword: sexpr.TokenId,
@@ -57,24 +65,21 @@ pub const Command = struct {
         pub fn parseContents(
             contents: *sexpr.Parser,
             tree: *const sexpr.Tree,
-            arena: *ArenaAllocator,
+            arenas: *Arenas,
+            caches: *Caches,
             target: std.meta.Tag(Target),
             target_token: sexpr.TokenId,
             parent_list: sexpr.List.Id,
-            alloca: *ArenaAllocator,
-            interned_ids: *Ident.Cache,
-            interned_names: *Name.Cache,
-            scratch: *ArenaAllocator,
             errors: *Error.List,
         ) error{OutOfMemory}!ParseResult(*const Action) {
-            const action = try arena.allocator().create(Action);
+            const action = try arenas.out.allocator().create(Action);
 
-            const module = switch (try Ident.parse(contents, tree, interned_ids, alloca)) {
+            const module = switch (try Ident.parse(contents, tree, arenas.parse, &caches.ids)) {
                 .ok => |ok| ok,
                 .err => |err| return .{ .err = err },
             };
 
-            const name = switch (try Name.parse(contents, tree, alloca, interned_names, alloca, parent_list, scratch)) {
+            const name = switch (try Name.parse(contents, tree, arenas, &caches.names, parent_list)) {
                 .ok => |ok| ok,
                 .err => |err| return .{ .err = err },
             };
@@ -82,7 +87,7 @@ pub const Command = struct {
             const parsed_target: Target = switch (target) {
                 .invoke => .{
                     .invoke = .{
-                        .arguments = try parseConstOrResultList(contents, Const, tree, arena, errors),
+                        .arguments = try parseConstOrResultList(contents, Const, tree, arenas.out, errors),
                     },
                 },
                 .get => Target.get,
@@ -103,12 +108,9 @@ pub const Command = struct {
         pub fn parse(
             parser: *sexpr.Parser,
             tree: *const sexpr.Tree,
-            arena: *ArenaAllocator,
+            arenas: *Arenas,
+            caches: *Caches,
             parent: sexpr.List.Id,
-            alloca: *ArenaAllocator,
-            interned_ids: *Ident.Cache,
-            interned_names: *Name.Cache,
-            scratch: *ArenaAllocator,
             errors: *Error.List,
         ) error{OutOfMemory}!ParseResult(*const Action) {
             const action_list_result = parser.parseList() catch |e| switch (e) {
@@ -134,19 +136,7 @@ pub const Command = struct {
                 else => return .{ .err = Error.initUnexpectedValue(sexpr.Value.initAtom(action_keyword), .at_value) },
             };
 
-            return parseContents(
-                &contents,
-                tree,
-                arena,
-                target,
-                action_keyword,
-                action_list,
-                alloca,
-                interned_ids,
-                interned_names,
-                scratch,
-                errors,
-            );
+            return parseContents(&contents, tree, arenas, caches, target, action_keyword, action_list, errors);
         }
     };
 
@@ -344,22 +334,27 @@ pub fn parse(
     tree: *const sexpr.Tree,
     arena: *ArenaAllocator,
     errors: *Error.List,
-    alloca: *ArenaAllocator,
+    parse_arena: *ArenaAllocator,
 ) error{OutOfMemory}!Wast {
-    // `alloca` is used for allocations that live for the rest of this function call.
-    var scratch = ArenaAllocator.init(alloca.allocator());
-    defer scratch.deinit();
+    // `parse_arena` is used for allocations that live for the rest of this function call.
+    var temporary_arena = ArenaAllocator.init(parse_arena.allocator());
+    defer temporary_arena.deinit();
+
+    var arenas = Arenas{
+        .out = arena,
+        .parse = parse_arena,
+        .scratch = &temporary_arena,
+    };
 
     const commands_values = tree.values.values(tree);
 
     var commands = std.MultiArrayList(Command).empty;
-    try commands.setCapacity(arena.allocator(), commands_values.len);
+    try commands.setCapacity(arenas.out.allocator(), commands_values.len);
 
-    var interned_ids = Ident.Cache.empty;
-    var interned_names = Name.Cache.empty;
+    var caches = Caches{};
 
     for (commands_values) |cmd_value| {
-        _ = scratch.reset(.retain_capacity);
+        _ = arenas.scratch.reset(.retain_capacity);
 
         const cmd_list = cmd_value.getList() orelse {
             try errors.append(Error.initUnexpectedValue(cmd_value, .at_value));
@@ -382,17 +377,9 @@ pub fn parse(
             //     unreachable;
             // },
             .keyword_register => {
-                const register = try Command.Inner.allocate(arena.allocator(), .register);
+                const register = try Command.Inner.allocate(arenas.out.allocator(), .register);
 
-                const name_result = try Name.parse(
-                    &cmd_parser,
-                    tree,
-                    alloca,
-                    &interned_names,
-                    arena,
-                    cmd_list,
-                    &scratch,
-                );
+                const name_result = try Name.parse(&cmd_parser, tree, &arenas, &caches.names, cmd_list);
 
                 const name = switch (name_result) {
                     .ok => |ok| ok,
@@ -402,7 +389,7 @@ pub fn parse(
                     },
                 };
 
-                const id = switch (try Ident.parse(&cmd_parser, tree, &interned_ids, alloca)) {
+                const id = switch (try Ident.parse(&cmd_parser, tree, arenas.parse, &caches.ids)) {
                     .ok => |ok| ok,
                     .err => |err| {
                         try errors.append(err);
@@ -417,14 +404,11 @@ pub fn parse(
                 const action_result = try Command.Action.parseContents(
                     &cmd_parser,
                     tree,
-                    arena,
+                    &arenas,
+                    &caches,
                     .invoke,
                     cmd_keyword_id,
                     cmd_list,
-                    alloca,
-                    &interned_ids,
-                    &interned_names,
-                    &scratch,
                     errors,
                 );
 
@@ -442,14 +426,11 @@ pub fn parse(
                 const action_result = try Command.Action.parseContents(
                     &cmd_parser,
                     tree,
-                    arena,
+                    &arenas,
+                    &caches,
                     .get,
                     cmd_keyword_id,
                     cmd_list,
-                    alloca,
-                    &interned_ids,
-                    &interned_names,
-                    &scratch,
                     errors,
                 );
 
@@ -464,19 +445,8 @@ pub fn parse(
                 };
             },
             .keyword_assert_return => {
-                const assert_return = try Command.Inner.allocate(arena.allocator(), .assert_return);
-
-                const action_result = try Command.Action.parse(
-                    &cmd_parser,
-                    tree,
-                    arena,
-                    cmd_list,
-                    alloca,
-                    &interned_ids,
-                    &interned_names,
-                    &scratch,
-                    errors,
-                );
+                const assert_return = try Command.Inner.allocate(arenas.out.allocator(), .assert_return);
+                const action_result = try Command.Action.parse(&cmd_parser, tree, &arenas, &caches, cmd_list, errors);
 
                 const action = switch (action_result) {
                     .ok => |ok| ok,
@@ -488,23 +458,20 @@ pub fn parse(
 
                 assert_return.value = Command.AssertReturn{
                     .action = action,
-                    .results = try parseConstOrResultList(&cmd_parser, Result, tree, arena, errors),
+                    .results = try parseConstOrResultList(&cmd_parser, Result, tree, arenas.out, errors),
                 };
 
                 break :cmd .{ .assert_return = &assert_return.value };
             },
             .keyword_assert_trap => {
-                const assert_trap = try Command.Inner.allocate(arena.allocator(), .assert_trap);
+                const assert_trap = try Command.Inner.allocate(arenas.out.allocator(), .assert_trap);
 
                 const action_result = try Command.Action.parse(
                     &cmd_parser,
                     tree,
-                    arena,
+                    &arenas,
+                    &caches,
                     cmd_list,
-                    alloca,
-                    &interned_ids,
-                    &interned_names,
-                    &scratch,
                     errors,
                 );
 
@@ -518,7 +485,7 @@ pub fn parse(
 
                 assert_trap.value = Command.AssertTrap{
                     .action = action,
-                    .failure = switch (try Command.Failure.parseInList(&cmd_parser, tree, cmd_list, &scratch)) {
+                    .failure = switch (try Command.Failure.parseInList(&cmd_parser, tree, cmd_list, arenas.scratch)) {
                         .ok => |ok| ok,
                         .err => |err| {
                             try errors.append(err);
@@ -548,8 +515,10 @@ pub fn parse(
 
     return Wast{
         .tree = tree,
-        .interned_ids = try interned_ids.entries(arena),
-        .interned_names = try interned_names.entries(arena),
+        .interned = .{
+            .ids = try caches.ids.entries(arenas.out),
+            .names = try caches.names.entries(arenas.out),
+        },
         .commands = commands,
     };
 }

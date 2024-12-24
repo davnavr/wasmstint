@@ -3,9 +3,9 @@
 //! [*id*entifier]: https://webassembly.github.io/spec/core/text/values.html#text-id
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const sexpr = @import("sexpr.zig");
 const value = @import("value.zig");
+const Arenas = @import("Arenas.zig");
 
 inner: packed struct(u64) {
     some: bool,
@@ -74,9 +74,9 @@ pub fn index(ident: Ident, tree: *const sexpr.Tree) Index {
 pub fn parse(
     parser: *sexpr.Parser,
     tree: *const sexpr.Tree,
-    cache: *Cache,
     cache_arena: *std.heap.ArenaAllocator,
-) Allocator.Error!sexpr.Parser.Result(Ident) {
+    cache: *Cache,
+) error{OutOfMemory}!sexpr.Parser.Result(Ident) {
     var lookahead = parser.*;
     const atom = (lookahead.parseValue() catch return .{ .ok = Ident.none }).getAtom() orelse
         return .{ .ok = Ident.none };
@@ -113,7 +113,7 @@ pub const Cache = struct {
 
     pub const empty = Cache{ .lookup = .empty };
 
-    pub fn intern(cache: *Cache, ident: []const u8, arena: *std.heap.ArenaAllocator) Allocator.Error!Interned {
+    pub fn intern(cache: *Cache, ident: []const u8, arena: *std.heap.ArenaAllocator) error{OutOfMemory}!Interned {
         const entry = try cache.lookup.getOrPut(arena.allocator(), ident);
         if (!entry.found_existing and entry.index > std.math.maxInt(std.meta.Tag(Interned))) {
             _ = cache.lookup.pop();
@@ -127,7 +127,7 @@ pub const Cache = struct {
         return cache.lookup.keys()[@intFromEnum(id)];
     }
 
-    pub fn entries(cache: *const Cache, arena: *std.heap.ArenaAllocator) Allocator.Error!Entries {
+    pub fn entries(cache: *const Cache, arena: *std.heap.ArenaAllocator) error{OutOfMemory}!Entries {
         return .{ .identifiers = try arena.allocator().dupe([]const u8, cache.lookup.keys()) };
     }
 

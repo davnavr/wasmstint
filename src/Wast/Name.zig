@@ -3,10 +3,9 @@
 //! [*name*]: https://webassembly.github.io/spec/core/text/values.html#names
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const ArenaAllocator = std.heap.ArenaAllocator;
 const sexpr = @import("sexpr.zig");
 const value = @import("value.zig");
+const Arenas = @import("Arenas.zig");
 
 token: sexpr.TokenId,
 id: Id,
@@ -28,11 +27,9 @@ pub const Cache = struct {
 
     pub fn intern(
         cache: *Cache,
-        arena: *ArenaAllocator,
+        arenas: *Arenas,
         token: sexpr.TokenId,
-        name_arena: *ArenaAllocator,
         tree: *const sexpr.Tree,
-        scratch: *ArenaAllocator,
     ) error{ OutOfMemory, InvalidUtf8 }!Id {
         const actual_name: []const u8 = name: {
             const quoted = quoted: {
@@ -43,15 +40,16 @@ pub const Cache = struct {
             switch (token.tag(tree)) {
                 .string => break :name quoted,
                 .string_raw => {
-                    const buf = try value.string(quoted).allocPrint(scratch.allocator());
+                    _ = arenas.scratch.reset(.retain_capacity);
+                    const buf = try value.string(quoted).allocPrint(arenas.scratch.allocator());
                     if (!std.unicode.utf8ValidateSlice(buf.items)) return error.InvalidUtf8;
-                    break :name try name_arena.allocator().dupe(u8, buf.items);
+                    break :name try arenas.out.allocator().dupe(u8, buf.items);
                 },
                 else => unreachable,
             }
         };
 
-        const entry = try cache.lookup.getOrPut(arena.allocator(), actual_name);
+        const entry = try cache.lookup.getOrPut(arenas.parse.allocator(), actual_name);
         if (!entry.found_existing and entry.index > std.math.maxInt(std.meta.Tag(Id))) {
             _ = cache.lookup.pop();
             return error.OutOfMemory;
@@ -64,7 +62,7 @@ pub const Cache = struct {
         return cache.lookup.keys()[@intFromEnum(id)];
     }
 
-    pub fn entries(cache: *const Cache, arena: *ArenaAllocator) Allocator.Error!Entries {
+    pub fn entries(cache: *const Cache, arena: *std.heap.ArenaAllocator) error{OutOfMemory}!Entries {
         return .{ .names = try arena.allocator().dupe([]const u8, cache.lookup.keys()) };
     }
 
@@ -76,11 +74,9 @@ pub const Cache = struct {
 pub fn parse(
     parser: *sexpr.Parser,
     tree: *const sexpr.Tree,
-    cache_arena: *ArenaAllocator,
+    arenas: *Arenas,
     cache: *Cache,
-    name_arena: *ArenaAllocator,
     parent: sexpr.List.Id,
-    scratch: *ArenaAllocator,
 ) error{OutOfMemory}!sexpr.Parser.Result(Name) {
     const atom: sexpr.TokenId = switch (parser.parseAtomInList(.string, parent)) {
         .ok => |ok| ok,
@@ -89,7 +85,7 @@ pub fn parse(
 
     switch (atom.tag(tree)) {
         .string, .string_raw => {
-            const id = cache.intern(cache_arena, atom, name_arena, tree, scratch) catch |e| return switch (e) {
+            const id = cache.intern(arenas, atom, tree) catch |e| return switch (e) {
                 error.OutOfMemory => |oom| oom,
                 error.InvalidUtf8 => .{ .err = sexpr.Error.initInvalidUtf8(atom) },
             };
