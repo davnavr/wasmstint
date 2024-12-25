@@ -6,6 +6,7 @@
 const std = @import("std");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const InlineTaggedUnion = @import("inline_tagged_union.zig").InlineTaggedUnion;
+const CompactMultiSlice = @import("compact_multi_slice.zig").CompactMultiSlice;
 
 pub const Lexer = @import("Wast/Lexer.zig");
 pub const sexpr = @import("Wast/sexpr.zig");
@@ -53,7 +54,427 @@ pub const Module = struct {
             contents: Contents.Ptr(.@"const"),
         };
 
-        pub const Contents = InlineTaggedUnion(union {});
+        pub const Contents = InlineTaggedUnion(union {
+            func: Func,
+        });
+
+        pub const ValType = struct {
+            keyword: sexpr.TokenId,
+            type: Types,
+
+            const Types = enum {
+                i32,
+                i64,
+                f32,
+                f64,
+                // v128,
+                funcref,
+                externref,
+            };
+
+            pub fn parse(parser: *sexpr.Parser, tree: *const sexpr.Tree, parent: sexpr.List.Id) ParseResult(ValType) {
+                const atom: sexpr.TokenId = switch (parser.parseAtomInList(.keyword_unknown, parent)) {
+                    .ok => |ok| ok,
+                    .err => |err| return .{ .err = err },
+                };
+
+                const @"type": Types = switch (atom.tag(tree)) {
+                    .keyword_i32 => Types.i32,
+                    .keyword_i64 => Types.i64,
+                    .keyword_f32 => Types.f32,
+                    .keyword_f64 => Types.f64,
+                    .keyword_funcref => Types.funcref,
+                    .keyword_externref => Types.externref,
+                    else => return .{
+                        .err = Error.initUnexpectedValue(sexpr.Value.initAtom(atom), .at_value),
+                    },
+                };
+
+                return .{ .ok = .{ .keyword = atom, .type = @"type" } };
+            }
+
+            const SegmentedList = std.SegmentedList(ValType, 8);
+
+            pub const Range = struct {
+                start: u32,
+                count: u32,
+
+                pub fn slice(
+                    range: Range,
+                    types: *const CompactMultiSlice(ValType),
+                    comptime field: CompactMultiSlice(ValType).Field,
+                ) std.meta.fieldInfo(ValType, field).type {
+                    return types.slice().items(field)[range.start..][0..range.count];
+                }
+            };
+        };
+
+        pub const Export = struct {
+            /// The `export` keyword.
+            keyword: sexpr.TokenId,
+            name: Name,
+
+            pub fn parseContents(
+                contents: *sexpr.Parser,
+                tree: *const sexpr.Tree,
+                keyword: sexpr.TokenId,
+                parent: sexpr.List.Id,
+                name_cache: *Name.Cache,
+                arenas: *Arenas,
+            ) error{OutOfMemory}!ParseResult(Export) {
+                return switch (try Name.parse(contents, tree, arenas, name_cache, parent)) {
+                    .ok => |name| .{ .ok = Export{ .keyword = keyword, .name = name } },
+                    .err => |err| .{ .err = err },
+                };
+            }
+        };
+
+        pub const ParamOrLocal = struct {
+            /// The `param` or `local` keyword.
+            keyword: sexpr.TokenId,
+            inner: struct {
+                /// Must be `.none` if `.count > 1`
+                id: Ident,
+                types: ValType.Range,
+            },
+
+            pub fn parseContents(
+                contents: *sexpr.Parser,
+                tree: *const sexpr.Tree,
+                keyword: sexpr.TokenId,
+                parent: sexpr.List.Id,
+                id_cache: *Ident.Cache,
+                types_arena: *ArenaAllocator,
+                types: *ValType.SegmentedList,
+                arenas: *Arenas,
+                errors: *Error.List,
+            ) error{OutOfMemory}!ParamOrLocal {
+                const ident = switch (try Ident.parse(contents, tree, arenas.parse, id_cache)) {
+                    .ok => |ok| ok,
+                    .err => |err| {
+                        try errors.append(err);
+                        return .{
+                            .keyword = keyword,
+                            .inner = .{ .id = .none, .types = .{ .start = 0, .count = 0 } },
+                        };
+                    },
+                };
+
+                const start_index = std.math.cast(u32, types.len) orelse return error.OutOfMemory;
+
+                try types.growCapacity(
+                    types_arena.allocator(),
+                    std.math.add(usize, types.len, contents.remaining().len) catch return error.OutOfMemory,
+                );
+
+                while (!contents.isEmpty()) {
+                    const val_type = switch (ValType.parse(contents, tree, parent)) {
+                        .ok => |ok| ok,
+                        .err => |err| {
+                            try errors.append(err);
+                            continue;
+                        },
+                    };
+
+                    types.append(types_arena.allocator(), val_type) catch unreachable;
+                }
+
+                return .{
+                    .keyword = keyword,
+                    .inner = .{
+                        .id = ident,
+                        .types = .{
+                            .start = start_index,
+                            .count = std.math.cast(u32, types.len - start_index) orelse return error.OutOfMemory,
+                        },
+                    },
+                };
+            }
+        };
+
+        pub const Param = ParamOrLocal;
+
+        pub const Result = struct {
+            keyword: sexpr.TokenId,
+            types: ValType.Range,
+
+            pub fn parseContents(
+                contents: *sexpr.Parser,
+                tree: *const sexpr.Tree,
+                keyword: sexpr.TokenId,
+                parent: sexpr.List.Id,
+                types_arena: *ArenaAllocator,
+                types: *ValType.SegmentedList,
+                errors: *Error.List,
+            ) error{OutOfMemory}!Text.Result {
+                const start_index = std.math.cast(u32, types.len) orelse return error.OutOfMemory;
+
+                try types.growCapacity(
+                    types_arena.allocator(),
+                    std.math.add(usize, types.len, contents.remaining().len) catch return error.OutOfMemory,
+                );
+
+                while (!contents.isEmpty()) {
+                    const val_type = switch (ValType.parse(contents, tree, parent)) {
+                        .ok => |ok| ok,
+                        .err => |err| {
+                            try errors.append(err);
+                            continue;
+                        },
+                    };
+
+                    types.append(types_arena.allocator(), val_type) catch unreachable;
+                }
+
+                return .{
+                    .keyword = keyword,
+                    .types = .{
+                        .start = start_index,
+                        .count = std.math.cast(u32, types.len - start_index) orelse return error.OutOfMemory,
+                    },
+                };
+            }
+        };
+
+        pub const Local = ParamOrLocal;
+
+        pub const ImportName = struct {
+            /// The `import` keyword.
+            keyword: sexpr.TokenId,
+            module: Name,
+            name: Name,
+
+            pub fn parseContents(
+                contents: *sexpr.Parser,
+                tree: *const sexpr.Tree,
+                keyword: sexpr.TokenId,
+                parent: sexpr.List.Id,
+                name_cache: *Name.Cache,
+                arenas: *Arenas,
+            ) error{OutOfMemory}!ParseResult(ImportName) {
+                const module = switch (try Name.parse(contents, tree, arenas, name_cache, parent)) {
+                    .ok => |ok| ok,
+                    .err => |err| return .{ .err = err },
+                };
+
+                const name = switch (try Name.parse(contents, tree, arenas, name_cache, parent)) {
+                    .ok => |ok| ok,
+                    .err => |err| return .{ .err = err },
+                };
+
+                return .{
+                    .ok = ImportName{
+                        .keyword = keyword,
+                        .module = module,
+                        .name = name,
+                    },
+                };
+            }
+        };
+
+        pub const Instr = struct {
+            keyword: sexpr.TokenId,
+            op: Op,
+
+            pub const Op = InlineTaggedUnion(union {
+                @"local.get": Ident,
+                @"i32.const": i32,
+                @"i32.add": void,
+            });
+        };
+
+        pub const Expr = struct {
+            // instructions: std.MultiArrayList(Instr), // CompactMultiSlice
+        };
+
+        pub const Func = struct {
+            id: Ident,
+            inline_exports: CompactMultiSlice(Export),
+            inline_import: ?*const ImportName,
+            parameters: CompactMultiSlice(Param),
+            results: CompactMultiSlice(Text.Result),
+            locals: CompactMultiSlice(Local),
+            types: CompactMultiSlice(ValType),
+            body: Expr,
+
+            pub fn parseContents(
+                contents: *sexpr.Parser,
+                tree: *const sexpr.Tree,
+                arenas: *Arenas,
+                caches: *Caches,
+                errors: *Error.List,
+            ) error{OutOfMemory}!ParseResult(Func) {
+                const id = switch (try Ident.parse(contents, tree, arenas.parse, &caches.ids)) {
+                    .ok => |ok| ok,
+                    .err => |err| return .{ .err = err },
+                };
+
+                // For allocations that span the lifetime of this function call.
+                var alloca = ArenaAllocator.init(arenas.scratch.allocator());
+
+                // All of the `SegmentedList`s are allocated in `alloca`.
+                var inline_exports = std.SegmentedList(Export, 1){};
+                var inline_import: ?*const ImportName = null;
+                var parameters = std.SegmentedList(Param, 4){};
+                var results = std.SegmentedList(Text.Result, 4){};
+                var locals = std.SegmentedList(Local, 4){};
+                var types = ValType.SegmentedList{};
+
+                before_body: {
+                    var state: enum {
+                        start,
+                        exports,
+                        import,
+                        parameters,
+                        results,
+                        locals,
+
+                        const State = @This();
+
+                        fn advance(current: *State, to: State) bool {
+                            if (@intFromEnum(current.*) <= @intFromEnum(to)) {
+                                current.* = to;
+                                return true;
+                            } else {
+                                return false;
+                            }
+                        }
+                    } = .start;
+
+                    var lookahead = contents.*;
+                    while (lookahead.parseValue() catch null) |maybe_list| {
+                        const field_list: sexpr.List.Id = maybe_list.getList() orelse break :before_body;
+                        var list_contents = sexpr.Parser.init(field_list.contents(tree).values(tree));
+
+                        var keyword = (list_contents.parseValue() catch break :before_body).getAtom() orelse break :before_body;
+                        switch (keyword.tag(tree)) {
+                            .keyword_export => {
+                                // Treat an incorrect order of these as an unknown instruction.
+                                if (!state.advance(.exports)) break :before_body;
+
+                                const export_result = try Export.parseContents(
+                                    &list_contents,
+                                    tree,
+                                    keyword,
+                                    field_list,
+                                    &caches.names,
+                                    arenas,
+                                );
+
+                                try inline_exports.append(
+                                    alloca.allocator(),
+                                    switch (export_result) {
+                                        .ok => |ok| ok,
+                                        .err => |err| return .{ .err = err },
+                                    },
+                                );
+                            },
+                            .keyword_import => {
+                                if (!state.advance(.import)) break :before_body;
+
+                                if (inline_import == null) {
+                                    const import_result = try ImportName.parseContents(
+                                        &list_contents,
+                                        tree,
+                                        keyword,
+                                        field_list,
+                                        &caches.names,
+                                        arenas,
+                                    );
+
+                                    switch (import_result) {
+                                        .ok => |ok| {
+                                            const import = try arenas.out.allocator().create(ImportName);
+                                            import.* = ok;
+                                            inline_import = import;
+                                        },
+                                        .err => |err| try errors.append(err),
+                                    }
+                                } else {
+                                    // An extra inline import is not fatal.
+                                    try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(keyword), .at_value));
+                                }
+                            },
+                            .keyword_param => {
+                                if (!state.advance(.parameters)) break :before_body;
+
+                                const param = try Param.parseContents(
+                                    &list_contents,
+                                    tree,
+                                    keyword,
+                                    field_list,
+                                    &caches.ids,
+                                    &alloca,
+                                    &types,
+                                    arenas,
+                                    errors,
+                                );
+
+                                std.debug.assert(list_contents.isEmpty());
+
+                                try parameters.append(alloca.allocator(), param);
+                            },
+                            .keyword_result => {
+                                if (!state.advance(.results)) break :before_body;
+
+                                const result = try Text.Result.parseContents(
+                                    &list_contents,
+                                    tree,
+                                    keyword,
+                                    field_list,
+                                    &alloca,
+                                    &types,
+                                    errors,
+                                );
+
+                                std.debug.assert(list_contents.isEmpty());
+
+                                try results.append(alloca.allocator(), result);
+                            },
+                            .keyword_local => {
+                                if (!state.advance(.locals)) break :before_body;
+
+                                const local = try Local.parseContents(
+                                    &list_contents,
+                                    tree,
+                                    keyword,
+                                    field_list,
+                                    &caches.ids,
+                                    &alloca,
+                                    &types,
+                                    arenas,
+                                    errors,
+                                );
+
+                                std.debug.assert(list_contents.isEmpty());
+
+                                try locals.append(alloca.allocator(), local);
+                            },
+                            else => break :before_body,
+                        }
+
+                        contents.* = lookahead;
+                        try list_contents.expectEmpty(errors);
+                    }
+                }
+
+                // TODO: Parse Expr!
+
+                const alloc_out = arenas.out.allocator();
+                return .{
+                    .ok = Func{
+                        .id = id,
+                        .inline_exports = try CompactMultiSlice(Export).cloneSegmentedList(&inline_exports, alloc_out),
+                        .inline_import = inline_import,
+                        .parameters = try CompactMultiSlice(Param).cloneSegmentedList(&parameters, alloc_out),
+                        .results = try CompactMultiSlice(Text.Result).cloneSegmentedList(&results, alloc_out),
+                        .locals = try CompactMultiSlice(Local).cloneSegmentedList(&locals, alloc_out),
+                        .types = try CompactMultiSlice(ValType).cloneSegmentedList(&types, alloc_out),
+                        .body = .{},
+                    },
+                };
+            }
+        };
 
         pub fn parseFields(
             contents: *sexpr.Parser,
@@ -65,10 +486,53 @@ pub const Module = struct {
             var fields = std.MultiArrayList(Field).empty;
             try fields.ensureTotalCapacity(arenas.out.allocator(), contents.remaining().len);
 
-            // TODO: Module parsing
-            _ = tree;
-            _ = caches;
-            _ = errors;
+            while (contents.parseList() catch null) |field_list_result| {
+                const field_list: sexpr.List.Id = switch (field_list_result) {
+                    .ok => |ok| ok,
+                    .err => |err| {
+                        try errors.append(err);
+                        continue;
+                    },
+                };
+
+                var field_contents = sexpr.Parser.init(field_list.contents(tree).values(tree));
+                const field_keyword = switch (field_contents.parseAtomInList(.keyword_unknown, field_list)) {
+                    .ok => |ok| ok,
+                    .err => |err| {
+                        try errors.append(err);
+                        continue;
+                    },
+                };
+
+                _ = arenas.scratch.reset(.retain_capacity);
+                const module_field: Contents.Union(.@"const") = field: switch (field_keyword.tag(tree)) {
+                    .keyword_func => {
+                        const func = try Contents.allocate(arenas.out.allocator(), .func);
+                        func.value = switch (try Func.parseContents(&field_contents, tree, arenas, caches, errors)) {
+                            .ok => |ok| ok,
+                            .err => |err| {
+                                try errors.append(err);
+                                continue;
+                            },
+                        };
+
+                        break :field .{ .func = &func.value };
+                    },
+                    else => {
+                        try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(field_keyword), .at_value));
+                        continue;
+                    },
+                };
+
+                try field_contents.expectEmpty(errors);
+
+                try fields.append(arenas.out.allocator(), Field{
+                    .keyword = field_keyword,
+                    .contents = Contents.Ptr(.@"const").init(module_field),
+                });
+            }
+
+            std.debug.assert(contents.isEmpty());
 
             return fields;
         }

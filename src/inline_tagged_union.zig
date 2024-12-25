@@ -33,6 +33,13 @@ pub fn InlineTaggedUnion(comptime T: type) type {
             return struct {
                 const info = std.meta.fieldInfo(T, tag);
 
+                const Self = @This();
+
+                pub const constant: ?*const Self = if (info.type == void)
+                    &Self{ .tag = @enumFromInt(tag) }
+                else
+                    null;
+
                 tag: @Type(.{
                     .@"enum" = .{
                         .tag_type = @typeInfo(Tag).@"enum".tag_type,
@@ -55,7 +62,7 @@ pub fn InlineTaggedUnion(comptime T: type) type {
             for (fields, &cases) |*f, *c| {
                 c.* = .{
                     .name = f.name ++ "",
-                    .type = constness.SinglePtr(f.type),
+                    .type = constness.SinglePtr(f.type), // TODO: Type safe wrapper that ensures ptr is part of a parent Tagged struct
                     .alignment = 0,
                 };
             }
@@ -107,10 +114,14 @@ pub fn InlineTaggedUnion(comptime T: type) type {
             allocator: std.mem.Allocator,
             comptime tag: Tag,
         ) error{OutOfMemory}!*Tagged(tag) {
-            const ptr = try allocator.create(Tagged(tag));
-            errdefer comptime unreachable;
-            ptr.tag = @enumFromInt(@intFromEnum(tag));
-            return ptr;
+            if (Tagged(tag).constant) |constant| {
+                return constant;
+            } else {
+                const ptr = try allocator.create(Tagged(tag));
+                errdefer comptime unreachable;
+                ptr.tag = @enumFromInt(@intFromEnum(tag));
+                return ptr;
+            }
         }
     };
 }

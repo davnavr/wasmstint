@@ -101,3 +101,42 @@ pub fn parse(
         },
     }
 }
+
+// TODO: Remove, this is unused!
+pub const Opt = struct {
+    inner: packed struct(u64) {
+        is_some: bool,
+        token: sexpr.TokenId,
+        id: Id,
+    } align(@alignOf(u32)),
+
+    pub const none = Opt{
+        .inner = .{
+            .is_some = false,
+            .token = undefined,
+            .id = undefined,
+        },
+    };
+
+    pub fn init(name: ?Name) Opt {
+        return if (name) |some| .{
+            .inner = .{
+                .is_some = true,
+                .token = some.token,
+                .id = some.id,
+            },
+        } else .none;
+    }
+
+    pub fn option(opt: Opt) ?Name {
+        return if (opt.inner.is_some) Name{
+            .token = opt.inner.token,
+            .id = opt.inner.id,
+        } else null;
+    }
+};
+
+comptime {
+    std.debug.assert(@sizeOf(Name) == 8);
+    std.debug.assert(@alignOf(Name) == 4);
+}
