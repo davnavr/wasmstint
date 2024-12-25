@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const wasmstint = @import("wasmstint");
 
@@ -7,10 +8,12 @@ const Arguments = struct {
 
     const Flag = enum {
         run,
+        wait_for_debugger,
 
         const lookup = std.StaticStringMap(Flag).initComptime(.{
             .{ "--run", .run },
             .{ "-r", .run },
+            .{ "--wait-for-debugger", .wait_for_debugger },
         });
     };
 
@@ -36,6 +39,27 @@ const Arguments = struct {
                         u8,
                         iter.next() orelse return error.InvalidCommandLineArgument,
                     );
+                },
+                .wait_for_debugger => if (builtin.target.os.tag == .windows) {
+                    std.debug.print("Attach debugger to process {}\n", .{std.os.windows.GetCurrentProcessId()});
+
+                    const debugapi = struct {
+                        pub extern "kernel32" fn IsDebuggerPresent() callconv(.winapi) std.os.windows.BOOL;
+                    };
+
+                    while (debugapi.IsDebuggerPresent() == 0) {
+                        std.Thread.sleep(100);
+                    }
+                } else {
+                    if (builtin.target.os.tag == .linux) {
+                        std.debug.print("Attach debugger to process {}\n", .{std.os.linux.getpid()});
+                    }
+
+                    var dbg: usize = 0;
+                    const dbg_ptr: *volatile usize = &dbg;
+                    while (dbg_ptr.* == 0) {
+                        std.Thread.sleep(100);
+                    }
                 },
             }
         }
