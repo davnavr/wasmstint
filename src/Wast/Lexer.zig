@@ -32,6 +32,27 @@ pub const Token = struct {
     /// [*identifiers*]: https://webassembly.github.io/spec/core/text/values.html#text-id
     tag: Tag,
 
+    fn keywordsFromEnum(
+        comptime Enum: type,
+        comptime prefix_count: usize,
+    ) [@typeInfo(Enum).@"enum".fields.len - prefix_count][:0]const u8 {
+        const enum_fields = @typeInfo(Enum).@"enum".fields;
+
+        var names: [enum_fields.len - prefix_count][:0]const u8 = undefined;
+        var names_idx = 0;
+
+        @setEvalBranchQuota(2_000);
+
+        for (enum_fields) |case| {
+            if (std.mem.startsWith(u8, case.name, "0x")) continue;
+            names[names_idx] = case.name;
+            names_idx += 1;
+        }
+
+        std.debug.assert(names_idx == names.len);
+        return names;
+    }
+
     const keywords_list = [_][:0]const u8{
         // Based on this grammar:
         // https://github.com/WebAssembly/spec/blob/d52e42df1314521c6e4cd7331593f2901e1d7b43/interpreter/README.md#s-expression-syntax
@@ -51,7 +72,10 @@ pub const Token = struct {
         // These are treated as `keyword_unknown`.
         // "offset=",
         // "align=",
-        // `nan:0x`, // keyword only when sign is omitted
+        // `nan:0x`, // keyword only when sign is omitted.
+
+        // Instruction keywords
+        "then", // Used for folded `if` instructions.
 
         "export",
         "import",
@@ -91,18 +115,8 @@ pub const Token = struct {
         // "output",
 
         // Keywords corresponding to opcodes are concatenated next.
-    } ++ byte_opcode: {
-        const byte_opcode_cases = @typeInfo(opcodes.ByteOpcode).@"enum".fields;
-        var names: [byte_opcode_cases.len - 1][:0]const u8 = undefined;
-        var names_idx = 0;
-        for (byte_opcode_cases) |case| {
-            if (case.value == @intFromEnum(opcodes.ByteOpcode.@"0xFC")) continue;
-            names[names_idx] = case.name;
-            names_idx += 1;
-        }
-        std.debug.assert(names_idx == names.len);
-        break :byte_opcode names;
-    };
+    } ++ keywordsFromEnum(opcodes.ByteOpcode, 1) ++
+        keywordsFromEnum(opcodes.FCPrefixOpcode, 0);
 
     const non_keyword_tags = [_][:0]const u8{
         "reserved",

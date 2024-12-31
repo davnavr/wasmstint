@@ -184,7 +184,7 @@ pub const Tree = struct {
                         try errors.append(Error.initUnexpectedValue(value, .at_value));
                     },
                     else => {
-                        const popped_list: ListHeader = list_stack.headers.pop() orelse unreachable;
+                        const popped_list: ListHeader = list_stack.headers.pop().?;
 
                         {
                             const prev_list_count = &list_stack.headers.at(list_stack.headers.count() - 1).count;
@@ -247,7 +247,7 @@ pub const Tree = struct {
 
             while (list_stack.headers.count() > 1) {
                 // TODO: Refactor this duplicated code from `.close_paren` case.
-                const popped_list: ListHeader = list_stack.headers.pop() orelse unreachable;
+                const popped_list: ListHeader = list_stack.headers.pop().?;
 
                 {
                     const prev_list_count = &list_stack.headers.at(list_stack.headers.count() - 1).count;
@@ -329,7 +329,7 @@ pub const Tree = struct {
 
 pub const Parser = struct {
     sexpr: []const Value,
-    i: usize,
+    i: usize, // TODO: Remove this for space savings!
 
     pub fn init(sexpr: []const Value) Parser {
         return .{ .sexpr = sexpr, .i = 0 };
@@ -448,5 +448,11 @@ pub const Parser = struct {
             try errors.append(Error.initUnexpectedValue(value, .at_value));
 
         parser.i = parser.sexpr.len;
+    }
+
+    pub fn empty(parser: *Parser) []const Value {
+        const remainder = parser.remaining();
+        parser.i = parser.sexpr.len;
+        return remainder;
     }
 };

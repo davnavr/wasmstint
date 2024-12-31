@@ -71,6 +71,40 @@ pub fn index(ident: Ident, tree: *const sexpr.Tree) Index {
     } else return .omitted;
 }
 
+pub fn parseRequired(
+    parser: *sexpr.Parser,
+    tree: *const sexpr.Tree,
+    parent: sexpr.List.Id,
+    cache_arena: *std.heap.ArenaAllocator,
+    cache: *Cache,
+) error{OutOfMemory}!sexpr.Parser.Result(Ident) {
+    const atom: sexpr.TokenId = switch (parser.parseAtomInList(.id, parent)) {
+        .ok => |ok| ok,
+        .err => |err| return .{ .err = err },
+    };
+
+    const contents = atom.contents(tree);
+    switch (atom.tag(tree)) {
+        // Mostly copied from the optional `parse()` version.
+        .id => {
+            const ident = try cache.intern(contents[1..], cache_arena);
+            return .{ .ok = Ident.initSymbolic(atom, ident) };
+        },
+        .integer => {
+            const n = value.unsignedInteger(u32, contents) catch |e| switch (e) {
+                error.Overflow => return .{
+                    .err = sexpr.Error.initIntegerLiteralOverflow(atom, 32),
+                },
+            };
+
+            return .{ .ok = Ident.initNumeric(atom, n) };
+        },
+        else => return .{
+            .err = sexpr.Error.initExpectedToken(sexpr.Value.initAtom(atom), .id, .at_value),
+        },
+    }
+}
+
 pub fn parse(
     parser: *sexpr.Parser,
     tree: *const sexpr.Tree,
@@ -91,7 +125,9 @@ pub fn parse(
         .integer => {
             parser.* = lookahead;
             const n = value.unsignedInteger(u32, contents) catch |e| switch (e) {
-                error.Overflow => return .{ .err = sexpr.Error.initIntegerLiteralOverflow(atom, 32) },
+                error.Overflow => return .{
+                    .err = sexpr.Error.initIntegerLiteralOverflow(atom, 32),
+                },
             };
 
             return .{ .ok = Ident.initNumeric(atom, n) };
