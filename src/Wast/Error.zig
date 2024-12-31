@@ -20,6 +20,15 @@ pub const ExpectedLocation = enum {
     at_value,
     /// The `value` is a list, and a specific token was expected at its end.
     at_list_end,
+
+    fn print(loc: ExpectedLocation, writer: anytype) !void {
+        switch (loc) {
+            .at_value => {},
+            .at_list_end => {
+                _ = try writer.write(" at end of containing list");
+            },
+        }
+    }
 };
 
 pub const Tag = enum {
@@ -53,10 +62,12 @@ pub fn print(err: *const Error, tree: *const sexpr.Tree, writer: anytype) !void 
                     try writer.print("token {s}", .{@tagName(err.value.case.atom.tag(tree))});
                 },
             }
+
+            try err.extra.unexpected_value.print(writer);
         },
         .expected_token => {
             const expected_token = err.extra.expected_token;
-            try writer.print("expected token {}, but got", .{expected_token.tag});
+            try writer.print("expected token {}, but got ", .{expected_token.tag});
             switch (err.value.tag) {
                 .list => {
                     _ = try writer.write("list");
@@ -65,19 +76,14 @@ pub fn print(err: *const Error, tree: *const sexpr.Tree, writer: anytype) !void 
                     try writer.print("token {s}", .{@tagName(err.value.case.atom.tag(tree))});
                 },
             }
+
+            try err.extra.expected_token.location.print(writer);
         },
         .invalid_utf8 => {
             _ = try writer.write("name string literal must be valid UTF-8");
         },
         .integer_literal_overflow => {
             _ = try writer.print("not a valid literal for {}-bit integers", .{err.extra.integer_literal_overflow.width});
-        },
-    }
-
-    switch (err.extra.unexpected_value) {
-        .at_value => {},
-        .at_list_end => {
-            _ = try writer.write(" at end of containing list");
         },
     }
 }
