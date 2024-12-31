@@ -164,7 +164,7 @@ pub const Module = struct {
 
                 try types.growCapacity(
                     types_arena.allocator(),
-                    std.math.add(usize, types.len, contents.remaining().len) catch return error.OutOfMemory,
+                    std.math.add(usize, types.len, contents.remaining.len) catch return error.OutOfMemory,
                 );
 
                 while (!contents.isEmpty()) {
@@ -211,7 +211,7 @@ pub const Module = struct {
 
                 try types.growCapacity(
                     types_arena.allocator(),
-                    std.math.add(usize, types.len, contents.remaining().len) catch return error.OutOfMemory,
+                    std.math.add(usize, types.len, contents.remaining.len) catch return error.OutOfMemory,
                 );
 
                 while (!contents.isEmpty()) {
@@ -510,7 +510,7 @@ pub const Module = struct {
                 const output_capacity = std.math.add(
                     usize,
                     output.len,
-                    (contents.remaining().len +| 7) / 8,
+                    (contents.remaining.len +| 7) / 8,
                 ) catch return error.OutOfMemory;
 
                 // Avoids an integer overflow panic.
@@ -984,7 +984,7 @@ pub const Module = struct {
             errors: *Error.List,
         ) error{OutOfMemory}!std.MultiArrayList(Field) {
             var fields = std.MultiArrayList(Field).empty;
-            try fields.ensureTotalCapacity(arenas.out.allocator(), contents.remaining().len);
+            try fields.ensureTotalCapacity(arenas.out.allocator(), contents.remaining.len);
 
             while (contents.parseList() catch null) |field_list_result| {
                 const field_list: sexpr.List.Id = switch (field_list_result) {
@@ -1102,7 +1102,7 @@ pub const Module = struct {
 
                 var strings = try std.ArrayListUnmanaged(String).initCapacity(
                     arenas.out.allocator(),
-                    contents.remaining().len,
+                    contents.remaining.len,
                 );
 
                 for (0..strings.capacity) |_| {
@@ -1421,7 +1421,7 @@ pub fn parseConstOrResultList(
     errors: *Error.List,
 ) error{OutOfMemory}!std.MultiArrayList(T) {
     var values = std.MultiArrayList(T).empty;
-    const count = contents.remaining().len;
+    const count = contents.remaining.len;
     try values.setCapacity(arena.allocator(), count);
 
     for (0..count) |_| {
