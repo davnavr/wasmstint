@@ -7,4 +7,5 @@ pub const float = @import("float.zig");
 
 test {
     _ = Wast;
+    _ = @import("IndexedArena.zig");
 }
