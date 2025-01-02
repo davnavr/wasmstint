@@ -105,6 +105,21 @@ pub const TokenId = enum(u31) {
         const loc = id.offset(tree);
         return tree.source[loc.start..loc.end];
     }
+
+    pub const Opt = packed struct(u32) {
+        some: bool,
+        inner_id: TokenId,
+
+        pub const none = Opt{ .some = false, .inner_id = undefined };
+
+        pub inline fn init(id: ?TokenId) Opt {
+            return if (id) |some| Opt{ .some = true, .inner_id = some } else .none;
+        }
+
+        pub inline fn get(id: Opt) ?TokenId {
+            return if (id.some) id.inner_id else null;
+        }
+    };
 };
 
 /// Stores allocations for parsed S-expressions.

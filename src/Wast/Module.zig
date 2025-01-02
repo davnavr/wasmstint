@@ -1,55 +1,48 @@
 const std = @import("std");
 const ArenaAllocator = std.heap.ArenaAllocator;
+const IndexedArena = @import("../IndexedArena.zig");
+
 const sexpr = @import("sexpr.zig");
-const Arenas = @import("Arenas.zig");
-const Caches = @import("Caches.zig");
-const Ident = @import("Ident.zig");
-const Name = @import("Name.zig");
-const InlineTaggedUnion = @import("../inline_tagged_union.zig").InlineTaggedUnion;
-const CompactMultiSlice = @import("../compact_multi_slice.zig").CompactMultiSlice;
 const Error = sexpr.Error;
 const ParseResult = sexpr.Parser.Result;
 
-// keyword: sexpr.TokenId,
+const Ident = @import("Ident.zig");
+const Name = @import("Name.zig");
+
+const Caches = @import("Caches.zig");
+
 name: Ident,
-format: Format.Ptr(.@"const"),
+format_keyword: sexpr.TokenId.Opt,
+format: Format,
 
 const Module = @This();
 
-pub const Format = InlineTaggedUnion(union {
-    text: Text,
-    binary: Binary,
-    quote: Quote,
-});
+pub const Format = union {
+    text: IndexedArena.Idx(Text),
+    binary: IndexedArena.Idx(Binary),
+    quote: IndexedArena.Idx(Quote),
+};
 
 /// A module in the [WebAssembly Text] format.
 ///
 /// [WebAssembly Text]: https://webassembly.github.io/spec/core/index.html
 pub const Text = struct {
-    fields: std.MultiArrayList(Field),
+    fields: IndexedArena.Slice(Field),
 
     pub const Field = struct {
         keyword: sexpr.TokenId,
-        contents: Contents.Ptr(.@"const"),
+        contents: Contents,
     };
 
-    pub const Contents = InlineTaggedUnion(union {
-        func: Func,
-    });
+    pub const Contents = union {
+        func: IndexedArena.Idx(Func),
+    };
 
     pub const ValType = struct {
-        keyword: sexpr.TokenId,
+        keyword: sexpr.TokenId, // sexpr.Value // GC proposal support
         type: Types,
 
-        const Types = enum {
-            i32,
-            i64,
-            f32,
-            f64,
-            // v128,
-            funcref,
-            externref,
-        };
+        const Types = union { simple: void };
 
         pub fn parse(parser: *sexpr.Parser, tree: *const sexpr.Tree, parent: sexpr.List.Id) ParseResult(ValType) {
             const atom: sexpr.TokenId = switch (parser.parseAtomInList(.keyword_unknown, parent)) {
@@ -57,35 +50,13 @@ pub const Text = struct {
                 .err => |err| return .{ .err = err },
             };
 
-            const @"type": Types = switch (atom.tag(tree)) {
-                .keyword_i32 => Types.i32,
-                .keyword_i64 => Types.i64,
-                .keyword_f32 => Types.f32,
-                .keyword_f64 => Types.f64,
-                .keyword_funcref => Types.funcref,
-                .keyword_externref => Types.externref,
-                else => return .{
-                    .err = Error.initUnexpectedValue(sexpr.Value.initAtom(atom), .at_value),
-                },
-            };
-
-            return .{ .ok = .{ .keyword = atom, .type = @"type" } };
-        }
-
-        const SegmentedList = std.SegmentedList(ValType, 8);
-
-        pub const Range = struct {
-            start: u32,
-            count: u32,
-
-            pub fn slice(
-                range: Range,
-                types: *const CompactMultiSlice(ValType),
-                comptime field: CompactMultiSlice(ValType).Field,
-            ) std.meta.fieldInfo(ValType, field).type {
-                return types.slice().items(field)[range.start..][0..range.count];
+            switch (atom.tag(tree)) {
+                .keyword_i32, .keyword_i64, .keyword_f32, .keyword_f64, .keyword_funcref, .keyword_externref => {},
+                else => return .{ .err = Error.initUnexpectedValue(sexpr.Value.initAtom(atom), .at_value) },
             }
-        };
+
+            return .{ .ok = .{ .keyword = atom, .type = .{ .simple = {} } } };
+        }
     };
 
     pub const Export = struct {
@@ -96,12 +67,14 @@ pub const Text = struct {
         pub fn parseContents(
             contents: *sexpr.Parser,
             tree: *const sexpr.Tree,
+            arena: *IndexedArena,
+            caches: *Caches,
             keyword: sexpr.TokenId,
             parent: sexpr.List.Id,
-            name_cache: *Name.Cache,
-            arenas: *Arenas,
+            scratch: *ArenaAllocator,
         ) error{OutOfMemory}!ParseResult(Export) {
-            return switch (try Name.parse(contents, tree, arenas, name_cache, parent)) {
+            std.debug.assert(keyword.tag(tree) == .keyword_export);
+            return switch (try Name.parse(contents, tree, caches.allocator, &caches.names, arena, parent, scratch)) {
                 .ok => |name| .{ .ok = Export{ .keyword = keyword, .name = name } },
                 .err => |err| .{ .err = err },
             };
@@ -111,41 +84,28 @@ pub const Text = struct {
     pub const ParamOrLocal = struct {
         /// The `param` or `local` keyword.
         keyword: sexpr.TokenId,
-        inner: struct {
-            /// Must be `.none` if `.count > 1`
-            id: Ident,
-            types: ValType.Range,
-        },
+        /// Must be `.none` if `types.len > 1`.
+        id: Ident,
+        types: IndexedArena.Slice(ValType),
 
         pub fn parseContents(
             contents: *sexpr.Parser,
             tree: *const sexpr.Tree,
+            arena: *IndexedArena,
+            caches: *Caches,
             keyword: sexpr.TokenId,
             parent: sexpr.List.Id,
-            id_cache: *Ident.Cache,
-            types_arena: *ArenaAllocator,
-            types: *ValType.SegmentedList,
-            arenas: *Arenas,
             errors: *Error.List,
         ) error{OutOfMemory}!ParamOrLocal {
-            const ident = switch (try Ident.parse(contents, tree, arenas.parse, id_cache)) {
+            const ident = switch (try Ident.parse(contents, tree, caches.allocator, &caches.ids)) {
                 .ok => |ok| ok,
                 .err => |err| {
                     try errors.append(err);
-                    return .{
-                        .keyword = keyword,
-                        .inner = .{ .id = .none, .types = .{ .start = 0, .count = 0 } },
-                    };
+                    return .{ .keyword = keyword, .id = .none, .types = .empty };
                 },
             };
 
-            const start_index = std.math.cast(u32, types.len) orelse return error.OutOfMemory;
-
-            try types.growCapacity(
-                types_arena.allocator(),
-                std.math.add(usize, types.len, contents.remaining.len) catch return error.OutOfMemory,
-            );
-
+            var types = try IndexedArena.BoundedArrayList(ValType).initCapacity(arena, contents.remaining.len);
             while (!contents.isEmpty()) {
                 const val_type = switch (ValType.parse(contents, tree, parent)) {
                     .ok => |ok| ok,
@@ -155,19 +115,10 @@ pub const Text = struct {
                     },
                 };
 
-                types.append(types_arena.allocator(), val_type) catch unreachable;
+                types.appendAssumeCapacity(arena, val_type);
             }
 
-            return .{
-                .keyword = keyword,
-                .inner = .{
-                    .id = ident,
-                    .types = .{
-                        .start = start_index,
-                        .count = std.math.cast(u32, types.len - start_index) orelse return error.OutOfMemory,
-                    },
-                },
-            };
+            return .{ .keyword = keyword, .id = ident, .types = types.items };
         }
     };
 
@@ -175,24 +126,19 @@ pub const Text = struct {
 
     pub const Result = struct {
         keyword: sexpr.TokenId,
-        types: ValType.Range,
+        types: IndexedArena.Slice(ValType),
 
         pub fn parseContents(
             contents: *sexpr.Parser,
             tree: *const sexpr.Tree,
+            arena: *IndexedArena,
             keyword: sexpr.TokenId,
             parent: sexpr.List.Id,
-            types_arena: *ArenaAllocator,
-            types: *ValType.SegmentedList,
             errors: *Error.List,
         ) error{OutOfMemory}!Text.Result {
-            const start_index = std.math.cast(u32, types.len) orelse return error.OutOfMemory;
+            std.debug.assert(keyword.tag(tree) == .keyword_result);
 
-            try types.growCapacity(
-                types_arena.allocator(),
-                std.math.add(usize, types.len, contents.remaining.len) catch return error.OutOfMemory,
-            );
-
+            var types = try IndexedArena.BoundedArrayList(ValType).initCapacity(arena, contents.remaining.len);
             while (!contents.isEmpty()) {
                 const val_type = switch (ValType.parse(contents, tree, parent)) {
                     .ok => |ok| ok,
@@ -202,16 +148,10 @@ pub const Text = struct {
                     },
                 };
 
-                types.append(types_arena.allocator(), val_type) catch unreachable;
+                types.appendAssumeCapacity(arena, val_type);
             }
 
-            return .{
-                .keyword = keyword,
-                .types = .{
-                    .start = start_index,
-                    .count = std.math.cast(u32, types.len - start_index) orelse return error.OutOfMemory,
-                },
-            };
+            return .{ .keyword = keyword, .types = types.items };
         }
     };
 
@@ -232,28 +172,26 @@ pub const Text = struct {
         pub fn parseContents(
             contents: *sexpr.Parser,
             tree: *const sexpr.Tree,
+            arena: *IndexedArena,
+            caches: *Caches,
             keyword: sexpr.TokenId,
             parent: sexpr.List.Id,
-            name_cache: *Name.Cache,
-            arenas: *Arenas,
+            scratch: *ArenaAllocator,
         ) error{OutOfMemory}!ParseResult(ImportName) {
-            const module = switch (try Name.parse(contents, tree, arenas, name_cache, parent)) {
+            std.debug.assert(keyword.tag(tree) == .keyword_import);
+
+            const module = switch (try Name.parse(contents, tree, caches.allocator, &caches.names, arena, parent, scratch)) {
                 .ok => |ok| ok,
                 .err => |err| return .{ .err = err },
             };
 
-            const name = switch (try Name.parse(contents, tree, arenas, name_cache, parent)) {
+            _ = scratch.reset(.retain_capacity);
+            const name = switch (try Name.parse(contents, tree, caches.allocator, &caches.names, arena, parent, scratch)) {
                 .ok => |ok| ok,
                 .err => |err| return .{ .err = err },
             };
 
-            return .{
-                .ok = ImportName{
-                    .keyword = keyword,
-                    .module = module,
-                    .name = name,
-                },
-            };
+            return .{ .ok = ImportName{ .keyword = keyword, .module = module, .name = name } };
         }
     };
 
@@ -280,10 +218,11 @@ pub const Text = struct {
             contents: *sexpr.Parser,
             tree: *const sexpr.Tree,
             parent: sexpr.List.Id,
-            arenas: *Arenas,
+            arena: *IndexedArena,
             caches: *Caches,
             errors: *Error.List,
         ) error{OutOfMemory}!ParseResult(Instr) {
+            _ = arena;
             const args: Args = args: switch (keyword.tag(tree)) {
                 .keyword_nop,
                 .keyword_unreachable,
@@ -426,7 +365,7 @@ pub const Text = struct {
                 .@"keyword_i64.trunc_sat_f64_u",
                 => Args{ .none = {} },
                 .@"keyword_local.get" => {
-                    const local = switch (try Ident.parseRequired(contents, tree, parent, arenas.parse, &caches.ids)) {
+                    const local = switch (try Ident.parseRequired(contents, tree, parent, caches.allocator, &caches.ids)) {
                         .ok => |ok| ok,
                         .err => |err| return .{ .err = err },
                     };
@@ -461,14 +400,12 @@ pub const Text = struct {
                 },
             };
 
-            return .{
-                .ok = Instr{ .keyword = sexpr.Value.initAtom(keyword), .args = args },
-            };
+            return .{ .ok = Instr{ .keyword = sexpr.Value.initAtom(keyword), .args = args } };
         }
     };
 
     pub const Expr = struct {
-        instructions: []const Instr,
+        instructions: IndexedArena.Slice(Instr),
 
         const InstrList = std.SegmentedList(Instr, 2);
         const InstrListCache = std.SegmentedList(InstrList, 2);
@@ -477,7 +414,7 @@ pub const Text = struct {
             contents: *sexpr.Parser,
             tree: *const sexpr.Tree,
             parent: sexpr.List.Id,
-            arenas: *Arenas,
+            arena: *IndexedArena,
             caches: *Caches,
             instr_list_arena: *ArenaAllocator,
             instr_list_cache: *InstrListCache,
@@ -511,7 +448,7 @@ pub const Text = struct {
                         contents,
                         tree,
                         parent,
-                        arenas,
+                        arena,
                         caches,
                         errors,
                     );
@@ -569,7 +506,7 @@ pub const Text = struct {
                         &list_contents,
                         tree,
                         parent,
-                        arenas,
+                        arena,
                         caches,
                         errors,
                     );
@@ -591,7 +528,7 @@ pub const Text = struct {
                         &list_contents,
                         tree,
                         list,
-                        arenas,
+                        arena,
                         caches,
                         instr_list_arena,
                         instr_list_cache,
@@ -638,25 +575,25 @@ pub const Text = struct {
             contents: *sexpr.Parser,
             tree: *const sexpr.Tree,
             parent: sexpr.List.Id,
-            arenas: *Arenas,
-            instr_arena: *ArenaAllocator,
+            arena: *IndexedArena,
             caches: *Caches,
             errors: *Error.List,
+            scratch: *ArenaAllocator,
         ) error{OutOfMemory}!Expr {
+            _ = scratch.reset(.retain_capacity);
             var instr_list_cache: InstrListCache = .{};
             var parsed_instructions = try parseInstrList(
                 contents,
                 tree,
                 parent,
-                arenas,
+                arena,
                 caches,
-                instr_arena,
+                scratch,
                 &instr_list_cache,
                 errors,
             );
 
-            const instructions = try arenas.out.allocator().alloc(Instr, parsed_instructions.len);
-            parsed_instructions.writeToSlice(instructions, 0);
+            const instructions = try arena.dupeSegmentedList(Instr, 2, &parsed_instructions);
             return .{ .instructions = instructions };
         }
 
@@ -665,7 +602,7 @@ pub const Text = struct {
             contents: *sexpr.Parser,
             tree: *const sexpr.Tree,
             parent: sexpr.List.Id,
-            arenas: *Arenas,
+            arenas: *IndexedArena,
             caches: *Caches,
             instr_arena: *ArenaAllocator,
             errors: *Error.List,
@@ -747,46 +684,38 @@ pub const Text = struct {
 
     pub const Func = struct {
         id: Ident,
-        inline_exports: CompactMultiSlice(Export),
-        inline_import: ?*const ImportName,
-        parameters: CompactMultiSlice(Param),
-        results: CompactMultiSlice(Text.Result),
-        locals: CompactMultiSlice(Local),
-        types: CompactMultiSlice(ValType),
+        inline_exports: IndexedArena.Slice(Export),
+        inline_import: IndexedArena.Idx(ImportName).Opt,
+        parameters: IndexedArena.Slice(Param),
+        results: IndexedArena.Slice(Text.Result),
+        locals: IndexedArena.Slice(Local),
         body: Expr,
 
         pub fn parseContents(
             contents: *sexpr.Parser,
             tree: *const sexpr.Tree,
             parent: sexpr.List.Id,
-            passed_arenas: *Arenas,
+            arena: *IndexedArena,
             caches: *Caches,
             errors: *Error.List,
+            alloca: *ArenaAllocator,
         ) error{OutOfMemory}!ParseResult(Func) {
-            // For allocations that span the lifetime of this function call.
-            const alloca = passed_arenas.scratch;
+            // Arena used for allocations that span the lifetime of this function call.
+            _ = alloca.reset(.retain_capacity);
 
             var scratch = ArenaAllocator.init(alloca.allocator());
-            defer _ = passed_arenas.scratch.reset(.retain_capacity);
 
-            var arenas = Arenas{
-                .out = passed_arenas.out,
-                .parse = passed_arenas.parse,
-                .scratch = &scratch,
-            };
-
-            const id = switch (try Ident.parse(contents, tree, arenas.parse, &caches.ids)) {
+            const id = switch (try Ident.parse(contents, tree, caches.allocator, &caches.ids)) {
                 .ok => |ok| ok,
                 .err => |err| return .{ .err = err },
             };
 
             // All of the `SegmentedList`s are allocated in `alloca`.
             var inline_exports = std.SegmentedList(Export, 1){};
-            var inline_import: ?*const ImportName = null;
+            var inline_import: IndexedArena.Idx(ImportName).Opt = .none;
             var parameters = std.SegmentedList(Param, 4){};
-            var results = std.SegmentedList(Text.Result, 4){};
+            var results = std.SegmentedList(Text.Result, 1){};
             var locals = std.SegmentedList(Local, 4){};
-            var types = ValType.SegmentedList{};
 
             before_body: {
                 var state: enum {
@@ -811,7 +740,7 @@ pub const Text = struct {
 
                 var lookahead = contents.*;
                 while (lookahead.parseValue() catch null) |maybe_list| {
-                    _ = arenas.scratch.reset(.retain_capacity);
+                    _ = scratch.reset(.retain_capacity);
 
                     const field_list: sexpr.List.Id = maybe_list.getList() orelse break :before_body;
                     var list_contents = sexpr.Parser.init(field_list.contents(tree).values(tree));
@@ -825,10 +754,11 @@ pub const Text = struct {
                             const export_result = try Export.parseContents(
                                 &list_contents,
                                 tree,
+                                arena,
+                                caches,
                                 keyword,
                                 field_list,
-                                &caches.names,
-                                &arenas,
+                                &scratch,
                             );
 
                             try inline_exports.append(
@@ -842,21 +772,22 @@ pub const Text = struct {
                         .keyword_import => {
                             if (!state.advance(.import)) break :before_body;
 
-                            if (inline_import == null) {
+                            if (!inline_import.some) {
                                 const import_result = try ImportName.parseContents(
                                     &list_contents,
                                     tree,
+                                    arena,
+                                    caches,
                                     keyword,
                                     field_list,
-                                    &caches.names,
-                                    &arenas,
+                                    &scratch,
                                 );
 
                                 switch (import_result) {
                                     .ok => |ok| {
-                                        const import = try arenas.out.allocator().create(ImportName);
-                                        import.* = ok;
-                                        inline_import = import;
+                                        const import = try arena.create(ImportName);
+                                        import.set(arena, ok);
+                                        inline_import = IndexedArena.Idx(ImportName).Opt.init(import);
                                     },
                                     .err => |err| try errors.append(err),
                                 }
@@ -871,12 +802,10 @@ pub const Text = struct {
                             const param = try Param.parseContents(
                                 &list_contents,
                                 tree,
+                                arena,
+                                caches,
                                 keyword,
                                 field_list,
-                                &caches.ids,
-                                alloca,
-                                &types,
-                                &arenas,
                                 errors,
                             );
 
@@ -890,10 +819,9 @@ pub const Text = struct {
                             const result = try Text.Result.parseContents(
                                 &list_contents,
                                 tree,
+                                arena,
                                 keyword,
                                 field_list,
-                                alloca,
-                                &types,
                                 errors,
                             );
 
@@ -907,12 +835,10 @@ pub const Text = struct {
                             const local = try Local.parseContents(
                                 &list_contents,
                                 tree,
+                                arena,
+                                caches,
                                 keyword,
                                 field_list,
-                                &caches.ids,
-                                alloca,
-                                &types,
-                                &arenas,
                                 errors,
                             );
 
@@ -928,28 +854,25 @@ pub const Text = struct {
                 }
             }
 
-            _ = arenas.scratch.reset(.retain_capacity);
-            const expr = try Expr.parseContents(
-                contents,
-                tree,
-                parent,
-                &arenas,
-                alloca,
-                caches,
-                errors,
-            );
+            scratch = undefined;
 
-            const alloc_out = arenas.out.allocator();
             return .{
                 .ok = Func{
                     .id = id,
-                    .inline_exports = try CompactMultiSlice(Export).cloneSegmentedList(&inline_exports, alloc_out),
+                    .inline_exports = try arena.dupeSegmentedList(Export, 1, &inline_exports),
                     .inline_import = inline_import,
-                    .parameters = try CompactMultiSlice(Param).cloneSegmentedList(&parameters, alloc_out),
-                    .results = try CompactMultiSlice(Text.Result).cloneSegmentedList(&results, alloc_out),
-                    .locals = try CompactMultiSlice(Local).cloneSegmentedList(&locals, alloc_out),
-                    .types = try CompactMultiSlice(ValType).cloneSegmentedList(&types, alloc_out),
-                    .body = expr,
+                    .parameters = try arena.dupeSegmentedList(Param, 4, &parameters),
+                    .results = try arena.dupeSegmentedList(Text.Result, 1, &results),
+                    .locals = try arena.dupeSegmentedList(Local, 4, &locals),
+                    .body = try Expr.parseContents(
+                        contents,
+                        tree,
+                        parent,
+                        arena,
+                        caches,
+                        errors,
+                        alloca,
+                    ),
                 },
             };
         }
@@ -958,12 +881,14 @@ pub const Text = struct {
     pub fn parseFields(
         contents: *sexpr.Parser,
         tree: *const sexpr.Tree,
-        arenas: *Arenas,
+        arena: *IndexedArena,
         caches: *Caches,
         errors: *Error.List,
-    ) error{OutOfMemory}!std.MultiArrayList(Field) {
-        var fields = std.MultiArrayList(Field).empty;
-        try fields.ensureTotalCapacity(arenas.out.allocator(), contents.remaining.len);
+        scratch: *ArenaAllocator,
+    ) error{OutOfMemory}!IndexedArena.Slice(Field) {
+        var fields = try IndexedArena.BoundedArrayList(Field).initCapacity(arena, contents.remaining.len);
+
+        arena.ensureUnusedCapacityForBytes(@import("../size.zig").averageOfFields(Field) *| fields.capacity) catch {};
 
         while (contents.parseList() catch null) |field_list_result| {
             const field_list: sexpr.List.Id = switch (field_list_result) {
@@ -983,29 +908,33 @@ pub const Text = struct {
                 },
             };
 
-            _ = arenas.scratch.reset(.retain_capacity);
-            const module_field: Contents.Union(.@"const") = field: switch (field_keyword.tag(tree)) {
+            _ = scratch.reset(.retain_capacity);
+            const module_field: Contents = field: switch (field_keyword.tag(tree)) {
                 .keyword_func => {
-                    const func = try Contents.allocate(arenas.out.allocator(), .func);
+                    const func = try arena.create(Func);
 
                     const func_result = try Func.parseContents(
                         &field_contents,
                         tree,
                         field_list,
-                        arenas,
+                        arena,
                         caches,
                         errors,
+                        scratch,
                     );
 
-                    func.value = switch (func_result) {
-                        .ok => |ok| ok,
-                        .err => |err| {
-                            try errors.append(err);
-                            continue;
+                    func.set(
+                        arena,
+                        switch (func_result) {
+                            .ok => |ok| ok,
+                            .err => |err| {
+                                try errors.append(err);
+                                continue;
+                            },
                         },
-                    };
+                    );
 
-                    break :field .{ .func = &func.value };
+                    break :field .{ .func = func };
                 },
                 else => {
                     try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(field_keyword), .at_value));
@@ -1015,26 +944,24 @@ pub const Text = struct {
 
             try field_contents.expectEmpty(errors);
 
-            try fields.append(arenas.out.allocator(), Field{
-                .keyword = field_keyword,
-                .contents = Contents.Ptr(.@"const").init(module_field),
-            });
+            fields.appendAssumeCapacity(
+                arena,
+                .{ .keyword = field_keyword, .contents = module_field },
+            );
         }
 
         std.debug.assert(contents.isEmpty());
 
-        return fields;
+        return fields.items;
     }
 };
 
 pub const Binary = struct {
-    keyword: sexpr.TokenId,
-    contents: []const String,
+    contents: IndexedArena.Slice(String),
 };
 
 pub const Quote = struct {
-    keyword: sexpr.TokenId,
-    contents: []const String,
+    contents: IndexedArena.Slice(String),
 };
 
 pub const String = struct {
@@ -1055,35 +982,34 @@ pub const String = struct {
 pub fn parseContents(
     contents: *sexpr.Parser,
     tree: *const sexpr.Tree,
-    arenas: *Arenas,
+    arena: *IndexedArena,
     caches: *Caches,
     errors: *Error.List,
+    scratch: *ArenaAllocator,
 ) error{OutOfMemory}!ParseResult(Module) {
-    const name = switch (try Ident.parse(contents, tree, arenas.parse, &caches.ids)) {
+    const name: Ident = switch (try Ident.parse(contents, tree, caches.allocator, &caches.ids)) {
         .ok => |ok| ok,
         .err => |err| return .{ .err = err },
     };
 
-    const format: Format.Union(.@"const") = format: {
+    var format_keyword = sexpr.TokenId.Opt.none;
+    const format: Format = format: {
         text: {
             var lookahead = contents.*;
             const peeked_value = lookahead.parseValue() catch break :text;
             const peeked_atom = peeked_value.getAtom() orelse break :text;
-
-            const quoted_format: Format.Tag = switch (peeked_atom.tag(tree)) {
-                .keyword_binary => .binary,
-                .keyword_quote => .quote,
-                else => return .{ .err = Error.initUnexpectedValue(sexpr.Value.initAtom(peeked_atom), .at_value) },
-            };
+            const format_tag = peeked_atom.tag(tree);
+            switch (format_tag) {
+                .keyword_binary, .keyword_quote => format_keyword = sexpr.TokenId.Opt.init(peeked_atom),
+                else => return .{
+                    .err = Error.initUnexpectedValue(sexpr.Value.initAtom(peeked_atom), .at_value),
+                },
+            }
 
             contents.* = lookahead;
             lookahead = undefined;
 
-            var strings = try std.ArrayListUnmanaged(String).initCapacity(
-                arenas.out.allocator(),
-                contents.remaining.len,
-            );
-
+            var strings = try IndexedArena.BoundedArrayList(String).initCapacity(arena, contents.remaining.len);
             for (0..strings.capacity) |_| {
                 const string_atom: sexpr.TokenId = switch (contents.parseAtom(.string) catch break) {
                     .ok => |ok| ok,
@@ -1094,49 +1020,62 @@ pub fn parseContents(
                 };
 
                 switch (string_atom.tag(tree)) {
-                    .string, .string_raw => strings.appendAssumeCapacity(String{ .token = string_atom }),
+                    .string, .string_raw => strings.appendAssumeCapacity(arena, String{ .token = string_atom }),
                     else => try errors.append(
-                        Error.initExpectedToken(
-                            sexpr.Value.initAtom(string_atom),
-                            .string,
-                            .at_value,
-                        ),
+                        Error.initExpectedToken(sexpr.Value.initAtom(string_atom), .string, .at_value),
                     ),
                 }
             }
 
             std.debug.assert(contents.isEmpty());
 
-            switch (quoted_format) {
-                .text => unreachable,
-                inline else => |format_tag| {
-                    const quoted = try Format.allocate(arenas.out.allocator(), format_tag);
-                    quoted.value = .{ .keyword = peeked_atom, .contents = strings.items };
-                    break :format @unionInit(Format.Union(.@"const"), @tagName(format_tag), &quoted.value);
+            switch (format_tag) {
+                .keyword_binary => {
+                    const binary = try arena.create(Binary);
+                    binary.set(arena, .{ .contents = strings.items });
+                    break :format .{ .binary = binary };
                 },
+                .keyword_quote => {
+                    const quoted = try arena.create(Quote);
+                    quoted.set(arena, .{ .contents = strings.items });
+                    break :format .{ .quote = quoted };
+                },
+                else => unreachable,
             }
+
+            comptime unreachable;
         }
 
-        const wat = try Format.allocate(arenas.out.allocator(), .text);
-        wat.value = Text{ .fields = try Text.parseFields(contents, tree, arenas, caches, errors) };
-        break :format .{ .text = &wat.value };
+        const wat = try arena.create(Module.Text);
+        _ = scratch.reset(.retain_capacity);
+        wat.set(
+            arena,
+            .{
+                .fields = try Text.parseFields(
+                    contents,
+                    tree,
+                    arena,
+                    caches,
+                    errors,
+                    scratch,
+                ),
+            },
+        );
+
+        break :format .{ .text = wat };
     };
 
-    return .{
-        .ok = Module{
-            .name = name,
-            .format = Format.Ptr(.@"const").init(format),
-        },
-    };
+    return .{ .ok = Module{ .name = name, .format_keyword = format_keyword, .format = format } };
 }
 
 pub fn parse(
     parser: *sexpr.Parser,
     tree: *const sexpr.Tree,
-    arenas: *Arenas,
+    arena: *IndexedArena,
     caches: *Caches,
     parent: sexpr.List.Id,
     errors: *Error.List,
+    scratch: *ArenaAllocator,
 ) error{OutOfMemory}!ParseResult(Module) {
     const module_list: sexpr.List.Id = switch (parser.parseListInList(parent)) {
         .ok => |ok| ok,
@@ -1152,9 +1091,10 @@ pub fn parse(
 
     switch (module_token.tag(tree)) {
         .keyword_module => {
-            const module = try parseContents(&contents, tree, arenas, caches, errors);
+            const module = try parseContents(&contents, tree, arena, caches, errors, scratch);
             if (module == .ok)
                 try contents.expectEmpty(errors);
+
             return module;
         },
         else => return .{

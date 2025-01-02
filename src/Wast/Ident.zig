@@ -3,9 +3,9 @@
 //! [*id*entifier]: https://webassembly.github.io/spec/core/text/values.html#text-id
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const sexpr = @import("sexpr.zig");
 const value = @import("value.zig");
-const Arenas = @import("Arenas.zig");
 
 inner: packed struct(u64) {
     some: bool,
@@ -75,23 +75,22 @@ pub fn parseRequired(
     parser: *sexpr.Parser,
     tree: *const sexpr.Tree,
     parent: sexpr.List.Id,
-    cache_arena: *std.heap.ArenaAllocator,
+    cache_allocator: Allocator,
     cache: *Cache,
-) error{OutOfMemory}!sexpr.Parser.Result(Ident) {
+) Allocator.Error!sexpr.Parser.Result(Ident) {
     const atom: sexpr.TokenId = switch (parser.parseAtomInList(.id, parent)) {
         .ok => |ok| ok,
         .err => |err| return .{ .err = err },
     };
 
-    const contents = atom.contents(tree);
     switch (atom.tag(tree)) {
         // Mostly copied from the optional `parse()` version.
         .id => {
-            const ident = try cache.intern(contents[1..], cache_arena);
+            const ident = try cache.intern(cache_allocator, tree, atom);
             return .{ .ok = Ident.initSymbolic(atom, ident) };
         },
         .integer => {
-            const n = value.unsignedInteger(u32, contents) catch |e| switch (e) {
+            const n = value.unsignedInteger(u32, atom.contents(tree)) catch |e| switch (e) {
                 error.Overflow => return .{
                     .err = sexpr.Error.initIntegerLiteralOverflow(atom, 32),
                 },
@@ -108,23 +107,22 @@ pub fn parseRequired(
 pub fn parse(
     parser: *sexpr.Parser,
     tree: *const sexpr.Tree,
-    cache_arena: *std.heap.ArenaAllocator,
+    cache_allocator: Allocator,
     cache: *Cache,
-) error{OutOfMemory}!sexpr.Parser.Result(Ident) {
+) Allocator.Error!sexpr.Parser.Result(Ident) {
     var lookahead = parser.*;
     const atom = (lookahead.parseValue() catch return .{ .ok = Ident.none }).getAtom() orelse
         return .{ .ok = Ident.none };
 
-    const contents = atom.contents(tree);
     switch (atom.tag(tree)) {
         .id => {
             parser.* = lookahead;
-            const ident = try cache.intern(contents[1..], cache_arena);
+            const ident = try cache.intern(cache_allocator, tree, atom);
             return .{ .ok = Ident.initSymbolic(atom, ident) };
         },
         .integer => {
             parser.* = lookahead;
-            const n = value.unsignedInteger(u32, contents) catch |e| switch (e) {
+            const n = value.unsignedInteger(u32, atom.contents(tree)) catch |e| switch (e) {
                 error.Overflow => return .{
                     .err = sexpr.Error.initIntegerLiteralOverflow(atom, 32),
                 },
@@ -139,35 +137,48 @@ pub fn parse(
 pub const Interned = enum(u32) {
     _,
 
-    pub fn get(id: Interned, cache: Cache.Entries) []const u8 {
-        return cache.identifiers[@intFromEnum(id)];
+    pub fn get(id: Interned, tree: *const sexpr.Tree, cache: *const Cache) []const u8 {
+        return Cache.idTokenContents(tree, cache.lookup.keys()[@intFromEnum(id)]);
     }
 };
 
 pub const Cache = struct {
-    lookup: std.StringArrayHashMapUnmanaged(void),
+    fn idTokenContents(tree: *const sexpr.Tree, tok: sexpr.TokenId) []const u8 {
+        std.debug.assert(tok.tag(tree) == .id);
+        return tok.contents(tree)[1..];
+    }
+
+    const LookupContext = struct {
+        tree: *const sexpr.Tree,
+        // hash_seed: u64,
+
+        pub fn eql(ctx: LookupContext, a: sexpr.TokenId, b: sexpr.TokenId, _: usize) bool {
+            return std.mem.eql(u8, idTokenContents(ctx.tree, a), idTokenContents(ctx.tree, b));
+        }
+
+        pub fn hash(ctx: LookupContext, key: sexpr.TokenId) u32 {
+            return @truncate(std.hash.Wyhash.hash(0, idTokenContents(ctx.tree, key)));
+        }
+    };
+
+    lookup: std.ArrayHashMapUnmanaged(sexpr.TokenId, void, LookupContext, true),
+    // hash_seed: u64,
 
     pub const empty = Cache{ .lookup = .empty };
 
-    pub fn intern(cache: *Cache, ident: []const u8, arena: *std.heap.ArenaAllocator) error{OutOfMemory}!Interned {
-        const entry = try cache.lookup.getOrPut(arena.allocator(), ident);
+    pub fn intern(cache: *Cache, allocator: Allocator, tree: *const sexpr.Tree, tok: sexpr.TokenId) Allocator.Error!Interned {
+        const entry = try cache.lookup.getOrPutContext(allocator, tok, .{ .tree = tree });
         if (!entry.found_existing and entry.index > std.math.maxInt(std.meta.Tag(Interned))) {
             _ = cache.lookup.pop();
             return error.OutOfMemory;
         } else {
+            // `getOrPutContext` should automatically write the correct key.
+            std.debug.assert(std.mem.eql(u8, tok.contents(tree), entry.key_ptr.contents(tree)));
             return @enumFromInt(@as(std.meta.Tag(Interned), @intCast(entry.index)));
         }
     }
 
-    pub fn get(cache: *const Cache, id: Interned) []const u8 {
-        return cache.lookup.keys()[@intFromEnum(id)];
+    pub fn deinit(cache: *Cache, allocator: Allocator) void {
+        cache.lookup.deinit(allocator);
     }
-
-    pub fn entries(cache: *const Cache, arena: *std.heap.ArenaAllocator) error{OutOfMemory}!Entries {
-        return .{ .identifiers = try arena.allocator().dupe([]const u8, cache.lookup.keys()) };
-    }
-
-    pub const Entries = struct {
-        identifiers: []const []const u8,
-    };
 };

@@ -116,10 +116,15 @@ pub fn main() !u8 {
         _ = scratch.reset(.retain_capacity);
         const script_tree = try wasmstint.Wast.sexpr.Tree.parseFromSlice(script_buf, parse_arena.allocator(), &scratch, &errors);
 
+        // TODO: Figure out if using an arena here might actually faster than using the GPA.
+        var parse_array = wasmstint.Wast.Arena.init(parse_arena.allocator());
+        var parse_caches = wasmstint.Wast.Caches.init(parse_arena.allocator());
+
         _ = scratch.reset(.retain_capacity);
         const script = wasmstint.Wast.parse(
             &script_tree,
-            &parse_arena,
+            &parse_array,
+            &parse_caches,
             &errors,
             &scratch,
         ) catch |e| {

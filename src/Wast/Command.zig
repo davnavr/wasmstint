@@ -1,28 +1,40 @@
 const std = @import("std");
 const ArenaAllocator = std.heap.ArenaAllocator;
+const IndexedArena = @import("../IndexedArena.zig");
+
 const sexpr = @import("sexpr.zig");
-const Arenas = @import("Arenas.zig");
-const Caches = @import("Caches.zig");
+const Error = sexpr.Error;
+
+const Wast = @import("../Wast.zig");
 const Ident = @import("Ident.zig");
 const Name = @import("Name.zig");
-const Wast = @import("../Wast.zig");
-const InlineTaggedUnion = @import("../inline_tagged_union.zig").InlineTaggedUnion;
-const Error = sexpr.Error;
+
+const Caches = @import("Caches.zig");
 const ParseResult = sexpr.Parser.Result;
 
 keyword: sexpr.TokenId,
-inner: Inner.Ptr(.@"const"),
+inner: Inner,
+
+pub const Inner = union {
+    module: IndexedArena.Idx(Wast.Module),
+    register: IndexedArena.Idx(Register),
+    action: IndexedArena.Idx(Action),
+    assert_return: IndexedArena.Idx(AssertReturn),
+    assert_trap: IndexedArena.Idx(AssertTrap), // TODO: Need assert_trap to also accept <module>
+    // assert_exhaustion: AssertExhaustion,
+    // assert_malformed: AssertMalformed, // TODO: Since this probably only uses quote/binary module, no need to have separate error list field
+    assert_invalid: IndexedArena.Idx(AssertInvalid),
+    // assert_unlinkable: AssertUnlinkable,
+};
 
 pub fn parseConstOrResult(
     parser: *sexpr.Parser,
     comptime T: type,
     tree: *const sexpr.Tree,
-    arena: *ArenaAllocator,
+    arena: *IndexedArena,
     errors: *Error.List,
 ) error{ OutOfMemory, EndOfStream }!ParseResult(T) {
-    comptime std.debug.assert(@typeInfo(T.Value).@"union".tag_type != null);
-
-    _ = arena; // Might be used for large v128 values.
+    const Value: type = T.Value;
 
     const list: sexpr.List.Id = switch (try parser.parseList()) {
         .ok => |ok| ok,
@@ -36,13 +48,17 @@ pub fn parseConstOrResult(
         .err => |err| return .{ .err = err },
     };
 
-    const parsed: struct { sexpr.TokenId, T.Value } = switch (keyword.tag(tree)) {
+    const parsed: struct { sexpr.TokenId, Value } = value: switch (keyword.tag(tree)) {
         .@"keyword_i32.const" => switch (list_parser.parseUninterpretedIntegerInList(i32, list, tree)) {
-            .ok => |ok| .{ ok.token, T.Value{ .i32 = ok.value } },
+            .ok => |ok| .{ ok.token, Value{ .i32 = ok.value } },
             .err => |err| return .{ .err = err },
         },
         .@"keyword_i64.const" => switch (list_parser.parseUninterpretedIntegerInList(i64, list, tree)) {
-            .ok => |ok| .{ ok.token, T.Value{ .i64 = ok.value } },
+            .ok => |ok| {
+                const val = try arena.create(i64);
+                val.set(arena, ok.value);
+                break :value .{ ok.token, Value{ .i64 = val } };
+            },
             .err => |err| return .{ .err = err },
         },
         .keyword_unknown => return .{
@@ -67,27 +83,24 @@ pub fn parseConstOrResultList(
     contents: *sexpr.Parser,
     comptime T: type,
     tree: *const sexpr.Tree,
-    arena: *ArenaAllocator,
+    arena: *IndexedArena,
     errors: *Error.List,
-) error{OutOfMemory}!std.MultiArrayList(T) {
-    var values = std.MultiArrayList(T).empty;
-    const count = contents.remaining.len;
-    try values.setCapacity(arena.allocator(), count);
-
-    for (0..count) |_| {
+) error{OutOfMemory}!IndexedArena.Slice(T) {
+    var values = try IndexedArena.BoundedArrayList(T).initCapacity(arena, contents.remaining.len);
+    for (0..values.capacity) |_| {
         const val_result = parseConstOrResult(contents, T, tree, arena, errors) catch |e| switch (e) {
             error.OutOfMemory => |oom| return oom,
             error.EndOfStream => unreachable,
         };
 
         switch (val_result) {
-            .ok => |val| values.appendAssumeCapacity(val),
+            .ok => |val| values.appendAssumeCapacity(arena, val),
             .err => |err| try errors.append(err),
         }
     }
 
     std.debug.assert(contents.isEmpty());
-    return values;
+    return values.items;
 }
 
 pub const Const = struct {
@@ -95,18 +108,20 @@ pub const Const = struct {
     value_token: sexpr.TokenId,
     value: Value,
 
-    pub const Value = union(enum) {
+    pub const Value = union {
+        /// `keyword.tag == .@"keyword_i32.const"`
         i32: i32,
         f32: u32,
-        i64: i64,
-        f64: u64,
-        // v128: *const [u8; 16],
+        i64: IndexedArena.Idx(i64),
+        f64: IndexedArena.Idx(u64),
+        // v128: IndexedArena.Idx([u8; 16]),
         // ref_null: enum { func, extern },
         ref_extern: u32,
     };
 
     comptime {
-        std.debug.assert(@sizeOf(Value) <= 16);
+        std.debug.assert(@alignOf(Const) == @alignOf(u32));
+        // std.debug.assert(@sizeOf(Const) == 12); // 16 for safe optimization modes.
     }
 };
 
@@ -115,24 +130,21 @@ pub const Result = struct {
     value_token: sexpr.TokenId,
     value: Value,
 
-    pub const Value = union(enum) {
+    pub const Value = union {
         i32: i32,
         f32: u32,
-        i64: i64,
-        f64: u64,
+        i64: IndexedArena.Idx(i64),
+        f64: IndexedArena.Idx(u64),
         // v128: *const [u8; 16],
+        /// `keyword.tag == .@"keyword_f32.const" and value_token.tag == .@"keyword_nan:canonical"`
         f32_nan: NanPattern,
         f64_nan: NanPattern,
         // ref_null: enum { func, extern },
         ref_extern: ?u32,
-        ref_func,
+        ref_func: void,
     };
 
     pub const NanPattern = enum { canonical, arithmetic };
-
-    comptime {
-        std.debug.assert(@sizeOf(Value) <= 16);
-    }
 };
 
 pub const Register = struct {
@@ -155,52 +167,55 @@ pub const Action = struct {
     keyword: sexpr.TokenId,
     target: Target,
 
-    pub const Target = union(enum) {
-        get,
-        invoke: struct {
-            arguments: std.MultiArrayList(Const),
-        },
+    pub const Target = union {
+        get: void,
+        invoke: struct { arguments: IndexedArena.Slice(Const) },
     };
 
     pub fn parseContents(
         contents: *sexpr.Parser,
         tree: *const sexpr.Tree,
-        arenas: *Arenas,
+        arena: *IndexedArena,
         caches: *Caches,
-        target: std.meta.Tag(Target),
-        target_token: sexpr.TokenId,
+        action_keyword: sexpr.TokenId,
         parent_list: sexpr.List.Id,
         errors: *Error.List,
-    ) error{OutOfMemory}!ParseResult(*const Action) {
-        const action = try arenas.out.allocator().create(Action);
+        scratch: *ArenaAllocator,
+    ) error{OutOfMemory}!ParseResult(IndexedArena.Idx(Action)) {
+        const action = try arena.create(Action);
 
-        const module = switch (try Ident.parse(contents, tree, arenas.parse, &caches.ids)) {
+        const module = switch (try Ident.parse(contents, tree, caches.allocator, &caches.ids)) {
             .ok => |ok| ok,
             .err => |err| return .{ .err = err },
         };
 
-        const name = switch (try Name.parse(contents, tree, arenas, &caches.names, parent_list)) {
+        _ = scratch.reset(.retain_capacity);
+        const name = switch (try Name.parse(contents, tree, caches.allocator, &caches.names, arena, parent_list, scratch)) {
             .ok => |ok| ok,
             .err => |err| return .{ .err = err },
         };
 
-        const parsed_target: Target = switch (target) {
-            .invoke => .{
+        const parsed_target: Target = switch (action_keyword.tag(tree)) {
+            .keyword_invoke => .{
                 .invoke = .{
-                    .arguments = try parseConstOrResultList(contents, Const, tree, arenas.out, errors),
+                    .arguments = try parseConstOrResultList(contents, Const, tree, arena, errors),
                 },
             },
-            .get => Target.get,
+            .keyword_get => Target{ .get = {} },
+            else => return .{ .err = Error.initUnexpectedValue(sexpr.Value.initAtom(action_keyword), .at_value) },
         };
 
         try contents.expectEmpty(errors);
 
-        action.* = Action{
-            .module = module,
-            .name = name,
-            .keyword = target_token,
-            .target = parsed_target,
-        };
+        action.set(
+            arena,
+            Action{
+                .module = module,
+                .name = name,
+                .keyword = action_keyword,
+                .target = parsed_target,
+            },
+        );
 
         return .{ .ok = action };
     }
@@ -208,11 +223,12 @@ pub const Action = struct {
     pub fn parse(
         parser: *sexpr.Parser,
         tree: *const sexpr.Tree,
-        arenas: *Arenas,
+        arenas: *IndexedArena,
         caches: *Caches,
         parent: sexpr.List.Id,
         errors: *Error.List,
-    ) error{OutOfMemory}!ParseResult(*const Action) {
+        scratch: *ArenaAllocator,
+    ) error{OutOfMemory}!ParseResult(IndexedArena.Idx(Action)) {
         const action_list: sexpr.List.Id = switch (parser.parseListInList(parent)) {
             .ok => |ok| ok,
             .err => |err| return .{ .err = err },
@@ -224,27 +240,33 @@ pub const Action = struct {
             .err => |err| return .{ .err = err },
         };
 
-        const target: std.meta.Tag(Target) = switch (action_keyword.tag(tree)) {
-            .keyword_invoke => .invoke,
-            .keyword_get => .get,
-            else => return .{ .err = Error.initUnexpectedValue(sexpr.Value.initAtom(action_keyword), .at_value) },
-        };
-
-        return parseContents(&contents, tree, arenas, caches, target, action_keyword, action_list, errors);
+        return parseContents(
+            &contents,
+            tree,
+            arenas,
+            caches,
+            action_keyword,
+            action_list,
+            errors,
+            scratch,
+        );
     }
 };
 
 pub const AssertReturn = struct {
-    action: *const Action,
-    results: std.MultiArrayList(Result),
+    action: IndexedArena.Idx(Action),
+    results: IndexedArena.Slice(Result),
 };
 
 pub const Failure = struct {
-    msg: []const u8,
+    const String = @import("String.zig");
+
+    msg: String,
 
     pub fn parseInList(
         parser: *sexpr.Parser,
         tree: *const sexpr.Tree,
+        arena: *IndexedArena,
         list: sexpr.List.Id,
         scratch: *ArenaAllocator,
     ) error{OutOfMemory}!ParseResult(Failure) {
@@ -257,18 +279,19 @@ pub const Failure = struct {
             .string => {
                 const contents = atom.contents(tree);
                 const msg = contents[1 .. contents.len - 1];
+                // Strings without escape sequences are always valid UTF-8.
                 std.debug.assert(std.unicode.utf8ValidateSlice(msg));
-                return .{ .ok = .{ .msg = msg } };
+                return .{ .ok = .{ .msg = try String.initSlice(msg) } };
             },
             .string_raw => {
                 const contents = atom.contents(tree);
                 const msg = contents[1 .. contents.len - 1];
-                const failure = Failure{
-                    .msg = (try @import("value.zig").string(msg).allocPrint(scratch.allocator())).items,
-                };
 
-                return if (std.unicode.utf8ValidateSlice(failure.msg))
-                    .{ .ok = failure }
+                _ = scratch.reset(.retain_capacity);
+                const printed_msg = try @import("value.zig").string(msg).allocPrint(scratch.allocator());
+
+                return if (std.unicode.utf8ValidateSlice(printed_msg.items))
+                    .{ .ok = Failure{ .msg = String.initAllocated(try arena.dupe(u8, printed_msg.items)) } }
                 else
                     .{ .err = Error.initInvalidUtf8(atom) };
             },
@@ -280,12 +303,12 @@ pub const Failure = struct {
 };
 
 pub const AssertTrap = struct {
-    action: *const Action,
+    action: IndexedArena.Idx(Action),
     failure: Failure,
 };
 
 pub const AssertExhaustion = struct {
-    action: *const Action,
+    action: IndexedArena.Idx(Action),
     failure: Failure,
 };
 
@@ -294,19 +317,3 @@ pub const AssertInvalid = struct {
     module: Wast.Module,
     failure: Failure,
 };
-
-pub const Inner = InlineTaggedUnion(union {
-    module: Wast.Module,
-    register: Register,
-    action: Action,
-    assert_return: AssertReturn,
-    assert_trap: AssertTrap, // TODO: Need assert_trap to also accept <module>
-    // assert_exhaustion: AssertExhaustion,
-    // assert_malformed: AssertMalformed, // TODO: Since this probably only uses quote/binary module, no need to have separate error list
-    assert_invalid: AssertInvalid,
-    // assert_unlinkable: AssertUnlinkable,
-});
-
-comptime {
-    std.debug.assert(@alignOf(Register) == @alignOf(u32));
-}
