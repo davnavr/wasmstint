@@ -133,7 +133,10 @@ pub const Const = struct {
 
     comptime {
         std.debug.assert(@alignOf(Const) == @alignOf(u32));
-        // std.debug.assert(@sizeOf(Const) == 12); // 16 for safe optimization modes.
+        std.debug.assert(@sizeOf(Const) == switch (@import("builtin").mode) {
+            .Debug, .ReleaseSafe => 16,
+            .ReleaseFast, .ReleaseSmall => 12,
+        });
     }
 };
 
