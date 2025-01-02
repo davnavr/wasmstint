@@ -1,3 +1,4 @@
+const std = @import("std");
 const sexpr = @import("../sexpr.zig");
 const Value = sexpr.Value;
 const Error = sexpr.Error;
@@ -5,6 +6,8 @@ const Token = sexpr.Token;
 const TokenId = sexpr.TokenId;
 const List = sexpr.List;
 const Tree = sexpr.Tree;
+const parse_value = @import("../value.zig");
+const floating_point = @import("../../float.zig");
 
 remaining: []const Value,
 
@@ -89,7 +92,7 @@ pub fn parseUninterpretedInteger(
         .integer => .{
             .ok = .{
                 .token = atom,
-                .value = @import("../value.zig").uninterpretedInteger(T, atom.contents(tree)) catch |e| switch (e) {
+                .value = parse_value.uninterpretedInteger(T, atom.contents(tree)) catch |e| switch (e) {
                     error.Overflow => return .{ .err = Error.initIntegerLiteralOverflow(atom, @typeInfo(T).int.bits) },
                 },
             },
@@ -106,6 +109,66 @@ pub fn parseUninterpretedIntegerInList(
 ) Result(ParsedToken(T)) {
     return parser.parseUninterpretedInteger(T, tree) catch |e| switch (e) {
         error.EndOfStream => .{ .err = Error.initExpectedToken(Value.initList(list), .integer, .at_list_end) },
+    };
+}
+
+pub fn parseFloat(
+    parser: *Parser,
+    comptime F: type,
+    tree: *const Tree,
+) error{EndOfStream}!Result(ParsedToken(floating_point.Bits(F))) {
+    const atom: TokenId = switch (try parser.parseAtom(.integer)) {
+        .ok => |ok| ok,
+        .err => |err| return .{ .err = err },
+    };
+
+    const contents = atom.contents(tree);
+    switch (atom.tag(tree)) {
+        .integer,
+        .float,
+        .keyword_inf,
+        .keyword_nan,
+        .@"keyword_nan:canonical",
+        .@"keyword_nan:arithmetic",
+        => {},
+        else => |tag| {
+            const err = Result(ParsedToken(floating_point.Bits(F))){
+                .err = Error.initExpectedToken(
+                    Value.initAtom(atom),
+                    .integer,
+                    .at_value,
+                ),
+            };
+
+            if (tag == .keyword_unknown and std.mem.startsWith(u8, contents, "nan:0x")) {
+                const digits = contents[6..];
+
+                if (digits.len == 0 or digits[0] == '_' or digits[digits.len - 1] == '_')
+                    return err;
+
+                if (std.mem.indexOfNone(u8, digits, "0123456789_abcdefABCDEF")) |_|
+                    return err;
+            } else {
+                return err;
+            }
+        },
+    }
+
+    const f = parse_value.float(F, contents) catch |e| switch (e) {
+        error.InvalidNanPayload => return .{ .err = Error.initInvalidNanPayload(atom) },
+    };
+
+    return .{ .ok = .{ .token = atom, .value = @bitCast(f) } };
+}
+
+pub fn parseFloatInList(
+    parser: *Parser,
+    comptime F: type,
+    list: List.Id,
+    tree: *const Tree,
+) Result(ParsedToken(floating_point.Bits(F))) {
+    return parser.parseFloat(F, tree) catch |e| switch (e) {
+        error.EndOfStream => .{ .err = Error.initExpectedToken(Value.initList(list), .float, .at_list_end) },
     };
 }
 

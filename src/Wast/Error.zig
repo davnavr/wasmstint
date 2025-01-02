@@ -39,6 +39,7 @@ pub const Tag = enum {
     expected_token,
     invalid_utf8,
     integer_literal_overflow,
+    invalid_nan_payload,
 };
 
 const Error = @This();
@@ -85,6 +86,9 @@ pub fn print(err: *const Error, tree: *const sexpr.Tree, writer: anytype) !void 
         .integer_literal_overflow => {
             _ = try writer.print("not a valid literal for {}-bit integers", .{err.extra.integer_literal_overflow.width});
         },
+        .invalid_nan_payload => {
+            _ = try writer.write("invalid NaN literal payload");
+        },
     }
 }
 
@@ -127,6 +131,14 @@ pub fn initIntegerLiteralOverflow(integer: sexpr.TokenId, width: u16) Error {
         .value = Value.initAtom(integer),
         .tag = .integer_literal_overflow,
         .extra = .{ .integer_literal_overflow = .{ .width = width } },
+    };
+}
+
+pub fn initInvalidNanPayload(float: sexpr.TokenId) Error {
+    return .{
+        .value = Value.initAtom(float),
+        .tag = .invalid_nan_payload,
+        .extra = undefined,
     };
 }
 

@@ -203,14 +203,14 @@ pub const Text = struct {
         keyword: sexpr.Value,
         args: Args,
 
-        // comptime { std.debug.assert(@sizeOf(Instr) == 8); }
-
         pub const Args = union {
             none: void,
             end: Ident,
-            @"local.get": Ident,
+            @"local.get": Ident, // Rename to ident
             @"i32.const": i32,
-            @"i64.const": i64,
+            @"i64.const": i64, // Make this an idx?
+            f32: u32,
+            f64: u64,
         };
 
         pub fn parseArgs(
@@ -393,6 +393,28 @@ pub const Text = struct {
                     };
 
                     break :args Args{ .@"i64.const" = literal };
+                },
+                .@"keyword_f32.const" => {
+                    const literal: u32 = literal: switch (contents.parseFloatInList(f32, parent, tree)) {
+                        .ok => |ok| ok.value,
+                        .err => |err| {
+                            try errors.append(err);
+                            break :literal 0;
+                        },
+                    };
+
+                    break :args Args{ .f32 = literal };
+                },
+                .@"keyword_f64.const" => {
+                    const literal: u64 = literal: switch (contents.parseFloatInList(f64, parent, tree)) {
+                        .ok => |ok| ok.value,
+                        .err => |err| {
+                            try errors.append(err);
+                            break :literal 0;
+                        },
+                    };
+
+                    break :args Args{ .f64 = literal };
                 },
                 // Unknown instruction.
                 else => return .{

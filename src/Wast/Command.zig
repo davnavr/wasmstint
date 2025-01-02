@@ -53,11 +53,23 @@ pub fn parseConstOrResult(
             .ok => |ok| .{ ok.token, Value{ .i32 = ok.value } },
             .err => |err| return .{ .err = err },
         },
+        .@"keyword_f32.const" => switch (list_parser.parseFloatInList(f32, list, tree)) {
+            .ok => |ok| .{ ok.token, Value{ .f32 = ok.value } },
+            .err => |err| return .{ .err = err },
+        },
         .@"keyword_i64.const" => switch (list_parser.parseUninterpretedIntegerInList(i64, list, tree)) {
             .ok => |ok| {
                 const val = try arena.create(i64);
                 val.set(arena, ok.value);
                 break :value .{ ok.token, Value{ .i64 = val } };
+            },
+            .err => |err| return .{ .err = err },
+        },
+        .@"keyword_f64.const" => switch (list_parser.parseFloatInList(f64, list, tree)) {
+            .ok => |ok| {
+                const val = try arena.create(u64);
+                val.set(arena, ok.value);
+                break :value .{ ok.token, Value{ .f64 = val } };
             },
             .err => |err| return .{ .err = err },
         },
