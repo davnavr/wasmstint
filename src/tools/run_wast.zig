@@ -111,6 +111,12 @@ pub fn main() !u8 {
         };
 
         _ = parse_arena.reset(.retain_capacity);
+        {
+            // Try to allocate some space upfront.
+            _ = parse_arena.allocator().alloc(u8, script_buf.len) catch {};
+            _ = parse_arena.reset(.retain_capacity);
+        }
+
         var errors = wasmstint.Wast.Error.List.init(parse_arena.allocator());
 
         _ = scratch.reset(.retain_capacity);
@@ -156,6 +162,7 @@ pub fn main() !u8 {
                 try w.writeByte('\n');
             }
 
+            try w.print("{} errors\n", .{errors.list.count()});
             try buf_stderr.flush();
         }
 
