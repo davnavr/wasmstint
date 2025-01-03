@@ -78,6 +78,10 @@ pub fn Slice(comptime T: type) type {
 
         pub const empty = Self{ .idx = @enumFromInt(0), .len = 0 };
 
+        pub inline fn isEmpty(self: Self) bool {
+            return self.len == 0;
+        }
+
         fn byteSize(self: Self) usize {
             // When slice is constructed, this is already checked to ensure no overflow occurs.
             return @sizeOf(T) * @as(usize, self.len);

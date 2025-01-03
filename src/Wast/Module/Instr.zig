@@ -1,3 +1,4 @@
+const std = @import("std");
 const IndexedArena = @import("../../IndexedArena.zig");
 
 const sexpr = @import("../sexpr.zig");
@@ -5,6 +6,8 @@ const Error = sexpr.Error;
 
 const Ident = @import("../ident.zig").Ident;
 const Name = @import("../Name.zig");
+const TypeUse = @import("TypeUse.zig");
+
 const Caches = @import("../Caches.zig");
 
 const Instr = @This();
@@ -18,21 +21,51 @@ args: Args,
 
 pub const Args = union {
     none: void,
-    end: Ident align(4),
-    @"local.get": Ident align(4), // Rename to ident
-    @"i32.const": i32,
-    @"i64.const": i64, // Make this an idx?
+    block: IndexedArena.Idx(BlockType),
+    id_opt: IndexedArena.Idx(Ident.Opt.Unaligned),
+    id: IndexedArena.Idx(Ident.Unaligned),
+    i32: i32,
+    i64: IndexedArena.Idx(i64),
     f32: u32,
-    f64: u64,
+    f64: IndexedArena.Idx(u64),
 };
 
-// comptime {
-//     std.debug.assert(@alignOf(Instr) == @alignOf(u32));
-//     std.debug.assert(@sizeOf(Instr) == switch (@import("builtin").mode) {
-//         .Debug, .ReleaseSafe => 16,
-//         .ReleaseFast, .ReleaseSmall => 16,
-//     });
-// }
+comptime {
+    std.debug.assert(@alignOf(Instr) == @alignOf(u32));
+    std.debug.assert(@sizeOf(Instr) == switch (@import("builtin").mode) {
+        .Debug, .ReleaseSafe => 12,
+        .ReleaseFast, .ReleaseSmall => 8,
+    });
+}
+
+pub const BlockType = struct {
+    label: Ident.Opt align(4),
+    type: TypeUse,
+
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        tree: *const sexpr.Tree,
+        arena: *IndexedArena,
+        caches: *Caches,
+        errors: *Error.List,
+        scratch: *std.heap.ArenaAllocator,
+    ) error{OutOfMemory}!sexpr.Parser.Result(IndexedArena.Idx(BlockType)) {
+        const block_type = try arena.create(BlockType);
+
+        const label = switch (try Ident.Opt.parse(contents, tree, &caches.allocator, &caches.ids)) {
+            .ok => |ok| ok,
+            .err => |err| return .{ .err = err },
+        };
+
+        const type_use = switch (try TypeUse.parseContents(contents, tree, arena, caches, errors, scratch)) {
+            .ok => |ok| ok,
+            .err => |err| return .{ .err = err },
+        };
+
+        block_type.set(arena, .{ .label = label, .type = type_use });
+        return .{ .ok = block_type };
+    }
+};
 
 pub fn parseArgs(
     keyword: sexpr.TokenId,
@@ -43,7 +76,6 @@ pub fn parseArgs(
     caches: *Caches,
     errors: *Error.List,
 ) error{OutOfMemory}!sexpr.Parser.Result(Instr) {
-    _ = arena;
     const args: Args = args: switch (keyword.tag(tree)) {
         .keyword_nop,
         .keyword_unreachable,
@@ -185,13 +217,44 @@ pub fn parseArgs(
         .@"keyword_i64.trunc_sat_f64_s",
         .@"keyword_i64.trunc_sat_f64_u",
         => Args{ .none = {} },
-        .@"keyword_local.get" => {
-            const local = switch (try Ident.parse(contents, tree, parent, caches.allocator, &caches.ids)) {
+
+        .keyword_br,
+        .keyword_br_if,
+        .keyword_call,
+        .@"keyword_local.get",
+        .@"keyword_local.set",
+        .@"keyword_local.tee",
+        .@"keyword_global.get",
+        .@"keyword_global.set",
+        .@"keyword_elem.drop",
+        .@"keyword_memory.size",
+        .@"keyword_memory.grow",
+        .@"keyword_data.drop",
+        => {
+            const id = try arena.create(Ident.Unaligned);
+            const ident = switch (try Ident.parse(contents, tree, parent, caches.allocator, &caches.ids)) {
                 .ok => |ok| ok,
                 .err => |err| return .{ .err = err },
             };
 
-            break :args Args{ .@"local.get" = local };
+            id.set(arena, .{ .ident = ident });
+            break :args Args{ .id = id };
+        },
+        .keyword_end,
+        .@"keyword_table.get",
+        .@"keyword_table.set",
+        .@"keyword_table.size",
+        .@"keyword_table.grow",
+        .@"keyword_table.fill",
+        => {
+            const id = try arena.create(Ident.Opt.Unaligned);
+            const ident = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
+                .ok => |ok| ok,
+                .err => |err| return .{ .err = err },
+            };
+
+            id.set(arena, .{ .ident = ident });
+            break :args Args{ .id_opt = id };
         },
         .@"keyword_i32.const" => {
             const literal: i32 = literal: switch (contents.parseUninterpretedIntegerInList(i32, parent, tree)) {
@@ -202,18 +265,22 @@ pub fn parseArgs(
                 },
             };
 
-            break :args Args{ .@"i32.const" = literal };
+            break :args Args{ .i32 = literal };
         },
         .@"keyword_i64.const" => {
-            const literal: i64 = literal: switch (contents.parseUninterpretedIntegerInList(i64, parent, tree)) {
-                .ok => |ok| ok.value,
-                .err => |err| {
-                    try errors.append(err);
-                    break :literal 0;
+            const literal = try arena.create(i64);
+            literal.set(
+                arena,
+                switch (contents.parseUninterpretedIntegerInList(i64, parent, tree)) {
+                    .ok => |ok| ok.value,
+                    .err => |err| literal: {
+                        try errors.append(err);
+                        break :literal 0;
+                    },
                 },
-            };
+            );
 
-            break :args Args{ .@"i64.const" = literal };
+            break :args Args{ .i64 = literal };
         },
         .@"keyword_f32.const" => {
             const literal: u32 = literal: switch (contents.parseFloatInList(f32, parent, tree)) {
@@ -227,13 +294,17 @@ pub fn parseArgs(
             break :args Args{ .f32 = literal };
         },
         .@"keyword_f64.const" => {
-            const literal: u64 = literal: switch (contents.parseFloatInList(f64, parent, tree)) {
-                .ok => |ok| ok.value,
-                .err => |err| {
-                    try errors.append(err);
-                    break :literal 0;
+            const literal = try arena.create(u64);
+            literal.set(
+                arena,
+                switch (contents.parseFloatInList(f64, parent, tree)) {
+                    .ok => |ok| ok.value,
+                    .err => |err| literal: {
+                        try errors.append(err);
+                        break :literal 0;
+                    },
                 },
-            };
+            );
 
             break :args Args{ .f64 = literal };
         },

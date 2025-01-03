@@ -99,6 +99,11 @@ pub const Ident = packed struct(u63) {
 
         pub const Unaligned = struct { ident: Opt align(4) };
 
+        comptime {
+            std.debug.assert(@sizeOf(Opt) == 8);
+            std.debug.assert(@sizeOf(Opt.Unaligned) == 8);
+        }
+
         pub const none = Opt{ .some = false, .inner_ident = undefined };
 
         pub fn init(id: ?Ident) Opt {

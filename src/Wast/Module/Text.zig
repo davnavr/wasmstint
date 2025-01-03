@@ -18,6 +18,7 @@ const Caches = @import("../Caches.zig");
 pub const Instr = @import("Instr.zig");
 pub const Expr = @import("Expr.zig");
 pub const Func = @import("Func.zig");
+pub const TypeUse = @import("TypeUse.zig");
 
 fields: IndexedArena.Slice(Field),
 
@@ -162,12 +163,6 @@ pub const Result = struct {
 };
 
 pub const Local = ParamOrLocal;
-
-pub const BlockType = union {
-    // empty,
-    // valtype: ValType, // TODO: Optimize, ValType has unused bit which can be used for empty case
-    // inline_type: struct { parameters: CompactMultiSlice(Param), results: CompactMultiSlice(Text.Result), },
-};
 
 pub const ImportName = struct {
     /// The `import` keyword.
