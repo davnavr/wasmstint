@@ -4,13 +4,13 @@ const IndexedArena = @import("../../IndexedArena.zig");
 const sexpr = @import("../sexpr.zig");
 const Error = sexpr.Error;
 
-const Ident = @import("../Ident.zig");
+const Ident = @import("../ident.zig").Ident;
 const Name = @import("../Name.zig");
 const Caches = @import("../Caches.zig");
 
 const Text = @import("Text.zig");
 
-id: Ident,
+id: Ident.Opt align(4),
 inline_exports: IndexedArena.Slice(Text.Export),
 inline_import: IndexedArena.Idx(Text.ImportName).Opt,
 parameters: IndexedArena.Slice(Text.Param),
@@ -34,7 +34,7 @@ pub fn parseContents(
 
     var scratch = std.heap.ArenaAllocator.init(alloca.allocator());
 
-    const id = switch (try Ident.parse(contents, tree, caches.allocator, &caches.ids)) {
+    const id = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
         .ok => |ok| ok,
         .err => |err| return .{ .err = err },
     };

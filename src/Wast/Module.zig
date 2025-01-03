@@ -6,14 +6,14 @@ const sexpr = @import("sexpr.zig");
 const Error = sexpr.Error;
 const ParseResult = sexpr.Parser.Result;
 
-const Ident = @import("Ident.zig");
+const Ident = @import("ident.zig").Ident;
 const Name = @import("Name.zig");
 
 const Caches = @import("Caches.zig");
 
 pub const Text = @import("Module/Text.zig");
 
-name: Ident,
+name: Ident.Opt align(4),
 format_keyword: sexpr.TokenId.Opt,
 format: Format,
 
@@ -64,7 +64,7 @@ pub fn parseContents(
     errors: *Error.List,
     scratch: *ArenaAllocator,
 ) error{OutOfMemory}!ParseResult(Module) {
-    const name: Ident = switch (try Ident.parse(contents, tree, caches.allocator, &caches.ids)) {
+    const name = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
         .ok => |ok| ok,
         .err => |err| return .{ .err = err },
     };

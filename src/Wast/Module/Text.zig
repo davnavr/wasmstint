@@ -10,7 +10,7 @@ const sexpr = @import("../sexpr.zig");
 const Error = sexpr.Error;
 const ParseResult = sexpr.Parser.Result;
 
-const Ident = @import("../Ident.zig");
+const Ident = @import("../ident.zig").Ident;
 const Name = @import("../Name.zig");
 
 const Caches = @import("../Caches.zig");
@@ -91,7 +91,7 @@ pub const ParamOrLocal = struct {
     /// The `param` or `local` keyword.
     keyword: sexpr.TokenId,
     /// Must be `.none` if `types.len > 1`.
-    id: Ident,
+    id: Ident.Opt align(4),
     types: IndexedArena.Slice(ValType),
 
     pub fn parseContents(
@@ -103,7 +103,7 @@ pub const ParamOrLocal = struct {
         parent: sexpr.List.Id,
         errors: *Error.List,
     ) error{OutOfMemory}!ParamOrLocal {
-        const ident = switch (try Ident.parse(contents, tree, caches.allocator, &caches.ids)) {
+        const ident = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
             .ok => |ok| ok,
             .err => |err| {
                 try errors.append(err);

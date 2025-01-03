@@ -1,6 +1,6 @@
 const std = @import("std");
 const Name = @import("Name.zig");
-const Ident = @import("Ident.zig");
+const Ident = @import("ident.zig").Ident;
 
 ids: Ident.Cache,
 names: Name.Cache,

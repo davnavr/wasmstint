@@ -6,7 +6,7 @@ const sexpr = @import("sexpr.zig");
 const Error = sexpr.Error;
 
 const Wast = @import("../Wast.zig");
-const Ident = @import("Ident.zig");
+const Ident = @import("ident.zig").Ident;
 const Name = @import("Name.zig");
 
 const Caches = @import("Caches.zig");
@@ -168,14 +168,14 @@ pub const Register = struct {
     /// Identifies which module to register for imports.
     ///
     /// If `.none`, then the latest initialized module is used.
-    id: Ident,
+    id: Ident.Opt align(4),
 };
 
 pub const Action = struct {
     /// Identifies which module contains the function or global export to invoke or get.
     ///
     /// If `.none`, then the latest initialized module is used.
-    module: Ident,
+    module: Ident.Opt align(4),
     /// The name of the function or global export to invoke or get.
     name: Name,
     /// The `invoke` or `get` keyword.
@@ -199,7 +199,7 @@ pub const Action = struct {
     ) error{OutOfMemory}!ParseResult(IndexedArena.Idx(Action)) {
         const action = try arena.create(Action);
 
-        const module = switch (try Ident.parse(contents, tree, caches.allocator, &caches.ids)) {
+        const module = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
             .ok => |ok| ok,
             .err => |err| return .{ .err = err },
         };

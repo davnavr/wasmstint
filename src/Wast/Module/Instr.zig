@@ -3,7 +3,7 @@ const IndexedArena = @import("../../IndexedArena.zig");
 const sexpr = @import("../sexpr.zig");
 const Error = sexpr.Error;
 
-const Ident = @import("../Ident.zig");
+const Ident = @import("../ident.zig").Ident;
 const Name = @import("../Name.zig");
 const Caches = @import("../Caches.zig");
 
@@ -18,8 +18,8 @@ args: Args,
 
 pub const Args = union {
     none: void,
-    end: Ident,
-    @"local.get": Ident, // Rename to ident
+    end: Ident align(4),
+    @"local.get": Ident align(4), // Rename to ident
     @"i32.const": i32,
     @"i64.const": i64, // Make this an idx?
     f32: u32,
@@ -186,7 +186,7 @@ pub fn parseArgs(
         .@"keyword_i64.trunc_sat_f64_u",
         => Args{ .none = {} },
         .@"keyword_local.get" => {
-            const local = switch (try Ident.parseRequired(contents, tree, parent, caches.allocator, &caches.ids)) {
+            const local = switch (try Ident.parse(contents, tree, parent, caches.allocator, &caches.ids)) {
                 .ok => |ok| ok,
                 .err => |err| return .{ .err = err },
             };

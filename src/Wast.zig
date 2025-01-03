@@ -14,7 +14,7 @@ pub const sexpr = @import("Wast/sexpr.zig");
 pub const Error = @import("Wast/Error.zig");
 pub const LineCol = @import("Wast/LineCol.zig");
 
-pub const Ident = @import("Wast/Ident.zig");
+pub const Ident = @import("Wast/ident.zig").Ident;
 pub const Name = @import("Wast/Name.zig");
 pub const Module = @import("Wast/Module.zig");
 pub const Command = @import("Wast/Command.zig");
@@ -93,7 +93,7 @@ pub fn parse(
                     },
                 };
 
-                const id = switch (try Ident.parse(&cmd_parser, tree, caches.allocator, &caches.ids)) {
+                const id = switch (try Ident.Opt.parse(&cmd_parser, tree, caches.allocator, &caches.ids)) {
                     .ok => |ok| ok,
                     .err => |err| {
                         try errors.append(err);
