@@ -52,7 +52,7 @@ pub const BlockType = struct {
     ) error{OutOfMemory}!sexpr.Parser.Result(IndexedArena.Idx(BlockType)) {
         const block_type = try arena.create(BlockType);
 
-        const label = switch (try Ident.Opt.parse(contents, tree, &caches.allocator, &caches.ids)) {
+        const label = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
             .ok => |ok| ok,
             .err => |err| return .{ .err = err },
         };
@@ -75,10 +75,12 @@ pub fn parseArgs(
     arena: *IndexedArena,
     caches: *Caches,
     errors: *Error.List,
+    scratch: *std.heap.ArenaAllocator,
 ) error{OutOfMemory}!sexpr.Parser.Result(Instr) {
     const args: Args = args: switch (keyword.tag(tree)) {
         .keyword_nop,
         .keyword_unreachable,
+        .keyword_return,
         .keyword_drop,
         .@"keyword_i32.eqz",
         .@"keyword_i32.eq",
@@ -217,6 +219,16 @@ pub fn parseArgs(
         .@"keyword_i64.trunc_sat_f64_s",
         .@"keyword_i64.trunc_sat_f64_u",
         => Args{ .none = {} },
+
+        .keyword_block, .keyword_loop, .keyword_if => {
+            _ = scratch.reset(.retain_capacity);
+            const block_type = switch (try BlockType.parseContents(contents, tree, arena, caches, errors, scratch)) {
+                .ok => |ok| ok,
+                .err => |err| return .{ .err = err },
+            };
+
+            break :args Args{ .block = block_type };
+        },
 
         .keyword_br,
         .keyword_br_if,

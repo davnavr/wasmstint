@@ -25,6 +25,7 @@ fn parseInstrList(
     instr_list_arena: *ArenaAllocator,
     instr_list_cache: *InstrListCache,
     errors: *Error.List,
+    scratch: *ArenaAllocator,
 ) error{OutOfMemory}!InstrList {
     var output: InstrList = instr_list_cache.pop() orelse .{};
     std.debug.assert(output.len == 0);
@@ -57,6 +58,7 @@ fn parseInstrList(
                 arena,
                 caches,
                 errors,
+                scratch,
             );
 
             const instr = switch (instr_result) {
@@ -115,6 +117,7 @@ fn parseInstrList(
                 arena,
                 caches,
                 errors,
+                scratch,
             );
 
             const parent_instr = switch (instr_result) {
@@ -130,6 +133,7 @@ fn parseInstrList(
             // TODO: Check for `(then)` and `(else)` branches.
 
             // Recursive call!
+            _ = scratch.reset(.retain_capacity);
             var folded_instructions: InstrList = try parseInstrList(
                 &list_contents,
                 tree,
@@ -139,6 +143,7 @@ fn parseInstrList(
                 instr_list_arena,
                 instr_list_cache,
                 errors,
+                scratch,
             );
 
             defer {
@@ -188,6 +193,7 @@ pub fn parseContents(
 ) error{OutOfMemory}!Expr {
     _ = scratch.reset(.retain_capacity);
     var instr_list_cache: InstrListCache = .{};
+    var actual_scratch = ArenaAllocator.init(scratch.allocator());
     var parsed_instructions = try parseInstrList(
         contents,
         tree,
@@ -197,6 +203,7 @@ pub fn parseContents(
         scratch,
         &instr_list_cache,
         errors,
+        &actual_scratch,
     );
 
     const instructions = try arena.dupeSegmentedList(Instr, 2, &parsed_instructions);

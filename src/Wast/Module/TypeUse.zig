@@ -75,11 +75,11 @@ pub fn parseContents(
                 std.debug.assert(type_use.parameters.isEmpty());
 
                 const id_result = try Ident.parse(
-                    list_contents,
+                    &list_contents,
                     tree,
                     list,
-                    &caches.allocator,
-                    &caches.names,
+                    caches.allocator,
+                    &caches.ids,
                 );
 
                 const id = switch (id_result) {
@@ -120,7 +120,7 @@ pub fn parseContents(
                     // Reuse space in the arena since all parameters have been parsed
                     type_use.parameters = try arena.dupeSegmentedList(Text.Param, 4, &param_buf);
                     param_buf.clearRetainingCapacity();
-                    temporary.reset(.retain_capacity);
+                    _ = temporary.reset(.retain_capacity);
                 }
 
                 try result_buf.append(
