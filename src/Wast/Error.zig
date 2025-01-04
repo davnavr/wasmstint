@@ -33,13 +33,14 @@ pub const ExpectedLocation = enum {
 
 pub const Tag = enum {
     unexpected_value,
-    // missing_closing_quotation_mark,
-    // missing_block_comment_end,
-    // missing_closing_parenthesis,
     expected_token,
     invalid_utf8,
     integer_literal_overflow,
     invalid_nan_payload,
+    // missing_closing_quotation_mark,
+    // missing_block_comment_end,
+    // missing_closing_parenthesis,
+    missing_folded_then,
 };
 
 const Error = @This();
@@ -88,6 +89,9 @@ pub fn print(err: *const Error, tree: *const sexpr.Tree, writer: anytype) !void 
         },
         .invalid_nan_payload => {
             _ = try writer.write("invalid NaN literal payload");
+        },
+        .missing_folded_then => {
+            _ = try writer.write("missing then branch in folded if instruction");
         },
     }
 }
@@ -138,6 +142,14 @@ pub fn initInvalidNanPayload(float: sexpr.TokenId) Error {
     return .{
         .value = Value.initAtom(float),
         .tag = .invalid_nan_payload,
+        .extra = undefined,
+    };
+}
+
+pub fn initMissingFoldedThen(if_instr: sexpr.List.Id) Error {
+    return .{
+        .value = Value.initList(if_instr),
+        .tag = .missing_folded_then,
         .extra = undefined,
     };
 }

@@ -25,8 +25,9 @@ fn parseInstrList(
     instr_list_arena: *ArenaAllocator,
     instr_list_cache: *InstrListCache,
     errors: *Error.List,
-    scratch: *ArenaAllocator,
+    alloca: *ArenaAllocator,
 ) error{OutOfMemory}!InstrList {
+    // Allocated in `instr_list_arena`.
     var output: InstrList = instr_list_cache.pop() orelse .{};
     std.debug.assert(output.len == 0);
 
@@ -36,18 +37,28 @@ fn parseInstrList(
         (contents.remaining.len +| 7) / 8,
     ) catch return error.OutOfMemory;
 
-    // Avoids an integer overflow panic.
+    // This check avoids an integer overflow panic.
     if (output_capacity > InstrList.prealloc_count) {
-        try output.growCapacity(
-            instr_list_arena.allocator(),
-            output_capacity,
-        );
+        try output.growCapacity(instr_list_arena.allocator(), output_capacity);
     }
 
-    var block_nesting_level: u32 = 0;
+    _ = alloca.reset(.retain_capacity);
+    var scratch = ArenaAllocator.init(alloca.allocator());
+
+    const Block = enum {
+        block_or_loop,
+        @"if",
+        @"else",
+        //catch,
+    };
+
+    // Allocated in `alloca`.
+    var block_stack = std.SegmentedList(Block, 8){};
+
     var previous_instr: ?sexpr.Value = null;
-    while (@as(?sexpr.Value, contents.parseValue() catch null)) |instr_value| {
+    parse_body: while (@as(?sexpr.Value, contents.parseValue() catch null)) |instr_value| {
         previous_instr = instr_value;
+        _ = scratch.reset(.retain_capacity);
         if (instr_value.getAtom()) |keyword| {
             // Parse a plain instruction.
             const instr_result = try Instr.parseArgs(
@@ -58,7 +69,7 @@ fn parseInstrList(
                 arena,
                 caches,
                 errors,
-                scratch,
+                &scratch,
             );
 
             const instr = switch (instr_result) {
@@ -67,29 +78,24 @@ fn parseInstrList(
                     // If a single instruction fails to parse, then skip parsing the rest of them.
                     try errors.append(err);
                     _ = contents.empty();
-                    break;
+                    break :parse_body;
                 },
             };
 
             switch (keyword.tag(tree)) {
-                .keyword_block, .keyword_loop, .keyword_if => {
-                    block_nesting_level = std.math.add(u32, block_nesting_level, 1) catch
-                        return error.OutOfMemory;
+                .keyword_block, .keyword_loop => try block_stack.append(alloca.allocator(), .block_or_loop),
+                .keyword_if => try block_stack.append(alloca.allocator(), .@"if"),
+                .keyword_else => if (block_stack.pop() == .@"if") {
+                    block_stack.append(undefined, .@"else") catch unreachable;
+                } else {
+                    try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(keyword), .at_value));
+                    _ = contents.empty();
+                    break :parse_body;
                 },
-                // TODO: Darn, have to check for more than one else, have a real stack instead of a counter
-                .keyword_else => unreachable,
-                .keyword_end => {
-                    block_nesting_level = std.math.sub(u32, block_nesting_level, 1) catch {
-                        try errors.append(
-                            Error.initUnexpectedValue(
-                                sexpr.Value.initAtom(keyword),
-                                .at_value,
-                            ),
-                        );
-
-                        _ = contents.empty();
-                        break;
-                    };
+                .keyword_end => if (block_stack.pop() == null) {
+                    try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(keyword), .at_value));
+                    _ = contents.empty();
+                    break :parse_body;
                 },
                 else => {},
             }
@@ -105,7 +111,7 @@ fn parseInstrList(
                 .err => |err| {
                     try errors.append(err);
                     _ = contents.empty();
-                    break;
+                    break :parse_body;
                 },
             };
 
@@ -117,7 +123,7 @@ fn parseInstrList(
                 arena,
                 caches,
                 errors,
-                scratch,
+                &scratch,
             );
 
             const parent_instr = switch (instr_result) {
@@ -126,11 +132,91 @@ fn parseInstrList(
                     // If a single instruction fails to parse, then skip parsing the rest of them.
                     try errors.append(err);
                     _ = contents.empty();
-                    break;
+                    break :parse_body;
                 },
             };
 
-            // TODO: Check for `(then)` and `(else)` branches.
+            const parent_tag = keyword.tag(tree);
+
+            const BlockBranch = struct {
+                contents: sexpr.Parser,
+                /// If `!contents.isEmpty()`, then this *must* be set.
+                keyword: sexpr.TokenId.Opt,
+                /// Must *not* be accessed if `keyword == .none`.
+                list: sexpr.List.Id,
+
+                const empty = @This(){
+                    .contents = sexpr.Parser.init(&[0]sexpr.Value{}),
+                    .keyword = .none,
+                    .list = undefined,
+                };
+            };
+
+            var then_branch = BlockBranch.empty;
+            var else_branch = BlockBranch.empty;
+            if (parent_tag == .keyword_if) missing_then: {
+                var then_index = list_contents.remaining.len;
+                for (list_contents.remaining, 0..) |value, i| {
+                    const then_list = value.getList() orelse continue;
+                    var then_contents = sexpr.Parser.init(then_list.contents(tree).values(tree));
+                    const then_keyword = (then_contents.parseValue() catch continue).getAtom() orelse continue;
+
+                    if (then_keyword.tag(tree) != .keyword_then) continue;
+
+                    then_index = i;
+                    then_branch = .{
+                        .keyword = sexpr.TokenId.Opt.init(then_keyword),
+                        .contents = then_contents,
+                        .list = then_list,
+                    };
+
+                    break;
+                }
+
+                if (then_index == list_contents.remaining.len) break :missing_then;
+
+                var remaining_branches = sexpr.Parser.init(list_contents.remaining[then_index + 1 ..]);
+                list_contents.remaining = list_contents.remaining[0..then_index];
+
+                no_else: {
+                    const else_list: sexpr.List.Id = switch (remaining_branches.parseList() catch break :no_else) {
+                        .ok => |ok| ok,
+                        .err => |err| {
+                            try errors.append(err);
+                            break :no_else;
+                        },
+                    };
+
+                    var else_contents = sexpr.Parser.init(else_list.contents(tree).values(tree));
+                    const else_keyword = switch (else_contents.parseAtomInList(.keyword_else, else_list)) {
+                        .ok => |ok| ok,
+                        .err => |err| {
+                            try errors.append(err);
+                            break :no_else;
+                        },
+                    };
+
+                    if (else_keyword.tag(tree) != .keyword_else) {
+                        try errors.append(
+                            Error.initExpectedToken(
+                                sexpr.Value.initAtom(else_keyword),
+                                .keyword_else,
+                                .at_value,
+                            ),
+                        );
+
+                        break :no_else;
+                    }
+
+                    else_branch = .{
+                        .keyword = sexpr.TokenId.Opt.init(else_keyword),
+                        .contents = else_contents,
+                        .list = else_list,
+                    };
+                }
+
+                try remaining_branches.expectEmpty(errors);
+            }
 
             // Recursive call!
             _ = scratch.reset(.retain_capacity);
@@ -143,7 +229,7 @@ fn parseInstrList(
                 instr_list_arena,
                 instr_list_cache,
                 errors,
-                scratch,
+                &scratch,
             );
 
             defer {
@@ -153,29 +239,148 @@ fn parseInstrList(
 
             std.debug.assert(list_contents.isEmpty());
 
-            try output.setCapacity(
-                instr_list_arena.allocator(),
-                std.math.add(
-                    usize,
-                    output.len,
-                    std.math.add(usize, folded_instructions.len, 1) catch return error.OutOfMemory,
-                ) catch return error.OutOfMemory,
-            );
+            // Reserve space to avoid allocating in the `append()` calls.
+            {
+                const extra_instr_count: usize = switch (parent_tag) {
+                    .keyword_block, .keyword_loop => 2,
+                    .keyword_if => if (else_branch.keyword.some) 3 else 2,
+                    else => 1,
+                };
 
-            var instrs_append = folded_instructions.constIterator(0);
-            while (instrs_append.next()) |instr_to_append| {
-                output.append(undefined, instr_to_append.*) catch unreachable;
+                const additional_instr_count = std.math.add(
+                    usize,
+                    folded_instructions.len,
+                    extra_instr_count,
+                ) catch return error.OutOfMemory;
+
+                try output.growCapacity(
+                    instr_list_arena.allocator(),
+                    std.math.add(usize, output.len, additional_instr_count) catch return error.OutOfMemory,
+                );
             }
 
-            output.append(undefined, parent_instr) catch unreachable;
+            switch (parent_tag) {
+                .keyword_block, .keyword_loop, .keyword_if => {
+                    output.append(undefined, parent_instr) catch unreachable;
+                },
+                .keyword_else => unreachable,
+                else => {},
+            }
 
-            // TODO: Check for special block instructions, then add an implicit `end`.
+            {
+                var instrs_append = folded_instructions.constIterator(0);
+                while (instrs_append.next()) |instr_to_append|
+                    output.append(undefined, instr_to_append.*) catch unreachable;
+            }
+
+            switch (parent_tag) {
+                .keyword_block, .keyword_loop => {
+                    output.append(undefined, Instr.initImplicitEnd(list)) catch unreachable;
+                },
+                .keyword_if => {
+                    if (!then_branch.keyword.some) {
+                        try errors.append(Error.initMissingFoldedThen(list));
+                        _ = contents.empty();
+                        break :parse_body;
+                    }
+
+                    {
+                        // Recursive call!
+                        _ = scratch.reset(.retain_capacity);
+                        var then_body: InstrList = try parseInstrList(
+                            &then_branch.contents,
+                            tree,
+                            list,
+                            arena,
+                            caches,
+                            instr_list_arena,
+                            instr_list_cache,
+                            errors,
+                            &scratch,
+                        );
+
+                        defer {
+                            then_body.clearRetainingCapacity();
+                            instr_list_cache.append(instr_list_arena.allocator(), then_body) catch {};
+                        }
+
+                        try output.growCapacity(
+                            instr_list_arena.allocator(),
+                            std.math.add(usize, output.len, then_body.len) catch return error.OutOfMemory,
+                        );
+
+                        {
+                            var then_append = then_body.constIterator(0);
+                            while (then_append.next()) |instr_to_append|
+                                output.append(undefined, instr_to_append.*) catch unreachable;
+                        }
+                    }
+
+                    std.debug.assert(then_branch.contents.isEmpty());
+                    then_branch = undefined;
+
+                    if (else_branch.keyword.get()) |else_keyword| {
+                        output.append(
+                            undefined,
+                            Instr{
+                                .keyword = sexpr.Value.initAtom(else_keyword),
+                                .args = .{ .id_opt = .none },
+                            },
+                        ) catch unreachable;
+
+                        // Recursive call!
+                        _ = scratch.reset(.retain_capacity);
+                        var else_body: InstrList = try parseInstrList(
+                            &else_branch.contents,
+                            tree,
+                            list,
+                            arena,
+                            caches,
+                            instr_list_arena,
+                            instr_list_cache,
+                            errors,
+                            &scratch,
+                        );
+
+                        defer {
+                            else_body.clearRetainingCapacity();
+                            instr_list_cache.append(instr_list_arena.allocator(), else_body) catch {};
+                        }
+
+                        try output.growCapacity(
+                            instr_list_arena.allocator(),
+                            std.math.add(usize, output.len, else_body.len) catch return error.OutOfMemory,
+                        );
+
+                        {
+                            var else_append = else_body.constIterator(0);
+                            while (else_append.next()) |instr_to_append|
+                                output.append(undefined, instr_to_append.*) catch unreachable;
+                        }
+                    }
+
+                    std.debug.assert(else_branch.contents.isEmpty());
+                    else_branch = undefined;
+
+                    // Can't assume capacity is enough here, due to nature `growCapacity()` calls relying on the current length.
+                    try output.append(instr_list_arena.allocator(), Instr.initImplicitEnd(list));
+                },
+                .keyword_then, .keyword_else => unreachable,
+                else => {
+                    output.append(undefined, parent_instr) catch unreachable;
+
+                    std.debug.assert(else_branch.contents.isEmpty());
+                    std.debug.assert(!else_branch.keyword.some);
+                    std.debug.assert(then_branch.contents.isEmpty());
+                    std.debug.assert(!then_branch.keyword.some);
+                },
+            }
         }
     }
 
     std.debug.assert(contents.isEmpty());
 
-    if (block_nesting_level > 0) {
+    if (block_stack.len > 0) {
         try errors.append(Error.initExpectedToken(previous_instr.?, .keyword_end, .at_value));
     }
 

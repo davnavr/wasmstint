@@ -10,8 +10,6 @@ const TypeUse = @import("TypeUse.zig");
 
 const Caches = @import("../Caches.zig");
 
-const Instr = @This();
-
 /// For most instructions, this is the `atom` corresponding to the keyword.
 ///
 /// For implicit `end` instuctions in folded instructions, this refers to the list
@@ -19,10 +17,12 @@ const Instr = @This();
 keyword: sexpr.Value,
 args: Args,
 
+const Instr = @This();
+
 pub const Args = union {
     none: void,
     block: IndexedArena.Idx(BlockType),
-    id_opt: IndexedArena.Idx(Ident.Opt.Unaligned),
+    id_opt: IndexedArena.Idx(Ident.Unaligned).Opt,
     id: IndexedArena.Idx(Ident.Unaligned),
     i32: i32,
     i64: IndexedArena.Idx(i64),
@@ -36,6 +36,13 @@ comptime {
         .Debug, .ReleaseSafe => 12,
         .ReleaseFast, .ReleaseSmall => 8,
     });
+}
+
+pub fn initImplicitEnd(block: sexpr.List.Id) Instr {
+    return .{
+        .keyword = sexpr.Value.initList(block),
+        .args = .{ .id_opt = .none },
+    };
 }
 
 pub const BlockType = struct {
@@ -252,6 +259,7 @@ pub fn parseArgs(
             id.set(arena, .{ .ident = ident });
             break :args Args{ .id = id };
         },
+        .keyword_else,
         .keyword_end,
         .@"keyword_table.get",
         .@"keyword_table.set",
@@ -259,14 +267,18 @@ pub fn parseArgs(
         .@"keyword_table.grow",
         .@"keyword_table.fill",
         => {
-            const id = try arena.create(Ident.Opt.Unaligned);
             const ident = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
                 .ok => |ok| ok,
                 .err => |err| return .{ .err = err },
             };
 
-            id.set(arena, .{ .ident = ident });
-            break :args Args{ .id_opt = id };
+            break :args Args{
+                .id_opt = if (ident.get()) |some_id| id: {
+                    const allocated = try arena.create(Ident.Unaligned);
+                    allocated.set(arena, .{ .ident = some_id });
+                    break :id IndexedArena.Idx(Ident.Unaligned).Opt.init(allocated);
+                } else .none,
+            };
         },
         .@"keyword_i32.const" => {
             const literal: i32 = literal: switch (contents.parseUninterpretedIntegerInList(i32, parent, tree)) {
