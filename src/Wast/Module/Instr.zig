@@ -36,8 +36,8 @@ pub const Select = IndexedArena.Slice(Text.Result);
 
 pub const MemArg = struct {
     offset_token: sexpr.TokenId.Opt,
-    offset: u64,
     align_token: sexpr.TokenId.Opt,
+    offset: u64 align(4),
     /// If `align_token == .none`, then the *natural alignment* should be used instead.
     align_pow: u5,
 
@@ -350,8 +350,6 @@ pub fn parseArgs(
         .@"keyword_global.get",
         .@"keyword_global.set",
         .@"keyword_elem.drop",
-        .@"keyword_memory.size",
-        .@"keyword_memory.grow",
         .@"keyword_data.drop",
         => {
             const id = try arena.create(Ident.Unaligned);
@@ -365,6 +363,8 @@ pub fn parseArgs(
         },
         .keyword_else,
         .keyword_end,
+        .@"keyword_memory.size",
+        .@"keyword_memory.grow",
         .@"keyword_table.get",
         .@"keyword_table.set",
         .@"keyword_table.size",
