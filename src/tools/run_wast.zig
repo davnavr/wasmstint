@@ -93,6 +93,8 @@ pub fn main() !u8 {
 
     const file_max_bytes = @as(usize, 1) << 21; // 2 miB
 
+    const color_config = std.io.tty.detectConfig(std.io.getStdErr());
+
     const cwd = std.fs.cwd();
     for (arguments.run) |script_path| {
         const script_buf: []const u8 = buf: {
@@ -150,7 +152,7 @@ pub fn main() !u8 {
             var errors_iter = errors.list.constIterator(0);
             while (errors_iter.next()) |err| {
                 try w.print(
-                    "{s}:{}: error: ",
+                    "{s}:{}: ",
                     .{
                         script_path,
                         // For some errors, use the "end" offset
@@ -158,11 +160,30 @@ pub fn main() !u8 {
                     },
                 );
 
+                switch (color_config) {
+                    .escape_codes => try w.writeAll("\x1B[31m" ++ "error" ++ "\x1B[39m"),
+                    else => try w.writeAll("error"),
+                }
+
+                try w.writeAll(": ");
                 try err.print(&script_tree, w);
                 try w.writeByte('\n');
             }
 
-            try w.print("{} errors\n", .{errors.list.count()});
+            {
+                if (color_config == .escape_codes) {
+                    try w.writeAll("\x1B[31m");
+                }
+
+                try w.print("{} errors", .{errors.list.count()});
+
+                if (color_config == .escape_codes) {
+                    try w.writeAll("\x1B[39m");
+                }
+
+                try w.writeByte('\n');
+            }
+
             try buf_stderr.flush();
         }
 
