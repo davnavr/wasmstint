@@ -20,6 +20,7 @@ pub const Expr = @import("Expr.zig");
 pub const Func = @import("Func.zig");
 pub const Type = @import("Type.zig");
 pub const TypeUse = @import("TypeUse.zig");
+pub const Limits = @import("Limits.zig");
 
 fields: IndexedArena.Slice(Field),
 
@@ -39,7 +40,10 @@ pub const Field = struct {
 
 pub const Contents = union {
     type: IndexedArena.Idx(Type),
+    // import: IndexedArena.Idx(Import),
     func: IndexedArena.Idx(Func),
+    // table: IndexedArena.Idx(Table),
+    mem: IndexedArena.Idx(Mem),
 };
 
 pub const ValType = struct {
@@ -197,6 +201,49 @@ pub const ImportName = struct {
     }
 };
 
+pub const MemType = struct {
+    limits: Limits,
+
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        tree: *const sexpr.Tree,
+        parent: sexpr.List.Id,
+        errors: *Error.List,
+    ) error{OutOfMemory}!ParseResult(MemType) {
+        const limits = switch (try Limits.parseContents(contents, tree, parent, errors)) {
+            .ok => |ok| ok,
+            .err => |err| return .{ .err = err },
+        };
+
+        return .{ .ok = .{ .limits = limits } };
+    }
+};
+
+pub const Mem = struct {
+    id: Ident.Opt,
+    mem_type: MemType,
+
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        tree: *const sexpr.Tree,
+        parent: sexpr.List.Id,
+        caches: *Caches,
+        errors: *Error.List,
+    ) error{OutOfMemory}!ParseResult(Mem) {
+        const id = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
+            .ok => |ok| ok,
+            .err => |err| return .{ .err = err },
+        };
+
+        const mem_type = switch (try MemType.parseContents(contents, tree, parent, errors)) {
+            .ok => |ok| ok,
+            .err => |err| return .{ .err = err },
+        };
+
+        return .{ .ok = .{ .id = id, .mem_type = mem_type } };
+    }
+};
+
 pub fn parseFields(
     contents: *sexpr.Parser,
     tree: *const sexpr.Tree,
@@ -280,6 +327,19 @@ pub fn parseFields(
                 );
 
                 break :field .{ .func = func };
+            },
+            .keyword_memory => {
+                const mem = try arena.create(Mem);
+                const parsed_mem = switch (try Mem.parseContents(&field_contents, tree, field_list, caches, errors)) {
+                    .ok => |ok| ok,
+                    .err => |err| {
+                        try errors.append(err);
+                        continue;
+                    },
+                };
+
+                mem.set(arena, parsed_mem);
+                break :field .{ .mem = mem };
             },
             else => {
                 try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(field_keyword), .at_value));
