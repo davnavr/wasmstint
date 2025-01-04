@@ -41,6 +41,7 @@ pub const Tag = enum {
     // missing_block_comment_end,
     // missing_closing_parenthesis,
     missing_folded_then,
+    mem_arg_align_non_power_of_two,
 };
 
 const Error = @This();
@@ -55,10 +56,10 @@ pub fn offset(err: *const Error, tree: *const sexpr.Tree) *const sexpr.Offset {
 pub fn print(err: *const Error, tree: *const sexpr.Tree, writer: anytype) !void {
     switch (err.tag) {
         .unexpected_value => {
-            _ = try writer.write("unexpected ");
+            try writer.writeAll("unexpected ");
             switch (err.value.tag) {
                 .list => {
-                    _ = try writer.write("list");
+                    try writer.writeAll("list");
                 },
                 .atom => {
                     try writer.print("token {s}", .{@tagName(err.value.case.atom.tag(tree))});
@@ -82,16 +83,19 @@ pub fn print(err: *const Error, tree: *const sexpr.Tree, writer: anytype) !void 
             try err.extra.expected_token.location.print(writer);
         },
         .invalid_utf8 => {
-            _ = try writer.write("name string literal must be valid UTF-8");
+            try writer.writeAll("name string literal must be valid UTF-8");
         },
         .integer_literal_overflow => {
-            _ = try writer.print("not a valid literal for {}-bit integers", .{err.extra.integer_literal_overflow.width});
+            try writer.print("not a valid literal for {}-bit integers", .{err.extra.integer_literal_overflow.width});
         },
         .invalid_nan_payload => {
-            _ = try writer.write("invalid NaN literal payload");
+            try writer.writeAll("invalid NaN literal payload");
         },
         .missing_folded_then => {
-            _ = try writer.write("missing then branch in folded if instruction");
+            try writer.writeAll("missing then branch in folded if instruction");
+        },
+        .mem_arg_align_non_power_of_two => {
+            try writer.writeAll("alignment must be power-of-two");
         },
     }
 }
@@ -150,6 +154,14 @@ pub fn initMissingFoldedThen(if_instr: sexpr.List.Id) Error {
     return .{
         .value = Value.initList(if_instr),
         .tag = .missing_folded_then,
+        .extra = undefined,
+    };
+}
+
+pub fn initMemArgAlignNonPowerOfTwo(align_token: sexpr.TokenId) Error {
+    return .{
+        .value = Value.initAtom(align_token),
+        .tag = .mem_arg_align_non_power_of_two,
         .extra = undefined,
     };
 }

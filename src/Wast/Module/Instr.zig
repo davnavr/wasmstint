@@ -1,7 +1,9 @@
 const std = @import("std");
 const IndexedArena = @import("../../IndexedArena.zig");
 
+const Lexer = @import("../Lexer.zig");
 const sexpr = @import("../sexpr.zig");
+const parseUninterpretedInteger = @import("../value.zig").uninterpretedInteger;
 const Error = sexpr.Error;
 
 const Ident = @import("../ident.zig").Ident;
@@ -32,6 +34,89 @@ pub const CallIndirect = struct {
 
 pub const Select = IndexedArena.Slice(Text.Result);
 
+pub const MemArg = struct {
+    offset_token: sexpr.TokenId.Opt,
+    offset: u64,
+    align_token: sexpr.TokenId.Opt,
+    /// If `align_token == .none`, then the *natural alignment* should be used instead.
+    align_pow: u5,
+
+    pub const none = MemArg{
+        .offset_token = .none,
+        .offset = undefined,
+        .align_token = .none,
+        .align_pow = undefined,
+    };
+
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        tree: *const sexpr.Tree,
+        errors: *Error.List,
+    ) error{OutOfMemory}!MemArg {
+        var mem_arg = MemArg.none;
+        var lookahead: sexpr.Parser = contents.*;
+
+        {
+            const offset_token = (lookahead.parseValue() catch return mem_arg).getAtom() orelse return mem_arg;
+            if (offset_token.tag(tree) != .keyword_unknown) return mem_arg;
+            const offset_contents = offset_token.contents(tree);
+            if (!std.mem.startsWith(u8, offset_contents, "offset=")) return mem_arg;
+
+            const lexer_offset = offset_token.offset(tree);
+            var offset_lexer = Lexer.initUtf8(.{
+                .bytes = tree.source[0..lexer_offset.end],
+                .i = lexer_offset.start + "offset=".len,
+            });
+
+            const digits_token = offset_lexer.next() orelse return mem_arg;
+            if (digits_token.tag != .integer) {
+                try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(offset_token), .at_value));
+                return mem_arg;
+            }
+
+            const offset_value = parseUninterpretedInteger(u64, digits_token.contents(tree.source)) catch {
+                try errors.append(Error.initIntegerLiteralOverflow(offset_token, 64));
+                return mem_arg;
+            };
+
+            mem_arg.offset_token = sexpr.TokenId.Opt.init(offset_token);
+            mem_arg.offset = offset_value;
+        }
+
+        {
+            const align_token = (lookahead.parseValue() catch return mem_arg).getAtom() orelse return mem_arg;
+            if (align_token.tag(tree) != .keyword_unknown) return mem_arg;
+            const align_contents = align_token.contents(tree);
+            if (!std.mem.startsWith(u8, align_contents, "align=")) return mem_arg;
+
+            const lexer_offset = align_token.offset(tree);
+            var offset_lexer = Lexer.initUtf8(.{
+                .bytes = tree.source[0..lexer_offset.end],
+                .i = lexer_offset.start + "align=".len,
+            });
+
+            const digits_token = offset_lexer.next() orelse return mem_arg;
+            if (digits_token.tag != .integer) {
+                try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(align_token), .at_value));
+                return mem_arg;
+            }
+
+            const align_value = parseUninterpretedInteger(u32, digits_token.contents(tree.source)) catch {
+                try errors.append(Error.initIntegerLiteralOverflow(align_token, 32));
+                return mem_arg;
+            };
+
+            if (!std.math.isPowerOfTwo(align_value))
+                try errors.append(Error.initMemArgAlignNonPowerOfTwo(align_token));
+
+            mem_arg.align_token = sexpr.TokenId.Opt.init(align_token);
+            mem_arg.align_pow = std.math.log2_int(u32, align_value);
+        }
+
+        return mem_arg;
+    }
+};
+
 pub const Args = union {
     none: void,
     block: IndexedArena.Idx(BlockType),
@@ -43,6 +128,7 @@ pub const Args = union {
     ///
     /// This is set to `.none` if the number of result types is zero as a space optimization.
     select: IndexedArena.Idx(Select).Opt,
+    mem_arg: IndexedArena.Idx(MemArg),
     i32: i32,
     i64: IndexedArena.Idx(i64),
     f32: u32,
@@ -383,6 +469,34 @@ pub fn parseArgs(
                 results.set(arena, try arena.dupeSegmentedList(Text.Result, 1, &result_types));
                 break :args Args{ .select = IndexedArena.Idx(Select).Opt.init(results) };
             }
+        },
+        .@"keyword_i32.load",
+        .@"keyword_i64.load",
+        .@"keyword_f32.load",
+        .@"keyword_f64.load",
+        .@"keyword_i32.load8_s",
+        .@"keyword_i32.load8_u",
+        .@"keyword_i32.load16_s",
+        .@"keyword_i32.load16_u",
+        .@"keyword_i64.load8_s",
+        .@"keyword_i64.load8_u",
+        .@"keyword_i64.load16_s",
+        .@"keyword_i64.load16_u",
+        .@"keyword_i64.load32_s",
+        .@"keyword_i64.load32_u",
+        .@"keyword_i32.store",
+        .@"keyword_i64.store",
+        .@"keyword_f32.store",
+        .@"keyword_f64.store",
+        .@"keyword_i32.store8",
+        .@"keyword_i32.store16",
+        .@"keyword_i64.store8",
+        .@"keyword_i64.store16",
+        .@"keyword_i64.store32",
+        => {
+            const mem_arg = try arena.create(MemArg);
+            mem_arg.set(arena, try MemArg.parseContents(contents, tree, errors));
+            break :args Args{ .mem_arg = mem_arg };
         },
         .@"keyword_i32.const" => {
             const literal: i32 = literal: switch (contents.parseUninterpretedIntegerInList(i32, parent, tree)) {
