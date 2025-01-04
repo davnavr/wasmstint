@@ -25,6 +25,11 @@ pub const BrTable = struct {
     default_label: Ident align(4),
 };
 
+pub const CallIndirect = struct {
+    table: Ident.Opt align(4),
+    type: TypeUse,
+};
+
 pub const Select = IndexedArena.Slice(Text.Result);
 
 pub const Args = union {
@@ -33,6 +38,7 @@ pub const Args = union {
     br_table: IndexedArena.Idx(BrTable),
     id_opt: IndexedArena.Idx(Ident.Unaligned).Opt,
     id: IndexedArena.Idx(Ident.Unaligned),
+    call_indirect: IndexedArena.Idx(CallIndirect),
     /// If not `.none`, then the number of result types must be at least one.
     ///
     /// This is set to `.none` if the number of result types is zero as a space optimization.
@@ -249,7 +255,6 @@ pub fn parseArgs(
 
             break :args Args{ .block = block_type };
         },
-
         .keyword_br,
         .keyword_br_if,
         .keyword_call,
@@ -292,6 +297,22 @@ pub fn parseArgs(
                     break :id IndexedArena.Idx(Ident.Unaligned).Opt.init(allocated);
                 } else .none,
             };
+        },
+        .keyword_call_indirect => {
+            const call_indirect = try arena.create(CallIndirect);
+
+            const table = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
+                .ok => |ok| ok,
+                .err => |err| return .{ .err = err },
+            };
+
+            const type_use = switch (try TypeUse.parseContents(contents, tree, arena, caches, errors, scratch)) {
+                .ok => |ok| ok,
+                .err => |err| return .{ .err = err },
+            };
+
+            call_indirect.set(arena, .{ .table = table, .type = type_use });
+            break :args Args{ .call_indirect = call_indirect };
         },
         .keyword_br_table => {
             const br_table = try arena.create(BrTable);
