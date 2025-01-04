@@ -19,9 +19,15 @@ args: Args,
 
 const Instr = @This();
 
+pub const BrTable = struct {
+    labels: IndexedArena.Slice(Ident),
+    default_label: Ident align(4),
+};
+
 pub const Args = union {
     none: void,
     block: IndexedArena.Idx(BlockType),
+    br_table: IndexedArena.Idx(BrTable),
     id_opt: IndexedArena.Idx(Ident.Unaligned).Opt,
     id: IndexedArena.Idx(Ident.Unaligned),
     i32: i32,
@@ -279,6 +285,41 @@ pub fn parseArgs(
                     break :id IndexedArena.Idx(Ident.Unaligned).Opt.init(allocated);
                 } else .none,
             };
+        },
+        .keyword_br_table => {
+            const br_table = try arena.create(BrTable);
+
+            _ = scratch.reset(.retain_capacity);
+            var labels_buf = std.SegmentedList(Ident, 4){};
+            const first_label = switch (try Ident.parse(contents, tree, parent, caches.allocator, &caches.ids)) {
+                .ok => |ok| ok,
+                .err => |err| return .{ .err = err },
+            };
+
+            labels_buf.append(undefined, first_label) catch unreachable;
+
+            while (true) {
+                const ident = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
+                    .ok => |ok| ok,
+                    .err => |err| return .{ .err = err },
+                };
+
+                try labels_buf.append(scratch.allocator(), ident.get() orelse break);
+            }
+
+            std.debug.assert(labels_buf.len > 0);
+
+            const labels = try arena.alloc(Ident, labels_buf.len - 1);
+            labels_buf.writeToSlice(labels.items(arena), 0);
+
+            errdefer comptime unreachable;
+
+            br_table.set(
+                arena,
+                BrTable{ .labels = labels, .default_label = labels_buf.at(labels_buf.len - 1).* },
+            );
+
+            break :args Args{ .br_table = br_table };
         },
         .@"keyword_i32.const" => {
             const literal: i32 = literal: switch (contents.parseUninterpretedIntegerInList(i32, parent, tree)) {
