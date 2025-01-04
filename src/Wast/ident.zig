@@ -114,7 +114,7 @@ pub const Ident = packed struct(u63) {
             return if (id.some) id.inner_ident else null;
         }
 
-        fn parseAtom(
+        pub fn parseAtom(
             atom: sexpr.TokenId,
             tree: *const sexpr.Tree,
             cache_allocator: Allocator,
@@ -148,7 +148,7 @@ pub const Ident = packed struct(u63) {
             const atom = (lookahead.parseValue() catch return .{ .ok = .none }).getAtom() orelse
                 return .{ .ok = .none };
 
-            const ident: Opt = switch (try parseAtom(atom, tree, cache_allocator, cache)) {
+            const ident: Opt = switch (try Opt.parseAtom(atom, tree, cache_allocator, cache)) {
                 .ok => |ok| ok,
                 .err => |err| return .{ .err = err },
             };
@@ -158,6 +158,23 @@ pub const Ident = packed struct(u63) {
             return .{ .ok = ident };
         }
     };
+
+    pub fn parseAtom(
+        atom: sexpr.TokenId,
+        tree: *const sexpr.Tree,
+        cache_allocator: Allocator,
+        cache: *Cache,
+    ) Allocator.Error!ParseResult(Ident) {
+        const ident = switch (try Opt.parseAtom(atom, tree, cache_allocator, cache)) {
+            .ok => |ok| ok,
+            .err => |err| return .{ .err = err },
+        };
+
+        return if (ident.get()) |id|
+            .{ .ok = id }
+        else
+            .{ .err = Error.initExpectedToken(sexpr.Value.initAtom(atom), .id, .at_value) };
+    }
 
     pub fn parse(
         parser: *sexpr.Parser,
