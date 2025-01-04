@@ -213,26 +213,185 @@ pub const MemType = struct {
     }
 };
 
+/// Used when parsing memories and tables.
+pub const InlineImportExports = struct {
+    exports: IndexedArena.Slice(Export),
+    import: Import,
+
+    const Import = IndexedArena.Idx(ImportName).Opt;
+
+    pub const none = InlineImportExports{ .exports = .empty, .import = .none };
+
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        tree: *const sexpr.Tree,
+        arena: *IndexedArena,
+        caches: *Caches,
+        errors: *Error.List,
+        alloca: *ArenaAllocator,
+    ) error{OutOfMemory}!InlineImportExports {
+        var import_exports = InlineImportExports.none;
+        var lookahead: sexpr.Parser = contents.*;
+
+        _ = alloca.reset(.retain_capacity);
+        var scratch = ArenaAllocator.init(alloca.allocator());
+        var export_buf = std.SegmentedList(Export, 1){};
+
+        while (!import_exports.import.some) {
+            _ = scratch.reset(.retain_capacity);
+            const list = (lookahead.parseValue() catch break).getList() orelse break;
+            var list_contents = sexpr.Parser.init(list.contents(tree).values(tree));
+
+            const keyword = (list_contents.parseValue() catch break).getAtom() orelse break;
+
+            switch (keyword.tag(tree)) {
+                .keyword_export => {
+                    if (import_exports.import.some) break;
+
+                    const result = try Export.parseContents(
+                        &list_contents,
+                        tree,
+                        arena,
+                        caches,
+                        keyword,
+                        list,
+                        &scratch,
+                    );
+
+                    switch (result) {
+                        .ok => |ok| try export_buf.append(scratch.allocator(), ok),
+                        .err => break,
+                    }
+                },
+                .keyword_import => {
+                    std.debug.assert(!import_exports.import.some);
+
+                    const import = try arena.create(ImportName);
+                    const result = try ImportName.parseContents(
+                        &list_contents,
+                        tree,
+                        arena,
+                        caches,
+                        keyword,
+                        list,
+                        &scratch,
+                    );
+
+                    switch (result) {
+                        .ok => |ok| {
+                            import.set(arena, ok);
+                            import_exports.import = Import.init(import);
+                        },
+                        .err => break,
+                    }
+                },
+                else => break,
+            }
+
+            try list_contents.expectEmpty(errors);
+
+            contents.* = lookahead;
+        }
+
+        import_exports.exports = try arena.dupeSegmentedList(Export, 1, &export_buf);
+        return import_exports;
+    }
+};
+
 pub const Mem = struct {
-    id: Ident.Symbolic,
+    id: Ident.Symbolic align(4),
+    import_exports: InlineImportExports,
     mem_type: MemType,
 
     pub fn parseContents(
         contents: *sexpr.Parser,
         tree: *const sexpr.Tree,
         parent: sexpr.List.Id,
+        arena: *IndexedArena,
         caches: *Caches,
         errors: *Error.List,
+        scratch: *ArenaAllocator,
     ) error{OutOfMemory}!ParseResult(Mem) {
         const id = try Ident.Symbolic.parse(contents, tree, caches.allocator, &caches.ids);
+
+        const import_exports = try InlineImportExports.parseContents(contents, tree, arena, caches, errors, scratch);
 
         const mem_type = switch (try MemType.parseContents(contents, tree, parent, errors)) {
             .ok => |ok| ok,
             .err => |err| return .{ .err = err },
         };
 
-        return .{ .ok = .{ .id = id, .mem_type = mem_type } };
+        return .{
+            .ok = .{
+                .id = id,
+                .import_exports = import_exports,
+                .mem_type = mem_type,
+            },
+        };
     }
+};
+
+pub const TableType = struct {
+    limits: Limits,
+    ref_type: sexpr.TokenId,
+
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        tree: *const sexpr.Tree,
+        parent: sexpr.List.Id,
+        errors: *Error.List,
+    ) error{OutOfMemory}!ParseResult(MemType) {
+        const limits = switch (try Limits.parseContents(contents, tree, parent, errors)) {
+            .ok => |ok| ok,
+            .err => |err| return .{ .err = err },
+        };
+
+        const ref_type = switch (contents.parseAtomInList(null, parent)) {
+            .ok => |ok| ok,
+            .err => |err| return .{ .err = err },
+        };
+
+        switch (ref_type.tag(tree)) {
+            .keyword_funcref, .keyword_externref => {},
+            else => return .{ .err = Error.initUnexpectedValue(sexpr.Value.initAtom(ref_type), .at_value) },
+        }
+
+        return .{ .ok = .{ .limits = limits, .ref_type = ref_type } };
+    }
+};
+
+pub const Table = struct {
+    id: Ident.Symbolic align(4),
+    import_exports: InlineImportExports,
+    table_type: TableType,
+    inline_element_segment: struct {
+        /// The `elem` keyword.
+        ///
+        /// If `.none`, then an inline element segment was not specified.
+        keyword: sexpr.TokenId.Opt,
+        /// If `keyword == .none`, this must not be accessed.
+        elements: InlineElements,
+    },
+
+    pub const InlineElements = union(enum) {
+        expressions: IndexedArena.Slice(ElementSegment.Item),
+        indices: IndexedArena.Slice(Ident.Unaligned),
+
+        const unspecified = std.mem.zeroes(InlineElements);
+    };
+
+    comptime {
+        std.debug.assert(@alignOf(Table) == @alignOf(u32));
+    }
+};
+
+pub const ElementSegment = struct {
+    /// An *`elemexpr`*.
+    pub const Item = struct {
+        /// The `item` keyword.
+        keyword: sexpr.TokenId,
+        expr: Expr,
+    };
 };
 
 pub fn parseFields(
@@ -321,16 +480,26 @@ pub fn parseFields(
             },
             .keyword_memory => {
                 const mem = try arena.create(Mem);
-                const parsed_mem = switch (try Mem.parseContents(&field_contents, tree, field_list, caches, errors)) {
-                    .ok => |ok| ok,
+                const parsed_mem = try Mem.parseContents(
+                    &field_contents,
+                    tree,
+                    field_list,
+                    arena,
+                    caches,
+                    errors,
+                    scratch,
+                );
+
+                switch (parsed_mem) {
+                    .ok => |ok| {
+                        mem.set(arena, ok);
+                        break :field .{ .mem = mem };
+                    },
                     .err => |err| {
                         try errors.append(err);
                         continue;
                     },
-                };
-
-                mem.set(arena, parsed_mem);
-                break :field .{ .mem = mem };
+                }
             },
             else => {
                 try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(field_keyword), .at_value));
