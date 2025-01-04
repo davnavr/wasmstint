@@ -18,6 +18,7 @@ const Caches = @import("../Caches.zig");
 pub const Instr = @import("Instr.zig");
 pub const Expr = @import("Expr.zig");
 pub const Func = @import("Func.zig");
+pub const Type = @import("Type.zig");
 pub const TypeUse = @import("TypeUse.zig");
 
 fields: IndexedArena.Slice(Field),
@@ -37,8 +38,8 @@ pub const Field = struct {
 };
 
 pub const Contents = union {
+    type: IndexedArena.Idx(Type),
     func: IndexedArena.Idx(Func),
-    placeholder: void,
 };
 
 pub const ValType = struct {
@@ -228,6 +229,32 @@ pub fn parseFields(
 
         _ = scratch.reset(.retain_capacity);
         const module_field: Contents = field: switch (field_keyword.tag(tree)) {
+            .keyword_type => {
+                const type_def = try arena.create(Type);
+
+                const type_result = try Type.parseContents(
+                    &field_contents,
+                    tree,
+                    field_list,
+                    arena,
+                    caches,
+                    errors,
+                    scratch,
+                );
+
+                type_def.set(
+                    arena,
+                    switch (type_result) {
+                        .ok => |ok| ok,
+                        .err => |err| {
+                            try errors.append(err);
+                            continue;
+                        },
+                    },
+                );
+
+                break :field .{ .type = type_def };
+            },
             .keyword_func => {
                 const func = try arena.create(Func);
 
