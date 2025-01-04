@@ -16,6 +16,7 @@ inline_import: IndexedArena.Idx(Text.ImportName).Opt,
 parameters: IndexedArena.Slice(Text.Param),
 results: IndexedArena.Slice(Text.Result),
 locals: IndexedArena.Slice(Text.Local),
+/// Must only be set and can only be read when `inline_import != .none`.
 body: Text.Expr,
 
 const Func = @This();
@@ -185,23 +186,29 @@ pub fn parseContents(
 
     scratch = undefined;
 
-    return .{
-        .ok = Func{
-            .id = id,
-            .inline_exports = try arena.dupeSegmentedList(Text.Export, 1, &inline_exports),
-            .inline_import = inline_import,
-            .parameters = try arena.dupeSegmentedList(Text.Param, 4, &parameters),
-            .results = try arena.dupeSegmentedList(Text.Result, 1, &results),
-            .locals = try arena.dupeSegmentedList(Text.Local, 4, &locals),
-            .body = try Text.Expr.parseContents(
-                contents,
-                tree,
-                parent,
-                arena,
-                caches,
-                errors,
-                alloca,
-            ),
-        },
+    var func = Func{
+        .id = id,
+        .inline_exports = try arena.dupeSegmentedList(Text.Export, 1, &inline_exports),
+        .inline_import = inline_import,
+        .parameters = try arena.dupeSegmentedList(Text.Param, 4, &parameters),
+        .results = try arena.dupeSegmentedList(Text.Result, 1, &results),
+        .locals = try arena.dupeSegmentedList(Text.Local, 4, &locals),
+        .body = undefined,
     };
+
+    if (inline_import.some) {
+        try contents.expectEmpty(errors);
+    } else {
+        func.body = try Text.Expr.parseContents(
+            contents,
+            tree,
+            parent,
+            arena,
+            caches,
+            errors,
+            alloca,
+        );
+    }
+
+    return .{ .ok = func };
 }
