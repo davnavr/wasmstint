@@ -9,7 +9,7 @@ const Caches = @import("../Caches.zig");
 
 const Text = @import("Text.zig");
 
-id: Ident.Opt align(4),
+id: Ident.Symbolic align(4),
 /// The `func` keyword.
 keyword: sexpr.TokenId,
 // type: union { func: FuncType },
@@ -27,10 +27,7 @@ pub fn parseContents(
     errors: *Error.List,
     temporary: *std.heap.ArenaAllocator,
 ) error{OutOfMemory}!sexpr.Parser.Result(Type) {
-    const id = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
-        .ok => |ok| ok,
-        .err => |err| return .{ .err = err },
-    };
+    const id = try Ident.Symbolic.parse(contents, tree, caches.allocator, &caches.ids);
 
     const func_list: sexpr.List.Id = switch (contents.parseListInList(parent)) {
         .ok => |ok| ok,

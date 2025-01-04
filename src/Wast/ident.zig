@@ -144,9 +144,9 @@ pub const Ident = packed struct(u63) {
             cache_allocator: Allocator,
             cache: *Cache,
         ) Allocator.Error!ParseResult(Opt) {
-            var lookahead = parser.*;
-            const atom = (lookahead.parseValue() catch return .{ .ok = Ident.Opt.none }).getAtom() orelse
-                return .{ .ok = Ident.Opt.none };
+            var lookahead: sexpr.Parser = parser.*;
+            const atom = (lookahead.parseValue() catch return .{ .ok = .none }).getAtom() orelse
+                return .{ .ok = .none };
 
             const ident: Opt = switch (try parseAtom(atom, tree, cache_allocator, cache)) {
                 .ok => |ok| ok,
@@ -181,4 +181,33 @@ pub const Ident = packed struct(u63) {
         else
             .{ .err = Error.initExpectedToken(sexpr.Value.initAtom(atom), .id, .at_value) };
     }
+
+    pub const Symbolic = packed struct(u64) {
+        ident: Interned,
+        token: sexpr.TokenId,
+        some: bool,
+
+        pub const none = Symbolic{
+            .some = false,
+            .ident = undefined,
+            .token = undefined,
+        };
+
+        pub fn parse(
+            parser: *sexpr.Parser,
+            tree: *const sexpr.Tree,
+            cache_allocator: Allocator,
+            cache: *Cache,
+        ) Allocator.Error!Symbolic {
+            var lookahead: sexpr.Parser = parser.*;
+            const token = (lookahead.parseValue() catch return .none).getAtom() orelse return .none;
+            if (token.tag(tree) != .id) return .none;
+
+            parser.* = lookahead;
+            lookahead = undefined;
+
+            const ident = try cache.intern(cache_allocator, tree, token);
+            return .{ .ident = ident, .token = token, .some = true };
+        }
+    };
 };

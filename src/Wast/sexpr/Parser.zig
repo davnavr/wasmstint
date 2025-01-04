@@ -189,3 +189,14 @@ pub fn expectEmpty(parser: *Parser, errors: *Error.List) error{OutOfMemory}!void
 
     _ = parser.empty();
 }
+
+pub fn dumpRemainingToStderr(parser: *const Parser, tree: *const Tree, title: [:0]const u8) void {
+    std.debug.print("BEGIN DUMP {s}\n", .{title});
+    for (parser.remaining) |value| {
+        switch (value.unpacked()) {
+            .atom => |atom| std.debug.print("  {}\n", .{atom.tag(tree)}),
+            .list => |list| std.debug.print("  ({} values)\n", .{list.contents(tree).count}),
+        }
+    }
+    std.debug.print("END DUMP\n", .{});
+}

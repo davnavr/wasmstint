@@ -97,7 +97,7 @@ pub const ParamOrLocal = struct {
     /// The `param` or `local` keyword.
     keyword: sexpr.TokenId,
     /// Must be `.none` if `types.len > 1`.
-    id: Ident.Opt align(4),
+    id: Ident.Symbolic align(4),
     types: IndexedArena.Slice(ValType),
 
     pub fn parseContents(
@@ -109,13 +109,7 @@ pub const ParamOrLocal = struct {
         parent: sexpr.List.Id,
         errors: *Error.List,
     ) error{OutOfMemory}!ParamOrLocal {
-        const ident = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
-            .ok => |ok| ok,
-            .err => |err| {
-                try errors.append(err);
-                return .{ .keyword = keyword, .id = .none, .types = .empty };
-            },
-        };
+        const ident = try Ident.Symbolic.parse(contents, tree, caches.allocator, &caches.ids);
 
         var types = try IndexedArena.BoundedArrayList(ValType).initCapacity(arena, contents.remaining.len);
         while (!contents.isEmpty()) {
@@ -220,7 +214,7 @@ pub const MemType = struct {
 };
 
 pub const Mem = struct {
-    id: Ident.Opt,
+    id: Ident.Symbolic,
     mem_type: MemType,
 
     pub fn parseContents(
@@ -230,10 +224,7 @@ pub const Mem = struct {
         caches: *Caches,
         errors: *Error.List,
     ) error{OutOfMemory}!ParseResult(Mem) {
-        const id = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
+        const id = try Ident.Symbolic.parse(contents, tree, caches.allocator, &caches.ids);
 
         const mem_type = switch (try MemType.parseContents(contents, tree, parent, errors)) {
             .ok => |ok| ok,

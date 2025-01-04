@@ -10,7 +10,7 @@ const Caches = @import("../Caches.zig");
 
 const Text = @import("Text.zig");
 
-id: Ident.Opt align(4),
+id: Ident.Symbolic align(4),
 inline_exports: IndexedArena.Slice(Text.Export),
 inline_import: IndexedArena.Idx(Text.ImportName).Opt,
 parameters: IndexedArena.Slice(Text.Param),
@@ -35,10 +35,7 @@ pub fn parseContents(
 
     var scratch = std.heap.ArenaAllocator.init(alloca.allocator());
 
-    const id = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
-        .ok => |ok| ok,
-        .err => |err| return .{ .err = err },
-    };
+    const id = try Ident.Symbolic.parse(contents, tree, caches.allocator, &caches.ids);
 
     // All of the `SegmentedList`s are allocated in `alloca`.
     var inline_exports = std.SegmentedList(Text.Export, 1){};
