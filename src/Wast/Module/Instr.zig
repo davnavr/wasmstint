@@ -6,6 +6,7 @@ const Error = sexpr.Error;
 
 const Ident = @import("../ident.zig").Ident;
 const Name = @import("../Name.zig");
+const Text = @import("Text.zig");
 const TypeUse = @import("TypeUse.zig");
 
 const Caches = @import("../Caches.zig");
@@ -24,12 +25,18 @@ pub const BrTable = struct {
     default_label: Ident align(4),
 };
 
+pub const Select = IndexedArena.Slice(Text.Result);
+
 pub const Args = union {
     none: void,
     block: IndexedArena.Idx(BlockType),
     br_table: IndexedArena.Idx(BrTable),
     id_opt: IndexedArena.Idx(Ident.Unaligned).Opt,
     id: IndexedArena.Idx(Ident.Unaligned),
+    /// If not `.none`, then the number of result types must be at least one.
+    ///
+    /// This is set to `.none` if the number of result types is zero as a space optimization.
+    select: IndexedArena.Idx(Select).Opt,
     i32: i32,
     i64: IndexedArena.Idx(i64),
     f32: u32,
@@ -320,6 +327,41 @@ pub fn parseArgs(
             );
 
             break :args Args{ .br_table = br_table };
+        },
+        .keyword_select => {
+            _ = scratch.reset(.retain_capacity);
+            var result_types = std.SegmentedList(Text.Result, 1){};
+            var lookahead: sexpr.Parser = contents.*;
+
+            while (true) {
+                const result_list = (lookahead.parseValue() catch break).getList() orelse break;
+                var result_contents = sexpr.Parser.init(result_list.contents(tree).values(tree));
+                const result_token = (result_contents.parseValue() catch break).getAtom() orelse break;
+                if (result_token.tag(tree) != .keyword_result) break;
+
+                const result = try Text.Result.parseContents(
+                    &result_contents,
+                    tree,
+                    arena,
+                    result_token,
+                    result_list,
+                    errors,
+                );
+
+                try result_types.append(scratch.allocator(), result);
+                contents.* = lookahead;
+                std.debug.assert(result_contents.isEmpty());
+            }
+
+            lookahead = undefined;
+
+            if (result_types.len == 0) {
+                break :args Args{ .select = .none };
+            } else {
+                const results = try arena.create(Select);
+                results.set(arena, try arena.dupeSegmentedList(Text.Result, 1, &result_types));
+                break :args Args{ .select = IndexedArena.Idx(Select).Opt.init(results) };
+            }
         },
         .@"keyword_i32.const" => {
             const literal: i32 = literal: switch (contents.parseUninterpretedIntegerInList(i32, parent, tree)) {
