@@ -22,7 +22,7 @@ pub const Inner = union {
     assert_return: IndexedArena.Idx(AssertReturn),
     assert_trap: IndexedArena.Idx(AssertTrap), // TODO: Need assert_trap to also accept <module>
     // assert_exhaustion: AssertExhaustion,
-    // assert_malformed: AssertMalformed, // TODO: Since this probably only uses quote/binary module, no need to have separate error list field
+    assert_malformed: IndexedArena.Idx(AssertMalformed),
     assert_invalid: IndexedArena.Idx(AssertInvalid),
     // assert_unlinkable: AssertUnlinkable,
 };
@@ -329,6 +329,11 @@ pub const AssertExhaustion = struct {
 
 /// Asserts that a module does not pass validation.
 pub const AssertInvalid = struct {
+    module: Wast.Module,
+    failure: Failure,
+};
+
+pub const AssertMalformed = struct {
     module: Wast.Module,
     failure: Failure,
 };

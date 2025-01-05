@@ -217,6 +217,33 @@ pub fn parse(
             },
             // .keyword_assert_exhaustion => {},
             // .keyword_assert_malformed => {},
+            .keyword_assert_malformed => {
+                // Copied from `.keyword_assert_invalid` case.
+                const assert_malformed = try arena.create(Command.AssertMalformed);
+                const module = switch (try Module.parse(&cmd_parser, tree, arena, caches, cmd_list, errors, scratch)) {
+                    .ok => |ok| ok,
+                    .err => |err| {
+                        try errors.append(err);
+                        continue;
+                    },
+                };
+
+                assert_malformed.set(
+                    arena,
+                    .{
+                        .module = module,
+                        .failure = switch (try Command.Failure.parseInList(&cmd_parser, tree, arena, cmd_list, scratch)) {
+                            .ok => |ok| ok,
+                            .err => |err| {
+                                try errors.append(err);
+                                continue;
+                            },
+                        },
+                    },
+                );
+
+                break :cmd .{ .assert_malformed = assert_malformed };
+            },
             .keyword_assert_invalid => {
                 const assert_invalid = try arena.create(Command.AssertInvalid);
                 const module = switch (try Module.parse(&cmd_parser, tree, arena, caches, cmd_list, errors, scratch)) {
