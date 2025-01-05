@@ -44,7 +44,7 @@ pub const Contents = union {
     func: IndexedArena.Idx(Func),
     table: IndexedArena.Idx(Table),
     mem: IndexedArena.Idx(Mem),
-    // global: IndexedArena.Idx(Global),
+    global: IndexedArena.Idx(Global),
 };
 
 pub const ValType = struct {
@@ -626,30 +626,72 @@ pub const GlobalType = struct {
     }
 };
 
-// pub const Global = struct {
-//     id: Ident.Symbolic align(4),
-//     import_exports: InlineImportExports,
-//     global_type: GlobalType,
-//     init: Expr,
+pub const Global = struct {
+    id: Ident.Symbolic align(4),
+    inline_exports: InlineExports,
+    inline_import: sexpr.TokenId.Opt,
+    global_type: GlobalType,
+    inner: union {
+        init: Expr,
+        inline_import: ImportName,
+    },
 
-//     pub fn parseContents(
-//         contents: *sexpr.Parser,
-//         tree: *const sexpr.Tree,
-//         parent: sexpr.List.Id,
-//         arena: *IndexedArena,
-//         caches: *Caches,
-//         errors: *Error.List,
-//         scratch: *ArenaAllocator,
-//     ) error{OutOfMemory}!ParseResult(IndexedArena.Idx(Global)) {
-//         const global = try arena.create(Global);
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        tree: *const sexpr.Tree,
+        parent: sexpr.List.Id,
+        arena: *IndexedArena,
+        caches: *Caches,
+        errors: *Error.List,
+        scratch: *ArenaAllocator,
+    ) error{OutOfMemory}!ParseResult(IndexedArena.Idx(Global)) {
+        const global = try arena.create(Global);
 
-//         const id = try Ident.Symbolic.parse(contents, tree, caches.allocator, &caches.ids);
+        const id = try Ident.Symbolic.parse(contents, tree, caches.allocator, &caches.ids);
 
-//         const import_exports = try InlineImportExports.parseContents(contents, tree, arena, caches, errors, scratch);
+        const import_exports = try InlineImportExports.parseContents(
+            contents,
+            tree,
+            arena,
+            caches,
+            errors,
+            scratch,
+        );
 
-//         unreachable; // TODO
-//     }
-// };
+        const global_type = switch (try GlobalType.parse(contents, tree, parent, errors)) {
+            .ok => |ok| ok,
+            .err => |err| return .{ .err = err },
+        };
+
+        global.set(
+            arena,
+            Global{
+                .id = id,
+                .inline_exports = import_exports.exports,
+                .inline_import = import_exports.import.keyword,
+                .global_type = global_type,
+                .inner = if (import_exports.import.keyword.some)
+                    .{ .inline_import = import_exports.import.name }
+                else
+                    .{
+                        .init = try Expr.parseContents(
+                            contents,
+                            tree,
+                            parent,
+                            arena,
+                            caches,
+                            errors,
+                            scratch,
+                        ),
+                    },
+            },
+        );
+
+        try contents.expectEmpty(errors);
+
+        return .{ .ok = global };
+    }
+};
 
 pub const ElementSegment = struct {
     /// An *`elemexpr`*.
@@ -830,6 +872,25 @@ pub fn parseFields(
                         mem.set(arena, ok);
                         break :field .{ .mem = mem };
                     },
+                    .err => |err| {
+                        try errors.append(err);
+                        continue;
+                    },
+                }
+            },
+            .keyword_global => {
+                const parsed_global = try Global.parseContents(
+                    &field_contents,
+                    tree,
+                    field_list,
+                    arena,
+                    caches,
+                    errors,
+                    scratch,
+                );
+
+                switch (parsed_global) {
+                    .ok => |global| break :field .{ .global = global },
                     .err => |err| {
                         try errors.append(err);
                         continue;
