@@ -44,6 +44,7 @@ pub const Contents = union {
     func: IndexedArena.Idx(Func),
     table: IndexedArena.Idx(Table),
     mem: IndexedArena.Idx(Mem),
+    // global: IndexedArena.Idx(Global),
 };
 
 pub const ValType = struct {
@@ -56,18 +57,32 @@ pub const ValType = struct {
         std.debug.assert(@sizeOf(ValType) <= 8);
     }
 
+    pub fn parseAtom(
+        atom: sexpr.TokenId,
+        parser: *sexpr.Parser,
+        tree: *const sexpr.Tree,
+        parent: sexpr.List.Id,
+    ) ParseResult(ValType) {
+        switch (atom.tag(tree)) {
+            .keyword_i32, .keyword_i64, .keyword_f32, .keyword_f64, .keyword_funcref, .keyword_externref => {},
+            else => return .{
+                .err = Error.initUnexpectedValue(sexpr.Value.initAtom(atom), .at_value),
+            },
+        }
+
+        _ = parser;
+        _ = parent;
+
+        return .{ .ok = .{ .keyword = atom, .type = .{ .simple = {} } } };
+    }
+
     pub fn parse(parser: *sexpr.Parser, tree: *const sexpr.Tree, parent: sexpr.List.Id) ParseResult(ValType) {
         const atom: sexpr.TokenId = switch (parser.parseAtomInList(.keyword_unknown, parent)) {
             .ok => |ok| ok,
             .err => |err| return .{ .err = err },
         };
 
-        switch (atom.tag(tree)) {
-            .keyword_i32, .keyword_i64, .keyword_f32, .keyword_f64, .keyword_funcref, .keyword_externref => {},
-            else => return .{ .err = Error.initUnexpectedValue(sexpr.Value.initAtom(atom), .at_value) },
-        }
-
-        return .{ .ok = .{ .keyword = atom, .type = .{ .simple = {} } } };
+        return parseAtom(atom, parser, tree, parent);
     }
 };
 
@@ -164,8 +179,6 @@ pub const Result = struct {
 pub const Local = ParamOrLocal;
 
 pub const ImportName = struct {
-    /// The `import` keyword.
-    keyword: sexpr.TokenId,
     module: Name,
     name: Name,
 
@@ -174,12 +187,9 @@ pub const ImportName = struct {
         tree: *const sexpr.Tree,
         arena: *IndexedArena,
         caches: *Caches,
-        keyword: sexpr.TokenId,
         parent: sexpr.List.Id,
         scratch: *ArenaAllocator,
     ) error{OutOfMemory}!ParseResult(ImportName) {
-        std.debug.assert(keyword.tag(tree) == .keyword_import);
-
         const module = switch (try Name.parse(contents, tree, caches.allocator, &caches.names, arena, parent, scratch)) {
             .ok => |ok| ok,
             .err => |err| return .{ .err = err },
@@ -191,7 +201,42 @@ pub const ImportName = struct {
             .err => |err| return .{ .err = err },
         };
 
-        return .{ .ok = ImportName{ .keyword = keyword, .module = module, .name = name } };
+        return .{ .ok = ImportName{ .module = module, .name = name } };
+    }
+};
+
+pub const InlineImport = struct {
+    /// The `import` keyword.
+    keyword: sexpr.TokenId.Opt,
+    /// Must not be read if `keyword == .none`.
+    name: ImportName,
+
+    pub const none = InlineImport{
+        .keyword = .none,
+        .name = undefined,
+    };
+
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        tree: *const sexpr.Tree,
+        arena: *IndexedArena,
+        caches: *Caches,
+        keyword: sexpr.TokenId,
+        parent: sexpr.List.Id,
+        scratch: *ArenaAllocator,
+    ) error{OutOfMemory}!ParseResult(InlineImport) {
+        std.debug.assert(keyword.tag(tree) == .keyword_import);
+
+        const name_result = try ImportName.parseContents(contents, tree, arena, caches, parent, scratch);
+        return switch (name_result) {
+            .ok => |name| .{
+                .ok = InlineImport{
+                    .keyword = sexpr.TokenId.Opt.init(keyword),
+                    .name = name,
+                },
+            },
+            .err => |err| .{ .err = err },
+        };
     }
 };
 
@@ -213,14 +258,17 @@ pub const MemType = struct {
     }
 };
 
-/// Used when parsing memories and tables.
+pub const InlineExports = IndexedArena.Slice(Export);
+
+/// Used when parsing memories, tables, and globals.
 pub const InlineImportExports = struct {
-    exports: IndexedArena.Slice(Export),
-    import: Import,
+    exports: InlineExports,
+    import: InlineImport,
 
-    const Import = IndexedArena.Idx(ImportName).Opt;
-
-    pub const none = InlineImportExports{ .exports = .empty, .import = .none };
+    pub const none = InlineImportExports{
+        .exports = .empty,
+        .import = .none,
+    };
 
     pub fn parseContents(
         contents: *sexpr.Parser,
@@ -237,7 +285,7 @@ pub const InlineImportExports = struct {
         var scratch = ArenaAllocator.init(alloca.allocator());
         var export_buf = std.SegmentedList(Export, 1){};
 
-        while (!import_exports.import.some) {
+        while (!import_exports.import.keyword.some) {
             _ = scratch.reset(.retain_capacity);
             const list = (lookahead.parseValue() catch break).getList() orelse break;
             var list_contents = sexpr.Parser.init(list.contents(tree).values(tree));
@@ -246,7 +294,7 @@ pub const InlineImportExports = struct {
 
             switch (keyword.tag(tree)) {
                 .keyword_export => {
-                    if (import_exports.import.some) break;
+                    if (import_exports.import.keyword.some) break;
 
                     const result = try Export.parseContents(
                         &list_contents,
@@ -264,10 +312,9 @@ pub const InlineImportExports = struct {
                     }
                 },
                 .keyword_import => {
-                    std.debug.assert(!import_exports.import.some);
+                    std.debug.assert(!import_exports.import.keyword.some);
 
-                    const import = try arena.create(ImportName);
-                    const result = try ImportName.parseContents(
+                    const import_result = try InlineImport.parseContents(
                         &list_contents,
                         tree,
                         arena,
@@ -277,11 +324,8 @@ pub const InlineImportExports = struct {
                         &scratch,
                     );
 
-                    switch (result) {
-                        .ok => |ok| {
-                            import.set(arena, ok);
-                            import_exports.import = Import.init(import);
-                        },
+                    switch (import_result) {
+                        .ok => |ok| import_exports.import = ok,
                         .err => break,
                     }
                 },
@@ -302,7 +346,7 @@ pub const Mem = struct {
     id: Ident.Symbolic align(4),
     import_exports: InlineImportExports,
     mem_type: MemType,
-    // TODO: Inline data segments
+    // TODO: Inline data segments, split import_exports field
 
     pub fn parseContents(
         contents: *sexpr.Parser,
@@ -363,15 +407,21 @@ pub const TableType = struct {
 
 pub const Table = struct {
     id: Ident.Symbolic align(4),
-    import_exports: InlineImportExports,
+    inline_exports: InlineExports,
     /// Indicates that a table type is not explicitly specified, and that an inline element segment is present.
     ///
-    /// If set, then inline imports are not allowed.
+    /// If `.none`, then `inner == .no_elements`.
     ref_type_keyword: sexpr.TokenId.Opt,
     inner: union {
-        table_type: TableType,
+        /// Invariant that `ref_type_keyword == .none`.
+        no_elements: struct {
+            inline_import: InlineImport,
+            table_type: TableType,
+        },
         /// Inline elements are allowed only when the table is not an inline import and a table type is not present.
-        inline_element_segment: struct {
+        ///
+        /// Invariant that `ref_type_keyword != .none`.
+        ref_type: struct {
             /// The `elem` keyword.
             keyword: sexpr.TokenId,
             elements: InlineElements,
@@ -422,16 +472,21 @@ pub const Table = struct {
 
                 break :table Table{
                     .id = id,
-                    .import_exports = import_exports,
+                    .inline_exports = import_exports.exports,
                     .ref_type_keyword = .none,
-                    .inner = .{ .table_type = table_type },
+                    .inner = .{
+                        .no_elements = .{
+                            .inline_import = import_exports.import,
+                            .table_type = table_type,
+                        },
+                    },
                 };
             },
             .keyword_funcref, .keyword_externref => {
                 contents.* = lookahead;
                 lookahead = undefined;
 
-                if (import_exports.import.some) return .{
+                if (import_exports.import.keyword.some) return .{
                     .err = Error.initUnexpectedValue(sexpr.Value.initAtom(type_token), .at_value),
                 };
 
@@ -509,10 +564,10 @@ pub const Table = struct {
 
                 break :table Table{
                     .id = id,
-                    .import_exports = import_exports,
+                    .inline_exports = import_exports.exports,
                     .ref_type_keyword = sexpr.TokenId.Opt.init(type_token),
                     .inner = .{
-                        .inline_element_segment = .{
+                        .ref_type = .{
                             .keyword = elem_keyword,
                             .elements = elements,
                         },
@@ -527,6 +582,74 @@ pub const Table = struct {
         return .{ .ok = table_idx };
     }
 };
+
+pub const GlobalType = struct {
+    mut: sexpr.TokenId.Opt,
+    val_type: ValType,
+
+    pub fn parse(
+        parser: *sexpr.Parser,
+        tree: *const sexpr.Tree,
+        parent: sexpr.List.Id,
+        errors: *Error.List,
+    ) error{OutOfMemory}!ParseResult(GlobalType) {
+        const value = parser.parseValue() catch return .{
+            .err = Error.initUnexpectedValue(sexpr.Value.initList(parent), .at_list_end),
+        };
+
+        switch (value.unpacked()) {
+            .atom => |type_keyword| return switch (ValType.parseAtom(type_keyword, parser, tree, parent)) {
+                .ok => |val_type| .{ .ok = .{ .mut = .none, .val_type = val_type } },
+                .err => |err| .{ .err = err },
+            },
+            .list => |list| {
+                var list_contents = sexpr.Parser.init(list.contents(tree).values(tree));
+                const mut_keyword = switch (list_contents.parseAtomInList(.keyword_mut, list)) {
+                    .ok => |ok| ok,
+                    .err => |err| return .{ .err = err },
+                };
+
+                if (mut_keyword.tag(tree) != .keyword_mut) return .{
+                    .err = Error.initExpectedToken(sexpr.Value.initAtom(mut_keyword), .keyword_mut, .at_value),
+                };
+
+                const val_type = switch (ValType.parse(&list_contents, tree, parent)) {
+                    .ok => |ok| ok,
+                    .err => |err| return .{ .err = err },
+                };
+
+                try list_contents.expectEmpty(errors);
+
+                return .{ .ok = .{ .mut = sexpr.TokenId.Opt.init(mut_keyword), .val_type = val_type } };
+            },
+        }
+    }
+};
+
+// pub const Global = struct {
+//     id: Ident.Symbolic align(4),
+//     import_exports: InlineImportExports,
+//     global_type: GlobalType,
+//     init: Expr,
+
+//     pub fn parseContents(
+//         contents: *sexpr.Parser,
+//         tree: *const sexpr.Tree,
+//         parent: sexpr.List.Id,
+//         arena: *IndexedArena,
+//         caches: *Caches,
+//         errors: *Error.List,
+//         scratch: *ArenaAllocator,
+//     ) error{OutOfMemory}!ParseResult(IndexedArena.Idx(Global)) {
+//         const global = try arena.create(Global);
+
+//         const id = try Ident.Symbolic.parse(contents, tree, caches.allocator, &caches.ids);
+
+//         const import_exports = try InlineImportExports.parseContents(contents, tree, arena, caches, errors, scratch);
+
+//         unreachable; // TODO
+//     }
+// };
 
 pub const ElementSegment = struct {
     /// An *`elemexpr`*.

@@ -11,13 +11,15 @@ const Caches = @import("../Caches.zig");
 const Text = @import("Text.zig");
 
 id: Ident.Symbolic align(4),
-inline_exports: IndexedArena.Slice(Text.Export),
-inline_import: IndexedArena.Idx(Text.ImportName).Opt,
+inline_exports: Text.InlineExports,
+inline_import: sexpr.TokenId.Opt,
 parameters: IndexedArena.Slice(Text.Param),
 results: IndexedArena.Slice(Text.Result),
 locals: IndexedArena.Slice(Text.Local),
-/// Must only be set and can only be read when `inline_import != .none`.
-body: Text.Expr,
+body: union {
+    defined: Text.Expr,
+    inline_import: Text.ImportName,
+},
 
 const Func = @This();
 
@@ -39,7 +41,7 @@ pub fn parseContents(
 
     // All of the `SegmentedList`s are allocated in `alloca`.
     var inline_exports = std.SegmentedList(Text.Export, 1){};
-    var inline_import: IndexedArena.Idx(Text.ImportName).Opt = .none;
+    var inline_import = Text.InlineImport.none;
     var parameters = std.SegmentedList(Text.Param, 4){};
     var results = std.SegmentedList(Text.Result, 1){};
     var locals = std.SegmentedList(Text.Local, 4){};
@@ -99,8 +101,8 @@ pub fn parseContents(
                 .keyword_import => {
                     if (!state.advance(.import)) break :before_body;
 
-                    if (!inline_import.some) {
-                        const import_result = try Text.ImportName.parseContents(
+                    if (!inline_import.keyword.some) {
+                        const import_result = try Text.InlineImport.parseContents(
                             &list_contents,
                             tree,
                             arena,
@@ -111,11 +113,7 @@ pub fn parseContents(
                         );
 
                         switch (import_result) {
-                            .ok => |ok| {
-                                const import = try arena.create(Text.ImportName);
-                                import.set(arena, ok);
-                                inline_import = IndexedArena.Idx(Text.ImportName).Opt.init(import);
-                            },
+                            .ok => |import| inline_import = import,
                             .err => |err| try errors.append(err),
                         }
                     } else {
@@ -186,17 +184,18 @@ pub fn parseContents(
     var func = Func{
         .id = id,
         .inline_exports = try arena.dupeSegmentedList(Text.Export, 1, &inline_exports),
-        .inline_import = inline_import,
+        .inline_import = inline_import.keyword,
         .parameters = try arena.dupeSegmentedList(Text.Param, 4, &parameters),
         .results = try arena.dupeSegmentedList(Text.Result, 1, &results),
         .locals = try arena.dupeSegmentedList(Text.Local, 4, &locals),
         .body = undefined,
     };
 
-    if (inline_import.some) {
+    func.body = if (inline_import.keyword.some) inline_import: {
         try contents.expectEmpty(errors);
-    } else {
-        func.body = try Text.Expr.parseContents(
+        break :inline_import .{ .inline_import = inline_import.name };
+    } else .{
+        .defined = try Text.Expr.parseContents(
             contents,
             tree,
             parent,
@@ -204,8 +203,8 @@ pub fn parseContents(
             caches,
             errors,
             alloca,
-        );
-    }
+        ),
+    };
 
     return .{ .ok = func };
 }
