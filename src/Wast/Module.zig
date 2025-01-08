@@ -142,16 +142,15 @@ pub fn parseContents(
     return .{ .ok = Module{ .name = name, .format_keyword = format_keyword, .format = format } };
 }
 
-pub fn parse(
+pub fn parseOrEmpty(
     parser: *sexpr.Parser,
     tree: *const sexpr.Tree,
     arena: *IndexedArena,
     caches: *Caches,
-    parent: sexpr.List.Id,
     errors: *Error.List,
     scratch: *ArenaAllocator,
-) error{OutOfMemory}!ParseResult(Module) {
-    const module_list: sexpr.List.Id = switch (parser.parseListInList(parent)) {
+) error{ OutOfMemory, EndOfStream }!ParseResult(Module) {
+    const module_list: sexpr.List.Id = switch (try parser.parseList()) {
         .ok => |ok| ok,
         .err => |err| return .{ .err = err },
     };
@@ -176,3 +175,20 @@ pub fn parse(
         },
     }
 }
+
+pub fn parse(
+    parser: *sexpr.Parser,
+    tree: *const sexpr.Tree,
+    arena: *IndexedArena,
+    caches: *Caches,
+    parent: sexpr.List.Id,
+    errors: *Error.List,
+    scratch: *ArenaAllocator,
+) error{OutOfMemory}!ParseResult(Module) {
+    return parseOrEmpty(parser, tree, arena, caches, errors, scratch) catch |e| switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.EndOfStream => .{ .err = Error.initUnexpectedValue(sexpr.Value.initList(parent), .at_list_end) },
+    };
+}
+
+pub const encode = @import("Module/encode.zig").encode;

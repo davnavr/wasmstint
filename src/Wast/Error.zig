@@ -1,9 +1,10 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const LineCol = @import("LineCol.zig");
 const sexpr = @import("sexpr.zig");
 const Value = sexpr.Value;
 const Token = sexpr.Token;
-const LineCol = @import("LineCol.zig");
+const Ident = @import("ident.zig").Ident;
 
 value: Value,
 tag: Tag,
@@ -14,6 +15,7 @@ extra: union {
         location: ExpectedLocation,
     },
     integer_literal_overflow: struct { width: u16 },
+    duplicate_ident: struct { original: sexpr.TokenId },
 },
 
 pub const ExpectedLocation = enum {
@@ -42,6 +44,8 @@ pub const Tag = enum {
     // missing_closing_parenthesis,
     missing_folded_then,
     mem_arg_align_non_power_of_two,
+
+    duplicate_ident,
 };
 
 const Error = @This();
@@ -96,6 +100,10 @@ pub fn print(err: *const Error, tree: *const sexpr.Tree, writer: anytype) !void 
         },
         .mem_arg_align_non_power_of_two => {
             try writer.writeAll("alignment must be power-of-two");
+        },
+        .duplicate_ident => {
+            // const duplicate_ident = err.extra.duplicate_ident;
+            try writer.writeAll("identifier defined twice");
         },
     }
 }
@@ -163,6 +171,14 @@ pub fn initMemArgAlignNonPowerOfTwo(align_token: sexpr.TokenId) Error {
         .value = Value.initAtom(align_token),
         .tag = .mem_arg_align_non_power_of_two,
         .extra = undefined,
+    };
+}
+
+pub fn initDuplicateIdent(id: Ident.Symbolic, original: sexpr.TokenId) Error {
+    return .{
+        .value = Value.initAtom(id.token),
+        .tag = .duplicate_ident,
+        .extra = .{ .duplicate_ident = .{ .original = original } },
     };
 }
 
