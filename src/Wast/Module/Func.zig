@@ -13,6 +13,7 @@ const Text = @import("Text.zig");
 id: Ident.Symbolic align(4),
 inline_exports: Text.InlineExports,
 inline_import: sexpr.TokenId.Opt,
+// TODO: Fix, use TypeUse here
 parameters: IndexedArena.Slice(Text.Param),
 results: IndexedArena.Slice(Text.Result),
 locals: IndexedArena.Slice(Text.Local),
@@ -39,9 +40,16 @@ pub fn parseContents(
 
     const id = try Ident.Symbolic.parse(contents, tree, caches.allocator, &caches.ids);
 
-    // All of the `SegmentedList`s are allocated in `alloca`.
-    var inline_exports = std.SegmentedList(Text.Export, 1){};
-    var inline_import = Text.InlineImport.none;
+    const import_exports = try Text.InlineImportExports.parseContents(
+        contents,
+        tree,
+        arena,
+        caches,
+        errors,
+        &scratch,
+    );
+
+    // Allocated in `alloca`.
     var parameters = std.SegmentedList(Text.Param, 4){};
     var results = std.SegmentedList(Text.Result, 1){};
     var locals = std.SegmentedList(Text.Local, 4){};
@@ -49,8 +57,6 @@ pub fn parseContents(
     before_body: {
         var state: enum {
             start,
-            exports,
-            import,
             parameters,
             results,
             locals,
@@ -76,51 +82,6 @@ pub fn parseContents(
 
             var keyword = (list_contents.parseValue() catch break :before_body).getAtom() orelse break :before_body;
             switch (keyword.tag(tree)) {
-                .keyword_export => {
-                    // Treat an incorrect order of these as an unknown instruction.
-                    if (!state.advance(.exports)) break :before_body;
-
-                    const export_result = try Text.Export.parseContents(
-                        &list_contents,
-                        tree,
-                        arena,
-                        caches,
-                        keyword,
-                        field_list,
-                        &scratch,
-                    );
-
-                    try inline_exports.append(
-                        alloca.allocator(),
-                        switch (export_result) {
-                            .ok => |ok| ok,
-                            .err => |err| return .{ .err = err },
-                        },
-                    );
-                },
-                .keyword_import => {
-                    if (!state.advance(.import)) break :before_body;
-
-                    if (!inline_import.keyword.some) {
-                        const import_result = try Text.InlineImport.parseContents(
-                            &list_contents,
-                            tree,
-                            arena,
-                            caches,
-                            keyword,
-                            field_list,
-                            &scratch,
-                        );
-
-                        switch (import_result) {
-                            .ok => |import| inline_import = import,
-                            .err => |err| try errors.append(err),
-                        }
-                    } else {
-                        // An extra inline import is not fatal.
-                        try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(keyword), .at_value));
-                    }
-                },
                 .keyword_param => {
                     if (!state.advance(.parameters)) break :before_body;
 
@@ -183,17 +144,17 @@ pub fn parseContents(
 
     var func = Func{
         .id = id,
-        .inline_exports = try arena.dupeSegmentedList(Text.Export, 1, &inline_exports),
-        .inline_import = inline_import.keyword,
+        .inline_exports = import_exports.exports,
+        .inline_import = import_exports.import.keyword,
         .parameters = try arena.dupeSegmentedList(Text.Param, 4, &parameters),
         .results = try arena.dupeSegmentedList(Text.Result, 1, &results),
         .locals = try arena.dupeSegmentedList(Text.Local, 4, &locals),
         .body = undefined,
     };
 
-    func.body = if (inline_import.keyword.some) inline_import: {
+    func.body = if (import_exports.import.keyword.some) inline_import: {
         try contents.expectEmpty(errors);
-        break :inline_import .{ .inline_import = inline_import.name };
+        break :inline_import .{ .inline_import = import_exports.import.name };
     } else .{
         .defined = try Text.Expr.parseContents(
             contents,

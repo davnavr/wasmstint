@@ -13,8 +13,12 @@ id: Ident.Symbolic align(4),
 /// The `func` keyword.
 keyword: sexpr.TokenId,
 // type: union { func: FuncType },
-parameters: IndexedArena.Slice(Text.Param),
-results: IndexedArena.Slice(Text.Result),
+func: Func,
+
+pub const Func = struct {
+    parameters: IndexedArena.Slice(Text.Param),
+    results: IndexedArena.Slice(Text.Result),
+};
 
 const Type = @This();
 
@@ -120,12 +124,10 @@ pub fn parseContents(
         parameters = try arena.dupeSegmentedList(Text.Param, 8, &params_buf);
     }
 
-    return .{
-        .ok = Type{
-            .id = id,
-            .keyword = func_keyword,
-            .parameters = parameters,
-            .results = try arena.dupeSegmentedList(Text.Result, 1, &results_buf),
-        },
+    const func = Func{
+        .parameters = parameters,
+        .results = try arena.dupeSegmentedList(Text.Result, 1, &results_buf),
     };
+
+    return .{ .ok = Type{ .id = id, .keyword = func_keyword, .func = func } };
 }

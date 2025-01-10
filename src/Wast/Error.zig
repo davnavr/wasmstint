@@ -109,7 +109,10 @@ pub fn print(err: *const Error, tree: *const sexpr.Tree, writer: anytype) !void 
 }
 
 comptime {
-    std.debug.assert(@sizeOf(Error) == 12);
+    std.debug.assert(@sizeOf(Error) == switch (@import("builtin").mode) {
+        .Debug, .ReleaseSafe => 16,
+        .ReleaseFast, .ReleaseSmall => 12,
+    });
 }
 
 pub fn initUnexpectedValue(value: Value, location: ExpectedLocation) Error {
