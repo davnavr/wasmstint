@@ -13,7 +13,7 @@ pub fn init(allocator: std.mem.Allocator) IndexedArena {
     return .{ .data = std.ArrayListAligned(Word, max_alignment).init(allocator) };
 }
 
-fn byteSizeToWordCount(size: usize) error{Overflow}!usize {
+pub fn byteSizeToWordCount(size: usize) error{Overflow}!usize {
     return (try std.math.add(usize, size, comptime (@sizeOf(Word) - 1))) / @sizeOf(Word);
 }
 
@@ -23,6 +23,7 @@ fn elementAlignment(natural_alignment: u29) u29 {
 
 const IdxInt = u31;
 
+/// A word offset into an `IndexedArena`.
 pub fn Idx(comptime T: type) type {
     if (@sizeOf(T) == 0) {
         @compileError(@typeName(T) ++ " has a size of zero, which is not supported");
@@ -56,7 +57,7 @@ pub fn Idx(comptime T: type) type {
             some: bool,
             inner_idx: Self,
 
-            pub const none = Opt{ .some = false, .inner_idx = undefined };
+            pub const none = Opt{ .some = false, .inner_idx = @enumFromInt(0) };
 
             pub inline fn init(id: ?Self) Opt {
                 return if (id) |some| Opt{ .some = true, .inner_idx = some } else .none;
@@ -129,6 +130,31 @@ pub fn Slice(comptime T: type) type {
             return (self.len == other.len and @intFromEnum(self.idx) == @intFromEnum(other.idx)) or
                 std.mem.eql(T, self.items(arena), other.items(arena));
         }
+
+        pub const Opt = struct {
+            idx: Idx(T).Opt,
+            len: u32,
+
+            pub const none = Opt{ .idx = .none, .len = 0 };
+
+            pub fn init(s: ?Self) Opt {
+                return if (s) |some|
+                    .{ .idx = Idx(T).Opt.init(some.idx), .len = some.len }
+                else
+                    .none;
+            }
+
+            pub fn slice(self: Opt) ?Self {
+                return if (self.idx.some)
+                    .{ .idx = self.idx.inner_idx, .len = self.len }
+                else
+                    null;
+            }
+
+            comptime {
+                std.debug.assert(@sizeOf(Opt) == 8);
+            }
+        };
     };
 }
 

@@ -6,15 +6,14 @@ const sexpr = @import("../sexpr.zig");
 const Error = sexpr.Error;
 
 const Caches = @import("../Caches.zig");
+const Ident = @import("../ident.zig").Ident;
 
 const Instr = @import("Instr.zig");
 
-instructions: IndexedArena.Slice(Instr),
+contents: IndexedArena.Slice(IndexedArena.Word),
+count: u32,
 
 const Expr = @This();
-
-const InstrList = std.SegmentedList(Instr, 2);
-const InstrListCache = std.SegmentedList(InstrList, 2);
 
 fn parseInstrList(
     contents: *sexpr.Parser,
@@ -23,24 +22,17 @@ fn parseInstrList(
     arena: *IndexedArena,
     caches: *Caches,
     instr_list_arena: *ArenaAllocator,
-    instr_list_cache: *InstrListCache,
+    instr_list_pool: *Instr.List.Pool,
     errors: *Error.List,
     alloca: *ArenaAllocator,
-) error{OutOfMemory}!InstrList {
+) error{OutOfMemory}!Instr.List {
     // Allocated in `instr_list_arena`.
-    var output: InstrList = instr_list_cache.pop() orelse .{};
-    std.debug.assert(output.len == 0);
+    var output = instr_list_pool.pop() orelse Instr.List.empty;
+    std.debug.assert(output.count == 0);
+    std.debug.assert(output.buffer.len == 0);
 
-    const output_capacity = std.math.add(
-        usize,
-        output.len,
-        (contents.remaining.len +| 7) / 8,
-    ) catch return error.OutOfMemory;
-
-    // This check avoids an integer overflow panic.
-    if (output_capacity > InstrList.prealloc_count) {
-        try output.growCapacity(instr_list_arena.allocator(), output_capacity);
-    }
+    // Get better estimate of avg. # of instr per sexpr.Value
+    try output.growCapacityAdditionalWords(instr_list_arena, (contents.remaining.len +| 7) / 8);
 
     _ = alloca.reset(.retain_capacity);
     var scratch = ArenaAllocator.init(alloca.allocator());
@@ -49,7 +41,7 @@ fn parseInstrList(
         block_or_loop,
         @"if",
         @"else",
-        //catch,
+        // catch,
     };
 
     // Allocated in `alloca`.
@@ -65,6 +57,8 @@ fn parseInstrList(
                 keyword,
                 contents,
                 tree,
+                &output,
+                instr_list_arena,
                 parent,
                 arena,
                 caches,
@@ -72,15 +66,12 @@ fn parseInstrList(
                 &scratch,
             );
 
-            const instr = switch (instr_result) {
-                .ok => |ok| ok,
-                .err => |err| {
-                    // If a single instruction fails to parse, then skip parsing the rest of them.
-                    try errors.append(err);
-                    _ = contents.empty();
-                    break :parse_body;
-                },
-            };
+            if (instr_result) |err| {
+                // If a single instruction fails to parse, then skip parsing the rest of them.
+                try errors.append(err);
+                _ = contents.empty();
+                break :parse_body;
+            }
 
             switch (keyword.tag(tree)) {
                 .keyword_block, .keyword_loop => try block_stack.append(alloca.allocator(), .block_or_loop),
@@ -99,8 +90,6 @@ fn parseInstrList(
                 },
                 else => {},
             }
-
-            try output.append(instr_list_arena.allocator(), instr);
         } else {
             // Parse a folded instruction.
             var list = instr_value.getList().?;
@@ -115,10 +104,13 @@ fn parseInstrList(
                 },
             };
 
+            var parent_output = Instr.List.empty;
             const instr_result = try Instr.parseArgs(
                 keyword,
                 &list_contents,
                 tree,
+                &parent_output,
+                instr_list_arena,
                 parent,
                 arena,
                 caches,
@@ -126,15 +118,12 @@ fn parseInstrList(
                 &scratch,
             );
 
-            const parent_instr = switch (instr_result) {
-                .ok => |ok| ok,
-                .err => |err| {
-                    // If a single instruction fails to parse, then skip parsing the rest of them.
-                    try errors.append(err);
-                    _ = contents.empty();
-                    break :parse_body;
-                },
-            };
+            if (instr_result) |err| {
+                // If a single instruction fails to parse, then skip parsing the rest of them.
+                try errors.append(err);
+                _ = contents.empty();
+                break :parse_body;
+            }
 
             const parent_tag = keyword.tag(tree);
 
@@ -220,64 +209,50 @@ fn parseInstrList(
 
             // Recursive call!
             _ = scratch.reset(.retain_capacity);
-            var folded_instructions: InstrList = try parseInstrList(
+            var folded_instructions = try parseInstrList(
                 &list_contents,
                 tree,
                 list,
                 arena,
                 caches,
                 instr_list_arena,
-                instr_list_cache,
+                instr_list_pool,
                 errors,
                 &scratch,
             );
 
-            defer {
-                folded_instructions.clearRetainingCapacity(); // .len = 0;
-                instr_list_cache.append(instr_list_arena.allocator(), folded_instructions) catch {};
-            }
-
             std.debug.assert(list_contents.isEmpty());
 
             // Reserve space to avoid allocating in the `append()` calls.
-            {
-                const extra_instr_count: usize = switch (parent_tag) {
+            try output.growCapacityAdditionalWords(
+                instr_list_arena,
+                switch (parent_tag) {
                     .keyword_block, .keyword_loop => 2,
                     .keyword_if => if (else_branch.keyword.some) 3 else 2,
                     else => 1,
-                };
+                },
+            );
 
-                const additional_instr_count = std.math.add(
-                    usize,
-                    folded_instructions.len,
-                    extra_instr_count,
-                ) catch return error.OutOfMemory;
-
-                try output.growCapacity(
-                    instr_list_arena.allocator(),
-                    std.math.add(usize, output.len, additional_instr_count) catch return error.OutOfMemory,
-                );
-            }
-
+            // Append a block instruction before its contents.
             switch (parent_tag) {
-                .keyword_block, .keyword_loop, .keyword_if => {
-                    output.append(undefined, parent_instr) catch unreachable;
+                .keyword_block, .keyword_loop => {
+                    try output.appendMovedList(instr_list_arena, &parent_output, instr_list_pool);
+                    parent_output = undefined;
                 },
                 .keyword_else => unreachable,
                 else => {},
             }
 
-            {
-                var instrs_append = folded_instructions.constIterator(0);
-                while (instrs_append.next()) |instr_to_append|
-                    output.append(undefined, instr_to_append.*) catch unreachable;
-            }
+            // Append the folded instructions.
+            try output.appendMovedList(instr_list_arena, &folded_instructions, instr_list_pool);
+            folded_instructions = undefined;
 
+            // Append any implicit end instructions for blocks, or the "parent" of the folded instruction.
             switch (parent_tag) {
-                .keyword_block, .keyword_loop => {
-                    output.append(undefined, Instr.initImplicitEnd(list)) catch unreachable;
-                },
+                .keyword_block, .keyword_loop => try output.appendImplicitEnd(instr_list_arena, list),
                 .keyword_if => {
+                    try output.appendMovedList(instr_list_arena, &parent_output, instr_list_pool);
+
                     if (!then_branch.keyword.some) {
                         try errors.append(Error.initMissingFoldedThen(list));
                         _ = contents.empty();
@@ -287,87 +262,52 @@ fn parseInstrList(
                     {
                         // Recursive call!
                         _ = scratch.reset(.retain_capacity);
-                        var then_body: InstrList = try parseInstrList(
+                        var then_body: Instr.List = try parseInstrList(
                             &then_branch.contents,
                             tree,
                             list,
                             arena,
                             caches,
                             instr_list_arena,
-                            instr_list_cache,
+                            instr_list_pool,
                             errors,
                             &scratch,
                         );
 
-                        defer {
-                            then_body.clearRetainingCapacity();
-                            instr_list_cache.append(instr_list_arena.allocator(), then_body) catch {};
-                        }
-
-                        try output.growCapacity(
-                            instr_list_arena.allocator(),
-                            std.math.add(usize, output.len, then_body.len) catch return error.OutOfMemory,
-                        );
-
-                        {
-                            var then_append = then_body.constIterator(0);
-                            while (then_append.next()) |instr_to_append|
-                                output.append(undefined, instr_to_append.*) catch unreachable;
-                        }
+                        try output.appendMovedList(instr_list_arena, &then_body, instr_list_pool);
                     }
 
                     std.debug.assert(then_branch.contents.isEmpty());
                     then_branch = undefined;
 
                     if (else_branch.keyword.get()) |else_keyword| {
-                        output.append(
-                            undefined,
-                            Instr{
-                                .keyword = sexpr.Value.initAtom(else_keyword),
-                                .args = .{ .id_opt = .none },
-                            },
-                        ) catch unreachable;
+                        try output.append(instr_list_arena, else_keyword, Ident.Opt.none, tree);
 
                         // Recursive call!
                         _ = scratch.reset(.retain_capacity);
-                        var else_body: InstrList = try parseInstrList(
+                        var else_body: Instr.List = try parseInstrList(
                             &else_branch.contents,
                             tree,
                             list,
                             arena,
                             caches,
                             instr_list_arena,
-                            instr_list_cache,
+                            instr_list_pool,
                             errors,
                             &scratch,
                         );
 
-                        defer {
-                            else_body.clearRetainingCapacity();
-                            instr_list_cache.append(instr_list_arena.allocator(), else_body) catch {};
-                        }
-
-                        try output.growCapacity(
-                            instr_list_arena.allocator(),
-                            std.math.add(usize, output.len, else_body.len) catch return error.OutOfMemory,
-                        );
-
-                        {
-                            var else_append = else_body.constIterator(0);
-                            while (else_append.next()) |instr_to_append|
-                                output.append(undefined, instr_to_append.*) catch unreachable;
-                        }
+                        try output.appendMovedList(instr_list_arena, &else_body, instr_list_pool);
                     }
 
                     std.debug.assert(else_branch.contents.isEmpty());
                     else_branch = undefined;
 
-                    // Can't assume capacity is enough here, due to nature `growCapacity()` calls relying on the current length.
-                    try output.append(instr_list_arena.allocator(), Instr.initImplicitEnd(list));
+                    try output.appendImplicitEnd(instr_list_arena, list);
                 },
                 .keyword_then, .keyword_else => unreachable,
                 else => {
-                    output.append(undefined, parent_instr) catch unreachable;
+                    try output.appendMovedList(instr_list_arena, &parent_output, instr_list_pool);
 
                     std.debug.assert(else_branch.contents.isEmpty());
                     std.debug.assert(!else_branch.keyword.some);
@@ -397,7 +337,7 @@ pub fn parseContents(
     scratch: *ArenaAllocator,
 ) error{OutOfMemory}!Expr {
     _ = scratch.reset(.retain_capacity);
-    var instr_list_cache: InstrListCache = .{};
+    var instr_list_pool = Instr.List.Pool{};
     var actual_scratch = ArenaAllocator.init(scratch.allocator());
     var parsed_instructions = try parseInstrList(
         contents,
@@ -406,13 +346,15 @@ pub fn parseContents(
         arena,
         caches,
         scratch,
-        &instr_list_cache,
+        &instr_list_pool,
         errors,
         &actual_scratch,
     );
 
-    const instructions = try arena.dupeSegmentedList(Instr, 2, &parsed_instructions);
-    return .{ .instructions = instructions };
+    return .{
+        .count = parsed_instructions.count,
+        .contents = try parsed_instructions.moveToIndexedArena(arena),
+    };
 }
 
 // TODO: Make a non-recursive instruction parser
@@ -498,3 +440,5 @@ pub fn parseContentsUnused(
     output.writeToSlice(instructions, 0);
     return .{ .instructions = instructions };
 }
+
+//pub const Iterator

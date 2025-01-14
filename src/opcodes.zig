@@ -262,26 +262,24 @@ pub const AllOpcodes: type = ty: {
         break :count total;
     };
 
+    const TagType = std.math.IntFittingRange(0, total_count);
+
     var fields: [total_count]std.builtin.Type.EnumField = undefined;
-    var init_fields = 0;
+    var init_fields: TagType = 0;
 
     @setEvalBranchQuota(total_count * 2);
 
     for (byte_opcodes) |byte_opcode| {
         if (std.mem.startsWith(u8, byte_opcode.name, "0x")) continue;
-        fields[init_fields] = byte_opcode;
+        fields[init_fields] = .{ .name = byte_opcode.name, .value = init_fields };
         init_fields += 1;
     }
 
     std.debug.assert(init_fields == non_prefix_byte_opcode_count);
 
     for (prefix_sets) |set| {
-        const prefix = @intFromEnum(set.prefix);
         for (set.@"enum".fields) |opcode| {
-            fields[init_fields] = .{
-                .name = opcode.name,
-                .value = @as(u16, opcode.value << 8) | prefix,
-            };
+            fields[init_fields] = .{ .name = opcode.name, .value = init_fields };
             init_fields += 1;
         }
     }
@@ -290,7 +288,7 @@ pub const AllOpcodes: type = ty: {
 
     break :ty @Type(std.builtin.Type{
         .@"enum" = .{
-            .tag_type = u16,
+            .tag_type = TagType,
             .fields = &fields,
             .decls = &[0]std.builtin.Type.Declaration{},
             .is_exhaustive = true,

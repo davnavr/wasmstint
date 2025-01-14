@@ -97,7 +97,7 @@ pub const Ident = packed struct(u63) {
         some: bool,
         inner_ident: Ident,
 
-        pub const Unaligned = struct { ident: Opt align(4) };
+        pub const Unaligned = extern struct { ident: Opt align(4) };
 
         comptime {
             std.debug.assert(@sizeOf(Opt) == 8);

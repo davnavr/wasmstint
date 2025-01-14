@@ -32,7 +32,24 @@ pub const Token = struct {
     /// [*identifiers*]: https://webassembly.github.io/spec/core/text/values.html#text-id
     tag: Tag,
 
-    const keywords_list = [_][:0]const u8{
+    const opcode_keywords = opcodes: {
+        var names: [@typeInfo(AllOpcodes).@"enum".fields.len - 1][:0]const u8 = undefined;
+        var names_idx: usize = 0;
+        for (@typeInfo(AllOpcodes).@"enum".fields) |opcode| {
+            if (opcode.value == @intFromEnum(AllOpcodes.@"select t")) continue;
+
+            names[names_idx] = opcode.name;
+            names_idx += 1;
+        }
+
+        std.debug.assert(names_idx == names.len);
+        break :opcodes names;
+    };
+
+    const keywords_list =
+        // Instruction keywords come first to ensure easy conversion of `Tag` to `InstrTag`.
+        opcode_keywords ++
+        [_][:0]const u8{
         // Based on this grammar:
         // https://github.com/WebAssembly/spec/blob/d52e42df1314521c6e4cd7331593f2901e1d7b43/interpreter/README.md#s-expression-syntax
         "i32",
@@ -94,13 +111,6 @@ pub const Token = struct {
         // "output",
 
         // Keywords corresponding to opcodes are concatenated next.
-    } ++ opcodes: {
-        var names: [@typeInfo(AllOpcodes).@"enum".fields.len][:0]const u8 = undefined;
-        for (@typeInfo(AllOpcodes).@"enum".fields, &names) |opcode, *name| {
-            name.* = opcode.name;
-        }
-
-        break :opcodes names;
     };
 
     const non_keyword_tags = [_][:0]const u8{
@@ -116,24 +126,34 @@ pub const Token = struct {
         "keyword_unknown",
     };
 
-    pub const Tag: type = @Type(std.builtin.Type{ .@"enum" = .{
-        .is_exhaustive = true,
-        .tag_type = u16,
-        .decls = &[0]std.builtin.Type.Declaration{},
-        .fields = cases: {
-            var cases: [keywords_list.len + non_keyword_tags.len]std.builtin.Type.EnumField = undefined;
-            var cases_idx = 0;
-            for (non_keyword_tags) |tag| {
-                cases[cases_idx] = .{ .name = tag, .value = cases_idx };
-                cases_idx += 1;
-            }
+    pub const Tag = tag: {
+        var cases: [keywords_list.len + non_keyword_tags.len]std.builtin.Type.EnumField = undefined;
+        const TagType = std.math.IntFittingRange(0, cases.len);
+        {
+            var cases_idx: TagType = 0;
+
             for (keywords_list) |keyword| {
                 cases[cases_idx] = .{ .name = "keyword_" ++ keyword, .value = cases_idx };
                 cases_idx += 1;
             }
-            break :cases &cases;
-        },
-    } });
+
+            for (non_keyword_tags) |tag| {
+                cases[cases_idx] = .{ .name = tag, .value = cases_idx };
+                cases_idx += 1;
+            }
+
+            std.debug.assert(cases.len == cases_idx);
+        }
+
+        break :tag @Type(std.builtin.Type{
+            .@"enum" = .{
+                .is_exhaustive = true,
+                .tag_type = TagType,
+                .decls = &[0]std.builtin.Type.Declaration{},
+                .fields = &cases,
+            },
+        });
+    };
 
     const keyword_lookup = std.static_string_map.StaticStringMap(Tag).initComptime(kvs: {
         var entries: [keywords_list.len]struct { []const u8, Tag } = undefined;
@@ -142,8 +162,43 @@ pub const Token = struct {
         break :kvs entries;
     });
 
+    pub const InstrTag = tag: {
+        var cases: [opcode_keywords.len]std.builtin.Type.EnumField = undefined;
+        const TagType = std.math.IntFittingRange(0, cases.len);
+        {
+            var next_value: TagType = 0;
+            for (opcode_keywords) |name| {
+                cases[next_value] = .{ .name = name, .value = next_value };
+                next_value += 1;
+            }
+        }
+
+        break :tag @Type(std.builtin.Type{
+            .@"enum" = .{
+                .is_exhaustive = true,
+                .tag_type = TagType,
+                .decls = &[0]std.builtin.Type.Declaration{},
+                .fields = &cases,
+            },
+        });
+    };
+
+    pub fn tagToInstrTag(tag: Tag) InstrTag {
+        // return @enumFromInt(@as(
+        //     @typeInfo(InstrTag).@"enum".tag_type,
+        //     @intCast(@intFromEnum(tag) - @intFromEnum(Tag.keyword_nop)),
+        // ));
+        return @enumFromInt(@intFromEnum(tag));
+    }
+
     pub fn contents(token: *const Token, src: []const u8) []const u8 {
         return src[token.offset.start..][0..token.offset.end];
+    }
+
+    test {
+        try std.testing.expectEqual(InstrTag.nop, tagToInstrTag(.keyword_nop));
+        try std.testing.expectEqual(InstrTag.@"ref.func", tagToInstrTag(.@"keyword_ref.func"));
+        try std.testing.expectEqual(InstrTag.@"table.fill", tagToInstrTag(.@"keyword_table.fill"));
     }
 };
 
