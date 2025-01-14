@@ -16,7 +16,7 @@ const Name = @This();
 pub const Id = enum(u32) {
     _,
 
-    pub fn bytes(id: Id, arena: *const IndexedArena, cache: Cache) []const u8 {
+    pub fn bytes(id: Id, arena: *const IndexedArena, cache: *const Cache) []const u8 {
         return cache.lookup.keys()[@intFromEnum(id)].slice(arena);
     }
 };

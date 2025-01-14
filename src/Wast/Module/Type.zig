@@ -18,6 +18,11 @@ func: Func,
 pub const Func = struct {
     parameters: IndexedArena.Slice(Text.Param),
     results: IndexedArena.Slice(Text.Result),
+
+    pub const empty = Func{
+        .parameters = .empty,
+        .results = .empty,
+    };
 };
 
 const Type = @This();

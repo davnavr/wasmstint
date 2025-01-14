@@ -31,8 +31,7 @@ pub const Id = struct {
 };
 
 id: Id align(4),
-parameters: IndexedArena.Slice(Text.Param),
-results: IndexedArena.Slice(Text.Result),
+func: Text.Type.Func,
 
 const TypeUse = @This();
 
@@ -43,8 +42,7 @@ comptime {
 
 const empty = TypeUse{
     .id = .@"inline",
-    .parameters = .empty,
-    .results = .empty,
+    .func = .empty,
 };
 
 pub fn parseContents(
@@ -72,7 +70,7 @@ pub fn parseContents(
                     .err = Error.initUnexpectedValue(sexpr.Value.initAtom(keyword), .at_value),
                 };
 
-                std.debug.assert(type_use.parameters.isEmpty());
+                std.debug.assert(type_use.func.parameters.isEmpty());
 
                 const id_result = try Ident.parse(
                     &list_contents,
@@ -118,7 +116,7 @@ pub fn parseContents(
                     std.debug.assert(result_buf.len == 0);
 
                     // Reuse space in the arena since all parameters have been parsed
-                    type_use.parameters = try arena.dupeSegmentedList(Text.Param, 4, &param_buf);
+                    type_use.func.parameters = try arena.dupeSegmentedList(Text.Param, 4, &param_buf);
                     param_buf.clearRetainingCapacity();
                     _ = temporary.reset(.retain_capacity);
                 }
@@ -145,9 +143,9 @@ pub fn parseContents(
     if (param_buf.len > 0) {
         // Duplicate code from the `.keyword_result` case.
         std.debug.assert(result_buf.len == 0);
-        type_use.parameters = try arena.dupeSegmentedList(Text.Param, 4, &param_buf);
+        type_use.func.parameters = try arena.dupeSegmentedList(Text.Param, 4, &param_buf);
     }
 
-    type_use.results = try arena.dupeSegmentedList(Text.Result, 1, &result_buf);
+    type_use.func.results = try arena.dupeSegmentedList(Text.Result, 1, &result_buf);
     return .{ .ok = type_use };
 }

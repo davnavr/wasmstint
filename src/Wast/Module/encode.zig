@@ -3,6 +3,7 @@
 //! [binary format]: https://webassembly.github.io/spec/core/binary/index.html
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const SegmentedList = std.SegmentedList;
 const writeUleb128 = std.leb.writeUleb128;
@@ -18,79 +19,311 @@ const escapeStringLiteral = @import("../value.zig").string;
 const Module = @import("../Module.zig");
 const Text = Module.Text;
 
+const IdentLookup = @import("encode/ident_lookup.zig").IdentLookup;
+
 fn EncodeError(comptime Out: type) type {
     return error{OutOfMemory} || Out.Error;
 }
 
-fn writeByteVec(output: anytype, bytes: []const u8) EncodeError(output) {
-    try writeUleb128(output, std.math.cast(u32, bytes.len) orelse return error.OutOfMemory);
+fn encodeIdx(output: anytype, comptime I: type, idx: I) @TypeOf(output).Error!void {
+    try writeUleb128(output, @as(@typeInfo(I).@"enum".tag_type, @intFromEnum(idx)));
 }
 
-/// A model of the WebAssembly [abstract syntax].
-///
-/// [abstract syntax]: https://webassembly.github.io/spec/core/syntax/index.html
-const Wasm = struct {
-    const Type = union(enum) {
-        field: IndexedArena.Idx(Text.Type),
-        // block_type
-        // func: IndexedArena.Idx(Text.Func),
+fn encodeVecLen(output: anytype, len: usize) EncodeError(@TypeOf(output))!void {
+    try writeUleb128(output, std.math.cast(u32, len) orelse return error.OutOfMemory);
+}
 
-        const Idx = enum(u32) { _ };
+fn encodeByteVec(output: anytype, bytes: []const u8) EncodeError(output)!void {
+    try encodeVecLen(output, bytes.len);
+    try output.writeAll(bytes);
+}
 
-        const Sec = struct {
-            sec: std.SegmentedList(Type, 8),
-            ids: std.AutoHashMapUnmanaged(Ident.Interned, Idx),
-
-            const empty = Sec{ .sec = .{}, .ids = .empty };
-        };
-
-        // TODO: Use this for comparisons when inserting new TypeUses
-        // fn funcType(ty: Type) *const Text.Type.Func
+fn addOrOom(comptime T: type, a: T, b: T) Allocator.Error!T {
+    return std.math.add(T, a, b) catch |e| switch (e) {
+        error.Overflow => error.OutOfMemory,
     };
+}
 
-    const Import = union(enum) {
-        // field: IndexedArena.Idx(Text.ImportOrSomething), // reference to import field
-        inline_func: IndexedArena.Idx(Text.Func),
+pub const ValType = enum(u8) {
+    i32 = 0x7F,
+    i64 = 0x7E,
+    f32 = 0x7D,
+    f64 = 0x7C,
+    v128 = 0x7B,
+    funcref = 0x70,
+    externref = 0x6F,
 
-        fn name(import: Import, arena: *const IndexedArena) *const Text.ImportName {
-            switch (import) {
-                .inline_func => |func| &func.getPtr(arena).body.inline_import,
+    fn fromValType(text: Text.ValType, tree: *const sexpr.Tree) ValType {
+        return switch (text.keyword.tag(tree)) {
+            .keyword_i32 => .i32,
+            .keyword_i64 => .i64,
+            .keyword_f32 => .f32,
+            .keyword_f64 => .f64,
+            .keyword_funcref => .funcref,
+            .keyword_externref => .externref,
+            else => unreachable,
+        };
+    }
+
+    fn encode(val_type: ValType, output: anytype) EncodeError(output)!void {
+        try output.writeByte(@intFromEnum(val_type));
+    }
+};
+
+pub const Type = *const Text.Type.Func;
+
+pub const TypeIdx = enum(u32) { _ };
+pub const FuncIdx = enum(u32) { _ };
+
+const IterParamTypes = struct {
+    types: []const Text.ValType,
+    params: []const Text.Param,
+
+    fn init(parameters: []const Text.Param) @This() {
+        return .{ .types = .{}, .params = parameters };
+    }
+
+    fn next(iter: *@This(), tree: *const sexpr.Tree, arena: *const IndexedArena) ?ValType {
+        if (iter.types.len == 0 and iter.params.len > 0) {
+            iter.types = iter.params[0].types.items(arena);
+            iter.params = iter.params[1..];
+        }
+
+        if (iter.types.len > 0) {
+            const item = iter.types[0];
+            iter.types = iter.types[1..];
+            return ValType.fromValType(item, tree);
+        } else {
+            return null;
+        }
+    }
+};
+
+const IterResultTypes = struct {
+    types: []const Text.ValType,
+    results: []const Text.Result,
+
+    fn init(results: []const Text.Result) @This() {
+        return .{ .types = .{}, .results = results };
+    }
+
+    fn next(iter: *@This(), tree: *const sexpr.Tree, arena: *const IndexedArena) ?ValType {
+        if (iter.types.len == 0 and iter.results.len > 0) {
+            iter.types = iter.results[0].types.items(arena);
+            iter.results = iter.results[1..];
+        }
+
+        if (iter.types.len > 0) {
+            const item = iter.types[0];
+            iter.types = iter.types[1..];
+            return ValType.fromValType(item, tree);
+        } else {
+            return null;
+        }
+    }
+};
+
+const TypeDedup = struct {
+    lookup: std.HashMapUnmanaged(
+        Type,
+        TypeIdx,
+        Context,
+        std.hash_map.default_max_load_percentage,
+    ),
+
+    const Context = struct {
+        arena: *const IndexedArena,
+        tree: *const sexpr.Tree,
+
+        pub fn eql(ctx: Context, a: Type, b: Type) bool {
+            {
+                var a_params_iter = IterParamTypes.init(a.parameters.items(ctx.arena));
+                var b_params_iter = IterParamTypes.init(b.parameters.items(ctx.arena));
+                while (a_params_iter.next(ctx.tree, ctx.arena)) |a_param| {
+                    const b_param = b_params_iter.next(ctx.arena) orelse return false;
+                    if (@intFromEnum(a_param) != @intFromEnum(b_param))
+                        return false;
+                }
+
+                if (b_params_iter.next(ctx.arena) != null) return false;
             }
+            {
+                var a_results_iter = IterResultTypes.init(a.results.items(ctx.arena));
+                var b_results_iter = IterResultTypes.init(b.results.items(ctx.arena));
+                while (a_results_iter.next(ctx.tree, ctx.arena)) |a_param| {
+                    const b_param = b_results_iter.next(ctx.arena) orelse return false;
+                    if (@intFromEnum(a_param) != @intFromEnum(b_param))
+                        return false;
+                }
+
+                if (b_results_iter.next(ctx.arena) != null) return false;
+            }
+
+            return true;
+        }
+
+        pub fn hash(ctx: Context, key: Type) u64 {
+            var hasher = std.hash.Wyhash.init(0);
+            for (@as([]const Text.Result, key.parameters.items(ctx.arena))) |*param| {
+                std.hash.autoHashStrat(
+                    hasher,
+                    @as([]const Text.ValType, param.types.items(ctx.arena)),
+                    .Deep,
+                );
+            }
+
+            for (@as([]const Text.Result, key.results.items(ctx.arena))) |*result| {
+                std.hash.autoHashStrat(
+                    hasher,
+                    @as([]const Text.ValType, result.types.items(ctx.arena)),
+                    .Deep,
+                );
+            }
+
+            return hasher.final();
         }
     };
 
-    const Func = struct {
-        decl: IndexedArena.Idx(Text.Func),
-        type_idx: Type.Idx,
-    };
+    const empty = TypeDedup{ .lookup = .empty };
+};
 
-    const CodeSec = struct {
-        const Fixup = packed struct(u32) {
-            tag: enum(u2) {
-                bytes,
-                // type_use,
-            },
-            payload: packed union {
-                bytes: packed struct(u30) { len: u30 },
-            },
+const Import = union(enum) {
+    // field: IndexedArena.Idx(Text.ImportField),
+    inline_func: IndexedArena.Idx(Text.Func),
+    inline_table: IndexedArena.Idx(Text.Table),
+    inline_mem: IndexedArena.Idx(Text.Mem),
+    inline_global: IndexedArena.Idx(Text.Global),
+
+    fn name(import: Import, arena: *const IndexedArena) *const Text.ImportName {
+        return switch (import) {
+            .inline_func => |func| &func.getPtr(arena).body.inline_import,
+            .inline_table => |table| &table.getPtr(arena).inner.no_elements.inline_import.name,
+            .inline_mem => |mem| &mem.getPtr(arena).import_exports.import.name,
+            .inline_global => |global| &global.getPtr(arena).inner.inline_import,
         };
+    }
+
+    comptime {
+        std.debug.assert(@sizeOf(Import) == 8);
+    }
+};
+
+const Export = union(enum) {
+    // module_field: IndexedArena.Idx(Text.ExportField),
+    inline_func: struct { field: IndexedArena.Idx(Text.Func), idx: FuncIdx },
+
+    fn name(@"export": Export, arena: *const IndexedArena) Text.InlineExports {
+        const list = switch (@"export") {
+            .inline_func => |func| func.field.getPtr(arena).inline_exports,
+        };
+
+        std.debug.assert(!list.isEmpty());
+        return list;
+    }
+
+    comptime {
+        std.debug.assert(@sizeOf(Export) == 8);
+    }
+};
+
+fn IdxCounter(comptime Idx: type) type {
+    return struct {
+        next: Idx = @enumFromInt(0),
+
+        const Self = @This();
+
+        pub fn increment(counter: *Self) Allocator.Error!Idx {
+            const give = counter.next;
+            counter.next = addOrOom(@typeInfo(Idx).@"enum".tag_type, @intFromEnum(counter.next), 1);
+            return give;
+        }
     };
+}
 
-    const Export = union(enum) {
-        // field: ,
-        inline_func: IndexedArena.Idx(Text.Func),
+const Wasm = struct {
+    /// Types originating from `Text.Type` fields come before those inserted by `TypeUse`s.
+    types: std.SegmentedList(IndexedArena.Idx(Text.Type), 8) = .{},
+    imports: std.SegmentedList(Import, 4) = .{},
+    exports: std.SegmentedList(Export, 4) = .{},
+    exports_count: u32 = 0,
 
-        // fn names(def: Export, arena: *const IndexedArena) Text.InlineExports {
-        //     switch (def) {
-        //         .inline_func => |func| func.getPtr(arena).inline_exports,
-        //     }
-        // }
-    };
+    func_count: IdxCounter(FuncIdx) = .{},
+    defined_funcs: std.SegmentedList(IndexedArena.Idx(Text.Func), 8) = .{},
 
-    types: Type.Sec = .empty,
-    imports: std.SegmentedList(Import, 8) = .{},
-    exports: std.SegmentedList(Export, 8) = .{},
-    funcs: std.SegmentedList(Func, 8) = .{},
+    type_uses: std.AutoArrayHashMapUnmanaged(*const Text.TypeUse, TypeIdx) = .empty,
+    type_dedup: TypeDedup = .empty,
+
+    type_ids: IdentLookup(TypeIdx) = .empty,
+    func_ids: IdentLookup(FuncIdx) = .empty,
+
+    fn checkImportOrdering(
+        state: *const Wasm,
+        import_keyword: sexpr.TokenId,
+        errors: *Error.List,
+    ) Allocator.Error!void {
+        if (state.defined_funcs.len > 0)
+            try errors.append(Error.initImportAfterDefinition(import_keyword));
+    }
+
+    const TypeSec = std.SegmentedList(Type, 8);
+
+    fn resolveTypeSec(
+        wasm: *const Wasm,
+        tree: *const sexpr.Tree,
+        errors: *Error.List,
+        arena: *ArenaAllocator,
+    ) Allocator.Error!TypeSec {
+        var type_sec = TypeSec{};
+        try wasm.types.growCapacity(arena.allocator(), wasm.types.len);
+        {
+            var iter_type_fields = wasm.types.constIterator(0);
+            while (iter_type_fields.next()) |type_field| {
+                type_sec.append(undefined, type_field.*) catch unreachable;
+            }
+        }
+
+        // Resolve all `TypeUse`s into types to append after all of the defined ones.
+        {
+            var iter_type_uses = wasm.type_uses.iterator();
+            while (iter_type_uses.next()) |entry| {
+                const type_use = entry.key_ptr.*;
+                entry.value_ptr.* = if (type_use.id.header.is_inline) type_idx: {
+                    const dedup_entry = try wasm.type_dedup.lookup.getOrPutContext(
+                        &type_use.func,
+                        .{ .arena = arena, .tree = tree },
+                    );
+
+                    if (dedup_entry.found_existing) {
+                        break :type_idx dedup_entry.value_ptr.*;
+                    } else {
+                        const type_idx: TypeIdx = @enumFromInt(
+                            std.math.cast(u32, wasm.types.len) orelse
+                                return error.OutOfMemory,
+                        );
+
+                        try type_sec.append(arena.allocator(), &type_use.func);
+                        dedup_entry.value_ptr.* = type_idx;
+                        break :type_idx type_idx;
+                    }
+                } else switch (type_use.id.type.toUnion(tree)) {
+                    .symbolic => |id| type_idx: switch (wasm.type_ids.get(id, type_use.id.type.token)) {
+                        .ok => |ok| {
+                            if (!(TypeDedup.Context{ .arena = arena }).eql(wasm.types.at(ok).*, &type_use.func)) {
+                                // TODO: Error for type use mismatch
+                            }
+
+                            break :type_idx ok;
+                        },
+                        .err => |err| {
+                            try errors.append(err);
+                            break :type_idx undefined;
+                        },
+                    },
+                    .numeric => |numeric| @enumFromInt(numeric),
+                };
+            }
+        }
+    }
 };
 
 /// Maps an interned symbolic identifier to where it is first defined.
@@ -104,7 +337,7 @@ const IndexLookup = struct {
         id: Ident.Symbolic,
         alloca: *ArenaAllocator,
         errors: *Error.List,
-    ) error{OutOfMemory}!void {
+    ) Allocator.Error!void {
         if (!id.some) return;
 
         const entry = try lookup.map.getOrPut(alloca.allocator(), id.ident);
@@ -118,6 +351,64 @@ const IndexSpaces = struct {
     functions: IndexLookup = .empty,
 };
 
+const wasm_preamble = "\x00asm\x01\x00\x00\x00";
+
+fn encodeSection(output: anytype, id: u8, contents: []const u8) EncodeError(@TypeOf(output))!void {
+    try output.writeByte(id);
+    try encodeByteVec(output, contents);
+}
+
+fn encodeResultType(
+    output: anytype,
+    comptime Iterator: type,
+    comptime T: type,
+    types: IndexedArena.Slice(T),
+    tree: *const sexpr.Tree,
+    arena: *const IndexedArena,
+    scratch: *ArenaAllocator,
+) EncodeError(@TypeOf(output))!void {
+    var text_iter: Iterator = Iterator.init(types.items(arena));
+    var types_buf = std.SegmentedList(ValType, 8){};
+    try types_buf.setCapacity(scratch.allocator(), types.len);
+    while (@as(text_iter.next(tree, arena), ?ValType)) |val_type| {
+        try types_buf.append(scratch.allocator(), val_type);
+    }
+
+    try encodeVecLen(output, types_buf.len);
+    var final_iter = types_buf.constIterator(0);
+    while (final_iter.next()) |val_type| {
+        try val_type.encode(output);
+    }
+}
+
+fn encodeTypeSecFunc(
+    output: anytype,
+    tree: *const sexpr.Tree,
+    arena: *const IndexedArena,
+    func_type: *const Text.Type.Func,
+    scratch: *ArenaAllocator,
+) EncodeError(@TypeOf(output))!void {
+    try output.writeByte(0x60);
+    try encodeResultType(
+        output,
+        IterParamTypes,
+        Text.Param,
+        func_type.parameters,
+        tree,
+        arena,
+        scratch,
+    );
+    try encodeResultType(
+        output,
+        IterResultTypes,
+        Text.Result,
+        func_type.results,
+        tree,
+        arena,
+        scratch,
+    );
+}
+
 fn encodeText(
     module: *const Text,
     tree: *const sexpr.Tree,
@@ -127,95 +418,116 @@ fn encodeText(
     errors: *Error.List,
     alloca: *ArenaAllocator,
 ) EncodeError(@TypeOf(output))!void {
+    _ = alloca.reset(.retain_capacity);
+
     // Allocated in `alloca`.
     var wasm = Wasm{};
-    var index_spaces = IndexSpaces{};
-    // TODO: Need way to determine total # of funcs, especially when imports come into the picture
     for (@as([]const Text.Field, module.fields.items(arena))) |field| {
         switch (field.keyword.tag(tree)) {
+            // .keyword_import => {wasm.checkImportOrdering();},
             .keyword_type => {
-                const type_idx = field.contents.type;
-                const func_type: *const Text.Type = type_idx.getPtr(arena);
+                const type_field = field.contents.type;
+                const type_field_ptr: *const Text.Type = type_field.getPtr(arena);
+                const type_idx: TypeIdx = @enumFromInt(std.math.cast(u32, wasm.types.len) orelse return error.OutOfMemory);
 
-                std.debug.assert(func_type.keyword.tag(tree) == .keyword_func);
-
-                const num_id = std.math.cast(u32, wasm.types.sec.len) orelse return error.OutOfMemory;
-                try wasm.types.sec.append(alloca.allocator(), type_idx);
-
-                const id = func_type.id.ident;
-                if (id.some) {
-                    const entry = try wasm.types.ids.getOrPut(alloca.allocator(), id.ident);
-                    if (entry.found_existing) {
-                        try errors.append(Error.initDuplicateIdent(id, entry.value_ptr.*));
-                    } else {
-                        entry.value_ptr.* = @as(Wasm.Type.Idx, @enumFromInt(num_id));
-                    }
-                }
+                try wasm.type_ids.insert(type_field_ptr.id, type_idx, alloca, errors);
+                try wasm.types.append(alloca.allocator(), field.contents.type);
+                try wasm.type_dedup.lookup.putNoClobberContext(
+                    alloca.allocator(),
+                    &type_field_ptr.func,
+                    type_idx,
+                    .{ .arena = arena, .tree = tree },
+                );
             },
             .keyword_func => {
-                const func_idx = field.contents.func;
-                const func: *const Text.Func = func_idx.getPtr(arena);
+                const func_field = field.contents.func;
+                const func_field_ptr: *const Text.Func = func_field.getPtr(arena);
+                const func_idx = try wasm.func_count.increment();
 
-                try index_spaces.functions.insert(func.id, alloca, errors);
+                try wasm.func_ids.insert(
+                    func_field_ptr.id,
+                    func_idx,
+                    alloca,
+                    &wasm.func_count,
+                    errors,
+                );
 
-                // TODO: Add TypeUse to typesec
-                // - how to get the type index used?
-                // - add an std.SegmentedList(u32) for func types? or Func = struct { decl: IndexedArena.Idx(Text.Func), type_idx: u32 };
-
-                if (func.inline_import.some) {
-                    try wasm.imports.append(alloca.allocator(), .{ .inline_func = func_idx });
-                } else {
-                    try wasm.funcs.append(alloca.allocator(), func_idx);
+                if (!func_field_ptr.inline_exports.isEmpty()) {
+                    wasm.exports_count = try addOrOom(u32, wasm.exports_count, func_field_ptr.inline_exports.len);
+                    try wasm.exports.append(
+                        alloca.allocator(),
+                        Export{ .inline_func = .{ .field = func_field, .idx = func_idx } },
+                    );
                 }
 
-                try wasm.exports.append(alloca.allocator(), .{ .inline_func = func_idx });
+                if (func_field_ptr.inline_import.get()) |import_keyword| {
+                    try wasm.checkImportOrdering(import_keyword, errors);
+                    try wasm.imports.append(
+                        alloca.allocator(),
+                        Import{ .inline_func = func_field },
+                    );
+                } else {
+                    try wasm.defined_funcs.append(alloca.allocator(), func_field);
+                }
+
+                try wasm.type_uses.putNoClobber(alloca.allocator(), &func_field_ptr.type_use, undefined);
+
+                // TODO: Get `TypeUse`s from the function's body.
             },
+            // .keyword_table => {},
+            // .keyword_memory => {},
+            // .keyword_global => {},
             else => unreachable,
         }
     }
 
-    var section_arena = ArenaAllocator.init(alloca.allocator());
-    var section_buffer = std.ArrayList(u8).init(section_arena.allocator()); // std.SegmentedList(u8, 0x200)
-    const section: std.ArrayList(u8).Writer = section_buffer.writer();
+    var scratch = ArenaAllocator.init(alloca.allocator());
+    var section_buf = std.ArrayList(u8).init(alloca.allocator());
 
-    _ = section;
-    _ = caches;
-    unreachable; // TODO
+    try output.writeAll(wasm_preamble);
 
-    // var iter_imports = fixed_sections.imports.constIterator(0);
-    // while (iter_imports.next()) |import| {
-    // const ImportDesc = union {
-    //     // type
-    // };
+    encode_type_sec: {
+        const type_sec = try wasm.resolveTypeSec(tree, errors, &scratch);
+        if (type_sec.len == 0) break :encode_type_sec;
 
-    // var name = switch (import.*); // Don't switch twice,
+        try encodeVecLen(section_buf.writer(), type_sec.len);
 
-    // const import_desc = switch (import.*) {
-    //     .inline_func => |func_idx| {
-    //         // writeByteVec(section, func.);
-    //     },
-    // };
+        var types_iter = type_sec.constIterator(0);
+        while (types_iter.next()) |func_type| {
+            try encodeTypeSecFunc(section_buf.writer(), tree, arena, func_type.*);
+        }
 
-    // // TODO: Switches above set variables, do writing here
-    // }
+        try encodeSection(output, 1, section_buf.items);
+    }
 
-    // TODO: May need to wait for sections that might use typeuse to be written to buffers before finally writing the typesec
+    if (wasm.imports.len > 0) {
+        _ = scratch.reset(.retain_capacity);
+        section_buf.clearRetainingCapacity();
 
-    // if (fixed_sections.imports.len > 0) {
-    //     const import_sec_len = std.math.cast(u32, section_buffer.items.len) orelse return error.OutOfMemory;
-    //     try output.writeByte(2);
-    //     try writeUleb128(output, import_sec_len);
-    //     try output.writeAll(section_buffer.items);
-    //     section_buffer.clearRetainingCapacity();
-    //     _ = section_arena.reset(.retain_capacity);
-    // }
+        try encodeVecLen(section_buf.writer(), wasm.imports.len);
 
-    // TODO: How to ensure `index_spaces` allows retrieval of u32 index?
-    // - Indices must only be assigned after all definitions + imports are parsed
-    // - type use ensures insertion of new types in Expr only appends to the end of the module
-    // - should write to index_spaces occur when field is first processed, or after all functions are known?
+        var iter_imports = wasm.imports.constIterator(0);
+        while (iter_imports.next()) |import| {
+            const name = import.name(arena);
+            try encodeByteVec(output, name.module.id.bytes(arena, &caches.names));
+            try encodeByteVec(output, name.name.id.bytes(arena, &caches.names));
+            switch (import) {
+                .inline_func => |func_field| {
+                    try output.writeByte(0);
+                    try encodeIdx(
+                        output,
+                        TypeIdx,
+                        wasm.type_uses.get(&func_field.getPtr(arena).type_use.func).?,
+                    );
+                },
+                else => unreachable, // TODO
+            }
+        }
 
-    // Implement encoding of name section.
+        try encodeSection(output, 2, section_buf.items);
+    }
+
+    return true;
 }
 
 /// Writes the binary representation of a given WebAssembly Text format module.
@@ -231,7 +543,7 @@ pub fn encode(
     alloca: *ArenaAllocator,
 ) EncodeError(@TypeOf(output))!void {
     // preamble
-    try output.writeAll("\x00asm\x01\x00\x00\x00");
+    try output.writeAll("\x00asm\x01\x00\x00\x00"); // TODO: Remove!
 
     _ = alloca.reset(.retain_capacity);
     switch (module.format) {

@@ -199,6 +199,19 @@ pub const Ident = packed struct(u63) {
             .{ .err = Error.initExpectedToken(sexpr.Value.initAtom(atom), .id, .at_value) };
     }
 
+    pub const Union = union(enum) {
+        symbolic: Interned,
+        numeric: u32,
+    };
+
+    pub fn toUnion(ident: Ident, tree: *const sexpr.Tree) Union {
+        return switch (ident.token.tag(tree)) {
+            .id => .{ .symbolic = ident.inner_index.symbolic },
+            .integer => .{ .numeric = ident.inner_index.numeric },
+            else => unreachable,
+        };
+    }
+
     pub const Symbolic = packed struct(u64) {
         ident: Interned,
         token: sexpr.TokenId,

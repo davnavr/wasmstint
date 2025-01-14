@@ -46,6 +46,8 @@ pub const Tag = enum {
     mem_arg_align_non_power_of_two,
 
     duplicate_ident,
+    undefined_ident,
+    import_after_definition,
 };
 
 const Error = @This();
@@ -101,10 +103,15 @@ pub fn print(err: *const Error, tree: *const sexpr.Tree, writer: anytype) !void 
         .mem_arg_align_non_power_of_two => {
             try writer.writeAll("alignment must be power-of-two");
         },
+
+        .undefined_ident => {
+            try writer.writeAll("undefined variable");
+        },
         .duplicate_ident => {
             // const duplicate_ident = err.extra.duplicate_ident;
             try writer.writeAll("identifier defined twice");
         },
+        .import_after_definition => try writer.writeAll("imports must occur before all non-import definitions"),
     }
 }
 
@@ -177,11 +184,27 @@ pub fn initMemArgAlignNonPowerOfTwo(align_token: sexpr.TokenId) Error {
     };
 }
 
+pub fn initUndefinedIdent(ident: sexpr.TokenId) Error {
+    return .{
+        .value = Value.initAtom(ident),
+        .tag = .undefined_ident,
+        .extra = undefined,
+    };
+}
+
 pub fn initDuplicateIdent(id: Ident.Symbolic, original: sexpr.TokenId) Error {
     return .{
         .value = Value.initAtom(id.token),
         .tag = .duplicate_ident,
         .extra = .{ .duplicate_ident = .{ .original = original } },
+    };
+}
+
+pub fn initImportAfterDefinition(import_keyword: sexpr.TokenId) Error {
+    return .{
+        .value = Value.initAtom(import_keyword),
+        .tag = .import_after_definition,
+        .extra = undefined,
     };
 }
 
