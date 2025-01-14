@@ -4,7 +4,7 @@
 //! [WebAssembly lexical format]: https://webassembly.github.io/spec/core/text/lexical.html#tokens
 
 const std = @import("std");
-const opcodes = @import("../opcodes.zig");
+const AllOpcodes = @import("../opcodes.zig").AllOpcodes;
 
 utf8: std.unicode.Utf8Iterator,
 
@@ -31,27 +31,6 @@ pub const Token = struct {
     ///
     /// [*identifiers*]: https://webassembly.github.io/spec/core/text/values.html#text-id
     tag: Tag,
-
-    fn keywordsFromEnum(
-        comptime Enum: type,
-        comptime prefix_count: usize,
-    ) [@typeInfo(Enum).@"enum".fields.len - prefix_count][:0]const u8 {
-        const enum_fields = @typeInfo(Enum).@"enum".fields;
-
-        var names: [enum_fields.len - prefix_count][:0]const u8 = undefined;
-        var names_idx = 0;
-
-        @setEvalBranchQuota(2_000);
-
-        for (enum_fields) |case| {
-            if (std.mem.startsWith(u8, case.name, "0x")) continue;
-            names[names_idx] = case.name;
-            names_idx += 1;
-        }
-
-        std.debug.assert(names_idx == names.len);
-        return names;
-    }
 
     const keywords_list = [_][:0]const u8{
         // Based on this grammar:
@@ -115,8 +94,14 @@ pub const Token = struct {
         // "output",
 
         // Keywords corresponding to opcodes are concatenated next.
-    } ++ keywordsFromEnum(opcodes.ByteOpcode, 1) ++
-        keywordsFromEnum(opcodes.FCPrefixOpcode, 0);
+    } ++ opcodes: {
+        var names: [@typeInfo(AllOpcodes).@"enum".fields.len][:0]const u8 = undefined;
+        for (@typeInfo(AllOpcodes).@"enum".fields, &names) |opcode, *name| {
+            name.* = opcode.name;
+        }
+
+        break :opcodes names;
+    };
 
     const non_keyword_tags = [_][:0]const u8{
         "reserved",

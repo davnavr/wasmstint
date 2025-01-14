@@ -1,3 +1,8 @@
+const std = @import("std");
+const meta = std.meta;
+
+const opcodes = @This();
+
 pub const ByteOpcode = enum(u8) {
     @"unreachable" = 0x00,
     nop = 0x01,
@@ -230,8 +235,65 @@ pub const FCPrefixOpcode = enum(u5) {
     @"table.fill" = 17,
 };
 
-// /// Technically a LEB128 encoded `u32`, but all of these are `<= 0xFF` for now.
-// /// So this can be parsed as a LEB128 encoded `u8`.
 // pub const FDPrefixOpcode = enum(u8) {
 //     @"v128.load" = 0,
 // };
+
+pub const AllOpcodes: type = ty: {
+    const PrefixSet = struct {
+        prefix: ByteOpcode,
+        @"enum": std.builtin.Type.Enum,
+
+        fn init(comptime prefix: ByteOpcode) @This() {
+            return .{
+                .prefix = prefix,
+                .@"enum" = @typeInfo(@field(opcodes, @tagName(prefix)[2..4] ++ "PrefixOpcode")).@"enum",
+            };
+        }
+    };
+
+    const byte_opcodes = @typeInfo(ByteOpcode).@"enum".fields;
+    const prefix_sets = [1]PrefixSet{PrefixSet.init(.@"0xFC")};
+    const non_prefix_byte_opcode_count = byte_opcodes.len - prefix_sets.len;
+
+    const total_count = count: {
+        var total = non_prefix_byte_opcode_count;
+        for (prefix_sets) |set| total += set.@"enum".fields.len;
+        break :count total;
+    };
+
+    var fields: [total_count]std.builtin.Type.EnumField = undefined;
+    var init_fields = 0;
+
+    @setEvalBranchQuota(total_count * 2);
+
+    for (byte_opcodes) |byte_opcode| {
+        if (std.mem.startsWith(u8, byte_opcode.name, "0x")) continue;
+        fields[init_fields] = byte_opcode;
+        init_fields += 1;
+    }
+
+    std.debug.assert(init_fields == non_prefix_byte_opcode_count);
+
+    for (prefix_sets) |set| {
+        const prefix = @intFromEnum(set.prefix);
+        for (set.@"enum".fields) |opcode| {
+            fields[init_fields] = .{
+                .name = opcode.name,
+                .value = @as(u16, opcode.value << 8) | prefix,
+            };
+            init_fields += 1;
+        }
+    }
+
+    std.debug.assert(init_fields == fields.len);
+
+    break :ty @Type(std.builtin.Type{
+        .@"enum" = .{
+            .tag_type = u16,
+            .fields = &fields,
+            .decls = &[0]std.builtin.Type.Declaration{},
+            .is_exhaustive = true,
+        },
+    });
+};
