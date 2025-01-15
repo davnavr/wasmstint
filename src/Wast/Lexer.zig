@@ -164,19 +164,14 @@ pub const Token = struct {
 
     pub const InstrTag = tag: {
         var cases: [opcode_keywords.len]std.builtin.Type.EnumField = undefined;
-        const TagType = std.math.IntFittingRange(0, cases.len);
-        {
-            var next_value: TagType = 0;
-            for (opcode_keywords) |name| {
-                cases[next_value] = .{ .name = name, .value = next_value };
-                next_value += 1;
-            }
+        for (opcode_keywords, 0..) |name, i| {
+            cases[i] = .{ .name = name, .value = i };
         }
 
         break :tag @Type(std.builtin.Type{
             .@"enum" = .{
                 .is_exhaustive = true,
-                .tag_type = TagType,
+                .tag_type = std.math.IntFittingRange(0, cases.len),
                 .decls = &[0]std.builtin.Type.Declaration{},
                 .fields = &cases,
             },
