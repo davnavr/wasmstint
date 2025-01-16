@@ -16,9 +16,9 @@ pub fn build(b: *std.Build) void {
     const root_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
     });
-    const global_allocator_mod = b.createModule(.{
-        .root_source_file = b.path("src/GlobalAllocator.zig"),
-    });
+    // const global_allocator_mod = b.createModule(.{
+    //     .root_source_file = b.path("src/GlobalAllocator.zig"),
+    // });
 
     const run_wast_exe = b.addExecutable(.{
         .name = "wasmstint-wast",
@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
     });
 
     run_wast_exe.root_module.addImport("wasmstint", root_mod);
-    run_wast_exe.root_module.addImport("GlobalAllocator", global_allocator_mod);
+    // run_wast_exe.root_module.addImport("GlobalAllocator", global_allocator_mod);
 
     const run_wast_cmd = b.addRunArtifact(run_wast_exe);
     if (b.args) |args| {

@@ -72,44 +72,50 @@ const Arguments = struct {
     }
 };
 
-pub fn main() !u8 {
-    var global_allocator = @import("GlobalAllocator").init();
-    defer global_allocator.deinit();
-    const gpa = global_allocator.allocator();
+const file_max_bytes = @as(usize, 1) << 21; // 2 MiB
 
-    var arguments_arena = ArenaAllocator.init(gpa);
+pub fn main() !u8 {
+    var arguments_arena = ArenaAllocator.init(std.heap.page_allocator);
     defer arguments_arena.deinit();
 
-    var scratch = ArenaAllocator.init(gpa);
+    var scratch = ArenaAllocator.init(std.heap.page_allocator);
     defer scratch.deinit();
 
     const arguments = try Arguments.parse(&arguments_arena, &scratch);
 
-    var file_arena = ArenaAllocator.init(gpa);
-    defer file_arena.deinit();
+    var file_buffer = std.ArrayList(u8).init(std.heap.page_allocator);
+    defer file_buffer.deinit();
 
-    var parse_arena = ArenaAllocator.init(gpa);
+    var encoding_buffer = std.ArrayList(u8).init(std.heap.page_allocator);
+    defer encoding_buffer.deinit();
+
+    var parse_arena = ArenaAllocator.init(std.heap.page_allocator);
     defer parse_arena.deinit();
 
-    const file_max_bytes = @as(usize, 1) << 21; // 2 miB
-
     const color_config = std.io.tty.detectConfig(std.io.getStdErr());
-
     const cwd = std.fs.cwd();
+
     for (arguments.run) |script_path| {
         const script_buf: []const u8 = buf: {
-            _ = file_arena.reset(.{ .retain_with_limit = file_max_bytes });
-
             const script_file = cwd.openFileZ(script_path, .{}) catch |e| {
                 std.debug.print("Could not open script file {s}: {!}", .{ script_path, e });
                 return e;
             };
+
             defer script_file.close();
 
-            break :buf script_file.readToEndAlloc(file_arena.allocator(), file_max_bytes) catch |e| {
+            file_buffer.clearRetainingCapacity();
+            size_estimate: {
+                const metadata = script_file.metadata() catch break :size_estimate;
+                try file_buffer.ensureTotalCapacity(std.math.cast(usize, metadata.size()) orelse return error.OutOfMemory);
+            }
+
+            script_file.reader().readAllArrayList(&file_buffer, file_max_bytes) catch |e| {
                 if (e != error.OutOfMemory) std.debug.print("Could not read script file {s}", .{script_path});
                 return e;
             };
+
+            break :buf file_buffer.items;
         };
 
         _ = parse_arena.reset(.retain_capacity);
@@ -122,7 +128,12 @@ pub fn main() !u8 {
         var errors = wasmstint.Wast.Error.List.init(parse_arena.allocator());
 
         _ = scratch.reset(.retain_capacity);
-        const script_tree = try wasmstint.Wast.sexpr.Tree.parseFromSlice(script_buf, parse_arena.allocator(), &scratch, &errors);
+        const script_tree = try wasmstint.Wast.sexpr.Tree.parseFromSlice(
+            script_buf,
+            parse_arena.allocator(),
+            &scratch,
+            &errors,
+        );
 
         // TODO: Figure out if using an arena here might actually faster than using the GPA.
         var parse_array = wasmstint.Wast.Arena.init(parse_arena.allocator());
@@ -146,6 +157,7 @@ pub fn main() !u8 {
             &script_tree,
             &parse_array,
             &parse_caches,
+            &encoding_buffer,
             &parse_arena,
             &errors,
         );
@@ -205,11 +217,11 @@ fn runScript(
     script_tree: *const wasmstint.Wast.sexpr.Tree,
     script_arena: *const wasmstint.Wast.Arena,
     script_caches: *const wasmstint.Wast.Caches,
+    encoding_buffer: *std.ArrayList(u8),
     run_arena: *ArenaAllocator, // Must not be reset for the lifetime of this function call.
     errors: *wasmstint.Wast.Error.List,
 ) std.mem.Allocator.Error!void {
     //var module_lookups = std.AutoHashMap(wasmstint.Wast.Ident.Interned, comptime V: type);
-    var encoding_buffer = std.ArrayList(u8).init(run_arena.allocator());
 
     // Live until the next `module` command is executed.
     var next_module_arena = ArenaAllocator.init(run_arena.allocator());
@@ -236,9 +248,13 @@ fn runScript(
                     &cmd_arena,
                 );
 
-                current_module = encoding_buffer.items;
+                current_module = if (module.name.some)
+                    try run_arena.allocator().dupe(u8, encoding_buffer.items)
+                else
+                    encoding_buffer.items;
 
                 // TODO: Store modules with an ident into a hashmap and use the run_arena for both hashmap and module encoding
+                // - hashmap should just store wasmstint.Module, not the []const u8
             },
             else => |bad| {
                 std.debug.print("TODO: process command {}\n", .{bad});
