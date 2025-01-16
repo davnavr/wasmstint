@@ -130,7 +130,7 @@ pub const List = struct {
 };
 
 pub const BrTable = struct {
-    labels: IndexedArena.Slice(Ident),
+    labels: IndexedArena.SliceAligned(Ident, 4),
     default_label: Ident align(4),
 };
 
@@ -526,8 +526,14 @@ pub fn parseArgs(
 
             std.debug.assert(labels_buf.len > 0);
 
-            const labels = try arena.alloc(Ident, labels_buf.len - 1);
-            labels_buf.writeToSlice(labels.items(arena), 0);
+            const labels = try arena.alignedAlloc(Ident, 4, labels_buf.len - 1);
+            // labels_buf.writeToSlice(labels.items(arena), 0);
+            {
+                var labels_buf_iter = labels_buf.constIterator(0);
+                for (labels.items(arena)) |*l| {
+                    l.* = labels_buf_iter.next().?.*;
+                }
+            }
 
             try list.append(
                 list_arena,

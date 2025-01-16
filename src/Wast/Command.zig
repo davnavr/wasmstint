@@ -59,7 +59,7 @@ pub fn parseConstOrResult(
         },
         .@"keyword_i64.const" => switch (list_parser.parseUninterpretedIntegerInList(i64, list, tree)) {
             .ok => |ok| {
-                const val = try arena.create(i64);
+                const val = try arena.alignedCreate(i64, 4);
                 val.set(arena, ok.value);
                 break :value .{ ok.token, Value{ .i64 = val } };
             },
@@ -67,7 +67,7 @@ pub fn parseConstOrResult(
         },
         .@"keyword_f64.const" => switch (list_parser.parseFloatInList(f64, list, tree)) {
             .ok => |ok| {
-                const val = try arena.create(u64);
+                const val = try arena.alignedCreate(u64, 4);
                 val.set(arena, ok.value);
                 break :value .{ ok.token, Value{ .f64 = val } };
             },
@@ -124,9 +124,9 @@ pub const Const = struct {
         /// `keyword.tag == .@"keyword_i32.const"`
         i32: i32,
         f32: u32,
-        i64: IndexedArena.Idx(i64),
-        f64: IndexedArena.Idx(u64),
-        // v128: IndexedArena.Idx([u8; 16]),
+        i64: IndexedArena.IdxAligned(i64, 4),
+        f64: IndexedArena.IdxAligned(u64, 4),
+        // v128: IndexedArena.IdxAligned([u8; 16], 4),
         // ref_null: enum { func, extern },
         ref_extern: u32,
     };
@@ -148,9 +148,9 @@ pub const Result = struct {
     pub const Value = union {
         i32: i32,
         f32: u32,
-        i64: IndexedArena.Idx(i64),
-        f64: IndexedArena.Idx(u64),
-        // v128: *const [u8; 16],
+        i64: IndexedArena.IdxAligned(i64, 4),
+        f64: IndexedArena.IdxAligned(u64, 4),
+        // v128: IndexedArena.IdxAligned([u8; 16], 4),
         /// `keyword.tag == .@"keyword_f32.const" and value_token.tag == .@"keyword_nan:canonical"`
         f32_nan: NanPattern,
         f64_nan: NanPattern,

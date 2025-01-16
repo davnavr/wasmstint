@@ -430,7 +430,7 @@ pub const Table = struct {
 
     pub const InlineElements = union(enum) {
         expressions: IndexedArena.Slice(ElementSegment.Item),
-        indices: IndexedArena.Slice(Ident.Unaligned),
+        indices: IndexedArena.SliceAligned(Ident, 4),
     };
 
     comptime {
@@ -507,19 +507,19 @@ pub const Table = struct {
 
                 const elements = elements: switch (first_elem_value.unpacked()) {
                     .atom => |first_idx| {
-                        var indices = try IndexedArena.BoundedArrayList(Ident.Unaligned).initCapacity(
+                        var indices = try IndexedArena.BoundedArrayListAligned(Ident, 4).initCapacity(
                             arena,
                             1 + elem_contents.remaining.len,
                         );
 
                         switch (try Ident.parseAtom(first_idx, tree, caches.allocator, &caches.ids)) {
-                            .ok => |ok| indices.appendAssumeCapacity(arena, .{ .ident = ok }),
+                            .ok => |ok| indices.appendAssumeCapacity(arena, ok),
                             .err => |err| return .{ .err = err },
                         }
 
                         while (!elem_contents.isEmpty()) {
                             switch (try Ident.parse(&elem_contents, tree, elem_list, caches.allocator, &caches.ids)) {
-                                .ok => |ok| indices.appendAssumeCapacity(arena, .{ .ident = ok }),
+                                .ok => |ok| indices.appendAssumeCapacity(arena, ok),
                                 .err => |err| return .{ .err = err },
                             }
                         }

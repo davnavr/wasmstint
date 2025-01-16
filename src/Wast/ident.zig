@@ -15,11 +15,8 @@ pub const Ident = packed struct(u63) {
     },
     token: sexpr.TokenId,
 
-    pub const Unaligned = struct { ident: Ident align(4) };
-
     comptime {
         std.debug.assert(@sizeOf(Ident) == 8);
-        std.debug.assert(@sizeOf(Unaligned) == 8);
     }
 
     /// `tok` must refer to a token with `tok.tag(tree) == .id`.
@@ -97,11 +94,8 @@ pub const Ident = packed struct(u63) {
         some: bool,
         inner_ident: Ident,
 
-        pub const Unaligned = extern struct { ident: Opt align(4) };
-
         comptime {
             std.debug.assert(@sizeOf(Opt) == 8);
-            std.debug.assert(@sizeOf(Opt.Unaligned) == 8);
         }
 
         pub const none = Opt{ .some = false, .inner_ident = undefined };
