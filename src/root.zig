@@ -3,6 +3,7 @@
 //! [WebAssembly]: https://webassembly.org/
 
 pub const Wast = @import("Wast.zig");
+pub const Module = @import("Module.zig");
 pub const float = @import("float.zig");
 
 test {
