@@ -48,6 +48,7 @@ pub const Tag = enum {
     duplicate_ident,
     undefined_ident,
     import_after_definition,
+    type_use_mismatch,
 };
 
 const Error = @This();
@@ -112,6 +113,7 @@ pub fn print(err: *const Error, tree: *const sexpr.Tree, writer: anytype) !void 
             try writer.writeAll("identifier defined twice");
         },
         .import_after_definition => try writer.writeAll("imports must occur before all non-import definitions"),
+        .type_use_mismatch => try writer.writeAll("type use does not match its definition"),
     }
 }
 
@@ -204,6 +206,14 @@ pub fn initImportAfterDefinition(import_keyword: sexpr.TokenId) Error {
     return .{
         .value = Value.initAtom(import_keyword),
         .tag = .import_after_definition,
+        .extra = undefined,
+    };
+}
+
+pub fn initTypeUseMismatch(id: Ident) Error {
+    return .{
+        .value = Value.initAtom(id.token),
+        .tag = .type_use_mismatch,
         .extra = undefined,
     };
 }

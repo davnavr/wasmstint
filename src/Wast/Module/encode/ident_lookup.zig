@@ -23,18 +23,17 @@ pub const RawIdentLookup = struct {
     ) error{OutOfMemory}!void {
         if (!id.some) return;
 
-        const entry = try lookup.map.getOrPut(
-            alloca.allocator(),
-            Value{ .id = id.ident, .index = index },
-        );
+        const entry = try lookup.map.getOrPut(alloca.allocator(), id.ident);
         if (entry.found_existing) {
             try errors.append(Error.initDuplicateIdent(id, entry.value_ptr.id));
+        } else {
+            entry.value_ptr.* = Value{ .id = id.token, .index = index };
         }
     }
 
     fn get(lookup: *const RawIdentLookup, id: Ident.Interned, token: sexpr.TokenId) sexpr.Parser.Result(u32) {
-        return if (lookup.get(id)) |entry|
-            .{ .ok = entry.index }
+        return if (lookup.map.get(id)) |value|
+            .{ .ok = value.index }
         else
             .{ .err = Error.initUndefinedIdent(token) };
     }
@@ -62,7 +61,7 @@ pub fn IdentLookup(comptime Idx: type) type {
         }
 
         pub fn get(lookup: *const Self, id: Ident.Interned, token: sexpr.TokenId) sexpr.Parser.Result(Idx) {
-            return switch (try lookup.inner.get(id, token)) {
+            return switch (lookup.inner.get(id, token)) {
                 .ok => |raw_idx| .{ .ok = @enumFromInt(raw_idx) },
                 .err => |err| .{ .err = err },
             };

@@ -13,6 +13,7 @@ const Ident = @import("../ident.zig").Ident;
 const Name = @import("../Name.zig");
 const Caches = @import("../Caches.zig");
 
+const Lexer = @import("../Lexer.zig");
 const sexpr = @import("../sexpr.zig");
 const Error = sexpr.Error;
 const escapeStringLiteral = @import("../value.zig").string;
@@ -33,7 +34,7 @@ fn encodeVecLen(output: anytype, len: usize) EncodeError(@TypeOf(output))!void {
     try writeUleb128(output, std.math.cast(u32, len) orelse return error.OutOfMemory);
 }
 
-fn encodeByteVec(output: anytype, bytes: []const u8) EncodeError(output)!void {
+fn encodeByteVec(output: anytype, bytes: []const u8) EncodeError(@TypeOf(output))!void {
     try encodeVecLen(output, bytes.len);
     try output.writeAll(bytes);
 }
@@ -65,7 +66,7 @@ pub const ValType = enum(u8) {
         };
     }
 
-    fn encode(val_type: ValType, output: anytype) EncodeError(output)!void {
+    fn encode(val_type: ValType, output: anytype) EncodeError(@TypeOf(output))!void {
         try output.writeByte(@intFromEnum(val_type));
     }
 };
@@ -80,7 +81,7 @@ const IterParamTypes = struct {
     params: []const Text.Param,
 
     fn init(parameters: []const Text.Param) @This() {
-        return .{ .types = .{}, .params = parameters };
+        return .{ .types = &[0]Text.ValType{}, .params = parameters };
     }
 
     fn next(iter: *@This(), tree: *const sexpr.Tree, arena: *const IndexedArena) ?ValType {
@@ -104,7 +105,7 @@ const IterResultTypes = struct {
     results: []const Text.Result,
 
     fn init(results: []const Text.Result) @This() {
-        return .{ .types = .{}, .results = results };
+        return .{ .types = &[0]Text.ValType{}, .results = results };
     }
 
     fn next(iter: *@This(), tree: *const sexpr.Tree, arena: *const IndexedArena) ?ValType {
@@ -140,23 +141,23 @@ const TypeDedup = struct {
                 var a_params_iter = IterParamTypes.init(a.parameters.items(ctx.arena));
                 var b_params_iter = IterParamTypes.init(b.parameters.items(ctx.arena));
                 while (a_params_iter.next(ctx.tree, ctx.arena)) |a_param| {
-                    const b_param = b_params_iter.next(ctx.arena) orelse return false;
+                    const b_param = b_params_iter.next(ctx.tree, ctx.arena) orelse return false;
                     if (@intFromEnum(a_param) != @intFromEnum(b_param))
                         return false;
                 }
 
-                if (b_params_iter.next(ctx.arena) != null) return false;
+                if (b_params_iter.next(ctx.tree, ctx.arena) != null) return false;
             }
             {
                 var a_results_iter = IterResultTypes.init(a.results.items(ctx.arena));
                 var b_results_iter = IterResultTypes.init(b.results.items(ctx.arena));
                 while (a_results_iter.next(ctx.tree, ctx.arena)) |a_param| {
-                    const b_param = b_results_iter.next(ctx.arena) orelse return false;
+                    const b_param = b_results_iter.next(ctx.tree, ctx.arena) orelse return false;
                     if (@intFromEnum(a_param) != @intFromEnum(b_param))
                         return false;
                 }
 
-                if (b_results_iter.next(ctx.arena) != null) return false;
+                if (b_results_iter.next(ctx.tree, ctx.arena) != null) return false;
             }
 
             return true;
@@ -164,22 +165,18 @@ const TypeDedup = struct {
 
         pub fn hash(ctx: Context, key: Type) u64 {
             var hasher = std.hash.Wyhash.init(0);
-            for (@as([]const Text.Result, key.parameters.items(ctx.arena))) |*param| {
-                std.hash.autoHashStrat(
-                    hasher,
-                    @as([]const Text.ValType, param.types.items(ctx.arena)),
-                    .Deep,
-                );
+            {
+                var iter_params = IterParamTypes.init(key.parameters.items(ctx.arena));
+                while (iter_params.next(ctx.tree, ctx.arena)) |param| {
+                    std.hash.autoHash(&hasher, param);
+                }
             }
-
-            for (@as([]const Text.Result, key.results.items(ctx.arena))) |*result| {
-                std.hash.autoHashStrat(
-                    hasher,
-                    @as([]const Text.ValType, result.types.items(ctx.arena)),
-                    .Deep,
-                );
+            {
+                var iter_results = IterResultTypes.init(key.results.items(ctx.arena));
+                while (iter_results.next(ctx.tree, ctx.arena)) |result| {
+                    std.hash.autoHash(&hasher, result);
+                }
             }
-
             return hasher.final();
         }
     };
@@ -234,7 +231,13 @@ fn IdxCounter(comptime Idx: type) type {
 
         pub fn increment(counter: *Self) Allocator.Error!Idx {
             const give = counter.next;
-            counter.next = addOrOom(@typeInfo(Idx).@"enum".tag_type, @intFromEnum(counter.next), 1);
+            counter.next = @enumFromInt(
+                try addOrOom(
+                    @typeInfo(Idx).@"enum".tag_type,
+                    @intFromEnum(counter.next),
+                    1,
+                ),
+            );
             return give;
         }
     };
@@ -268,20 +271,25 @@ const Wasm = struct {
     const TypeSec = std.SegmentedList(Type, 8);
 
     fn resolveTypeSec(
-        wasm: *const Wasm,
+        wasm: *Wasm,
+        wasm_arena: *ArenaAllocator,
         tree: *const sexpr.Tree,
+        arena: *const IndexedArena,
         errors: *Error.List,
-        arena: *ArenaAllocator,
+        output: *ArenaAllocator,
     ) Allocator.Error!TypeSec {
+        // Allocated in `output`.
         var type_sec = TypeSec{};
-        try wasm.types.growCapacity(arena.allocator(), wasm.types.len);
+        if (wasm.types.len > TypeSec.prealloc_count) {
+            try type_sec.growCapacity(wasm_arena.allocator(), wasm.types.len);
+        }
+
         {
             var iter_type_fields = wasm.types.constIterator(0);
             while (iter_type_fields.next()) |type_field| {
-                type_sec.append(undefined, type_field.*) catch unreachable;
+                type_sec.append(undefined, &type_field.getPtr(arena).func) catch unreachable;
             }
         }
-
         // Resolve all `TypeUse`s into types to append after all of the defined ones.
         {
             var iter_type_uses = wasm.type_uses.iterator();
@@ -289,6 +297,7 @@ const Wasm = struct {
                 const type_use = entry.key_ptr.*;
                 entry.value_ptr.* = if (type_use.id.header.is_inline) type_idx: {
                     const dedup_entry = try wasm.type_dedup.lookup.getOrPutContext(
+                        wasm_arena.allocator(),
                         &type_use.func,
                         .{ .arena = arena, .tree = tree },
                     );
@@ -301,15 +310,16 @@ const Wasm = struct {
                                 return error.OutOfMemory,
                         );
 
-                        try type_sec.append(arena.allocator(), &type_use.func);
+                        try type_sec.append(output.allocator(), &type_use.func);
                         dedup_entry.value_ptr.* = type_idx;
                         break :type_idx type_idx;
                     }
                 } else switch (type_use.id.type.toUnion(tree)) {
                     .symbolic => |id| type_idx: switch (wasm.type_ids.get(id, type_use.id.type.token)) {
                         .ok => |ok| {
-                            if (!(TypeDedup.Context{ .arena = arena }).eql(wasm.types.at(ok).*, &type_use.func)) {
-                                // TODO: Error for type use mismatch
+                            const type_cmp_ctx = TypeDedup.Context{ .arena = arena, .tree = tree };
+                            if (!type_cmp_ctx.eql(&wasm.types.at(@intFromEnum(ok)).getPtr(arena).func, &type_use.func)) {
+                                try errors.append(Error.initTypeUseMismatch(type_use.id.type));
                             }
 
                             break :type_idx ok;
@@ -323,6 +333,7 @@ const Wasm = struct {
                 };
             }
         }
+        return type_sec;
     }
 };
 
@@ -370,7 +381,8 @@ fn encodeResultType(
     var text_iter: Iterator = Iterator.init(types.items(arena));
     var types_buf = std.SegmentedList(ValType, 8){};
     try types_buf.setCapacity(scratch.allocator(), types.len);
-    while (@as(text_iter.next(tree, arena), ?ValType)) |val_type| {
+    while (true) {
+        const val_type: ValType = text_iter.next(tree, arena) orelse break;
         try types_buf.append(scratch.allocator(), val_type);
     }
 
@@ -448,7 +460,6 @@ fn encodeText(
                     func_field_ptr.id,
                     func_idx,
                     alloca,
-                    &wasm.func_count,
                     errors,
                 );
 
@@ -487,14 +498,16 @@ fn encodeText(
     try output.writeAll(wasm_preamble);
 
     encode_type_sec: {
-        const type_sec = try wasm.resolveTypeSec(tree, errors, &scratch);
+        const type_sec = try wasm.resolveTypeSec(alloca, tree, arena, errors, &scratch);
         if (type_sec.len == 0) break :encode_type_sec;
 
         try encodeVecLen(section_buf.writer(), type_sec.len);
 
         var types_iter = type_sec.constIterator(0);
+        var func_type_arena = ArenaAllocator.init(scratch.allocator());
         while (types_iter.next()) |func_type| {
-            try encodeTypeSecFunc(section_buf.writer(), tree, arena, func_type.*);
+            try encodeTypeSecFunc(section_buf.writer(), tree, arena, func_type.*, &func_type_arena);
+            _ = func_type_arena.reset(.retain_capacity);
         }
 
         try encodeSection(output, 1, section_buf.items);
@@ -511,13 +524,13 @@ fn encodeText(
             const name = import.name(arena);
             try encodeByteVec(output, name.module.id.bytes(arena, &caches.names));
             try encodeByteVec(output, name.name.id.bytes(arena, &caches.names));
-            switch (import) {
+            switch (import.*) {
                 .inline_func => |func_field| {
                     try output.writeByte(0);
                     try encodeIdx(
                         output,
                         TypeIdx,
-                        wasm.type_uses.get(&func_field.getPtr(arena).type_use.func).?,
+                        wasm.type_uses.get(&func_field.getPtr(arena).type_use).?,
                     );
                 },
                 else => unreachable, // TODO
@@ -526,8 +539,6 @@ fn encodeText(
 
         try encodeSection(output, 2, section_buf.items);
     }
-
-    return true;
 }
 
 /// Writes the binary representation of a given WebAssembly Text format module.
@@ -539,14 +550,14 @@ pub fn encode(
     arena: *const IndexedArena,
     caches: *const Caches,
     output: anytype,
-    errors: Error.List,
+    errors: *Error.List,
     alloca: *ArenaAllocator,
 ) EncodeError(@TypeOf(output))!void {
     // preamble
     try output.writeAll("\x00asm\x01\x00\x00\x00"); // TODO: Remove!
 
     _ = alloca.reset(.retain_capacity);
-    switch (module.format) {
+    switch (module.taggedFormat(tree)) {
         .text => |text| try encodeText(
             text.getPtr(arena),
             tree,
@@ -554,7 +565,7 @@ pub fn encode(
             caches,
             output,
             errors,
-            &alloca,
+            alloca,
         ),
         .quote => |quote_idx| {
             // Allocated in `alloca`.
@@ -565,7 +576,7 @@ pub fn encode(
                 for (@as([]const Module.String, quote.contents.items(arena))) |str| {
                     var parts = escapeStringLiteral(str.rawContents(tree));
                     while (parts.next()) |esc|
-                        contents.appendSlice(alloca.allocator(), esc.bytes());
+                        try contents.appendSlice(alloca.allocator(), esc.bytes());
                 }
 
                 break :text contents.items;
@@ -573,14 +584,19 @@ pub fn encode(
 
             var scratch = std.heap.ArenaAllocator.init(alloca.allocator());
             const quoted_tree = tree: {
-                var lexer = sexpr.Lexer.init(module_text) catch |e| switch (e) {
+                const lexer = Lexer.init(module_text) catch |e| switch (e) {
                     error.InvalidUtf8 => {
-                        errors.append(Error.initInvalidUtf8(module.format_keyword.get().?));
+                        try errors.append(Error.initInvalidUtf8(module.format_keyword.get().?));
                         return;
                     },
                 };
 
-                break :tree try sexpr.Tree.parseFromLexer(&lexer, alloca.allocator(), &scratch, errors);
+                break :tree try sexpr.Tree.parseFromLexer(
+                    lexer,
+                    alloca.allocator(),
+                    &scratch,
+                    errors,
+                );
             };
 
             var quoted_arena = IndexedArena.init(alloca.allocator());
@@ -600,7 +616,7 @@ pub fn encode(
                     // A more detailed error would be better here.
                     try errors.append(
                         Error.initUnexpectedValue(
-                            sexpr.Value.initAtom(module.format_keyword),
+                            sexpr.Value.initAtom(module.format_keyword.get().?),
                             .at_value,
                         ),
                     );

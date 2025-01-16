@@ -141,6 +141,15 @@ pub fn main() !u8 {
             return e;
         };
 
+        try runScript(
+            &script,
+            &script_tree,
+            &parse_array,
+            &parse_caches,
+            &parse_arena,
+            &errors,
+        );
+
         if (errors.list.count() > 0) {
             @branchHint(.unlikely);
             const raw_stderr = std.io.getStdErr();
@@ -186,9 +195,55 @@ pub fn main() !u8 {
 
             try buf_stderr.flush();
         }
-
-        _ = script;
     }
 
     return 0;
+}
+
+fn runScript(
+    script: *const wasmstint.Wast,
+    script_tree: *const wasmstint.Wast.sexpr.Tree,
+    script_arena: *const wasmstint.Wast.Arena,
+    script_caches: *const wasmstint.Wast.Caches,
+    run_arena: *ArenaAllocator, // Must not be reset for the lifetime of this function call.
+    errors: *wasmstint.Wast.Error.List,
+) std.mem.Allocator.Error!void {
+    //var module_lookups = std.AutoHashMap(wasmstint.Wast.Ident.Interned, comptime V: type);
+    var encoding_buffer = std.ArrayList(u8).init(run_arena.allocator());
+
+    // Live until the next `module` command is executed.
+    var next_module_arena = ArenaAllocator.init(run_arena.allocator());
+    var current_module: ?[]const u8 = null; // TODO: Store a wasmstint.Module instead!
+
+    // Live for the execution of a single command.
+    var cmd_arena = ArenaAllocator.init(run_arena.allocator());
+    for (script.commands.items(script_arena)) |cmd| {
+        defer _ = cmd_arena.reset(.retain_capacity);
+
+        switch (cmd.keyword.tag(script_tree)) {
+            .keyword_module => {
+                _ = next_module_arena.reset(.retain_capacity);
+                const module: *const wasmstint.Wast.Module = cmd.inner.module.getPtr(script_arena);
+
+                // const module_arena = if (module.name.some) run_arena else &next_module_arena;
+                encoding_buffer.clearRetainingCapacity();
+                try module.encode(
+                    script_tree,
+                    script_arena,
+                    script_caches,
+                    encoding_buffer.writer(),
+                    errors,
+                    &cmd_arena,
+                );
+
+                current_module = encoding_buffer.items;
+
+                // TODO: Store modules with an ident into a hashmap and use the run_arena for both hashmap and module encoding
+            },
+            else => |bad| {
+                std.debug.print("TODO: process command {}\n", .{bad});
+                // unreachable
+            },
+        }
+    }
 }

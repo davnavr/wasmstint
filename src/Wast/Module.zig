@@ -25,6 +25,26 @@ pub const Format = union {
     quote: IndexedArena.Idx(Quote),
 };
 
+pub const TaggedFormat = @Type(std.builtin.Type{
+    .@"union" = .{
+        .layout = .auto,
+        .tag_type = std.meta.FieldEnum(Format),
+        .fields = @typeInfo(Format).@"union".fields,
+        .decls = &[0]std.builtin.Type.Declaration{},
+    },
+});
+
+pub fn taggedFormat(module: *const Module, tree: *const sexpr.Tree) TaggedFormat {
+    return if (module.format_keyword.get()) |format_keyword|
+        switch (format_keyword.tag(tree)) {
+            .keyword_quote => .{ .quote = module.format.quote },
+            .keyword_binary => .{ .binary = module.format.binary },
+            else => unreachable,
+        }
+    else
+        .{ .text = module.format.text };
+}
+
 comptime {
     std.debug.assert(@alignOf(Module) == @alignOf(u32));
     std.debug.assert(@sizeOf(Module) == switch (@import("builtin").mode) {
