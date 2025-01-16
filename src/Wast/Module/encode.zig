@@ -84,7 +84,7 @@ const IterParamTypes = struct {
         return .{ .types = &[0]Text.ValType{}, .params = parameters };
     }
 
-    fn next(iter: *@This(), tree: *const sexpr.Tree, arena: *const IndexedArena) ?ValType {
+    fn next(iter: *@This(), tree: *const sexpr.Tree, arena: IndexedArena.ConstData) ?ValType {
         if (iter.types.len == 0 and iter.params.len > 0) {
             iter.types = iter.params[0].types.items(arena);
             iter.params = iter.params[1..];
@@ -108,7 +108,7 @@ const IterResultTypes = struct {
         return .{ .types = &[0]Text.ValType{}, .results = results };
     }
 
-    fn next(iter: *@This(), tree: *const sexpr.Tree, arena: *const IndexedArena) ?ValType {
+    fn next(iter: *@This(), tree: *const sexpr.Tree, arena: IndexedArena.ConstData) ?ValType {
         if (iter.types.len == 0 and iter.results.len > 0) {
             iter.types = iter.results[0].types.items(arena);
             iter.results = iter.results[1..];
@@ -133,7 +133,7 @@ const TypeDedup = struct {
     ),
 
     const Context = struct {
-        arena: *const IndexedArena,
+        arena: IndexedArena.ConstData,
         tree: *const sexpr.Tree,
 
         pub fn eql(ctx: Context, a: Type, b: Type) bool {
@@ -191,7 +191,7 @@ const Import = union(enum) {
     inline_mem: IndexedArena.Idx(Text.Mem),
     inline_global: IndexedArena.Idx(Text.Global),
 
-    fn name(import: Import, arena: *const IndexedArena) *const Text.ImportName {
+    fn name(import: Import, arena: IndexedArena.ConstData) *const Text.ImportName {
         return switch (import) {
             .inline_func => |func| &func.getPtr(arena).body.inline_import,
             .inline_table => |table| &table.getPtr(arena).inner.no_elements.inline_import.name,
@@ -209,7 +209,7 @@ const Export = union(enum) {
     // module_field: IndexedArena.Idx(Text.ExportField),
     inline_func: struct { field: IndexedArena.Idx(Text.Func), idx: FuncIdx },
 
-    fn name(@"export": Export, arena: *const IndexedArena) Text.InlineExports {
+    fn name(@"export": Export, arena: IndexedArena.ConstData) Text.InlineExports {
         const list = switch (@"export") {
             .inline_func => |func| func.field.getPtr(arena).inline_exports,
         };
@@ -274,7 +274,7 @@ const Wasm = struct {
         wasm: *Wasm,
         wasm_arena: *ArenaAllocator,
         tree: *const sexpr.Tree,
-        arena: *const IndexedArena,
+        arena: IndexedArena.ConstData,
         errors: *Error.List,
         output: *ArenaAllocator,
     ) Allocator.Error!TypeSec {
@@ -375,7 +375,7 @@ fn encodeResultType(
     comptime T: type,
     types: IndexedArena.Slice(T),
     tree: *const sexpr.Tree,
-    arena: *const IndexedArena,
+    arena: IndexedArena.ConstData,
     scratch: *ArenaAllocator,
 ) EncodeError(@TypeOf(output))!void {
     var text_iter: Iterator = Iterator.init(types.items(arena));
@@ -396,7 +396,7 @@ fn encodeResultType(
 fn encodeTypeSecFunc(
     output: anytype,
     tree: *const sexpr.Tree,
-    arena: *const IndexedArena,
+    arena: IndexedArena.ConstData,
     func_type: *const Text.Type.Func,
     scratch: *ArenaAllocator,
 ) EncodeError(@TypeOf(output))!void {
@@ -424,7 +424,7 @@ fn encodeTypeSecFunc(
 fn encodeText(
     module: *const Text,
     tree: *const sexpr.Tree,
-    arena: *const IndexedArena,
+    arena: IndexedArena.ConstData,
     caches: *const Caches,
     output: anytype,
     errors: *Error.List,
@@ -547,7 +547,7 @@ fn encodeText(
 pub fn encode(
     module: *const Module,
     tree: *const sexpr.Tree,
-    arena: *const IndexedArena,
+    arena: IndexedArena.ConstData,
     caches: *const Caches,
     output: anytype,
     errors: *Error.List,
@@ -631,7 +631,7 @@ pub fn encode(
                     return encode(
                         &quoted_module,
                         &quoted_tree,
-                        &quoted_arena,
+                        quoted_arena.dataSlice(),
                         &quoted_caches,
                         output,
                         errors,

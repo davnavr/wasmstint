@@ -16,7 +16,7 @@ const Name = @This();
 pub const Id = enum(u32) {
     _,
 
-    pub fn bytes(id: Id, arena: *const IndexedArena, cache: *const Cache) []const u8 {
+    pub fn bytes(id: Id, arena: anytype, cache: *const Cache) []const u8 {
         return cache.lookup.keys()[@intFromEnum(id)].slice(arena);
     }
 };
@@ -25,7 +25,7 @@ pub const Cache = struct {
     const String = @import("String.zig");
 
     const LookupContext = struct {
-        arena: *const IndexedArena,
+        arena: IndexedArena.ConstData,
         // hash_seed: u64,
 
         pub fn eql(ctx: LookupContext, a: []const u8, b: String, _: usize) bool {
@@ -73,7 +73,7 @@ pub const Cache = struct {
         const entry = try cache.lookup.getOrPutAdapted(
             allocator,
             actual_name.bytes,
-            LookupContext{ .arena = arena },
+            LookupContext{ .arena = arena.dataSlice() },
         );
 
         if (!entry.found_existing) {

@@ -14,6 +14,8 @@ comptime {
     std.debug.assert(min_alignment < max_alignment);
 }
 
+pub const ConstData = []align(max_alignment) const Word;
+
 pub fn init(allocator: std.mem.Allocator) IndexedArena {
     return .{ .data = std.ArrayListAligned(Word, max_alignment).init(allocator) };
 }
@@ -39,8 +41,12 @@ fn IdxPtr(
         .pointer = .{
             .size = size,
             .is_const = switch (Arena) {
-                *IndexedArena => false,
-                *const IndexedArena => true,
+                *IndexedArena,
+                []align(max_alignment) Word,
+                => false,
+                *const IndexedArena,
+                ConstData,
+                => true,
                 else => unreachable,
             },
             .is_volatile = false,
@@ -51,6 +57,18 @@ fn IdxPtr(
             .sentinel = null,
         },
     });
+}
+
+pub fn dataSlice(arena: anytype) IdxPtr(@TypeOf(arena), .Slice, max_alignment, Word) {
+    return switch (@TypeOf(arena)) {
+        *IndexedArena,
+        *const IndexedArena,
+        => arena.data.items,
+        []align(max_alignment) Word,
+        ConstData,
+        => arena,
+        else => unreachable,
+    };
 }
 
 /// A word offset into an `IndexedArena` pointing to a value of type `T` with the given `alignment`.
@@ -90,15 +108,15 @@ pub fn IdxAligned(comptime T: type, comptime alignment: u8) type {
 
         pub inline fn getPtr(idx: Self, arena: anytype) Ptr(@TypeOf(arena)) {
             const WordSlice = IdxPtr(@TypeOf(arena), .Slice, alignment, Word);
-            const words: WordSlice = @alignCast(arena.data.items[@intFromEnum(idx)..][0..word_len]);
+            const words: WordSlice = @alignCast(dataSlice(arena)[@intFromEnum(idx)..][0..word_len]);
             return @ptrCast(words.ptr);
         }
 
-        pub inline fn get(idx: Self, arena: *const IndexedArena) T {
+        pub inline fn get(idx: Self, arena: anytype) T {
             return idx.getPtr(arena).*;
         }
 
-        pub inline fn set(idx: Self, arena: *IndexedArena, value: T) void {
+        pub inline fn set(idx: Self, arena: anytype, value: T) void {
             idx.getPtr(arena).* = value;
         }
 
@@ -169,7 +187,7 @@ pub fn SliceAligned(comptime T: type, comptime alignment: u8) type {
 
         pub fn items(self: Self, arena: anytype) Items(@TypeOf(arena)) {
             const WordSlice = IdxPtr(@TypeOf(arena), .Slice, alignment, Word);
-            const words: WordSlice = @alignCast(arena.data.items[@intFromEnum(self.idx)..][0..self.wordLen()]);
+            const words: WordSlice = @alignCast(dataSlice(arena)[@intFromEnum(self.idx)..][0..self.wordLen()]);
 
             const BasePtr = IdxPtr(@TypeOf(arena), .Many, alignment, T);
             const base_ptr: BasePtr = @ptrCast(words.ptr);
@@ -190,11 +208,11 @@ pub fn SliceAligned(comptime T: type, comptime alignment: u8) type {
             return &self.items(arena)[idx];
         }
 
-        pub inline fn getAt(self: Self, idx: usize, arena: *const IndexedArena) T {
+        pub inline fn getAt(self: Self, idx: usize, arena: anytype) T {
             return self.ptrAt(idx, arena).*;
         }
 
-        pub inline fn setAt(self: Self, idx: usize, arena: *IndexedArena, value: T) void {
+        pub inline fn setAt(self: Self, idx: usize, arena: anytype, value: T) void {
             self.ptrAt(idx, arena).* = value;
         }
 
@@ -207,7 +225,7 @@ pub fn SliceAligned(comptime T: type, comptime alignment: u8) type {
             };
         }
 
-        pub fn eql(self: Self, other: Self, arena: *const IndexedArena) bool {
+        pub fn eql(self: Self, other: Self, arena: anytype) bool {
             return (self.len == other.len and @intFromEnum(self.idx) == @intFromEnum(other.idx)) or
                 std.mem.eql(T, self.items(arena), other.items(arena));
         }
@@ -257,9 +275,9 @@ fn calculateSizeWithAlignment(
     const base_word_count = try byteSizeToWordCount(size);
     const align_word_count = std.mem.alignForwardAnyAlign(
         usize,
-        arena.data.items.len,
+        dataSlice(arena).len,
         word_alignment,
-    ) - arena.data.items.len;
+    ) - dataSlice(arena).len;
 
     return .{
         .total_words = std.math.add(usize, align_word_count, base_word_count) catch return Error.OutOfMemory,
@@ -273,7 +291,7 @@ fn allocSizeWithAlignment(
     comptime alignment: u8,
 ) Error!IdxInt {
     const elem_size = try arena.calculateSizeWithAlignment(size, alignment);
-    const idx_after_align = std.math.add(usize, arena.data.items.len, elem_size.align_words) catch return Error.OutOfMemory;
+    const idx_after_align = std.math.add(usize, dataSlice(arena).len, elem_size.align_words) catch return Error.OutOfMemory;
     const base_idx = std.math.cast(IdxInt, idx_after_align) orelse return Error.OutOfMemory;
     try arena.data.appendNTimes(undefined, elem_size.total_words);
     return base_idx;
@@ -389,6 +407,6 @@ test "arena operations" {
     try std.testing.expectEqual(42, thing_0.get(&arena));
     try std.testing.expectEqualStrings("Hello!", str.items(&arena));
     try std.testing.expectEqual(0xABBA, thing_1.get(&arena));
-    try std.testing.expectEqual(6, arena.data.items.len);
+    try std.testing.expectEqual(6, arena.dataSlice().len);
     try std.testing.expectEqual('o', str.get(4, &arena));
 }

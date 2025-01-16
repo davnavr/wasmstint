@@ -155,7 +155,7 @@ pub fn main() !u8 {
         try runScript(
             &script,
             &script_tree,
-            &parse_array,
+            parse_array.dataSlice(),
             &parse_caches,
             &encoding_buffer,
             &parse_arena,
@@ -215,7 +215,7 @@ pub fn main() !u8 {
 fn runScript(
     script: *const wasmstint.Wast,
     script_tree: *const wasmstint.Wast.sexpr.Tree,
-    script_arena: *const wasmstint.Wast.Arena,
+    script_arena: wasmstint.Wast.Arena.ConstData,
     script_caches: *const wasmstint.Wast.Caches,
     encoding_buffer: *std.ArrayList(u8),
     run_arena: *ArenaAllocator, // Must not be reset for the lifetime of this function call.

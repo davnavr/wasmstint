@@ -8,7 +8,7 @@ ptr: ?[*]const u8,
 
 const String = @This();
 
-pub fn slice(s: *const String, arena: *const IndexedArena) []const u8 {
+pub fn slice(s: *const String, arena: anytype) []const u8 {
     return if (s.ptr) |ptr|
         ptr[0..s.len]
     else
