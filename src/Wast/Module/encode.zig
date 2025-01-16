@@ -553,9 +553,6 @@ pub fn encode(
     errors: *Error.List,
     alloca: *ArenaAllocator,
 ) EncodeError(@TypeOf(output))!void {
-    // preamble
-    try output.writeAll("\x00asm\x01\x00\x00\x00"); // TODO: Remove!
-
     _ = alloca.reset(.retain_capacity);
     switch (module.taggedFormat(tree)) {
         .text => |text| try encodeText(
