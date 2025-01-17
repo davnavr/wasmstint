@@ -420,5 +420,18 @@ test "arena operations" {
     try std.testing.expectEqualStrings("Hello!", str.items(&arena));
     try std.testing.expectEqual(0xABBA, thing_1.get(&arena));
     try std.testing.expectEqual(6, arena.dataSlice().len);
-    try std.testing.expectEqual('o', str.get(4, &arena));
+    try std.testing.expectEqual('o', str.getAt(4, &arena));
+
+    const Thing = struct {
+        a: u32,
+        b: u32,
+    };
+
+    const stuff = try arena.dupe(Thing, &[2]Thing{
+        .{ .a = 1, .b = 2 },
+        .{ .a = 3, .b = 4 },
+    });
+
+    const second = stuff.at(1);
+    try std.testing.expectEqual(Thing{ .a = 3, .b = 4 }, second.get(&arena));
 }
