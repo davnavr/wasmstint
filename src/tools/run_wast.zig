@@ -225,7 +225,7 @@ fn runScript(
 
     // Live until the next `module` command is executed.
     var next_module_arena = ArenaAllocator.init(run_arena.allocator());
-    var current_module: ?[]const u8 = null; // TODO: Store a wasmstint.Module instead!
+    var current_module: ?*const wasmstint.Module = null;
 
     // Live for the execution of a single command.
     var cmd_arena = ArenaAllocator.init(run_arena.allocator());
@@ -233,11 +233,11 @@ fn runScript(
         defer _ = cmd_arena.reset(.retain_capacity);
 
         switch (cmd.keyword.tag(script_tree)) {
-            .keyword_module => {
+            .keyword_module => parse_failed: {
                 _ = next_module_arena.reset(.retain_capacity);
                 const module: *const wasmstint.Wast.Module = cmd.inner.module.getPtr(script_arena);
 
-                // const module_arena = if (module.name.some) run_arena else &next_module_arena;
+                const module_arena = if (module.name.some) run_arena else &next_module_arena;
                 encoding_buffer.clearRetainingCapacity();
                 try module.encode(
                     script_tree,
@@ -248,10 +248,30 @@ fn runScript(
                     &cmd_arena,
                 );
 
-                current_module = if (module.name.some)
+                var module_contents: []const u8 = if (module.name.some)
                     try run_arena.allocator().dupe(u8, encoding_buffer.items)
                 else
                     encoding_buffer.items;
+
+                const parsed_module = try module_arena.allocator().create(wasmstint.Module);
+                parsed_module.* = wasmstint.Module.parse(
+                    module_arena.allocator(),
+                    &module_contents,
+                    cmd_arena.allocator(),
+                    .{ .realloc_contents = true },
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    else => |parse_error| {
+                        std.debug.print("TODO: Parse error {}\n", .{parse_error});
+                        if (@errorReturnTrace()) |err_trace| {
+                            std.debug.dumpStackTrace(err_trace.*);
+                        }
+                        break :parse_failed;
+                    },
+                };
+
+                current_module = parsed_module;
+                _ = &current_module;
 
                 // TODO: Store modules with an ident into a hashmap and use the run_arena for both hashmap and module encoding
                 // - hashmap should just store wasmstint.Module, not the []const u8

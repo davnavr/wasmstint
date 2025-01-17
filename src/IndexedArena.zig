@@ -47,7 +47,7 @@ fn IdxPtr(
                 *const IndexedArena,
                 ConstData,
                 => true,
-                else => unreachable,
+                else => @compileError(@typeName(Arena) ++ " is not a valid arena type"),
             },
             .is_volatile = false,
             .alignment = alignment,
@@ -153,10 +153,13 @@ pub fn Idx(comptime T: type) type {
 
 pub fn SliceAligned(comptime T: type, comptime alignment: u8) type {
     return struct {
-        idx: IdxAligned(T, alignment),
+        idx: ElemIdx,
         len: u32,
 
         const Self = @This();
+
+        pub const ElemIdx = IdxAligned(T, alignment);
+        pub const Elem = T;
 
         comptime {
             std.debug.assert(@sizeOf(Self) == 8);
@@ -194,17 +197,26 @@ pub fn SliceAligned(comptime T: type, comptime alignment: u8) type {
             return base_ptr[0..self.len];
         }
 
-        // /// Only works if `sizeOf(T)` (aka the stride) is exactly a multiple of `@sizeOf(Word)`.
-        // pub inline fn at(self: Self, idx: usize) Idx(T) {
-        //     std.debug.assert(idx < self.len);
-        //     return @enumFromInt(@as(IdxInt, @intFromEnum(self.idx) + @as(IdxInt, @intCast(idx))));
-        // }
+        /// Gets an index to the element of this slice.
+        ///
+        /// Only works if `sizeOf(T)` (aka the stride) is exactly a multiple of `@sizeOf(Word)`.
+        pub fn at(self: Self, idx: usize) Idx(T) {
+            comptime std.debug.assert(@sizeOf(T) % @sizeOf(Word) == 0);
+
+            std.debug.assert(idx < self.len);
+            const offset: IdxInt = @intCast(@divExact(@sizeOf(T) * idx, @sizeOf(Word)));
+            return Idx(T).fromInt(@as(IdxInt, @intFromEnum(self.idx) + offset));
+        }
+
+        pub fn PtrAt(comptime Arena: type) type {
+            return IdxPtr(Arena, .One, @min(@alignOf(T), alignment), T);
+        }
 
         pub inline fn ptrAt(
             self: Self,
             idx: usize,
             arena: anytype,
-        ) IdxAligned(T, alignment).Ptr(@TypeOf(arena)) {
+        ) PtrAt(@TypeOf(arena)) {
             return &self.items(arena)[idx];
         }
 
@@ -231,7 +243,7 @@ pub fn SliceAligned(comptime T: type, comptime alignment: u8) type {
         }
 
         pub const Opt = struct {
-            idx: IdxAligned(T, alignment).Opt,
+            idx: ElemIdx.Opt,
             len: u32,
 
             pub const none = Opt{ .idx = .none, .len = 0 };
