@@ -5,6 +5,7 @@
 pub const Wast = @import("Wast.zig");
 pub const Module = @import("Module.zig");
 pub const float = @import("float.zig");
+pub const runtime = @import("runtime.zig");
 
 comptime {
     const std = @import("std");
