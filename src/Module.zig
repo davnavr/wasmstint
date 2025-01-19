@@ -422,7 +422,7 @@ pub fn parse(
                     try func_imports.append(names_arena.allocator(), import_name);
                     try func_import_types.append(
                         temporary.allocator(),
-                        try import_reader.readIdx(TypeIdx, module.types),
+                        try resolveIdx(module.types, @intFromEnum(try import_reader.readIdx(TypeIdx, module.types))),
                     );
                 },
                 else => unreachable, // TODO
@@ -505,7 +505,7 @@ pub fn parse(
         try export_dedup.ensureTotalCapacityContext(
             temporary.allocator(),
             // Prevent regrowth even with high load factor.
-            std.math.add(usize, export_len, export_len / 4) catch return error.OutOfMemory,
+            std.math.add(u32, export_len, export_len / 4) catch return error.OutOfMemory,
             export_dedup_context,
         );
 
@@ -514,11 +514,11 @@ pub fn parse(
             if (export_dedup.getOrPutAssumeCapacityContext(name.bytes, export_dedup_context).found_existing)
                 return ParseError.InvalidWasm;
 
-            ex.* = .{
+            ex.* = Export{
                 .name_len = @intCast(name.bytes.len),
                 .name_offset = @intCast(@intFromPtr(name.bytes.ptr) - @intFromPtr(module.exports.section_start)),
                 .desc = switch (try export_reader.readByteTag(ImportExportDesc)) {
-                    .func => try export_reader.readIdx(FuncIdx, module.func_types),
+                    .func => .{ .func = try export_reader.readIdx(FuncIdx, module.func_types) },
                     else => unreachable, // TODO
                 },
             };
@@ -581,4 +581,9 @@ pub fn parse(
     };
 
     return module;
+}
+
+pub fn deinit(module: *Module, allocator: Allocator) void {
+    allocator.free(module.data);
+    module.* = undefined;
 }

@@ -15,15 +15,19 @@ pub const ModuleInst = struct {
     // tables
     data: IndexedArena.ConstData = &[0]IndexedArena.Word{},
 
-    pub fn allocate(module: *const Module) ModuleInst {
-        // imports: []const ExternVal,
-        unreachable; // TODO
+    pub fn allocate(module: *const Module, imports: []const ExternVal) ModuleInst {
+        // TODO: Check types of imports
+        _ = imports;
+        return .{
+            .module = module,
+        };
     }
 
     pub const FindExportError = error{ ModuleNotInstantiated, ExportNotFound };
 
     pub fn findExport(inst: *const ModuleInst, name: []const u8) FindExportError!ExternVal {
         if (!inst.instantiated) return error.ModuleNotInstantiated;
+        _ = name;
         unreachable; // TODO
     }
 };
@@ -66,7 +70,7 @@ pub const FuncInst = extern struct {
             IndexedArena.Idx(Module.FuncType)
         else
             void,
-        padding: if (@sizeOf(usize) > 4) u1 else void,
+        padding: if (@sizeOf(usize) > 4) u2 else u1 = 0,
     };
 
     pub const Expanded = union(enum) {
@@ -96,7 +100,7 @@ pub const FuncInst = extern struct {
     }
 
     comptime {
-        std.debug.assert(@sizeOf(FuncInst) == [2]*anyopaque);
+        std.debug.assert(@sizeOf(FuncInst) == @sizeOf([2]*anyopaque));
         std.debug.assert(@alignOf(ModuleInst) >= 2);
         std.debug.assert(@alignOf(Host) >= 2);
     }
