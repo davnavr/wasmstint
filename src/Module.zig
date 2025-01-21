@@ -836,7 +836,7 @@ pub fn parse(
         break :realloc dupe;
     } else contents: {
         const desired_len = arena.data.items.len;
-        if (gpa.resize(arena.data.items, desired_len)) {
+        if (gpa.resize(arena.data.allocatedSlice(), desired_len)) {
             arena.data.capacity = desired_len;
         } else {
             arena.data.expandToCapacity();
