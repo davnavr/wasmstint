@@ -5,6 +5,7 @@ const wasmstint = @import("wasmstint");
 
 const Arguments = struct {
     run: []const [:0]const u8,
+    rng_seed: u256 = 42,
 
     const Flag = enum {
         run,
@@ -95,6 +96,12 @@ pub fn main() !u8 {
     const color_config = std.io.tty.detectConfig(std.io.getStdErr());
     const cwd = std.fs.cwd();
 
+    const initial_rng = rng: {
+        var init = std.Random.Xoshiro256{ .s = undefined };
+        init.s = @bitCast(arguments.rng_seed);
+        break :rng init;
+    };
+
     for (arguments.run) |script_path| {
         const script_buf: []const u8 = buf: {
             const script_file = cwd.openFileZ(script_path, .{}) catch |e| {
@@ -152,11 +159,13 @@ pub fn main() !u8 {
             return e;
         };
 
+        var rng = initial_rng;
         try runScript(
             &script,
             &script_tree,
             parse_array.dataSlice(),
             &parse_caches,
+            rng.random(),
             &encoding_buffer,
             &parse_arena,
             &errors,
@@ -217,6 +226,7 @@ fn runScript(
     script_tree: *const wasmstint.Wast.sexpr.Tree,
     script_arena: wasmstint.Wast.Arena.ConstData,
     script_caches: *const wasmstint.Wast.Caches,
+    rng: std.Random,
     encoding_buffer: *std.ArrayList(u8),
     run_arena: *ArenaAllocator, // Must not be reset for the lifetime of this function call.
     errors: *wasmstint.Wast.Error.List,
@@ -257,7 +267,8 @@ fn runScript(
                 parsed_module.* = wasmstint.Module.parse(
                     module_arena.allocator(),
                     &module_contents,
-                    cmd_arena.allocator(),
+                    &cmd_arena,
+                    rng,
                     .{ .realloc_contents = true },
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,

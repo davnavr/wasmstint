@@ -6,7 +6,7 @@ const IndexedArena = @import("IndexedArena.zig");
 const Module = @This();
 
 pub const ValType = @import("Module/val_type.zig").ValType;
-pub const FuncType = @import("Module/FuncType.zig");
+pub const FuncType = @import("Module/func_type.zig").FuncType;
 
 pub const TypeIdx = enum(u31) {
     _,
@@ -21,21 +21,63 @@ pub const FuncIdx = enum(u31) {
 };
 
 wasm: []const u8,
-types: IndexedArena.Slice(FuncType) = .empty,
-func_types: IndexedArena.Slice(IndexedArena.Idx(FuncType)) = .empty,
-code: struct {
-    section_start: [*]const u8 = undefined,
-    entries: IndexedArena.Slice(Code) = .empty,
-} = .{},
-imports_start: [*]const u8 = undefined,
-func_imports: IndexedArena.Slice(ImportName) = .empty,
-exports: struct {
-    section_start: [*]const u8 = undefined,
-    descs: IndexedArena.Slice(Export) = .empty,
-} = .{},
-custom_sections: IndexedArena.Slice(CustomSection) = .empty,
-start: packed struct(u32) { exists: bool = false, idx: FuncIdx = undefined } = .{},
-data: IndexedArena.ConstData = &[0]IndexedArena.Word{},
+inner: extern struct {
+    types: [*]const FuncType,
+    types_count: u32,
+
+    func_count: u32,
+    func_types: [*]const *const FuncType, // Using TypeIdx would introduce another indirection
+
+    /// Not set if `code_count == 0`.
+    code_section: [*]const u8,
+    code_entries: [*]const Code,
+    code_count: u32,
+
+    func_import_count: u32,
+    global_count: u32,
+
+    // global_types: [*]const GlobalType,
+    // table_types: [*]const TableType,
+    // mem_types: [*]const MemoryType,
+    table_count: u8,
+    table_import_count: u8,
+    mem_count: u8,
+    mem_import_count: u8,
+    global_import_count: u32,
+
+    /// Not set if the total # of imports is zero.
+    import_section: [*]const u8,
+    func_imports: [*]const ImportName,
+    // global_imports: [*]const ImportName,
+    // table_imports: [*]const ImportName,
+    // memory_imports: [*]const ImportName,
+
+    export_section: [*]const u8,
+    exports: [*]const Export,
+    export_count: u32,
+
+    start: Start,
+},
+custom_sections: []const CustomSection,
+arena_data: IndexedArena.ConstData,
+
+pub const Start = packed struct(u32) {
+    exists: bool = false,
+    idx: FuncIdx = undefined,
+
+    pub const none = Start{ .exists = false, .idx = @enumFromInt(0) };
+
+    fn init(idx: ?FuncIdx) Start {
+        return .{
+            .exists = idx != null,
+            .idx = idx orelse undefined,
+        };
+    }
+
+    pub fn get(start: Start) ?FuncIdx {
+        return if (start.exists) start.idx else null;
+    }
+};
 
 pub const ImportName = struct {
     name_offset: u32,
@@ -47,9 +89,19 @@ pub const ImportName = struct {
     //pub inline fn name()
 };
 
+pub const WasmSlice = extern struct {
+    offset: u32,
+    size: u32,
+
+    pub fn slice(s: WasmSlice, base: [*]const u8, bounds: []const u8) []const u8 {
+        const calculated = base[s.offset .. s.offset + s.size];
+        std.debug.assert(@intFromPtr(calculated.ptr) + calculated.len <= @intFromPtr(bounds.ptr) + bounds.len);
+        return calculated;
+    }
+};
+
 pub const Export = struct {
-    name_offset: u32,
-    name_len: u32,
+    name_slice: WasmSlice,
     desc: Desc,
 
     pub const Desc = union(enum(u2)) {
@@ -57,13 +109,21 @@ pub const Export = struct {
     };
 
     pub inline fn name(self: Export, module: *const Module) std.unicode.Utf8View {
-        return .{ .bytes = module.exports.section_start[self.name_offset .. self.name_offset + self.name_len] };
+        return .{ .bytes = self.name_slice.slice(module.inner.export_section, module.wasm) };
     }
 };
 
-pub const Code = struct {
-    offset: u32,
-    size: u32,
+pub const MemoryType = extern struct {
+    min_pages: usize,
+    max_pages: usize,
+    flags: packed struct {
+        log2_page_size: u5,
+        // index_type: IndexType,
+    },
+};
+
+pub const Code = extern struct {
+    contents: WasmSlice,
     // TODO: Ptr to side table
 };
 
@@ -207,10 +267,10 @@ const Reader = struct {
 };
 
 pub const ParseOptions = struct {
-    /// If true, module data is initially allocated in a `scratch` allocator as it is resized.
+    /// If true, module data is initially allocated in a scratch allocator as it is resized.
     ///
     /// This reduces the final memory usage at the cost of doubling the peak memory usage. Setting this
-    /// option is useful when parsing many modules, as the `scratch` allocator allows reusing memory
+    /// option is useful when parsing many modules, as the scratch allocator allows reusing memory
     /// needed while parsing.
     realloc_contents: bool = false,
     keep_custom_sections: bool = false,
@@ -224,13 +284,16 @@ fn resolveIdx(slice: anytype, idx: u32) error{InvalidWasm}!@TypeOf(slice).ElemId
 }
 
 pub fn parse(
-    allocator: Allocator,
+    gpa: Allocator,
     wasm: *[]const u8,
-    scratch: Allocator,
+    alloca: *ArenaAllocator,
     rng: std.Random,
     options: ParseOptions,
 ) ParseError!Module {
-    var module = Module{ .wasm = wasm.* };
+    const original_wasm = wasm.*;
+
+    // Allocations that live for the rest of this function call.
+    _ = alloca.reset(.retain_capacity);
 
     if (!std.mem.startsWith(u8, wasm.*, wasm_preamble))
         return ParseError.NotWasm;
@@ -297,11 +360,10 @@ pub fn parse(
     var section_order = SectionOrder.any;
     var known_sections = KnownSections{};
 
-    var temporary = ArenaAllocator.init(scratch);
-    defer temporary.deinit();
+    var scratch = ArenaAllocator.init(alloca.allocator());
+    defer scratch.deinit();
 
-    // Allocated in `temporary`.
-    var custom_sections = std.SegmentedList(CustomSection, 1){};
+    var custom_sections_buf = std.SegmentedList(CustomSection, 1){}; // in `scratch`
 
     while (@as(?u8, wasm_reader.readByte() catch null)) |id_byte| {
         const id = std.meta.intToEnum(SectionId, id_byte) catch |e| switch (e) {
@@ -318,8 +380,8 @@ pub fn parse(
                 const section_name = try custom_sec.readName();
 
                 if (options.keep_custom_sections)
-                    try custom_sections.append(
-                        temporary.allocator(),
+                    try custom_sections_buf.append(
+                        scratch.allocator(),
                         CustomSection{
                             .name_ptr = section_name.bytes.ptr,
                             .name_len = @intCast(section_name.bytes.len),
@@ -342,24 +404,37 @@ pub fn parse(
     std.debug.assert(wasm_reader.isEmpty());
     wasm_reader = undefined;
 
-    var arena = IndexedArena.init(if (options.realloc_contents) scratch else allocator);
-    defer if (options.realloc_contents) arena.deinit();
+    var arena = IndexedArena.init(if (options.realloc_contents) alloca.allocator() else gpa);
+    defer arena.deinit();
 
-    module.custom_sections = try arena.dupeSegmentedList(CustomSection, 1, &custom_sections);
+    const custom_sections = try arena.dupeSegmentedList(CustomSection, 1, &custom_sections_buf);
+    custom_sections_buf = undefined;
 
-    if (known_sections.type.len > 0) {
+    const TypeSecEntry = extern union {
+        fixup: extern struct {
+            types: packed struct(u32) {
+                idx: IndexedArena.Idx(ValType),
+                padding: u1 = 0,
+            },
+            param_count: u16,
+            result_count: u16,
+        },
+        final: FuncType,
+    };
+
+    const type_sec: IndexedArena.Slice(TypeSecEntry) = if (known_sections.type.len > 0) types: {
         const type_reader = Reader.init(&known_sections.type);
         errdefer wasm.* = type_reader.bytes.*;
         const type_len = try type_reader.readUleb128(u32);
-        const types = try arena.alloc(FuncType, type_len);
-        module.types = types;
+        const types = try arena.alloc(TypeSecEntry, type_len);
+        // Can't iterate over slice as result type slices must be allocated
         for (0..type_len) |type_i| {
-            _ = temporary.reset(.retain_capacity);
+            _ = scratch.reset(.retain_capacity);
 
             _ = try type_reader.readByteTag(enum(u8) { func = 0x60 });
 
             const param_count = try type_reader.readUleb128Casted(u32, u16);
-            const param_types = try temporary.allocator().alloc(ValType, param_count);
+            const param_types = try scratch.allocator().alloc(ValType, param_count);
             for (param_types) |*param_ty| {
                 param_ty.* = try type_reader.readValType();
             }
@@ -375,107 +450,132 @@ pub fn parse(
             types.setAt(
                 type_i,
                 &arena,
-                FuncType{
-                    .types = types_buf.idx,
-                    .param_count = param_count,
-                    .result_count = result_count,
+                TypeSecEntry{
+                    .fixup = .{
+                        .types = .{ .idx = types_buf.idx },
+                        .param_count = param_count,
+                        .result_count = result_count,
+                    },
                 },
             );
         }
 
         try type_reader.expectEndOfStream();
         known_sections.type = undefined;
-    }
+        break :types types;
+    } else .empty;
 
-    // Allocated in `temporary`.
-    var func_import_types = std.SegmentedList(IndexedArena.Idx(FuncType), 8){};
+    const FuncSecEntry = extern union {
+        fixup: packed struct(u32) {
+            idx: IndexedArena.Idx(FuncType),
+            padding: u1 = 0,
+        },
+        final: *const FuncType,
+    };
 
-    if (known_sections.import.len > 0) {
+    // Allocated in `alloca`.
+    var func_import_types = std.SegmentedList(FuncSecEntry, 8){};
+
+    const ImportSec = struct {
+        start: [*]const u8 = undefined,
+        funcs: IndexedArena.Slice(ImportName) = .empty,
+    };
+
+    const import_sec: ImportSec = if (known_sections.import.len > 0) imports: {
         const import_reader = Reader.init(&known_sections.import);
         errdefer wasm.* = import_reader.bytes.*;
         const import_len = try import_reader.readUleb128(u32);
-        module.imports_start = import_reader.bytes.*.ptr;
+        const imports_start = import_reader.bytes.*.ptr;
 
-        var names_arena = ArenaAllocator.init(temporary.allocator());
+        var func_imports = std.SegmentedList(ImportName, 8){}; // in `scratch`
+
         // Reserve space for all of the names.
-        _ = try names_arena.allocator().alloc(
-            ImportName,
-            std.math.add(usize, import_len, 2) catch return error.OutOfMemory,
-        );
-
-        _ = names_arena.reset(.retain_capacity);
-        var func_imports = std.SegmentedList(ImportName, 8){};
+        {
+            _ = scratch.reset(.retain_capacity);
+            _ = try scratch.allocator().alloc(
+                ImportName,
+                std.math.add(usize, import_len, import_len / 2) catch return error.OutOfMemory,
+            );
+            _ = scratch.reset(.retain_capacity);
+        }
 
         for (0..import_len) |_| {
             const mod = try import_reader.readName();
             const name = try import_reader.readName();
             const import_name = ImportName{
-                .module_offset = @intCast(@intFromPtr(mod.bytes.ptr) - @intFromPtr(module.imports_start)),
+                .module_offset = @intCast(@intFromPtr(mod.bytes.ptr) - @intFromPtr(imports_start)),
                 .module_len = std.math.cast(u16, mod.bytes.len) orelse return error.WasmImplementationLimit,
 
-                .name_offset = @intCast(@intFromPtr(name.bytes.ptr) - @intFromPtr(module.imports_start)),
+                .name_offset = @intCast(@intFromPtr(name.bytes.ptr) - @intFromPtr(imports_start)),
                 .name_len = std.math.cast(u16, name.bytes.len) orelse return error.WasmImplementationLimit,
             };
 
             switch (try import_reader.readByteTag(ImportExportDesc)) {
                 .func => {
-                    try func_imports.append(names_arena.allocator(), import_name);
+                    const type_idx = try import_reader.readIdx(TypeIdx, type_sec);
+                    try func_imports.append(scratch.allocator(), import_name);
+                    const type_ptr = try resolveIdx(type_sec, @intFromEnum(type_idx));
                     try func_import_types.append(
-                        temporary.allocator(),
-                        try resolveIdx(module.types, @intFromEnum(try import_reader.readIdx(TypeIdx, module.types))),
+                        scratch.allocator(),
+                        .{ .fixup = .{ .idx = type_ptr.ptrCast(FuncType) } },
                     );
                 },
                 else => unreachable, // TODO
             }
         }
 
-        module.func_imports = try arena.dupeSegmentedList(ImportName, 8, &func_imports);
-
         try import_reader.expectEndOfStream();
         known_sections.import = undefined;
-    }
 
-    const func_sec_len: u32 = if (known_sections.func.len > 0) len: {
+        break :imports .{
+            .start = imports_start,
+            .funcs = try arena.dupeSegmentedList(ImportName, 8, &func_imports),
+        };
+    } else .{};
+
+    const func_types: IndexedArena.Slice(FuncSecEntry) = if (known_sections.func.len > 0) funcs: {
         const func_reader = Reader.init(&known_sections.func);
         errdefer wasm.* = func_reader.bytes.*;
+
         const func_len = try func_reader.readUleb128(u32);
         const func_import_len: u32 = @intCast(func_import_types.len);
-        module.func_types = try arena.alloc(
-            IndexedArena.Idx(FuncType),
+
+        const func_types = try arena.alloc(
+            FuncSecEntry,
             std.math.add(u32, func_import_len, func_len) catch return error.InvalidWasm,
         );
 
-        // Cannot use `temporary` until this runs.
-        func_import_types.writeToSlice(module.func_types.items(&arena)[0..func_import_len], 0);
+        const func_types_dst: []FuncSecEntry = func_types.items(&arena);
 
-        for (func_import_len..(func_import_len + func_len)) |i| {
+        // Cannot use `alloca` until this runs.
+        func_import_types.writeToSlice(func_types_dst[0..func_import_len], 0);
+
+        for (func_types_dst) |*f| {
             const type_idx = try func_reader.readUleb128(u32);
-            module.func_types.setAt(i, &arena, try resolveIdx(module.types, type_idx));
+            f.* = FuncSecEntry{
+                .fixup = .{ .idx = (try resolveIdx(type_sec, type_idx)).ptrCast(FuncType) },
+            };
         }
 
         try func_reader.expectEndOfStream();
         known_sections.func = undefined;
-        break :len func_len;
-    } else no_func: {
-        // Cannot use `temporary` until this runs.
-        module.func_types = try arena.dupeSegmentedList(
-            IndexedArena.Idx(FuncType),
-            8,
-            &func_import_types,
-        );
-        break :no_func 0;
-    };
+        break :funcs func_types;
+    } else try arena.dupeSegmentedList(FuncSecEntry, 8, &func_import_types);
 
-    std.debug.assert(module.func_types.len >= func_import_types.len);
+    std.debug.assert(func_types.len >= func_import_types.len);
     func_import_types = undefined;
 
-    if (known_sections.@"export".len > 0) {
+    const ExportSec = struct {
+        start: [*]const u8 = undefined,
+        descs: IndexedArena.Slice(Export) = .empty,
+    };
+
+    const export_sec: ExportSec = if (known_sections.@"export".len > 0) exports: {
         const export_reader = Reader.init(&known_sections.@"export");
         errdefer wasm.* = export_reader.bytes.*;
         const export_len = try export_reader.readUleb128(u32);
-
-        module.exports = .{
-            .section_start = export_reader.bytes.*.ptr,
+        const exports = ExportSec{
+            .start = export_reader.bytes.*.ptr,
             .descs = try arena.alloc(Export, export_len),
         };
 
@@ -500,25 +600,27 @@ pub fn parse(
 
         const export_dedup_context = ExportDedupContext{ .seed = rng.int(u64) };
 
-        _ = temporary.reset(.retain_capacity);
+        _ = scratch.reset(.retain_capacity);
         comptime std.debug.assert(std.hash_map.default_max_load_percentage > 75);
         try export_dedup.ensureTotalCapacityContext(
-            temporary.allocator(),
+            scratch.allocator(),
             // Prevent regrowth even with high load factor.
             std.math.add(u32, export_len, export_len / 4) catch return error.OutOfMemory,
             export_dedup_context,
         );
 
-        for (module.exports.descs.items(&arena)) |*ex| {
+        for (exports.descs.items(&arena)) |*ex| {
             const name = try export_reader.readName();
             if (export_dedup.getOrPutAssumeCapacityContext(name.bytes, export_dedup_context).found_existing)
                 return ParseError.InvalidWasm;
 
             ex.* = Export{
-                .name_len = @intCast(name.bytes.len),
-                .name_offset = @intCast(@intFromPtr(name.bytes.ptr) - @intFromPtr(module.exports.section_start)),
+                .name_slice = .{
+                    .size = @intCast(name.bytes.len),
+                    .offset = @intCast(@intFromPtr(name.bytes.ptr) - @intFromPtr(exports.start)),
+                },
                 .desc = switch (try export_reader.readByteTag(ImportExportDesc)) {
-                    .func => .{ .func = try export_reader.readIdx(FuncIdx, module.func_types) },
+                    .func => .{ .func = try export_reader.readIdx(FuncIdx, func_types) },
                     else => unreachable, // TODO
                 },
             };
@@ -526,52 +628,61 @@ pub fn parse(
 
         try export_reader.expectEndOfStream();
         known_sections.@"export" = undefined;
-    }
+        break :exports exports;
+    } else .{};
 
-    if (known_sections.start.len > 0) {
+    const start: Start = if (known_sections.start.len > 0) start: {
         const start_reader = Reader.init(&known_sections.start);
         errdefer wasm.* = start_reader.bytes.*;
 
-        module.start = .{
-            .idx = try start_reader.readIdx(FuncIdx, module.func_types),
-            .exists = true,
-        };
+        const func_idx = try start_reader.readIdx(FuncIdx, func_types);
 
         try start_reader.expectEndOfStream();
         known_sections.start = undefined;
-    }
 
-    if (known_sections.code.len > 0) {
+        break :start Start.init(func_idx);
+    } else .none;
+
+    const CodeSec = struct {
+        start: [*]const u8 = undefined,
+        entries: IndexedArena.Slice(Code) = .empty,
+    };
+
+    const code_sec: CodeSec = if (known_sections.code.len > 0) code: {
         const code_reader = Reader.init(&known_sections.code);
         errdefer wasm.* = code_reader.bytes.*;
-        const code_len = try code_reader.readUleb128(u32);
-        if (code_len != func_sec_len) return error.MalformedWasm;
 
-        module.code = .{
-            .section_start = code_reader.bytes.*.ptr,
+        const code_len = try code_reader.readUleb128(u32);
+        if (code_len != func_types.len) return error.MalformedWasm;
+
+        const code_sec = CodeSec{
+            .start = code_reader.bytes.*.ptr,
             .entries = try arena.alloc(Code, code_len),
         };
 
-        for (module.code.entries.items(&arena)) |*code| {
+        for (code_sec.entries.items(&arena)) |*code| {
             const contents = try code_reader.readByteVec();
-            code.* = .{
-                .size = @intCast(contents.len),
-                .offset = @intCast(@intFromPtr(contents.ptr) - @intFromPtr(module.code.section_start)),
+            code.* = Code{
+                .contents = .{
+                    .size = @intCast(contents.len),
+                    .offset = @intCast(@intFromPtr(contents.ptr) - @intFromPtr(code_sec.start)),
+                },
             };
         }
 
         try code_reader.expectEndOfStream();
         known_sections.code = undefined;
-    } else if (func_sec_len > 0) return error.MalformedWasm;
+        break :code code_sec;
+    } else if (func_types.len > 0) return error.MalformedWasm else .{};
 
-    module.data = if (options.realloc_contents) realloc: {
+    const arena_data = if (options.realloc_contents) realloc: {
         const src = arena.data.items;
-        const dupe = try allocator.alignedAlloc(IndexedArena.Word, IndexedArena.max_alignment, src.len);
+        const dupe = try gpa.alignedAlloc(IndexedArena.Word, IndexedArena.max_alignment, src.len);
         @memcpy(dupe, src);
         break :realloc dupe;
     } else contents: {
         const desired_len = arena.data.items.len;
-        if (arena.data.allocator.resize(arena.data.items, desired_len)) {
+        if (gpa.resize(arena.data.items, desired_len)) {
             arena.data.capacity = desired_len;
         } else {
             arena.data.expandToCapacity();
@@ -580,10 +691,71 @@ pub fn parse(
         break :contents arena.data.toOwnedSlice() catch unreachable;
     };
 
-    return module;
+    errdefer comptime unreachable;
+
+    for (type_sec.items(arena_data)) |*ty| {
+        const fixup = ty.*.fixup;
+        const types = IndexedArena.Slice(ValType){
+            .idx = fixup.types.idx,
+            .len = fixup.param_count + fixup.result_count,
+        };
+
+        ty.* = TypeSecEntry{
+            .final = FuncType{
+                .types = types.items(arena_data).ptr,
+                .param_count = fixup.param_count,
+                .result_count = fixup.result_count,
+            },
+        };
+    }
+
+    for (func_types.items(arena_data)) |*ty| {
+        const func_type_idx: IndexedArena.Idx(FuncType) = ty.*.fixup.idx;
+        ty.* = FuncSecEntry{ .final = func_type_idx.getPtr(arena_data) };
+    }
+
+    for (code_sec.entries.items(arena_data)) |*code| {
+        // TODO: Allocate side table information for code entries.
+        _ = code;
+    }
+
+    return Module{
+        .wasm = original_wasm,
+        .arena_data = arena_data,
+        .inner = .{
+            .types = @ptrCast(type_sec.items(arena_data)),
+            .types_count = type_sec.len,
+
+            .func_types = @ptrCast(func_types.items(arena_data)),
+            .func_count = func_types.len,
+
+            .code_section = code_sec.start,
+            .code_entries = @ptrCast(code_sec.entries.items(arena_data)),
+            .code_count = code_sec.entries.len,
+
+            .import_section = import_sec.start,
+            .func_import_count = import_sec.funcs.len,
+            .func_imports = import_sec.funcs.items(arena_data).ptr,
+
+            .export_section = export_sec.start,
+            .exports = export_sec.descs.items(arena_data).ptr,
+            .export_count = export_sec.descs.len,
+
+            .start = start,
+
+            // TODO:
+            .global_count = 0,
+            .table_count = 0,
+            .table_import_count = 0,
+            .mem_count = 0,
+            .mem_import_count = 0,
+            .global_import_count = 0,
+        },
+        .custom_sections = custom_sections.items(arena_data),
+    };
 }
 
-pub fn deinit(module: *Module, allocator: Allocator) void {
-    allocator.free(module.data);
+pub fn deinit(module: *Module, gpa: Allocator) void {
+    gpa.free(module.arena_data);
     module.* = undefined;
 }

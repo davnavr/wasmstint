@@ -38,7 +38,7 @@ pub fn main() !u8 {
     var module = wasmstint.Module.parse(
         gpa.allocator(),
         &wasm_buffer,
-        scratch.allocator(),
+        &scratch,
         rng.random(),
         .{ .keep_custom_sections = true },
     ) catch |e| {

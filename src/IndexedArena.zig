@@ -197,6 +197,14 @@ pub fn SliceAligned(comptime T: type, comptime alignment: u8) type {
             return base_ptr[0..self.len];
         }
 
+        pub fn Ptr(comptime Arena: type) type {
+            return IdxPtr(Arena, .Many, alignment, T);
+        }
+
+        pub fn ptr(self: Self, arena: anytype) Ptr(@TypeOf(arena)) {
+            return self.items(arena).ptr;
+        }
+
         /// Gets an index to the element of this slice.
         ///
         /// Only works if `sizeOf(T)` (aka the stride) is exactly a multiple of `@sizeOf(Word)`.
@@ -242,7 +250,7 @@ pub fn SliceAligned(comptime T: type, comptime alignment: u8) type {
                 std.mem.eql(T, self.items(arena), other.items(arena));
         }
 
-        pub const Opt = struct {
+        pub const Opt = extern struct {
             idx: ElemIdx.Opt,
             len: u32,
 
