@@ -22,6 +22,10 @@ pub const FuncIdx = enum(u31) {
 
 pub const TableIdx = enum(u8) { _ };
 
+/// A 7-bit index allows faster parsing and interpretation of memory instructions which would other
+/// be slowed by LEB128 parsing.
+pub const MemIdx = enum(u7) { _ };
+
 wasm: []const u8,
 inner: extern struct {
     types: [*]const FuncType,
@@ -40,7 +44,7 @@ inner: extern struct {
 
     // global_types: [*]const GlobalType,
     table_types: [*]const TableType,
-    // mem_types: [*]const MemoryType,
+    mem_types: [*]const MemType,
     table_count: u8,
     table_import_count: u8,
     mem_count: u8,
@@ -52,7 +56,7 @@ inner: extern struct {
     func_imports: [*]const ImportName,
     // global_imports: [*]const ImportName,
     table_imports: [*]const ImportName,
-    // memory_imports: [*]const ImportName,
+    memory_imports: [*]const ImportName,
 
     export_section: [*]const u8,
     exports: [*]const Export,
@@ -109,6 +113,7 @@ pub const Export = struct {
     pub const Desc = union(enum(u2)) {
         func: FuncIdx,
         table: TableIdx,
+        mem: MemIdx,
     };
 
     pub inline fn name(self: Export, module: *const Module) std.unicode.Utf8View {
@@ -129,13 +134,14 @@ pub const TableType = extern struct {
     // flags: packed struct { index_type: IndexType, },
 };
 
-pub const MemoryType = extern struct {
+pub const MemType = extern struct {
     /// The minimum and maximum number of pages.
     limits: Limits,
-    flags: packed struct {
-        log2_page_size: u5,
+    flags: packed struct(u32) {
+        log2_page_size: u5 = std.math.log2_int(u17, 65536),
         // index_type: IndexType,
-    },
+        padding: u27 = 0,
+    } = .{},
 };
 
 pub const Code = extern struct {
@@ -284,7 +290,7 @@ const Reader = struct {
         // When 64-bit memories are supported, parsed type needs to conditionally change to u64.
         const min = try reader.readUleb128(u32);
         const max: u32 = switch (flag) {
-            .no_maximum => 0,
+            .no_maximum => std.math.maxInt(u32),
             .has_maximum => try reader.readUleb128(u32),
         };
 
@@ -301,6 +307,11 @@ const Reader = struct {
             .elem_type = elem_type,
             .limits = try reader.readLimits(),
         };
+    }
+
+    fn readMemType(reader: Reader) ParseError!MemType {
+        const limits = try reader.readLimits();
+        return .{ .limits = limits };
     }
 
     fn readIdx(reader: Reader, comptime I: type, slice: anytype) ParseError!I {
@@ -528,11 +539,13 @@ pub fn parse(
     // Allocated in `alloca`.
     var func_import_types = std.SegmentedList(FuncSecEntry, 8){};
     var table_import_types = std.SegmentedList(TableType, 1){};
+    var mem_import_types = std.SegmentedList(MemType, 1){};
 
     const ImportSec = struct {
         start: [*]const u8 = undefined,
         funcs: IndexedArena.Slice(ImportName) = .empty,
         tables: IndexedArena.Slice(ImportName) = .empty,
+        mems: IndexedArena.Slice(ImportName) = .empty,
     };
 
     const import_sec: ImportSec = if (known_sections.import.len > 0) imports: {
@@ -544,6 +557,7 @@ pub fn parse(
         // Allocated in `scratch`.
         var func_imports = std.SegmentedList(ImportName, 8){};
         var table_imports = std.SegmentedList(ImportName, 1){};
+        var mem_imports = std.SegmentedList(ImportName, 1){};
 
         // Reserve space for all of the names.
         {
@@ -584,6 +598,13 @@ pub fn parse(
                         try import_reader.readTableType(),
                     );
                 },
+                .mem => {
+                    try mem_imports.append(scratch.allocator(), import_name);
+                    try mem_import_types.append(
+                        scratch.allocator(),
+                        try import_reader.readMemType(),
+                    );
+                },
                 else => unreachable, // TODO
             }
         }
@@ -594,10 +615,13 @@ pub fn parse(
         // Detect if code above accidentally added to the wrong name list.
         std.debug.assert(func_import_types.len == func_imports.len);
         std.debug.assert(table_import_types.len == table_imports.len);
+        std.debug.assert(mem_import_types.len == mem_imports.len);
 
         break :imports ImportSec{
             .start = imports_start,
             .funcs = try arena.dupeSegmentedList(ImportName, 8, &func_imports),
+            .tables = try arena.dupeSegmentedList(ImportName, 1, &table_imports),
+            .mems = try arena.dupeSegmentedList(ImportName, 1, &mem_imports),
         };
     } else .{};
 
@@ -612,6 +636,9 @@ pub fn parse(
             FuncSecEntry,
             std.math.add(u32, func_import_len, func_len) catch return error.InvalidWasm,
         );
+
+        if (func_types.len > std.math.maxInt(@typeInfo(FuncIdx).@"enum".tag_type))
+            return error.WasmImplementationLimit;
 
         const func_types_dst: []FuncSecEntry = func_types.items(&arena);
 
@@ -645,6 +672,9 @@ pub fn parse(
             std.math.add(u32, table_import_len, table_len) catch return error.InvalidWasm,
         );
 
+        if (table_types.len > std.math.maxInt(@typeInfo(TableIdx).@"enum".tag_type))
+            return error.WasmImplementationLimit;
+
         const table_types_dst: []TableType = table_types.items(&arena);
 
         // Cannot use `alloca` until this runs.
@@ -658,7 +688,33 @@ pub fn parse(
         break :tables table_types;
     } else try arena.dupeSegmentedList(TableType, 1, &table_import_types);
 
-    if (table_types.len > std.math.maxInt(u8)) return error.WasmImplementationLimit;
+    const mem_types: IndexedArena.Slice(MemType) = if (known_sections.mem.len > 0) mems: {
+        const mem_reader = Reader.init(&known_sections.mem);
+        errdefer wasm.* = mem_reader.bytes.*;
+
+        const mem_len = try mem_reader.readUleb128(u32);
+        const mem_import_len: u32 = @intCast(mem_import_types.len);
+
+        const mem_types = try arena.alloc(
+            MemType,
+            std.math.add(u32, mem_import_len, mem_len) catch return error.InvalidWasm,
+        );
+
+        // std.math.maxInt(@typeInfo(MemIdx).@"enum".tag_type)
+        if (mem_types.len > 1) return error.WasmImplementationLimit; // Pending multi-memory support.
+
+        const mem_types_dst: []MemType = mem_types.items(&arena);
+
+        // Cannot use `alloca` until this runs.
+        mem_import_types.writeToSlice(mem_types_dst[0..mem_import_len], 0);
+
+        for (mem_types_dst[mem_import_len..]) |*mem|
+            mem.* = try mem_reader.readMemType();
+
+        try mem_reader.expectEndOfStream();
+        known_sections.mem = undefined;
+        break :mems mem_types;
+    } else try arena.dupeSegmentedList(MemType, 1, &mem_import_types);
 
     const ExportSec = struct {
         start: [*]const u8 = undefined,
@@ -717,6 +773,7 @@ pub fn parse(
                 .desc = switch (try export_reader.readByteTag(ImportExportDesc)) {
                     .func => .{ .func = try export_reader.readIdx(FuncIdx, func_types) },
                     .table => .{ .table = try export_reader.readIdx(TableIdx, table_types) },
+                    .mem => .{ .mem = try export_reader.readIdx(MemIdx, mem_types) },
                     else => unreachable, // TODO
                 },
             };
@@ -744,12 +801,13 @@ pub fn parse(
         entries: IndexedArena.Slice(Code) = .empty,
     };
 
+    const defined_func_count = func_types.len - import_sec.funcs.len;
     const code_sec: CodeSec = if (known_sections.code.len > 0) code: {
         const code_reader = Reader.init(&known_sections.code);
         errdefer wasm.* = code_reader.bytes.*;
 
         const code_len = try code_reader.readUleb128(u32);
-        if (code_len != func_types.len) return error.MalformedWasm;
+        if (code_len != defined_func_count) return error.MalformedWasm;
 
         const code_sec = CodeSec{
             .start = code_reader.bytes.*.ptr,
@@ -769,7 +827,7 @@ pub fn parse(
         try code_reader.expectEndOfStream();
         known_sections.code = undefined;
         break :code code_sec;
-    } else if (func_types.len > 0) return error.MalformedWasm else .{};
+    } else if (defined_func_count > 0) return error.MalformedWasm else .{};
 
     const arena_data = if (options.realloc_contents) realloc: {
         const src = arena.data.items;
@@ -832,11 +890,16 @@ pub fn parse(
             .table_types = table_types.items(arena_data).ptr,
             .table_count = @intCast(table_types.len),
 
+            .mem_types = mem_types.items(arena_data).ptr,
+            .mem_count = 0,
+
             .import_section = import_sec.start,
             .func_import_count = import_sec.funcs.len,
             .func_imports = import_sec.funcs.items(arena_data).ptr,
             .table_import_count = @intCast(import_sec.tables.len),
             .table_imports = import_sec.tables.items(arena_data).ptr,
+            .mem_import_count = @intCast(import_sec.mems.len),
+            .memory_imports = import_sec.mems.items(arena_data).ptr,
 
             .export_section = export_sec.start,
             .exports = export_sec.descs.items(arena_data).ptr,
@@ -846,8 +909,6 @@ pub fn parse(
 
             // TODO:
             .global_count = 0,
-            .mem_count = 0,
-            .mem_import_count = 0,
             .global_import_count = 0,
         },
         .custom_sections = custom_sections.items(arena_data),

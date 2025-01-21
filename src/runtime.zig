@@ -9,9 +9,9 @@ const ModuleAllocator = *const fn (
 ) Allocator.Error!void;
 
 pub const ModuleAllocateRequest = struct {
-    // table_types: []const TableType,
+    table_types: []const Module.TableType,
     // tables: []TableInst,
-    memory_types: []const Module.MemoryType,
+    memory_types: []const Module.MemType,
     // memories: []MemoryInst,
 };
 
