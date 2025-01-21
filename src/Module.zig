@@ -20,6 +20,8 @@ pub const FuncIdx = enum(u31) {
     }
 };
 
+pub const TableIdx = enum(u8) { _ };
+
 wasm: []const u8,
 inner: extern struct {
     types: [*]const FuncType,
@@ -37,7 +39,7 @@ inner: extern struct {
     global_count: u32,
 
     // global_types: [*]const GlobalType,
-    // table_types: [*]const TableType,
+    table_types: [*]const TableType,
     // mem_types: [*]const MemoryType,
     table_count: u8,
     table_import_count: u8,
@@ -49,7 +51,7 @@ inner: extern struct {
     import_section: [*]const u8,
     func_imports: [*]const ImportName,
     // global_imports: [*]const ImportName,
-    // table_imports: [*]const ImportName,
+    table_imports: [*]const ImportName,
     // memory_imports: [*]const ImportName,
 
     export_section: [*]const u8,
@@ -106,6 +108,7 @@ pub const Export = struct {
 
     pub const Desc = union(enum(u2)) {
         func: FuncIdx,
+        table: TableIdx,
     };
 
     pub inline fn name(self: Export, module: *const Module) std.unicode.Utf8View {
@@ -113,9 +116,22 @@ pub const Export = struct {
     }
 };
 
+pub const Limits = extern struct {
+    min: usize,
+    max: usize,
+};
+
+pub const TableType = extern struct {
+    /// Until a `RefType` type is added, it is an invariant that `element_type.isRefType()`.
+    elem_type: ValType,
+    /// The minimum and maximum number of elements.
+    limits: Limits,
+    // flags: packed struct { index_type: IndexType, },
+};
+
 pub const MemoryType = extern struct {
-    min_pages: usize,
-    max_pages: usize,
+    /// The minimum and maximum number of pages.
+    limits: Limits,
     flags: packed struct {
         log2_page_size: u5,
         // index_type: IndexType,
@@ -255,6 +271,36 @@ const Reader = struct {
         comptime std.debug.assert(@typeInfo(ValType).@"enum".tag_type == u8);
 
         return reader.readByteTag(ValType);
+    }
+
+    fn readLimits(reader: Reader) ParseError!Limits {
+        const LimitsFlag = enum(u8) {
+            no_maximum = 0x00,
+            has_maximum = 0x01,
+        };
+
+        const flag = try reader.readByteTag(LimitsFlag);
+
+        // When 64-bit memories are supported, parsed type needs to conditionally change to u64.
+        const min = try reader.readUleb128(u32);
+        const max: u32 = switch (flag) {
+            .no_maximum => 0,
+            .has_maximum => try reader.readUleb128(u32),
+        };
+
+        return if (min <= max)
+            .{ .min = min, .max = max }
+        else
+            error.InvalidWasm;
+    }
+
+    fn readTableType(reader: Reader) ParseError!TableType {
+        const elem_type = try reader.readValType();
+        if (!elem_type.isRefType()) return error.MalformedWasm;
+        return .{
+            .elem_type = elem_type,
+            .limits = try reader.readLimits(),
+        };
     }
 
     fn readIdx(reader: Reader, comptime I: type, slice: anytype) ParseError!I {
@@ -465,20 +511,28 @@ pub fn parse(
         break :types types;
     } else .empty;
 
-    const FuncSecEntry = extern union {
-        fixup: packed struct(u32) {
-            idx: IndexedArena.Idx(FuncType),
-            padding: u1 = 0,
-        },
-        final: *const FuncType,
+    const definition = struct {
+        fn Class(comptime T: type) type {
+            return extern union {
+                fixup: packed struct(u32) {
+                    idx: IndexedArena.Idx(T),
+                    padding: u1 = 0,
+                },
+                final: *const T,
+            };
+        }
     };
+
+    const FuncSecEntry = definition.Class(FuncType);
 
     // Allocated in `alloca`.
     var func_import_types = std.SegmentedList(FuncSecEntry, 8){};
+    var table_import_types = std.SegmentedList(TableType, 1){};
 
     const ImportSec = struct {
         start: [*]const u8 = undefined,
         funcs: IndexedArena.Slice(ImportName) = .empty,
+        tables: IndexedArena.Slice(ImportName) = .empty,
     };
 
     const import_sec: ImportSec = if (known_sections.import.len > 0) imports: {
@@ -487,7 +541,9 @@ pub fn parse(
         const import_len = try import_reader.readUleb128(u32);
         const imports_start = import_reader.bytes.*.ptr;
 
-        var func_imports = std.SegmentedList(ImportName, 8){}; // in `scratch`
+        // Allocated in `scratch`.
+        var func_imports = std.SegmentedList(ImportName, 8){};
+        var table_imports = std.SegmentedList(ImportName, 1){};
 
         // Reserve space for all of the names.
         {
@@ -512,12 +568,20 @@ pub fn parse(
 
             switch (try import_reader.readByteTag(ImportExportDesc)) {
                 .func => {
-                    const type_idx = try import_reader.readIdx(TypeIdx, type_sec);
                     try func_imports.append(scratch.allocator(), import_name);
+
+                    const type_idx = try import_reader.readIdx(TypeIdx, type_sec);
                     const type_ptr = try resolveIdx(type_sec, @intFromEnum(type_idx));
                     try func_import_types.append(
                         scratch.allocator(),
                         .{ .fixup = .{ .idx = type_ptr.ptrCast(FuncType) } },
+                    );
+                },
+                .table => {
+                    try table_imports.append(scratch.allocator(), import_name);
+                    try table_import_types.append(
+                        scratch.allocator(),
+                        try import_reader.readTableType(),
                     );
                 },
                 else => unreachable, // TODO
@@ -527,7 +591,11 @@ pub fn parse(
         try import_reader.expectEndOfStream();
         known_sections.import = undefined;
 
-        break :imports .{
+        // Detect if code above accidentally added to the wrong name list.
+        std.debug.assert(func_import_types.len == func_imports.len);
+        std.debug.assert(table_import_types.len == table_imports.len);
+
+        break :imports ImportSec{
             .start = imports_start,
             .funcs = try arena.dupeSegmentedList(ImportName, 8, &func_imports),
         };
@@ -564,6 +632,33 @@ pub fn parse(
 
     std.debug.assert(func_types.len >= func_import_types.len);
     func_import_types = undefined;
+
+    const table_types: IndexedArena.Slice(TableType) = if (known_sections.table.len > 0) tables: {
+        const table_reader = Reader.init(&known_sections.table);
+        errdefer wasm.* = table_reader.bytes.*;
+
+        const table_len = try table_reader.readUleb128(u32);
+        const table_import_len: u32 = @intCast(table_import_types.len);
+
+        const table_types = try arena.alloc(
+            TableType,
+            std.math.add(u32, table_import_len, table_len) catch return error.InvalidWasm,
+        );
+
+        const table_types_dst: []TableType = table_types.items(&arena);
+
+        // Cannot use `alloca` until this runs.
+        table_import_types.writeToSlice(table_types_dst[0..table_import_len], 0);
+
+        for (table_types_dst[table_import_len..]) |*tt|
+            tt.* = try table_reader.readTableType();
+
+        try table_reader.expectEndOfStream();
+        known_sections.table = undefined;
+        break :tables table_types;
+    } else try arena.dupeSegmentedList(TableType, 1, &table_import_types);
+
+    if (table_types.len > std.math.maxInt(u8)) return error.WasmImplementationLimit;
 
     const ExportSec = struct {
         start: [*]const u8 = undefined,
@@ -621,6 +716,7 @@ pub fn parse(
                 },
                 .desc = switch (try export_reader.readByteTag(ImportExportDesc)) {
                     .func => .{ .func = try export_reader.readIdx(FuncIdx, func_types) },
+                    .table => .{ .table = try export_reader.readIdx(TableIdx, table_types) },
                     else => unreachable, // TODO
                 },
             };
@@ -733,9 +829,14 @@ pub fn parse(
             .code_entries = @ptrCast(code_sec.entries.items(arena_data)),
             .code_count = code_sec.entries.len,
 
+            .table_types = table_types.items(arena_data).ptr,
+            .table_count = @intCast(table_types.len),
+
             .import_section = import_sec.start,
             .func_import_count = import_sec.funcs.len,
             .func_imports = import_sec.funcs.items(arena_data).ptr,
+            .table_import_count = @intCast(import_sec.tables.len),
+            .table_imports = import_sec.tables.items(arena_data).ptr,
 
             .export_section = export_sec.start,
             .exports = export_sec.descs.items(arena_data).ptr,
@@ -745,8 +846,6 @@ pub fn parse(
 
             // TODO:
             .global_count = 0,
-            .table_count = 0,
-            .table_import_count = 0,
             .mem_count = 0,
             .mem_import_count = 0,
             .global_import_count = 0,

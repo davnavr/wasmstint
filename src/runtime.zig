@@ -1,6 +1,21 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const IndexedArena = @import("IndexedArena.zig");
 const Module = @import("Module.zig");
+
+const ModuleAllocator = *const fn (
+    ctx: *anyopaque,
+    request: *const ModuleAllocateRequest,
+) Allocator.Error!void;
+
+pub const ModuleAllocateRequest = struct {
+    // table_types: []const TableType,
+    // tables: []TableInst,
+    memory_types: []const Module.MemoryType,
+    // memories: []MemoryInst,
+};
+
+const memory_alignment = 16; // Enough to store aligned `v128` values.
 
 pub const ModuleInst = struct {
     module: *const Module,
@@ -15,9 +30,29 @@ pub const ModuleInst = struct {
     // tables
     data: IndexedArena.ConstData = &[0]IndexedArena.Word{},
 
-    pub fn allocate(module: *const Module, imports: []const ExternVal) ModuleInst {
+    pub const AllocateError = error{
+        ImportTypeMismatch,
+        // OutOfMemory
+    };
+
+    // TODO: Either take a Store interface struct, or a struct providing { tables: [][]const u8, memories: [][]const u8 }
+    // - Store either provides a function for each kind of definition (table, memory, globals),
+    //   or a single function to do one big allocation (they have to fill a struct { tables, memories })
+
+    pub fn allocate(
+        module: *const Module,
+        imports: []const ExternVal,
+        gpa: Allocator,
+        store_ctx: *anyopaque,
+        store: ModuleAllocator,
+        scratch: Allocator,
+    ) AllocateError!ModuleInst {
         // TODO: Check types of imports
         _ = imports;
+        _ = gpa;
+        _ = store_ctx;
+        _ = store;
+        _ = scratch;
         return .{
             .module = module,
         };
@@ -41,17 +76,11 @@ pub const ExternVal = union(enum) {
     // that won't be stored in memory for long.
 };
 
-pub const FuncType = extern struct {
-    types: [*]const Module.ValType,
-    param_count: u32,
-    result_count: u32,
-};
-
 pub const FuncInst = extern struct {
     /// If the lowest bit is `0`, then this is a `*const ModuleInst`.
     module_or_host: *anyopaque,
     func: packed union {
-        wasm: Wasm,
+        wasm: Module.FuncIdx,
         host_data: ?*anyopaque,
     },
 
@@ -60,17 +89,7 @@ pub const FuncInst = extern struct {
     /// Embedders of *wasmstint* are intended to store the data of a host function in some structure containing a
     /// `HostFunc`, passing the pointer to the `HostFunc` to *wasmstint*.
     pub const Host = extern struct {
-        signature: FuncType,
-    };
-
-    pub const Wasm = packed struct(usize) {
-        // TODO: Maybe make it an invariant that this does *not* refer to a function import?
-        idx: Module.FuncIdx,
-        signature: if (@sizeOf(usize) > 4)
-            IndexedArena.Idx(Module.FuncType)
-        else
-            void,
-        padding: if (@sizeOf(usize) > 4) u2 else u1 = 0,
+        signature: Module.FuncType,
     };
 
     pub const Expanded = union(enum) {
@@ -80,7 +99,7 @@ pub const FuncInst = extern struct {
         },
         wasm: struct {
             module: *const ModuleInst,
-            code: Wasm,
+            code: Module.FuncIdx,
         },
     };
 

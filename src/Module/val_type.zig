@@ -15,6 +15,13 @@ pub const ValType = enum(u8) { // packed union
         return @intFromEnum(a) == @intFromEnum(b);
     }
 
+    pub inline fn isRefType(val_type: ValType) bool {
+        return switch (val_type) {
+            .funcref, .externref => true,
+            else => false,
+        };
+    }
+
     // comptime {
     //     std.debug.assert(@sizeOf(ValType) == @sizeOf(usize));
     //     std.debug.assert(@sizeOf(ValType) == @sizeOf(*const anytype));
