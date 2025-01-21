@@ -550,7 +550,7 @@ pub fn parse(
         // Cannot use `alloca` until this runs.
         func_import_types.writeToSlice(func_types_dst[0..func_import_len], 0);
 
-        for (func_types_dst) |*f| {
+        for (func_types_dst[func_import_len..]) |*f| {
             const type_idx = try func_reader.readUleb128(u32);
             f.* = FuncSecEntry{
                 .fixup = .{ .idx = (try resolveIdx(type_sec, type_idx)).ptrCast(FuncType) },
