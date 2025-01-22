@@ -20,10 +20,8 @@ pub const FuncIdx = enum(u31) {
     }
 };
 
-pub const TableIdx = enum(u8) { _ };
-
-/// A 7-bit index allows faster parsing and interpretation of memory instructions which would other
-/// be slowed by LEB128 parsing.
+// A 7-bit index allows parsing a byte instead of a LEB128 index.
+pub const TableIdx = enum(u7) { _ };
 pub const MemIdx = enum(u7) { _ };
 
 wasm: []const u8,
@@ -59,7 +57,7 @@ inner: extern struct {
     memory_imports: [*]const ImportName,
 
     export_section: [*]const u8,
-    exports: [*]const Export,
+    exports: [*]align(4) const Export,
     export_count: u32,
 
     start: Start,
@@ -86,11 +84,11 @@ pub const Start = packed struct(u32) {
 };
 
 pub const ImportName = struct {
-    name_offset: u32,
-    name_len: u16,
+    name_offset: u16,
+    name_size: u16,
 
-    module_offset: u32,
-    module_len: u16,
+    module_offset: u16,
+    module_size: u16,
 
     //pub inline fn name()
 };
@@ -106,18 +104,21 @@ pub const WasmSlice = extern struct {
     }
 };
 
-pub const Export = struct {
-    name_slice: WasmSlice,
+pub const Export = packed struct(u64) {
     desc: Desc,
+    desc_tag: std.meta.FieldEnum(Desc),
+    name_size: u15,
+    name_offset: u16,
 
-    pub const Desc = union(enum(u2)) {
+    pub const Desc = packed union {
         func: FuncIdx,
         table: TableIdx,
         mem: MemIdx,
     };
 
     pub inline fn name(self: Export, module: *const Module) std.unicode.Utf8View {
-        return .{ .bytes = self.name_slice.slice(module.inner.export_section, module.wasm) };
+        const name_slice = WasmSlice{ .offset = self.name_offset, .size = self.name_size };
+        return .{ .bytes = name_slice.slice(module.inner.export_section, module.wasm) };
     }
 };
 
@@ -573,11 +574,15 @@ pub fn parse(
             const mod = try import_reader.readName();
             const name = try import_reader.readName();
             const import_name = ImportName{
-                .module_offset = @intCast(@intFromPtr(mod.bytes.ptr) - @intFromPtr(imports_start)),
-                .module_len = std.math.cast(u16, mod.bytes.len) orelse return error.WasmImplementationLimit,
+                .module_offset = std.math.cast(u16, @intFromPtr(mod.bytes.ptr) - @intFromPtr(imports_start)) orelse
+                    return error.WasmImplementationLimit,
+                .module_size = std.math.cast(u16, mod.bytes.len) orelse
+                    return error.WasmImplementationLimit,
 
-                .name_offset = @intCast(@intFromPtr(name.bytes.ptr) - @intFromPtr(imports_start)),
-                .name_len = std.math.cast(u16, name.bytes.len) orelse return error.WasmImplementationLimit,
+                .name_offset = std.math.cast(u16, @intFromPtr(name.bytes.ptr) - @intFromPtr(imports_start)) orelse
+                    return error.WasmImplementationLimit,
+                .name_size = std.math.cast(u16, name.bytes.len) orelse
+                    return error.WasmImplementationLimit,
             };
 
             switch (try import_reader.readByteTag(ImportExportDesc)) {
@@ -718,7 +723,7 @@ pub fn parse(
 
     const ExportSec = struct {
         start: [*]const u8 = undefined,
-        descs: IndexedArena.Slice(Export) = .empty,
+        descs: IndexedArena.SliceAligned(Export, 4) = .empty,
     };
 
     const export_sec: ExportSec = if (known_sections.@"export".len > 0) exports: {
@@ -727,7 +732,7 @@ pub fn parse(
         const export_len = try export_reader.readUleb128(u32);
         const exports = ExportSec{
             .start = export_reader.bytes.*.ptr,
-            .descs = try arena.alloc(Export, export_len),
+            .descs = try arena.alignedAlloc(Export, 4, export_len),
         };
 
         const ExportDedupContext = struct {
@@ -765,12 +770,18 @@ pub fn parse(
             if (export_dedup.getOrPutAssumeCapacityContext(name.bytes, export_dedup_context).found_existing)
                 return ParseError.InvalidWasm;
 
+            const tag = try export_reader.readByteTag(ImportExportDesc);
+
             ex.* = Export{
-                .name_slice = .{
-                    .size = @intCast(name.bytes.len),
-                    .offset = @intCast(@intFromPtr(name.bytes.ptr) - @intFromPtr(exports.start)),
+                .name_size = std.math.cast(u15, name.bytes.len) orelse
+                    return error.WasmImplementationLimit,
+                .name_offset = std.math.cast(u16, @intFromPtr(name.bytes.ptr) - @intFromPtr(exports.start)) orelse
+                    return error.WasmImplementationLimit,
+                .desc_tag = switch (tag) {
+                    .global => unreachable, // TODO
+                    inline else => |desc_tag| @field(std.meta.FieldEnum(Export.Desc), @tagName(desc_tag)),
                 },
-                .desc = switch (try export_reader.readByteTag(ImportExportDesc)) {
+                .desc = switch (tag) {
                     .func => .{ .func = try export_reader.readIdx(FuncIdx, func_types) },
                     .table => .{ .table = try export_reader.readIdx(TableIdx, table_types) },
                     .mem => .{ .mem = try export_reader.readIdx(MemIdx, mem_types) },
