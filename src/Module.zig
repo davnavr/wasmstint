@@ -2,8 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const IndexedArena = @import("IndexedArena.zig");
-
-const Module = @This();
+const opcodes = @import("opcodes.zig");
 
 pub const ValType = @import("Module/val_type.zig").ValType;
 pub const FuncType = @import("Module/func_type.zig").FuncType;
@@ -20,9 +19,13 @@ pub const FuncIdx = enum(u31) {
     }
 };
 
+pub const GlobalIdx = enum(u31) { _ };
+
 // A 7-bit index allows parsing a byte instead of a LEB128 index.
 pub const TableIdx = enum(u7) { _ };
 pub const MemIdx = enum(u7) { _ };
+
+const Module = @This();
 
 wasm: []const u8,
 inner: extern struct {
@@ -40,7 +43,8 @@ inner: extern struct {
     func_import_count: u32,
     global_count: u32,
 
-    // global_types: [*]const GlobalType,
+    global_exprs: [*]ConstExpr,
+    global_types: [*]const GlobalType,
     table_types: [*]const TableType,
     mem_types: [*]const MemType,
     table_count: u8,
@@ -52,9 +56,9 @@ inner: extern struct {
     /// Not set if the total # of imports is zero.
     import_section: [*]const u8,
     func_imports: [*]const ImportName,
-    // global_imports: [*]const ImportName,
     table_imports: [*]const ImportName,
     memory_imports: [*]const ImportName,
+    global_imports: [*]const ImportName,
 
     export_section: [*]const u8,
     exports: [*]align(4) const Export,
@@ -114,6 +118,7 @@ pub const Export = packed struct(u64) {
         func: FuncIdx,
         table: TableIdx,
         mem: MemIdx,
+        global: GlobalIdx,
     };
 
     pub inline fn name(self: Export, module: *const Module) std.unicode.Utf8View {
@@ -145,9 +150,38 @@ pub const MemType = extern struct {
     } = .{},
 };
 
+pub const GlobalType = extern struct {
+    val_type: ValType,
+    mut: Mut,
+
+    pub const Mut = enum(u8) {
+        @"const" = 0,
+        @"var" = 1,
+    };
+
+    pub inline fn isVar(ty: *const GlobalType) bool {
+        return switch (ty.mut) {
+            .@"const" => false,
+            .@"var" => true,
+        };
+    }
+};
+
 pub const Code = extern struct {
     contents: WasmSlice,
     // TODO: Ptr to side table
+};
+
+pub const ConstExpr = union {
+    i32_or_f32: u32,
+    i64_or_f64: IndexedArena.Idx(u64),
+    @"ref.null": void,
+    @"ref.func": FuncIdx,
+    @"global.get": GlobalIdx,
+
+    comptime {
+        std.debug.assert(@sizeOf(ConstExpr) == 8);
+    }
 };
 
 pub const CustomSection = struct {
@@ -260,6 +294,13 @@ const Reader = struct {
         return std.math.cast(U, try reader.readUleb128(T)) orelse LimitError.WasmImplementationLimit;
     }
 
+    fn readIleb128(reader: Reader, comptime T: type) Error!T {
+        return std.leb.readIleb128(T, reader) catch |e| switch (e) {
+            error.Overflow => ReaderError.MalformedWasm,
+            NoEofError.EndOfStream => |eof| eof,
+        };
+    }
+
     fn readByteVec(reader: Reader) Error![]const u8 {
         const len = try reader.readUleb128(u32);
         return reader.read(len);
@@ -315,12 +356,73 @@ const Reader = struct {
         return .{ .limits = limits };
     }
 
-    fn readIdx(reader: Reader, comptime I: type, slice: anytype) ParseError!I {
+    fn readGlobalType(reader: Reader) Error!GlobalType {
+        const val_type = try reader.readValType();
+        return .{
+            .val_type = val_type,
+            .mut = try reader.readByteTag(GlobalType.Mut),
+        };
+    }
+
+    fn readIdx(reader: Reader, comptime I: type, bounds: anytype) ParseError!I {
         const idx = try reader.readUleb128(u32);
-        return if (idx < slice.len)
+        const len = switch (@typeInfo(@TypeOf(bounds))) {
+            .@"struct" => bounds.len,
+            .int => bounds,
+            else => unreachable,
+        };
+
+        return if (idx < len)
             @enumFromInt(std.math.cast(@typeInfo(I).@"enum".tag_type, idx) orelse return error.WasmImplementationLimit)
         else
             error.InvalidWasm;
+    }
+
+    fn readConstExpr(
+        reader: Reader,
+        expected_type: ValType,
+        func_count: u32,
+        /// Should refer to global imports only.
+        global_types: IndexedArena.Slice(GlobalType),
+        arena: *IndexedArena,
+    ) ParseError!ConstExpr {
+        const const_opcode = try reader.readByteTag(opcodes.ByteOpcode);
+        const expr: ConstExpr = expr: switch (const_opcode) {
+            .@"i32.const" => {
+                if (!expected_type.eql(ValType.i32)) return error.InvalidWasm;
+                break :expr .{ .i32_or_f32 = @bitCast(try reader.readIleb128(i32)) };
+            },
+            .@"f32.const" => {
+                if (!expected_type.eql(ValType.f32)) return error.InvalidWasm;
+                break :expr .{ .i32_or_f32 = std.mem.readInt(u32, try reader.readArray(4), .little) };
+            },
+            .@"i64.const" => {
+                const n = try arena.create(u64);
+                n.set(arena, @bitCast(try reader.readIleb128(i64)));
+                break :expr .{ .i64_or_f64 = n };
+            },
+            .@"f64.const" => {
+                const n = try arena.create(u64);
+                n.set(arena, std.mem.readInt(u64, try reader.readArray(8), .little));
+                break :expr .{ .i64_or_f64 = n };
+            },
+            .@"ref.null" => .{ .@"ref.null" = {} },
+            .@"ref.func" => .{ .@"ref.func" = try reader.readIdx(FuncIdx, func_count) },
+            .@"global.get" => {
+                const global_idx = try reader.readIdx(GlobalIdx, global_types);
+                const actual_type: *const GlobalType = global_types.ptrAt(@intFromEnum(global_idx), arena);
+                if (!actual_type.val_type.eql(expected_type) or actual_type.isVar())
+                    return error.InvalidWasm;
+
+                break :expr .{ .@"global.get" = global_idx };
+            },
+            else => return ParseError.InvalidWasm,
+        };
+
+        const end_opcode = try reader.readByteTag(opcodes.ByteOpcode);
+        if (end_opcode != .end) return ParseError.InvalidWasm;
+
+        return expr;
     }
 };
 
@@ -333,13 +435,6 @@ pub const ParseOptions = struct {
     realloc_contents: bool = false,
     keep_custom_sections: bool = false,
 };
-
-fn resolveIdx(slice: anytype, idx: u32) error{InvalidWasm}!@TypeOf(slice).ElemIdx {
-    return if (idx >= slice.len)
-        error.InvalidWasm
-    else
-        slice.at(idx);
-}
 
 pub fn parse(
     gpa: Allocator,
@@ -541,12 +636,14 @@ pub fn parse(
     var func_import_types = std.SegmentedList(FuncSecEntry, 8){};
     var table_import_types = std.SegmentedList(TableType, 1){};
     var mem_import_types = std.SegmentedList(MemType, 1){};
+    var global_import_types = std.SegmentedList(GlobalType, 4){};
 
     const ImportSec = struct {
         start: [*]const u8 = undefined,
         funcs: IndexedArena.Slice(ImportName) = .empty,
         tables: IndexedArena.Slice(ImportName) = .empty,
         mems: IndexedArena.Slice(ImportName) = .empty,
+        globals: IndexedArena.Slice(ImportName) = .empty,
     };
 
     const import_sec: ImportSec = if (known_sections.import.len > 0) imports: {
@@ -559,6 +656,7 @@ pub fn parse(
         var func_imports = std.SegmentedList(ImportName, 8){};
         var table_imports = std.SegmentedList(ImportName, 1){};
         var mem_imports = std.SegmentedList(ImportName, 1){};
+        var global_imports = std.SegmentedList(ImportName, 4){};
 
         // Reserve space for all of the names.
         {
@@ -590,7 +688,7 @@ pub fn parse(
                     try func_imports.append(scratch.allocator(), import_name);
 
                     const type_idx = try import_reader.readIdx(TypeIdx, type_sec);
-                    const type_ptr = try resolveIdx(type_sec, @intFromEnum(type_idx));
+                    const type_ptr = type_sec.at(@intFromEnum(type_idx));
                     try func_import_types.append(
                         scratch.allocator(),
                         .{ .fixup = .{ .idx = type_ptr.ptrCast(FuncType) } },
@@ -610,7 +708,13 @@ pub fn parse(
                         try import_reader.readMemType(),
                     );
                 },
-                else => unreachable, // TODO
+                .global => {
+                    try global_imports.append(scratch.allocator(), import_name);
+                    try global_import_types.append(
+                        scratch.allocator(),
+                        try import_reader.readGlobalType(),
+                    );
+                },
             }
         }
 
@@ -621,12 +725,14 @@ pub fn parse(
         std.debug.assert(func_import_types.len == func_imports.len);
         std.debug.assert(table_import_types.len == table_imports.len);
         std.debug.assert(mem_import_types.len == mem_imports.len);
+        std.debug.assert(global_import_types.len == global_imports.len);
 
         break :imports ImportSec{
             .start = imports_start,
             .funcs = try arena.dupeSegmentedList(ImportName, 8, &func_imports),
             .tables = try arena.dupeSegmentedList(ImportName, 1, &table_imports),
             .mems = try arena.dupeSegmentedList(ImportName, 1, &mem_imports),
+            .globals = try arena.dupeSegmentedList(ImportName, 4, &global_imports),
         };
     } else .{};
 
@@ -651,9 +757,9 @@ pub fn parse(
         func_import_types.writeToSlice(func_types_dst[0..func_import_len], 0);
 
         for (func_types_dst[func_import_len..]) |*f| {
-            const type_idx = try func_reader.readUleb128(u32);
+            const type_idx = try func_reader.readIdx(TypeIdx, type_sec);
             f.* = FuncSecEntry{
-                .fixup = .{ .idx = (try resolveIdx(type_sec, type_idx)).ptrCast(FuncType) },
+                .fixup = .{ .idx = (type_sec.at(@intFromEnum(type_idx))).ptrCast(FuncType) },
             };
         }
 
@@ -693,6 +799,9 @@ pub fn parse(
         break :tables table_types;
     } else try arena.dupeSegmentedList(TableType, 1, &table_import_types);
 
+    std.debug.assert(table_types.len >= table_import_types.len);
+    table_import_types = undefined;
+
     const mem_types: IndexedArena.Slice(MemType) = if (known_sections.mem.len > 0) mems: {
         const mem_reader = Reader.init(&known_sections.mem);
         errdefer wasm.* = mem_reader.bytes.*;
@@ -720,6 +829,60 @@ pub fn parse(
         known_sections.mem = undefined;
         break :mems mem_types;
     } else try arena.dupeSegmentedList(MemType, 1, &mem_import_types);
+
+    std.debug.assert(mem_types.len >= mem_import_types.len);
+    mem_import_types = undefined;
+
+    const GlobalSec = struct {
+        types: IndexedArena.Slice(GlobalType),
+        exprs: IndexedArena.Slice(ConstExpr),
+    };
+
+    const global_sec: GlobalSec = if (known_sections.global.len > 0) globals: {
+        const global_reader = Reader.init(&known_sections.global);
+        errdefer wasm.* = global_reader.bytes.*;
+
+        const global_len = try global_reader.readUleb128(u32);
+        const global_import_len: u32 = @intCast(global_import_types.len);
+
+        const globals = GlobalSec{
+            .types = try arena.alloc(
+                GlobalType,
+                std.math.add(u32, global_import_len, global_len) catch return error.InvalidWasm,
+            ),
+            .exprs = try arena.alloc(ConstExpr, global_len),
+        };
+
+        if (globals.types.len > std.math.maxInt(@typeInfo(GlobalIdx).@"enum".tag_type))
+            return error.WasmImplementationLimit;
+
+        const import_types_slice = globals.types.slice(0, global_import_len);
+        global_import_types.writeToSlice(import_types_slice.items(&arena), 0);
+
+        for (0..global_len) |i| {
+            const ty = try global_reader.readGlobalType();
+            const expr = try global_reader.readConstExpr(
+                ty.val_type,
+                func_types.len,
+                globals.types.slice(0, global_import_len),
+                &arena,
+            );
+
+            globals.types.setAt(i, &arena, ty);
+            globals.exprs.setAt(i, &arena, expr);
+        }
+
+        try global_reader.expectEndOfStream();
+        known_sections.global = undefined;
+        break :globals globals;
+    } else GlobalSec{
+        .types = try arena.dupeSegmentedList(GlobalType, 4, &global_import_types),
+        .exprs = .empty,
+    };
+
+    std.debug.assert(global_sec.types.len >= global_import_types.len);
+    std.debug.assert(global_sec.types.len >= global_sec.exprs.len);
+    global_import_types = undefined;
 
     const ExportSec = struct {
         start: [*]const u8 = undefined,
@@ -778,14 +941,16 @@ pub fn parse(
                 .name_offset = std.math.cast(u16, @intFromPtr(name.bytes.ptr) - @intFromPtr(exports.start)) orelse
                     return error.WasmImplementationLimit,
                 .desc_tag = switch (tag) {
-                    .global => unreachable, // TODO
-                    inline else => |desc_tag| @field(std.meta.FieldEnum(Export.Desc), @tagName(desc_tag)),
+                    inline else => |desc_tag| @field(
+                        std.meta.FieldEnum(Export.Desc),
+                        @tagName(desc_tag),
+                    ),
                 },
                 .desc = switch (tag) {
                     .func => .{ .func = try export_reader.readIdx(FuncIdx, func_types) },
                     .table => .{ .table = try export_reader.readIdx(TableIdx, table_types) },
                     .mem => .{ .mem = try export_reader.readIdx(MemIdx, mem_types) },
-                    else => unreachable, // TODO
+                    .global => .{ .global = try export_reader.readIdx(GlobalIdx, global_sec.types) },
                 },
             };
         }
@@ -904,6 +1069,10 @@ pub fn parse(
             .mem_types = mem_types.items(arena_data).ptr,
             .mem_count = 0,
 
+            .global_types = global_sec.types.items(arena_data).ptr,
+            .global_exprs = global_sec.exprs.items(arena_data).ptr,
+            .global_count = global_sec.types.len,
+
             .import_section = import_sec.start,
             .func_import_count = import_sec.funcs.len,
             .func_imports = import_sec.funcs.items(arena_data).ptr,
@@ -911,16 +1080,14 @@ pub fn parse(
             .table_imports = import_sec.tables.items(arena_data).ptr,
             .mem_import_count = @intCast(import_sec.mems.len),
             .memory_imports = import_sec.mems.items(arena_data).ptr,
+            .global_import_count = @intCast(import_sec.globals.len),
+            .global_imports = import_sec.globals.items(arena_data).ptr,
 
             .export_section = export_sec.start,
             .exports = export_sec.descs.items(arena_data).ptr,
             .export_count = export_sec.descs.len,
 
             .start = start,
-
-            // TODO:
-            .global_count = 0,
-            .global_import_count = 0,
         },
         .custom_sections = custom_sections.items(arena_data),
     };

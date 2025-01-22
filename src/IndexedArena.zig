@@ -237,7 +237,7 @@ pub fn SliceAligned(comptime T: type, comptime alignment: u8) type {
         }
 
         pub fn slice(self: Self, start: usize, end: usize) Self {
-            std.debug.assert(start < end);
+            std.debug.assert(start <= end);
             std.debug.assert(end <= self.len);
             return .{
                 .idx = @enumFromInt(@as(IdxInt, @intCast(@intFromEnum(self.idx) + start))),
