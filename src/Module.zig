@@ -69,6 +69,62 @@ inner: extern struct {
 custom_sections: []const CustomSection,
 arena_data: IndexedArena.ConstData,
 
+pub inline fn customSections(module: *const Module) []const CustomSection {
+    return module.custom_sections.items(module.data);
+}
+
+pub fn funcTypes(module: *const Module) []const *const FuncType {
+    return module.inner.func_types[0..module.inner.func_count];
+}
+
+pub inline fn funcImportNames(module: *const Module) []const ImportName {
+    return module.inner.func_imports[0..module.inner.func_import_count];
+}
+
+pub inline fn funcImportTypes(module: *const Module) []const *const FuncType {
+    return module.funcTypes()[0..module.inner.func_import_count];
+}
+
+pub fn tableTypes(module: *const Module) []const TableType {
+    return module.inner.table_types[0..module.inner.table_count];
+}
+
+pub inline fn tableImportNames(module: *const Module) []const ImportName {
+    return module.inner.table_imports[0..module.inner.table_import_count];
+}
+
+pub inline fn tableImportTypes(module: *const Module) []const TableType {
+    return module.tableTypes()[0..module.inner.table_import_count];
+}
+
+pub fn memTypes(module: *const Module) []const MemType {
+    return module.inner.mem_types[0..module.inner.mem_count];
+}
+
+pub inline fn memImportNames(module: *const Module) []const ImportName {
+    return module.inner.mem_imports[0..module.inner.mem_import_count];
+}
+
+pub inline fn memImportTypes(module: *const Module) []const MemType {
+    return module.memTypes()[0..module.inner.mem_import_count];
+}
+
+pub fn globalTypes(module: *const Module) []const GlobalType {
+    return module.inner.global_types[0..module.inner.global_count];
+}
+
+pub inline fn globalImportNames(module: *const Module) []const ImportName {
+    return module.inner.global_imports[0..module.inner.global_import_count];
+}
+
+pub inline fn globalImportTypes(module: *const Module) []const GlobalType {
+    return module.globalTypes()[0..module.inner.global_import_count];
+}
+
+pub inline fn exports(module: *const Module) []const Export {
+    return module.inner.exports[0..module.inner.export_count];
+}
+
 pub const Start = packed struct(u32) {
     exists: bool = false,
     idx: FuncIdx = undefined,
@@ -87,16 +143,6 @@ pub const Start = packed struct(u32) {
     }
 };
 
-pub const ImportName = struct {
-    name_offset: u16,
-    name_size: u16,
-
-    module_offset: u16,
-    module_size: u16,
-
-    //pub inline fn name()
-};
-
 pub const WasmSlice = extern struct {
     offset: u32,
     size: u32,
@@ -105,6 +151,24 @@ pub const WasmSlice = extern struct {
         const calculated = base[s.offset .. s.offset + s.size];
         std.debug.assert(@intFromPtr(calculated.ptr) + calculated.len <= @intFromPtr(bounds.ptr) + bounds.len);
         return calculated;
+    }
+};
+
+pub const ImportName = struct {
+    name_offset: u16,
+    name_size: u16,
+
+    module_offset: u16,
+    module_size: u16,
+
+    pub inline fn desc_name(self: ImportName, module: *const Module) std.unicode.Utf8View {
+        const name_slice = WasmSlice{ .offset = self.name_offset, .size = self.name_size };
+        return .{ .bytes = name_slice.slice(module.inner.import_section, module.wasm) };
+    }
+
+    pub inline fn module_name(self: ImportName, module: *const Module) std.unicode.Utf8View {
+        const name_slice = WasmSlice{ .offset = self.module_offset, .size = self.module_size };
+        return .{ .bytes = name_slice.slice(module.inner.import_section, module.wasm) };
     }
 };
 
@@ -130,6 +194,10 @@ pub const Export = packed struct(u64) {
 pub const Limits = extern struct {
     min: usize,
     max: usize,
+
+    pub inline fn matches(a: *const Limits, b: *const Limits) bool {
+        return a.min >= b.min and a.max <= b.max;
+    }
 };
 
 pub const TableType = extern struct {
@@ -138,16 +206,24 @@ pub const TableType = extern struct {
     /// The minimum and maximum number of elements.
     limits: Limits,
     // flags: packed struct { index_type: IndexType, },
+
+    pub fn matches(a: *const TableType, b: *const TableType) bool {
+        return a.limits.matches(b.limits) and a.elem_type.eql(b.elem_type);
+    }
 };
 
 pub const MemType = extern struct {
     /// The minimum and maximum number of pages.
     limits: Limits,
-    flags: packed struct(u32) {
-        log2_page_size: u5 = std.math.log2_int(u17, 65536),
-        // index_type: IndexType,
-        padding: u27 = 0,
-    } = .{},
+    // flags: packed struct(u32) {
+    //     log2_page_size: u5 = std.math.log2_int(u17, 65536),
+    //     // index_type: IndexType,
+    //     padding: u27 = 0,
+    // } = .{},
+
+    pub fn matches(a: *const MemType, b: *const MemType) bool {
+        return a.limits.matches(b.limits);
+    }
 };
 
 pub const GlobalType = extern struct {
@@ -164,6 +240,10 @@ pub const GlobalType = extern struct {
             .@"const" => false,
             .@"var" => true,
         };
+    }
+
+    pub fn matches(a: *const GlobalType, b: *const GlobalType) bool {
+        return a.val_type.eql(b.val_type) and a.mut == b.mut;
     }
 };
 
@@ -202,10 +282,6 @@ pub const CustomSection = struct {
         return sec.contents_ptr[0..sec.contents_len];
     }
 };
-
-pub inline fn customSections(module: *const Module) []const CustomSection {
-    return module.custom_sections.items(module.data);
-}
 
 const wasm_preamble = "\x00asm\x01\x00\x00\x00";
 
@@ -893,7 +969,7 @@ pub fn parse(
         const export_reader = Reader.init(&known_sections.@"export");
         errdefer wasm.* = export_reader.bytes.*;
         const export_len = try export_reader.readUleb128(u32);
-        const exports = ExportSec{
+        const export_sec = ExportSec{
             .start = export_reader.bytes.*.ptr,
             .descs = try arena.alignedAlloc(Export, 4, export_len),
         };
@@ -928,7 +1004,7 @@ pub fn parse(
             export_dedup_context,
         );
 
-        for (exports.descs.items(&arena)) |*ex| {
+        for (export_sec.descs.items(&arena)) |*ex| {
             const name = try export_reader.readName();
             if (export_dedup.getOrPutAssumeCapacityContext(name.bytes, export_dedup_context).found_existing)
                 return ParseError.InvalidWasm;
@@ -938,7 +1014,7 @@ pub fn parse(
             ex.* = Export{
                 .name_size = std.math.cast(u15, name.bytes.len) orelse
                     return error.WasmImplementationLimit,
-                .name_offset = std.math.cast(u16, @intFromPtr(name.bytes.ptr) - @intFromPtr(exports.start)) orelse
+                .name_offset = std.math.cast(u16, @intFromPtr(name.bytes.ptr) - @intFromPtr(export_sec.start)) orelse
                     return error.WasmImplementationLimit,
                 .desc_tag = switch (tag) {
                     inline else => |desc_tag| @field(
@@ -957,7 +1033,7 @@ pub fn parse(
 
         try export_reader.expectEndOfStream();
         known_sections.@"export" = undefined;
-        break :exports exports;
+        break :exports export_sec;
     } else .{};
 
     const start: Start = if (known_sections.start.len > 0) start: {

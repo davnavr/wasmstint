@@ -12,7 +12,7 @@ pub const ValType = enum(u8) { // packed union
     externref = 0x6F,
 
     pub inline fn eql(a: ValType, b: ValType) bool {
-        return @intFromEnum(a) == @intFromEnum(b);
+        return a == b;
     }
 
     pub inline fn isRefType(val_type: ValType) bool {

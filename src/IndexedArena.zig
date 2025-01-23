@@ -14,6 +14,7 @@ comptime {
     std.debug.assert(min_alignment < max_alignment);
 }
 
+pub const Data = []align(max_alignment) Word;
 pub const ConstData = []align(max_alignment) const Word;
 
 pub fn init(allocator: std.mem.Allocator) IndexedArena {
@@ -99,6 +100,10 @@ pub fn IdxAligned(comptime T: type, comptime alignment: u8) type {
             return @enumFromInt(int);
         }
 
+        inline fn toInt(idx: Self) IdxInt {
+            return @intFromEnum(idx);
+        }
+
         pub fn Ptr(comptime Arena: type) type {
             return IdxPtr(Arena, .One, alignment, T);
         }
@@ -121,10 +126,14 @@ pub fn IdxAligned(comptime T: type, comptime alignment: u8) type {
         }
 
         pub inline fn ptrCast(idx: Self, comptime U: type) IdxAligned(U, alignment) {
-            return @enumFromInt(@as(IdxInt, @intFromEnum(idx)));
+            return @enumFromInt(idx.toInt());
         }
 
-        // pub inline fn alignCast(idx: Self, comptime new_alignment: u8) IdxAligned(T, new_alignment)
+        pub inline fn alignCast(idx: Self, comptime new_alignment: u8) IdxAligned(T, new_alignment) {
+            const int = idx.toInt();
+            std.debug.assert(int % new_alignment == 0);
+            return @enumFromInt(int);
+        }
 
         pub const Opt = packed struct(u32) {
             some: bool,
@@ -285,7 +294,7 @@ pub fn Slice(comptime T: type) type {
 fn calculateSizeWithAlignment(
     arena: *const IndexedArena,
     size: usize,
-    comptime desired_alignment: u8,
+    desired_alignment: u8,
 ) Error!struct { align_words: usize, total_words: usize } {
     if (desired_alignment > max_alignment) return Error.OutOfMemory;
 
@@ -293,11 +302,8 @@ fn calculateSizeWithAlignment(
     const word_alignment = alignment / @sizeOf(Word);
 
     const base_word_count = try byteSizeToWordCount(size);
-    const align_word_count = std.mem.alignForwardAnyAlign(
-        usize,
-        dataSlice(arena).len,
-        word_alignment,
-    ) - dataSlice(arena).len;
+    const unaligned_base_idx = dataSlice(arena).len;
+    const align_word_count = std.mem.alignForward(usize, unaligned_base_idx, word_alignment) - unaligned_base_idx;
 
     return .{
         .total_words = std.math.add(usize, align_word_count, base_word_count) catch return Error.OutOfMemory,
@@ -305,10 +311,10 @@ fn calculateSizeWithAlignment(
     };
 }
 
-fn allocSizeWithAlignment(
+pub fn rawAlloc(
     arena: *IndexedArena,
     size: usize,
-    comptime alignment: u8,
+    alignment: u8,
 ) Error!IdxInt {
     const elem_size = try arena.calculateSizeWithAlignment(size, alignment);
     const idx_after_align = std.math.add(usize, dataSlice(arena).len, elem_size.align_words) catch return Error.OutOfMemory;
@@ -322,7 +328,7 @@ pub fn alignedCreate(
     comptime T: type,
     comptime alignment: u8,
 ) Error!IdxAligned(T, alignment) {
-    const base_idx = try arena.allocSizeWithAlignment(@sizeOf(T), alignment);
+    const base_idx = try arena.rawAlloc(@sizeOf(T), alignment);
     return IdxAligned(T, alignment).fromInt(base_idx);
 }
 
@@ -338,7 +344,7 @@ pub fn alignedAlloc(
 ) Error!SliceAligned(T, alignment) {
     const len = std.math.cast(u32, n) orelse return Error.OutOfMemory;
     const byte_size = std.math.mul(usize, @sizeOf(T), len) catch return Error.OutOfMemory;
-    const base_idx = try arena.allocSizeWithAlignment(byte_size, alignment);
+    const base_idx = try arena.rawAlloc(byte_size, alignment);
     return .{ .idx = IdxAligned(T, alignment).fromInt(base_idx), .len = len };
 }
 
