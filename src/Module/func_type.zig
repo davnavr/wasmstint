@@ -19,7 +19,7 @@ pub const FuncType = extern struct {
         return sig.paramAndResultTypes()[sig.param_count..];
     }
 
-    pub inline fn matches(a: FuncType, b: FuncType) bool {
+    pub inline fn matches(a: *const FuncType, b: *const FuncType) bool {
         return a.param_count == b.param_count and
             a.result_count == b.result_count and
             std.mem.eql(ValType, a.paramAndResultTypes(), b.paramAndResultTypes());

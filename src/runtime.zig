@@ -11,7 +11,7 @@ inline fn tableElementStride(elem_type: Module.ValType) u32 {
     };
 }
 
-const ModuleAllocator = struct {
+pub const ModuleAllocator = struct {
     ctx: *anyopaque,
     vtable: *const VTable,
 
@@ -29,11 +29,11 @@ const ModuleAllocator = struct {
         mem_types: []const Module.MemType,
         mems: [*]MemInst,
 
-        pub fn nextTableType(req: *const Request) ?*Module.TableType {
+        pub fn nextTableType(req: *const Request) ?*const Module.TableType {
             return if (req.table_types.len > 0) &req.table_types[0] else null;
         }
 
-        pub fn nextMemType(req: *const Request) ?*Module.MemType {
+        pub fn nextMemType(req: *const Request) ?*const Module.MemType {
             return if (req.mem_types.len > 0) &req.mem_types[0] else null;
         }
 
@@ -42,7 +42,7 @@ const ModuleAllocator = struct {
         }
 
         pub fn allocateMemory(req: *Request, buffer: []align(MemInst.buffer_align) u8) Allocator.Error!bool {
-            if (req.mems.len == 0)
+            if (req.mem_types.len == 0)
                 return false;
 
             // This requirement could be relaxed, but there is no benefit.
@@ -68,13 +68,15 @@ const ModuleAllocator = struct {
 
         // TODO: Helper methods to init a table, but how to ensure length of allocation (memory/table data area) is correct?
         pub fn allocateTable(req: *Request, buffer: []align(TableInst.buffer_align) u8) Allocator.Error!bool {
-            if (req.tables.len == 0)
+            if (req.table_types.len == 0)
                 return false;
 
             const expected_type = &req.table_types[0];
             const stride = tableElementStride(expected_type.elem_type);
 
-            const len = @divExact(buffer.len, stride);
+            const len = std.math.cast(u32, @divExact(buffer.len, stride)) orelse
+                return error.OutOfMemory;
+
             if (len < expected_type.limits.min)
                 return error.OutOfMemory;
 
@@ -87,7 +89,7 @@ const ModuleAllocator = struct {
             req.tables[0] = TableInst{
                 .base = .{ .ptr = buffer.ptr },
                 .stride = stride,
-                .size = len,
+                .len = len,
                 .capacity = len,
                 .limit = max,
             };
@@ -120,7 +122,7 @@ const ModuleAllocator = struct {
 
             // TODO: Reserve pages, create a helper module page_allocator.zig
             while (request.nextMemType()) |mem_type| {
-                request.allocateMemory(
+                _ = request.allocateMemory(
                     try std.heap.page_allocator.alignedAlloc(
                         u8,
                         MemInst.buffer_align,
@@ -130,7 +132,7 @@ const ModuleAllocator = struct {
             }
 
             while (request.nextTableType()) |table_type| {
-                request.allocateTable(
+                _ = request.allocateTable(
                     try std.heap.page_allocator.alignedAlloc(
                         u8,
                         TableInst.buffer_align,
@@ -140,7 +142,7 @@ const ModuleAllocator = struct {
                             tableElementStride(table_type.elem_type),
                         ) catch return error.OutOfMemory,
                     ),
-                );
+                ) catch unreachable;
             }
         }
 
@@ -159,7 +161,7 @@ const ModuleAllocator = struct {
 
     pub const page_allocator = ModuleAllocator{
         .ctx = undefined,
-        .vtable = PageAllocator.vtable,
+        .vtable = &PageAllocator.vtable,
     };
 };
 
@@ -193,7 +195,7 @@ pub const ModuleInst = struct {
     func_imports: [*]FuncAddr,
     mems: [*]*MemInst, // Could use comptime config to have specialized [1]MemInst
     tables: [*]*TableInst,
-    globals: [*]*align(4) anyopaque,
+    globals: [*]*anyopaque,
     data: IndexedArena.Data,
 
     pub const AllocateError = error{
@@ -301,7 +303,7 @@ pub const ModuleInst = struct {
         }
 
         const GlobalFixup = packed union {
-            ptr: *align(4) anyopaque,
+            ptr: *anyopaque,
             idx: IndexedArena.Idx(IndexedArena.Word),
         };
 
@@ -334,6 +336,7 @@ pub const ModuleInst = struct {
             const size: u5 = switch (global_type.val_type) {
                 .i32, .f32 => 4,
                 .i64, .f64 => 8,
+                .v128 => 16,
                 .funcref => @sizeOf(FuncAddr.Nullable),
                 .externref => @sizeOf(ExternAddr),
             };
@@ -341,6 +344,7 @@ pub const ModuleInst = struct {
             const space_idx = try arena_array.rawAlloc(size, switch (global_type.val_type) {
                 .i32, .f32 => 4,
                 .i64, .f64 => @alignOf(u64),
+                .v128 => 16, // 8 if no SIMD
                 .funcref, .externref => @alignOf(*anyopaque),
             });
 
@@ -367,7 +371,7 @@ pub const ModuleInst = struct {
             mem_addr.* = mem_inst;
         }
 
-        for (globals.items(&arena_array)[module.inner.global_import_count..]) |global| {
+        for (globals.items(&arena_array)[module.inner.global_import_count..]) |*global| {
             const value_ptr: *IndexedArena.Word = global.idx.getPtr(&arena_array);
             global.* = GlobalFixup{ .ptr = @ptrCast(value_ptr) };
         }
@@ -557,7 +561,7 @@ pub const FuncAddr = extern struct {
         pub fn signature(inst: *const Expanded) *const Module.FuncType {
             return switch (inst.*) {
                 .host => |*host| &host.func.signature,
-                .wasm => |*wasm| wasm.module.funcTypes()[@intFromEnum(wasm.code)],
+                .wasm => |*wasm| wasm.module.module.funcTypes()[@intFromEnum(wasm.code)],
             };
         }
     };
@@ -565,7 +569,7 @@ pub const FuncAddr = extern struct {
     pub fn init(inst: Expanded) FuncAddr {
         return FuncAddr{
             .module_or_host = switch (inst) {
-                .wasm => |*wasm| @ptrCast(wasm.module),
+                .wasm => |*wasm| @constCast(@as(*const anyopaque, @ptrCast(wasm.module))),
                 .host => |*host| @ptrFromInt(@intFromPtr(host.func) | 1),
             },
             .func = switch (inst) {
@@ -584,7 +588,7 @@ pub const FuncAddr = extern struct {
             },
         } else .{
             .host = .{
-                .func = @ptrFromInt(module_or_host & @as(usize, !1)),
+                .func = @ptrFromInt(module_or_host & ~@as(usize, 1)),
                 .data = inst.func.host_data,
             },
         };

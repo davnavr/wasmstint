@@ -28,7 +28,7 @@ pub const StackFrame = extern struct {
     previous: Word.Size,
     /// The size of the current frame.
     size: Word.Size,
-    function: runtime.FuncInst,
+    function: runtime.FuncAddr,
 
     comptime {
         std.debug.assert(@sizeOf(StackFrame) % @min(@sizeOf(usize), 8) == 0);

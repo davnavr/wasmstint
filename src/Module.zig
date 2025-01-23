@@ -57,7 +57,7 @@ inner: extern struct {
     import_section: [*]const u8,
     func_imports: [*]const ImportName,
     table_imports: [*]const ImportName,
-    memory_imports: [*]const ImportName,
+    mem_imports: [*]const ImportName,
     global_imports: [*]const ImportName,
 
     export_section: [*]const u8,
@@ -208,7 +208,7 @@ pub const TableType = extern struct {
     // flags: packed struct { index_type: IndexType, },
 
     pub fn matches(a: *const TableType, b: *const TableType) bool {
-        return a.limits.matches(b.limits) and a.elem_type.eql(b.elem_type);
+        return a.limits.matches(&b.limits) and a.elem_type.eql(b.elem_type);
     }
 };
 
@@ -222,7 +222,7 @@ pub const MemType = extern struct {
     // } = .{},
 
     pub fn matches(a: *const MemType, b: *const MemType) bool {
-        return a.limits.matches(b.limits);
+        return a.limits.matches(&b.limits);
     }
 };
 
@@ -1155,7 +1155,7 @@ pub fn parse(
             .table_import_count = @intCast(import_sec.tables.len),
             .table_imports = import_sec.tables.items(arena_data).ptr,
             .mem_import_count = @intCast(import_sec.mems.len),
-            .memory_imports = import_sec.mems.items(arena_data).ptr,
+            .mem_imports = import_sec.mems.items(arena_data).ptr,
             .global_import_count = @intCast(import_sec.globals.len),
             .global_imports = import_sec.globals.items(arena_data).ptr,
 
