@@ -576,7 +576,7 @@ pub fn parse(
                     fields[i] = std.builtin.Type.StructField{
                         .name = f.name,
                         .type = []const u8,
-                        .default_value = @ptrCast(@as(*const []const u8, &empty)),
+                        .default_value_ptr = @ptrCast(@as(*const []const u8, &empty)),
                         .is_comptime = false,
                         .alignment = 0,
                     };

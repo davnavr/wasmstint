@@ -55,12 +55,12 @@ fn IdxPtr(
             .address_space = .generic,
             .child = Child,
             .is_allowzero = false,
-            .sentinel = null,
+            .sentinel_ptr = null,
         },
     });
 }
 
-pub fn dataSlice(arena: anytype) IdxPtr(@TypeOf(arena), .Slice, max_alignment, Word) {
+pub fn dataSlice(arena: anytype) IdxPtr(@TypeOf(arena), .slice, max_alignment, Word) {
     return switch (@TypeOf(arena)) {
         *IndexedArena,
         *const IndexedArena,
@@ -105,14 +105,14 @@ pub fn IdxAligned(comptime T: type, comptime alignment: u8) type {
         }
 
         pub fn Ptr(comptime Arena: type) type {
-            return IdxPtr(Arena, .One, alignment, T);
+            return IdxPtr(Arena, .one, alignment, T);
         }
 
         /// The length, in words, of the data pointed to.
         pub const word_len = byteSizeToWordCount(@sizeOf(T)) catch unreachable;
 
         pub inline fn getPtr(idx: Self, arena: anytype) Ptr(@TypeOf(arena)) {
-            const WordSlice = IdxPtr(@TypeOf(arena), .Slice, alignment, Word);
+            const WordSlice = IdxPtr(@TypeOf(arena), .slice, alignment, Word);
             const words: WordSlice = @alignCast(dataSlice(arena)[@intFromEnum(idx)..][0..word_len]);
             return @ptrCast(words.ptr);
         }
@@ -194,20 +194,20 @@ pub fn SliceAligned(comptime T: type, comptime alignment: u8) type {
         }
 
         pub fn Items(comptime Arena: type) type {
-            return IdxPtr(Arena, .Slice, alignment, T);
+            return IdxPtr(Arena, .slice, alignment, T);
         }
 
         pub fn items(self: Self, arena: anytype) Items(@TypeOf(arena)) {
-            const WordSlice = IdxPtr(@TypeOf(arena), .Slice, alignment, Word);
+            const WordSlice = IdxPtr(@TypeOf(arena), .slice, alignment, Word);
             const words: WordSlice = @alignCast(dataSlice(arena)[@intFromEnum(self.idx)..][0..self.wordLen()]);
 
-            const BasePtr = IdxPtr(@TypeOf(arena), .Many, alignment, T);
+            const BasePtr = IdxPtr(@TypeOf(arena), .many, alignment, T);
             const base_ptr: BasePtr = @ptrCast(words.ptr);
             return base_ptr[0..self.len];
         }
 
         pub fn Ptr(comptime Arena: type) type {
-            return IdxPtr(Arena, .Many, alignment, T);
+            return IdxPtr(Arena, .many, alignment, T);
         }
 
         pub fn ptr(self: Self, arena: anytype) Ptr(@TypeOf(arena)) {
@@ -226,7 +226,7 @@ pub fn SliceAligned(comptime T: type, comptime alignment: u8) type {
         }
 
         pub fn PtrAt(comptime Arena: type) type {
-            return IdxPtr(Arena, .One, @min(@alignOf(T), alignment), T);
+            return IdxPtr(Arena, .one, @min(@alignOf(T), alignment), T);
         }
 
         pub inline fn ptrAt(
