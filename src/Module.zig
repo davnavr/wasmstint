@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const IndexedArena = @import("IndexedArena.zig");
 const opcodes = @import("opcodes.zig");
+const validator = @import("Module/validator.zig");
 
 pub const ValType = @import("Module/val_type.zig").ValType;
 pub const FuncType = @import("Module/func_type.zig").FuncType;
@@ -35,13 +36,12 @@ inner: extern struct {
     func_count: u32,
     func_types: [*]const *const FuncType, // Using TypeIdx would introduce another indirection
 
+    func_import_count: u32,
+    code_count: u32,
+
     /// Not set if `code_count == 0`.
     code_section: [*]const u8,
     code_entries: [*]const Code,
-    code_count: u32,
-
-    func_import_count: u32,
-    global_count: u32,
 
     global_exprs: [*]ConstExpr,
     global_types: [*]const GlobalType,
@@ -51,7 +51,12 @@ inner: extern struct {
     table_import_count: u8,
     mem_count: u8,
     mem_import_count: u8,
+    global_count: u32,
     global_import_count: u32,
+    datas_count: packed struct(u32) {
+        count: u31,
+        has_count_section: bool,
+    },
 
     /// Not set if the total # of imports is zero.
     import_section: [*]const u8,
@@ -73,7 +78,11 @@ pub inline fn customSections(module: *const Module) []const CustomSection {
     return module.custom_sections.items(module.data);
 }
 
-pub fn funcTypes(module: *const Module) []const *const FuncType {
+pub inline fn typeSec(module: *const Module) []FuncType {
+    return module.inner.types[0..module.inner.types_count];
+}
+
+pub inline fn funcTypes(module: *const Module) []const *const FuncType {
     return module.inner.func_types[0..module.inner.func_count];
 }
 
@@ -85,7 +94,7 @@ pub inline fn funcImportTypes(module: *const Module) []const *const FuncType {
     return module.funcTypes()[0..module.inner.func_import_count];
 }
 
-pub fn tableTypes(module: *const Module) []const TableType {
+pub inline fn tableTypes(module: *const Module) []const TableType {
     return module.inner.table_types[0..module.inner.table_count];
 }
 
@@ -97,7 +106,7 @@ pub inline fn tableImportTypes(module: *const Module) []const TableType {
     return module.tableTypes()[0..module.inner.table_import_count];
 }
 
-pub fn memTypes(module: *const Module) []const MemType {
+pub inline fn memTypes(module: *const Module) []const MemType {
     return module.inner.mem_types[0..module.inner.mem_count];
 }
 
@@ -119,6 +128,10 @@ pub inline fn globalImportNames(module: *const Module) []const ImportName {
 
 pub inline fn globalImportTypes(module: *const Module) []const GlobalType {
     return module.globalTypes()[0..module.inner.global_import_count];
+}
+
+pub inline fn code(module: *const Module) []Code {
+    return module.inner.code_entries[0..module.inner.code_count];
 }
 
 pub inline fn exports(module: *const Module) []const Export {
@@ -247,9 +260,9 @@ pub const GlobalType = extern struct {
     }
 };
 
-pub const Code = extern struct {
+pub const Code = struct {
     contents: WasmSlice,
-    // TODO: Ptr to side table
+    state: validator.State = .{},
 };
 
 pub const ConstExpr = union {
@@ -310,35 +323,35 @@ pub const ParseError = error{
     InvalidWasm,
 } || ReaderError || LimitError || Allocator.Error;
 
-const Reader = struct {
+pub const Reader = struct {
     bytes: *[]const u8,
 
     const Error = ReaderError;
 
-    fn init(bytes: *[]const u8) Reader {
+    pub fn init(bytes: *[]const u8) Reader {
         return .{ .bytes = bytes };
     }
 
-    fn isEmpty(reader: Reader) bool {
+    pub fn isEmpty(reader: Reader) bool {
         return reader.bytes.len == 0;
     }
 
-    fn expectEndOfStream(reader: Reader) ReaderError!void {
+    pub fn expectEndOfStream(reader: Reader) ReaderError!void {
         if (!reader.isEmpty()) return error.MalformedWasm;
     }
 
-    fn readAssumeLength(reader: Reader, len: usize) []const u8 {
+    pub fn readAssumeLength(reader: Reader, len: usize) []const u8 {
         const skipped = reader.bytes.*[0..len];
         reader.bytes.* = reader.bytes.*[len..];
         return skipped;
     }
 
-    fn read(reader: Reader, len: usize) NoEofError![]const u8 {
+    pub fn read(reader: Reader, len: usize) NoEofError![]const u8 {
         if (reader.bytes.len < len) return error.EndOfStream;
         return reader.readAssumeLength(len);
     }
 
-    fn readArray(reader: Reader, comptime len: usize) NoEofError!*const [len]u8 {
+    pub fn readArray(reader: Reader, comptime len: usize) NoEofError!*const [len]u8 {
         const s = try reader.read(len);
         return s[0..len];
     }
@@ -348,7 +361,7 @@ const Reader = struct {
         return (try reader.readArray(1))[0];
     }
 
-    fn readByteTag(reader: Reader, comptime Tag: type) Error!Tag {
+    pub fn readByteTag(reader: Reader, comptime Tag: type) Error!Tag {
         comptime {
             std.debug.assert(@bitSizeOf(@typeInfo(Tag).@"enum".tag_type) <= 8);
         }
@@ -358,31 +371,37 @@ const Reader = struct {
         };
     }
 
-    fn readUleb128(reader: Reader, comptime T: type) Error!T {
+    pub fn readUleb128(reader: Reader, comptime T: type) Error!T {
         return std.leb.readUleb128(T, reader) catch |e| switch (e) {
             error.Overflow => ReaderError.MalformedWasm,
             NoEofError.EndOfStream => |eof| eof,
         };
     }
 
-    fn readUleb128Casted(reader: Reader, comptime T: type, comptime U: type) (Error || LimitError)!U {
+    pub fn readUleb128Casted(reader: Reader, comptime T: type, comptime U: type) (Error || LimitError)!U {
         comptime std.debug.assert(@bitSizeOf(U) < @bitSizeOf(T));
         return std.math.cast(U, try reader.readUleb128(T)) orelse LimitError.WasmImplementationLimit;
     }
 
-    fn readIleb128(reader: Reader, comptime T: type) Error!T {
+    pub fn readUleb128Enum(reader: Reader, comptime T: type, comptime E: type) Error!E {
+        return std.meta.intToEnum(E, try reader.readUleb128(T)) catch |e| switch (e) {
+            std.meta.IntToEnumError.InvalidEnumTag => return error.MalformedWasm,
+        };
+    }
+
+    pub fn readIleb128(reader: Reader, comptime T: type) Error!T {
         return std.leb.readIleb128(T, reader) catch |e| switch (e) {
             error.Overflow => ReaderError.MalformedWasm,
             NoEofError.EndOfStream => |eof| eof,
         };
     }
 
-    fn readByteVec(reader: Reader) Error![]const u8 {
+    pub fn readByteVec(reader: Reader) Error![]const u8 {
         const len = try reader.readUleb128(u32);
         return reader.read(len);
     }
 
-    fn readName(reader: Reader) Error!std.unicode.Utf8View {
+    pub fn readName(reader: Reader) Error!std.unicode.Utf8View {
         const contents = try reader.readByteVec();
         return if (std.unicode.utf8ValidateSlice(contents))
             .{ .bytes = contents }
@@ -390,7 +409,7 @@ const Reader = struct {
             error.MalformedWasm;
     }
 
-    fn readValType(reader: Reader) Error!ValType {
+    pub fn readValType(reader: Reader) Error!ValType {
         // Code has to change if ValType becomes a pointer to support typed function references/GC proposal.
         comptime std.debug.assert(@typeInfo(ValType).@"enum".tag_type == u8);
 
@@ -440,7 +459,7 @@ const Reader = struct {
         };
     }
 
-    fn readIdx(reader: Reader, comptime I: type, bounds: anytype) ParseError!I {
+    pub fn readIdx(reader: Reader, comptime I: type, bounds: anytype) ParseError!I {
         const idx = try reader.readUleb128(u32);
         const len = switch (@typeInfo(@TypeOf(bounds))) {
             .@"struct" => bounds.len,
@@ -1066,9 +1085,9 @@ pub fn parse(
             .entries = try arena.alloc(Code, code_len),
         };
 
-        for (code_sec.entries.items(&arena)) |*code| {
+        for (code_sec.entries.items(&arena)) |*code_entry| {
             const contents = try code_reader.readByteVec();
-            code.* = Code{
+            code_entry.* = Code{
                 .contents = .{
                     .size = @intCast(contents.len),
                     .offset = @intCast(@intFromPtr(contents.ptr) - @intFromPtr(code_sec.start)),
@@ -1120,11 +1139,6 @@ pub fn parse(
         ty.* = FuncSecEntry{ .final = func_type_idx.getPtr(arena_data) };
     }
 
-    for (code_sec.entries.items(arena_data)) |*code| {
-        // TODO: Allocate side table information for code entries.
-        _ = code;
-    }
-
     return Module{
         .wasm = original_wasm,
         .arena_data = arena_data,
@@ -1162,6 +1176,9 @@ pub fn parse(
             .export_section = export_sec.start,
             .exports = export_sec.descs.items(arena_data).ptr,
             .export_count = export_sec.descs.len,
+
+            // TODO
+            .datas_count = .{ .has_count_section = false, .count = 0 },
 
             .start = start,
         },

@@ -7,6 +7,12 @@ pub const FuncType = extern struct {
     param_count: u16,
     result_count: u16,
 
+    pub const empty = FuncType{
+        .types = &[0]ValType{},
+        .param_count = 0,
+        .result_count = 0,
+    };
+
     inline fn paramAndResultTypes(sig: *const FuncType) []const ValType {
         return sig.types[0 .. @as(u32, sig.param_count) + sig.result_count];
     }
