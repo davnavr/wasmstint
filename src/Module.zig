@@ -41,7 +41,7 @@ inner: extern struct {
 
     /// Not set if `code_count == 0`.
     code_section: [*]const u8,
-    code_entries: [*]const Code,
+    code_entries: [*]Code,
 
     global_exprs: [*]ConstExpr,
     global_types: [*]const GlobalType,
@@ -78,7 +78,7 @@ pub inline fn customSections(module: *const Module) []const CustomSection {
     return module.custom_sections.items(module.data);
 }
 
-pub inline fn typeSec(module: *const Module) []FuncType {
+pub inline fn typeSec(module: *const Module) []const FuncType {
     return module.inner.types[0..module.inner.types_count];
 }
 
@@ -263,6 +263,8 @@ pub const GlobalType = extern struct {
 pub const Code = struct {
     contents: WasmSlice,
     state: validator.State = .{},
+
+    pub const SideTableEntry = validator.SideTableEntry;
 };
 
 pub const ConstExpr = union {
@@ -1184,6 +1186,23 @@ pub fn parse(
         },
         .custom_sections = custom_sections.items(arena_data),
     };
+}
+
+/// Returns `false` if validation of one of the functions began in another thread and did not yet finish.
+pub fn finishCodeValidation(module: *Module, allocator: Allocator, scratch: *ArenaAllocator) validator.Error!bool {
+    var allValidated = true;
+    for (module.inner.func_import_count.., module.code()) |func_idx, *code_entry| {
+        _ = scratch.reset(.retain_capacity);
+        allValidated = allValidated or try code_entry.state.validate(
+            allocator,
+            module,
+            @enumFromInt(@intFromPtr(&module.funcTypes()[func_idx]) - @intFromPtr(module.typeSec().ptr)),
+            code_entry.contents,
+            scratch,
+        );
+    }
+
+    return allValidated;
 }
 
 pub fn deinit(module: *Module, gpa: Allocator) void {

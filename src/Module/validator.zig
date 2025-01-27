@@ -33,15 +33,20 @@ pub const State = struct {
     instructions: [*]const u8 = undefined,
     flag: std.atomic.Value(Flag) = .{ .raw = .init },
     side_table_len: u32 = undefined,
-    side_table_ptr: [*]SideTableEntry = undefined,
+    side_table_ptr: [*]const SideTableEntry = undefined,
     @"error": ?Error = null,
     info: extern union {
         sizes: Sizes,
-        error_location: [*]const u8,
+        /// Offset into the code bytes indicating where the error occurred.
+        ///
+        /// For example, `0` means the first byte of the LEB128-encoded count of the locals vector.
+        error_offset: u32,
     } = undefined,
 
     pub const Sizes = extern struct {
+        /// The maximum amount of space needed in the value stack for executing this function.
         max_values: u32,
+        /// The number of local variables, excluding parameters.
         local_values: u32,
     };
 
@@ -54,13 +59,20 @@ pub const State = struct {
         failed = 3,
     };
 
+    pub fn isValidated(state: *State) bool {
+        return switch (state.flag.load(.acquire)) {
+            .init, .validating => false,
+            .successful, .failed => true,
+        };
+    }
+
     /// Waits until validation in the other thread finishes.
     pub fn waitForValidation(state: *State, futex_timeout: std.Thread.Futex.Deadline) error{Timeout}!?Error {
         comptime std.debug.assert(@bitSizeOf(Flag) == 32);
         while (true) {
             try futex_timeout.wait(@ptrCast(&state.flag), @intFromEnum(Flag.validating));
             switch (state.flag.load(.acquire)) {
-                .init, .in_progress => continue,
+                .init, .validating => continue,
                 .successful => return null,
                 .failed => return state.@"error",
             }
@@ -80,11 +92,16 @@ pub const State = struct {
         code: Module.WasmSlice,
         scratch: *ArenaAllocator,
     ) Error!bool {
-        switch (state.flag.cmpxchgWeak(Flag.init, Flag.validating, .release, .acquire)) {
-            .init => unreachable,
-            .in_progress => return false,
-            .successful => return true,
-            .failed => return state.@"error",
+        check: {
+            const current_flag = state.flag.cmpxchgWeak(Flag.init, Flag.validating, .release, .acquire) orelse
+                break :check;
+
+            return switch (current_flag) {
+                .init => unreachable,
+                .validating => false,
+                .successful => true,
+                .failed => state.@"error".?,
+            };
         }
 
         // Now only this thread can modify `State`.
@@ -112,12 +129,22 @@ const Val = @Type(std.builtin.Type{
             var fields: [val_type_fields.len + 1]std.builtin.Type.EnumField = undefined;
             fields[0] = .{ .name = "unknown", .value = 0 };
             @memcpy(fields[1..], val_type_fields);
-            break :fields fields;
+            break :fields &fields;
         },
         .decls = &[0]std.builtin.Type.Declaration{},
         .is_exhaustive = false,
     },
 });
+
+inline fn valTypeToVal(val_type: ValType) Val {
+    comptime {
+        for (@typeInfo(ValType).@"enum".fields) |field| {
+            std.debug.assert(@intFromEnum(@field(Val, field.name)) == @intFromEnum(@field(ValType, field.name)));
+        }
+    }
+
+    return @enumFromInt(@intFromEnum(val_type));
+}
 
 const ValTypeBuf = std.SegmentedList(ValType, 128);
 
@@ -148,9 +175,10 @@ const BlockType = union(enum) {
             const idx = std.math.cast(@typeInfo(Module.TypeIdx).@"enum".tag_type, tag) orelse
                 return Error.WasmImplementationLimit;
 
-            return BlockType{
-                .type_idx = if (idx < module.inner.types_count) module.typeSec()[idx] else Error.InvalidWasm,
-            };
+            return if (idx < module.inner.types_count)
+                BlockType{ .type_idx = @enumFromInt(idx) }
+            else
+                Error.InvalidWasm;
         } else return BlockType{
             .single_result = switch (tag) {
                 0xFF => .i32,
@@ -214,10 +242,11 @@ const ValStack = struct {
     }
 
     /// Asserts that `types.len() <= std.math.maxInt(u32)`.
-    fn pushMany(val_stack: *ValStack, arena: *ArenaAllocator, types: []ValType) Error!void {
-        const new_len = try std.math.add(u32, @intCast(val_stack.buf.len), @intCast(types.len));
+    fn pushMany(val_stack: *ValStack, arena: *ArenaAllocator, types: []const ValType) Error!void {
+        const new_len = std.math.add(u32, @intCast(val_stack.buf.len), @intCast(types.len)) catch
+            return Error.WasmImplementationLimit;
         try val_stack.buf.growCapacity(arena.allocator(), new_len);
-        for (types) |ty| val_stack.buf.append(undefined, ty) orelse unreachable;
+        for (types) |ty| val_stack.buf.append(undefined, ty) catch unreachable;
         val_stack.max = @max(new_len, val_stack.max);
     }
 
@@ -227,12 +256,12 @@ const ValStack = struct {
             return if (current_frame.info.@"unreachable") Val.unknown else Error.InvalidWasm;
         }
 
-        return @bitCast(val_stack.buf.pop().?);
+        return valTypeToVal(val_stack.buf.pop().?);
     }
 
     fn popExpecting(val_stack: *ValStack, ctrl_stack: *const CtrlStack, expected: ValType) Error!void {
         const popped = try val_stack.popAny(ctrl_stack);
-        if (popped != @as(Val, @bitCast(expected)) and popped != .unknown)
+        if (popped != valTypeToVal(expected) and popped != .unknown)
             return Error.InvalidWasm;
     }
 
@@ -249,7 +278,7 @@ const ValStack = struct {
             if (top.* != expected) return Error.InvalidWasm;
             top.* = replacement;
         } else if (current_frame.info.@"unreachable") {
-            val_stack.push(arena.allocator(), replacement);
+            return val_stack.push(arena, replacement);
         } else {
             return Error.InvalidWasm;
         }
@@ -264,7 +293,7 @@ const ValStack = struct {
 
 fn readLocalIdx(reader: *Module.Reader, locals: []const ValType) Error!ValType {
     const idx = try reader.readUleb128(u32);
-    return if (idx < locals.len) @bitCast(locals[idx]) else Error.InvalidWasm;
+    return if (idx < locals.len) locals[idx] else Error.InvalidWasm;
 }
 
 const Label = struct {
@@ -283,8 +312,10 @@ const Label = struct {
         return Label{
             .frame = frame,
             .idx = idx,
-            .copy_count = std.math.cast(u8, frame.labelTypes(module).len) orelse Error.WasmImplementationLimit,
-            .pop_count = ctrl_stack.at(ctrl_stack.len - 1).info.height - frame.height,
+            .copy_count = std.math.cast(u8, frame.labelTypes(module).len) orelse
+                return Error.WasmImplementationLimit,
+            .pop_count = std.math.cast(u8, ctrl_stack.at(ctrl_stack.len - 1).info.height - frame.info.height) orelse
+                return Error.WasmImplementationLimit,
         };
     }
 };
@@ -327,7 +358,7 @@ fn popCtrlFrame(
     if (ctrl_stack.len == 0) return Error.InvalidWasm;
 
     const frame = ctrl_stack.at(ctrl_stack.len - 1).*;
-    val_stack.popManyExpecting(ctrl_stack, frame.types.funcType(module).results());
+    try val_stack.popManyExpecting(ctrl_stack, frame.types.funcType(module).results());
     if (val_stack.len() != frame.info.height) return Error.InvalidWasm;
     ctrl_stack.len -= 1;
     return frame;
@@ -378,7 +409,8 @@ const BranchFixupStack = struct {
     }
 
     fn append(fixups: *BranchFixupStack, arena: *ArenaAllocator, entry: BranchFixup) Allocator.Error!void {
-        try @as(*BranchFixup.List, fixups.active.at(fixups.active.len - 1)).append(arena, entry);
+        const current_list: *BranchFixup.List = fixups.active.at(fixups.active.len - 1);
+        try current_list.append(arena.allocator(), entry);
     }
 
     /// Asserts that `active.len > 0`, and that all of the branch fixup entries correspond to branches
@@ -449,17 +481,11 @@ fn doValidation(
     errdefer |e| {
         state.@"error" = e;
         state.flag.store(State.Flag.failed, .release);
-        state.info.error_location = code_ptr.ptr;
+        state.info.error_offset = @intCast(code_ptr.ptr - code.ptr);
     }
 
     var val_stack: ValStack = undefined;
     const locals: []const ValType = locals: {
-        comptime {
-            for (@typeInfo(ValType).@"enum".fields) |field| {
-                std.debug.assert(@field(Val, field.name) == @as(Val, @as(ValType, @bitCast(field.value))));
-            }
-        }
-
         const local_group_count = try reader.readUleb128(u32);
         var local_vars = ValTypeBuf{};
         // if (local_group_count > ValTypeBuf.prealloc_count) {
@@ -473,9 +499,9 @@ fn doValidation(
 
         for (0..local_group_count) |_| {
             const local_count = try reader.readUleb128(u32);
-            const local_type: Val = @bitCast(try reader.readValType());
+            const local_type = try reader.readValType();
             const new_local_len = std.math.add(u32, @intCast(local_vars.len), local_count) catch
-                return Error.WasmImplementationLimit;
+                return error.WasmImplementationLimit;
 
             // if (new_local_len > ValTypeBuf.prealloc_count) {
             try local_vars.growCapacity(scratch.allocator(), new_local_len);
@@ -506,11 +532,12 @@ fn doValidation(
                 .opcode = .block,
             },
             .offset = 0,
+            .side_table_idx = 0,
         },
     ) catch unreachable;
 
     var branch_fixups = BranchFixupStack{};
-    branch_fixups.push(scratch);
+    branch_fixups.push(scratch) catch unreachable;
 
     state.instructions = reader.bytes.ptr;
 
@@ -533,6 +560,8 @@ fn doValidation(
                     block_type,
                     module,
                 );
+
+                // TODO: Skip branch fixup processing for unreachable code.
                 try branch_fixups.push(scratch);
             },
             .loop => {
@@ -563,6 +592,7 @@ fn doValidation(
                     block_type,
                     module,
                 );
+                // TODO: Skip branch fixup processing for unreachable code.
                 try branch_fixups.push(scratch);
             },
             .@"else" => {
@@ -587,6 +617,7 @@ fn doValidation(
                 const frame = try popCtrlFrame(&ctrl_stack, &val_stack, module);
 
                 if (frame.info.opcode != .loop) {
+                    // TODO: Skip branch fixup processing for unreachable code.
                     try branch_fixups.popAndResolve(scratch, instr_offset, &side_table);
                 }
 
@@ -594,6 +625,7 @@ fn doValidation(
             },
             .br => {
                 const label = try Label.read(&reader, &ctrl_stack, module);
+                // TODO: Skip branch fixup processing for unreachable code.
                 try appendSideTableEntry(scratch, &side_table, &branch_fixups, instr_offset, label);
                 try val_stack.popManyExpecting(&ctrl_stack, label.frame.labelTypes(module));
             },
@@ -640,7 +672,7 @@ fn doValidation(
                 try val_stack.popExpecting(&ctrl_stack, .i32);
                 try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i32, .i32);
             },
-            .@"0xFC" => switch (try reader.readUleb128Casted(u32, opcodes.FCPrefixOpcode)) {
+            .@"0xFC" => switch (try reader.readUleb128Enum(u32, opcodes.FCPrefixOpcode)) {
                 .@"i32.trunc_sat_f32_s",
                 .@"i32.trunc_sat_f32_u",
                 => try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f32, .i32),
@@ -661,12 +693,13 @@ fn doValidation(
 
     try reader.expectEndOfStream();
 
-    if (ctrl_stack.len != 0 or val_stack.len() != 0) return Error.MalformedWasm;
+    if (ctrl_stack.len != 0 or val_stack.len() != 0)
+        return error.MalformedWasm;
 
     std.debug.assert(branch_fixups.active.len == 0);
 
     state.info.sizes.max_values = val_stack.max;
-    state.side_table_len = std.math.cast(u32, side_table.len) orelse return Error.WasmImplementationLimit;
+    state.side_table_len = std.math.cast(u32, side_table.len) orelse return error.WasmImplementationLimit;
     state.side_table_ptr = side_table: {
         const copied = try allocator.alloc(SideTableEntry, side_table.len);
         side_table.writeToSlice(copied, 0);

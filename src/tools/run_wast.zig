@@ -280,6 +280,22 @@ fn runScript(
                         break :parse_failed;
                     },
                 };
+                //parsed_module.finishCodeValidationInParallel(cmd_arena, thread_pool)
+                const validation_finished = parsed_module.finishCodeValidation(
+                    module_arena.allocator(),
+                    &cmd_arena,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    else => |validation_err| {
+                        std.debug.print("TODO: Code validation error {}\n", .{validation_err});
+                        if (@errorReturnTrace()) |err_trace| {
+                            std.debug.dumpStackTrace(err_trace.*);
+                        }
+                        break :parse_failed;
+                    },
+                };
+
+                std.debug.assert(validation_finished);
 
                 current_module = parsed_module;
                 _ = &current_module;
