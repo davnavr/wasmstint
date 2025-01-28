@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const wasmstint = @import("wasmstint");
+const Wast = wasmstint.Wast;
 
 const Arguments = struct {
     run: []const [:0]const u8,
@@ -132,10 +133,10 @@ pub fn main() !u8 {
             _ = parse_arena.reset(.retain_capacity);
         }
 
-        var errors = wasmstint.Wast.Error.List.init(parse_arena.allocator());
+        var errors = Wast.Error.List.init(parse_arena.allocator());
 
         _ = scratch.reset(.retain_capacity);
-        const script_tree = try wasmstint.Wast.sexpr.Tree.parseFromSlice(
+        const script_tree = try Wast.sexpr.Tree.parseFromSlice(
             script_buf,
             parse_arena.allocator(),
             &scratch,
@@ -143,11 +144,11 @@ pub fn main() !u8 {
         );
 
         // TODO: Figure out if using an arena here might actually faster than using the GPA.
-        var parse_array = wasmstint.Wast.Arena.init(parse_arena.allocator());
-        var parse_caches = wasmstint.Wast.Caches.init(parse_arena.allocator());
+        var parse_array = Wast.Arena.init(parse_arena.allocator());
+        var parse_caches = Wast.Caches.init(parse_arena.allocator());
 
         _ = scratch.reset(.retain_capacity);
-        const script = wasmstint.Wast.parse(
+        const script = Wast.parse(
             &script_tree,
             &parse_array,
             &parse_caches,
@@ -162,9 +163,6 @@ pub fn main() !u8 {
         var rng = initial_rng;
         try runScript(
             &script,
-            &script_tree,
-            parse_array.dataSlice(),
-            &parse_caches,
             rng.random(),
             &encoding_buffer,
             &parse_arena,
@@ -177,7 +175,7 @@ pub fn main() !u8 {
             var buf_stderr = std.io.bufferedWriter(raw_stderr.writer());
 
             var w = buf_stderr.writer();
-            var line_col = wasmstint.Wast.LineCol.FromOffset.init(script_buf);
+            var line_col = Wast.LineCol.FromOffset.init(script_buf);
 
             var errors_iter = errors.list.constIterator(0);
             while (errors_iter.next()) |err| {
@@ -221,51 +219,78 @@ pub fn main() !u8 {
     return 0;
 }
 
+const State = struct {
+    /// Allocated in the `run_arena`.
+    module_lookups: std.AutoHashMapUnmanaged(Wast.Ident.Interned, *ModuleInst) = .empty,
+
+    /// Live until the next `module` command is executed.
+    next_module_arena: ArenaAllocator,
+    /// Allocated either in the `next_module_arena` or the `run_arena`.
+    current_module: ?*ModuleInst = null,
+
+    /// Live for the execution of a single command.
+    cmd_arena: ArenaAllocator,
+
+    const ModuleInst = wasmstint.runtime.ModuleInst;
+
+    fn getModuleInst(state: *const State, id: Wast.Ident.Symbolic) ?*ModuleInst {
+        return if (id.some)
+            state.module_lookups.get(id.ident)
+        else
+            state.current_module;
+    }
+};
+
+// TODO: What if arguments could be allocated directly in the Interpreter's value_stack?
+fn allocateFunctionArguments(
+    script: *const Wast,
+    arguments: Wast.Command.Arguments,
+    arena: *ArenaAllocator,
+) std.mem.Allocator.Error![]const wasmstint.Interpreter.TaggedValue {
+    const src_arguments: []const Wast.Command.Const = arguments.items(script.arena);
+    const dst_values = try arena.allocator().alloc(wasmstint.Interpreter.TaggedValue, src_arguments.len);
+
+    errdefer comptime unreachable;
+
+    for (src_arguments, dst_values) |*src, *dst| {
+        dst.* = switch (src.keyword.tag(script.tree)) {
+            .@"keyword_i32.const" => .{ .i32 = src.value.i32 },
+            else => unreachable,
+        };
+    }
+
+    return dst_values;
+}
+
 fn runScript(
-    script: *const wasmstint.Wast,
-    script_tree: *const wasmstint.Wast.sexpr.Tree,
-    script_arena: wasmstint.Wast.Arena.ConstData,
-    script_caches: *const wasmstint.Wast.Caches,
+    script: *const Wast,
     rng: std.Random,
     encoding_buffer: *std.ArrayList(u8),
     run_arena: *ArenaAllocator, // Must not be reset for the lifetime of this function call.
-    errors: *wasmstint.Wast.Error.List,
+    errors: *Wast.Error.List,
 ) std.mem.Allocator.Error!void {
-    const ModuleInst = wasmstint.runtime.ModuleInst;
-
     var store = wasmstint.runtime.ModuleAllocator.WithinArena{ .arena = run_arena };
-
-    var state: struct {
-        /// Allocated in the `run_arena`.
-        module_lookups: std.AutoHashMapUnmanaged(wasmstint.Wast.Ident.Interned, *const ModuleInst) = .empty,
-
-        /// Live until the next `module` command is executed.
-        next_module_arena: ArenaAllocator,
-        /// Allocated either in the `next_module_arena` or the `run_arena`.
-        current_module: ?*const ModuleInst = null,
-
-        /// Live for the execution of a single command.
-        cmd_arena: ArenaAllocator,
-    } = .{
+    var state: State = .{
         .next_module_arena = ArenaAllocator.init(run_arena.allocator()),
         .cmd_arena = ArenaAllocator.init(run_arena.allocator()),
     };
 
-    for (script.commands.items(script_arena)) |cmd| {
+    for (script.commands.items(script.arena)) |cmd| {
         defer _ = state.cmd_arena.reset(.retain_capacity);
         var interp = try wasmstint.Interpreter.init(state.cmd_arena.allocator(), .{});
+        var fuel = wasmstint.Interpreter.Fuel{ .remaining = 2000 };
 
-        switch (cmd.keyword.tag(script_tree)) {
+        switch (cmd.keyword.tag(script.tree)) {
             .keyword_module => parse_failed: {
                 _ = state.next_module_arena.reset(.retain_capacity);
-                const module: *const wasmstint.Wast.Module = cmd.inner.module.getPtr(script_arena);
+                const module: *const Wast.Module = cmd.inner.module.getPtr(script.arena);
 
                 const module_arena = if (module.name.some) run_arena else &state.next_module_arena;
                 encoding_buffer.clearRetainingCapacity();
                 try module.encode(
-                    script_tree,
-                    script_arena,
-                    script_caches,
+                    script.tree,
+                    script.arena.dataSlice(),
+                    script.caches,
                     encoding_buffer.writer(),
                     errors,
                     &state.cmd_arena,
@@ -324,6 +349,9 @@ fn runScript(
                     else => unreachable, // TODO: how to handle import errors?
                 };
 
+                // TODO: This is waiting on a proper module instantiation API.
+                module_inst.instantiated = true;
+
                 state.current_module = module_inst;
 
                 if (module.name.some) {
@@ -336,9 +364,34 @@ fn runScript(
                 }
             },
             .keyword_assert_return => {
-                const assert_return: *const wasmstint.Wast.Command.AssertReturn = cmd.inner.assert_return.getPtr(script_arena);
-                _ = assert_return;
-                _ = &interp;
+                const assert_return: *const Wast.Command.AssertReturn = cmd.inner.assert_return.getPtr(script.arena);
+
+                // TODO: Move code that processess an invoke action to a separate function
+                const action: *const Wast.Command.Action = assert_return.action.getPtr(script.arena);
+                std.debug.assert(action.keyword.tag(script.tree) == .keyword_invoke);
+
+                const module = state.getModuleInst(action.module) orelse {
+                    std.debug.print("TODO: Missing module?", .{});
+                    continue;
+                };
+
+                const target_export = module.findExport(script.nameContents(action.name.id)) catch |e| {
+                    std.debug.print("TODO: bad export {?}", .{e});
+                    continue;
+                };
+
+                const callee = target_export.func;
+                const arguments = try allocateFunctionArguments(
+                    script,
+                    action.target.invoke.arguments,
+                    &state.cmd_arena,
+                );
+
+                interp.beginCall(state.cmd_arena.allocator(), callee, arguments, &fuel) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    else => unreachable,
+                };
+
                 std.debug.print("TODO: process assert_return\n", .{});
             },
             else => |bad| {

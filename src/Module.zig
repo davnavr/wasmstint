@@ -218,7 +218,11 @@ pub const Export = packed struct(u64) {
 
     pub inline fn name(self: Export, module: *const Module) std.unicode.Utf8View {
         const name_slice = WasmSlice{ .offset = self.name_offset, .size = self.name_size };
-        return .{ .bytes = name_slice.slice(module.inner.export_section, module.wasm) };
+        const bytes = name_slice.slice(module.inner.export_section, module.wasm);
+        return switch (@import("builtin").mode) {
+            .Debug, .ReleaseSafe => std.unicode.Utf8View.init(bytes) catch unreachable,
+            .ReleaseFast, .ReleaseSmall => .{ .bytes = name_slice.slice(module.inner.export_section, module.wasm) },
+        };
     }
 };
 

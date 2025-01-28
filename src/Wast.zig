@@ -292,6 +292,10 @@ pub fn parse(
     };
 }
 
+pub fn nameContents(wast: *const Wast, name: Name.Id) []const u8 {
+    return name.bytes(wast.arena, &wast.caches.names);
+}
+
 test {
     _ = Lexer;
     _ = value;

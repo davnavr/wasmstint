@@ -171,11 +171,13 @@ pub const Register = struct {
     id: Ident.Opt align(4),
 };
 
+pub const Arguments = IndexedArena.Slice(Const);
+
 pub const Action = struct {
     /// Identifies which module contains the function or global export to invoke or get.
     ///
     /// If `.none`, then the latest initialized module is used.
-    module: Ident.Opt align(4),
+    module: Ident.Symbolic align(4),
     /// The name of the function or global export to invoke or get.
     name: Name,
     /// The `invoke` or `get` keyword.
@@ -184,7 +186,7 @@ pub const Action = struct {
 
     pub const Target = union {
         get: void,
-        invoke: struct { arguments: IndexedArena.Slice(Const) },
+        invoke: struct { arguments: Arguments },
     };
 
     pub fn parseContents(
@@ -199,10 +201,7 @@ pub const Action = struct {
     ) error{OutOfMemory}!ParseResult(IndexedArena.Idx(Action)) {
         const action = try arena.create(Action);
 
-        const module = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
+        const module = try Ident.Symbolic.parse(contents, tree, caches.allocator, &caches.ids);
 
         _ = scratch.reset(.retain_capacity);
         const name = switch (try Name.parse(contents, tree, caches.allocator, &caches.names, arena, parent_list, scratch)) {
