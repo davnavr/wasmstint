@@ -233,6 +233,8 @@ fn runScript(
 ) std.mem.Allocator.Error!void {
     const ModuleInst = wasmstint.runtime.ModuleInst;
 
+    var store = wasmstint.runtime.ModuleAllocator.WithinArena{ .arena = run_arena };
+
     var state: struct {
         /// Allocated in the `run_arena`.
         module_lookups: std.AutoHashMapUnmanaged(wasmstint.Wast.Ident.Interned, *const ModuleInst) = .empty,
@@ -316,7 +318,7 @@ fn runScript(
                     parsed_module,
                     undefined, // TODO: Provide proper import_provider
                     module_arena.allocator(),
-                    undefined, // TODO: Using page allocator is annoying here, avoid calling deinit for every module w/ arena (add wrapper over an Arena)
+                    store.allocator(),
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
                     else => unreachable, // TODO: how to handle import errors?
@@ -337,6 +339,7 @@ fn runScript(
                 const assert_return: *const wasmstint.Wast.Command.AssertReturn = cmd.inner.assert_return.getPtr(script_arena);
                 _ = assert_return;
                 _ = &interp;
+                std.debug.print("TODO: process assert_return\n", .{});
             },
             else => |bad| {
                 std.debug.print("TODO: process command {}\n", .{bad});

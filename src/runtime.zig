@@ -159,9 +159,60 @@ pub const ModuleAllocator = struct {
         }
     };
 
+    fn noFree(ctx: *anyopaque, info: Free) void {
+        _ = ctx;
+        for (info.mems) |mem| mem.* = undefined;
+        for (info.tables) |table| table.* = undefined;
+    }
+
     pub const page_allocator = ModuleAllocator{
         .ctx = undefined,
         .vtable = &PageAllocator.vtable,
+    };
+
+    pub const WithinArena = struct {
+        arena: *std.heap.ArenaAllocator,
+
+        const vtable = VTable{
+            .allocate = WithinArena.allocate,
+            .free = noFree,
+        };
+
+        fn allocate(ctx: *anyopaque, request: *Request) Allocator.Error!void {
+            const into_arena = @as(*std.heap.ArenaAllocator, @ptrCast(@alignCast(ctx))).allocator();
+
+            // TODO: Duplicate code, maybe make a common wraper over an `std.mem.Allocator`?
+            while (request.nextMemType()) |mem_type| {
+                _ = request.allocateMemory(
+                    try into_arena.alignedAlloc(
+                        u8,
+                        MemInst.buffer_align,
+                        mem_type.limits.min * MemInst.page_size,
+                    ),
+                ) catch unreachable;
+            }
+
+            while (request.nextTableType()) |table_type| {
+                _ = request.allocateTable(
+                    try into_arena.alignedAlloc(
+                        u8,
+                        TableInst.buffer_align,
+                        std.math.mul(
+                            usize,
+                            table_type.limits.min,
+                            tableElementStride(table_type.elem_type),
+                        ) catch return error.OutOfMemory,
+                    ),
+                ) catch unreachable;
+            }
+        }
+
+        pub fn allocator(self: *WithinArena) ModuleAllocator {
+            return .{
+                .ctx = self.arena,
+                .vtable = &vtable,
+            };
+        }
     };
 };
 
