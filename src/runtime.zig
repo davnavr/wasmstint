@@ -553,15 +553,21 @@ pub const FuncAddr = extern struct {
             func: *Host,
             data: ?*anyopaque,
         },
-        wasm: struct {
-            module: *const ModuleInst,
-            code: Module.FuncIdx,
-        },
+        wasm: Wasm,
+
+        pub const Wasm = struct {
+            module: *ModuleInst,
+            idx: Module.FuncIdx,
+
+            pub inline fn code(wasm: *const Wasm) *Module.Code {
+                return wasm.code.code(wasm.module).?;
+            }
+        };
 
         pub fn signature(inst: *const Expanded) *const Module.FuncType {
             return switch (inst.*) {
                 .host => |*host| &host.func.signature,
-                .wasm => |*wasm| wasm.module.module.funcTypes()[@intFromEnum(wasm.code)],
+                .wasm => |*wasm| wasm.module.module.funcTypes()[@intFromEnum(wasm.idx)],
             };
         }
     };
@@ -573,7 +579,7 @@ pub const FuncAddr = extern struct {
                 .host => |*host| @ptrFromInt(@intFromPtr(host.func) | 1),
             },
             .func = switch (inst) {
-                .wasm => |*wasm| .{ .wasm = wasm.code },
+                .wasm => |*wasm| .{ .wasm = wasm.idx },
                 .host => |*host| .{ .host_data = host.data },
             },
         };
@@ -584,7 +590,7 @@ pub const FuncAddr = extern struct {
         return if (module_or_host & 1 == 0) Expanded{
             .wasm = .{
                 .module = @ptrFromInt(module_or_host),
-                .code = inst.func.wasm,
+                .idx = inst.func.wasm,
             },
         } else .{
             .host = .{

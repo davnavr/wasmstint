@@ -28,9 +28,14 @@ pub const SideTableEntry = packed struct(u64) {
     pop_count: u8,
 };
 
+pub const End = enum(u8) { end = @intFromEnum(opcodes.ByteOpcode.end) };
+
+pub const Ip = [*:@intFromEnum(opcodes.ByteOpcode.end)]const u8;
+
 pub const State = struct {
     /// Pointer to the first byte of the first opcode.
-    instructions: [*]const u8 = undefined,
+    instructions: Ip = undefined,
+    instructions_end: *const End = undefined,
     flag: std.atomic.Value(Flag) = .{ .raw = .init },
     side_table_len: u32 = undefined,
     side_table_ptr: [*]const SideTableEntry = undefined,
@@ -155,7 +160,7 @@ const BlockType = union(enum) {
 
     fn funcType(block_type: *const BlockType, module: *const Module) Module.FuncType {
         return switch (block_type.*) {
-            .type_idx => |type_idx| module.typeSec()[@intFromEnum(type_idx)],
+            .type_idx => |type_idx| type_idx.funcType(module).*,
             .single_result => |*ty| Module.FuncType{
                 .types = ty[0..1],
                 .param_count = 0,
@@ -539,11 +544,12 @@ fn doValidation(
     var branch_fixups = BranchFixupStack{};
     branch_fixups.push(scratch) catch unreachable;
 
-    state.instructions = reader.bytes.ptr;
+    state.instructions = @ptrCast(reader.bytes.ptr);
 
+    var instr_offset: u32 = 0;
     while (ctrl_stack.len > 0) {
         // Offset from the first byte of the first instruction to the first byte of the instruction being parsed.
-        const instr_offset: u32 = @intCast(@intFromPtr(reader.bytes.ptr) - @intFromPtr(state.instructions));
+        instr_offset = @intCast(@intFromPtr(reader.bytes.ptr) - @intFromPtr(state.instructions));
         switch (try reader.readByteTag(opcodes.ByteOpcode)) {
             .@"unreachable" => markUnreachable(&val_stack, &ctrl_stack),
             .nop => {},
@@ -698,6 +704,7 @@ fn doValidation(
 
     std.debug.assert(branch_fixups.active.len == 0);
 
+    state.instructions_end = @ptrCast(state.instructions + instr_offset);
     state.info.sizes.max_values = val_stack.max;
     state.side_table_len = std.math.cast(u32, side_table.len) orelse return error.WasmImplementationLimit;
     state.side_table_ptr = side_table: {

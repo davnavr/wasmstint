@@ -10,13 +10,22 @@ pub const FuncType = @import("Module/func_type.zig").FuncType;
 
 pub const TypeIdx = enum(u31) {
     _,
+
+    pub fn funcType(idx: TypeIdx, module: *const Module) *const FuncType {
+        return &module.types()[@intFromEnum(idx)];
+    }
 };
 
 pub const FuncIdx = enum(u31) {
     _,
 
-    pub fn signature(idx: FuncIdx, module: *const Module) *const FuncType {
-        return module.func_types.ptrAt(@intFromEnum(idx), module.data);
+    pub inline fn signature(idx: FuncIdx, module: *const Module) *const FuncType {
+        return module.func_types()[@intFromEnum(idx)];
+    }
+
+    pub fn code(idx: FuncIdx, module: *const Module) ?*const Code {
+        const i = std.math.sub(u32, idx, module.inner.func_import_count) orelse return null;
+        return module.code()[@intFromEnum(i)];
     }
 };
 
@@ -78,12 +87,21 @@ pub inline fn customSections(module: *const Module) []const CustomSection {
     return module.custom_sections.items(module.data);
 }
 
-pub inline fn typeSec(module: *const Module) []const FuncType {
+pub inline fn types(module: *const Module) []const FuncType {
     return module.inner.types[0..module.inner.types_count];
 }
 
 pub inline fn funcTypes(module: *const Module) []const *const FuncType {
     return module.inner.func_types[0..module.inner.func_count];
+}
+
+pub inline fn funcTypeIdx(module: *const Module, func: FuncIdx) TypeIdx {
+    const func_idx: u32 = @intFromEnum(func);
+    std.debug.assert(func_idx < module.inner.func_count);
+
+    const type_ptr = @intFromPtr(&module.funcTypes()[func_idx]);
+    std.debug.assert(type_ptr < @intFromPtr(module.inner.types + module.inner.types_count));
+    return @enumFromInt(type_ptr - @intFromPtr(module.inner.types));
 }
 
 pub inline fn funcImportNames(module: *const Module) []const ImportName {
@@ -265,6 +283,8 @@ pub const Code = struct {
     state: validator.State = .{},
 
     pub const SideTableEntry = validator.SideTableEntry;
+    pub const Ip = validator.Ip;
+    pub const End = validator.End;
 };
 
 pub const ConstExpr = union {
@@ -676,7 +696,7 @@ pub fn parse(
         const type_reader = Reader.init(&known_sections.type);
         errdefer wasm.* = type_reader.bytes.*;
         const type_len = try type_reader.readUleb128(u32);
-        const types = try arena.alloc(TypeSecEntry, type_len);
+        const type_sec = try arena.alloc(TypeSecEntry, type_len);
         // Can't iterate over slice as result type slices must be allocated
         for (0..type_len) |type_i| {
             _ = scratch.reset(.retain_capacity);
@@ -697,7 +717,7 @@ pub fn parse(
                 types_buf.setAt(result_i, &arena, try type_reader.readValType());
             }
 
-            types.setAt(
+            type_sec.setAt(
                 type_i,
                 &arena,
                 TypeSecEntry{
@@ -712,7 +732,7 @@ pub fn parse(
 
         try type_reader.expectEndOfStream();
         known_sections.type = undefined;
-        break :types types;
+        break :types type_sec;
     } else .empty;
 
     const definition = struct {
@@ -1122,14 +1142,14 @@ pub fn parse(
 
     for (type_sec.items(arena_data)) |*ty| {
         const fixup = ty.*.fixup;
-        const types = IndexedArena.Slice(ValType){
+        const type_slice = IndexedArena.Slice(ValType){
             .idx = fixup.types.idx,
             .len = fixup.param_count + fixup.result_count,
         };
 
         ty.* = TypeSecEntry{
             .final = FuncType{
-                .types = types.items(arena_data).ptr,
+                .types = type_slice.items(arena_data).ptr,
                 .param_count = fixup.param_count,
                 .result_count = fixup.result_count,
             },
@@ -1191,12 +1211,15 @@ pub fn parse(
 /// Returns `false` if validation of one of the functions began in another thread and did not yet finish.
 pub fn finishCodeValidation(module: *Module, allocator: Allocator, scratch: *ArenaAllocator) validator.Error!bool {
     var allValidated = true;
-    for (module.inner.func_import_count.., module.code()) |func_idx, *code_entry| {
+    for (
+        module.inner.func_import_count..module.inner.func_count,
+        module.code(),
+    ) |func_idx, *code_entry| {
         _ = scratch.reset(.retain_capacity);
         allValidated = allValidated or try code_entry.state.validate(
             allocator,
             module,
-            @enumFromInt(@intFromPtr(&module.funcTypes()[func_idx]) - @intFromPtr(module.typeSec().ptr)),
+            module.funcTypeIdx(@enumFromInt(@as(@typeInfo(FuncIdx).@"enum".tag_type, @intCast(func_idx)))),
             code_entry.contents,
             scratch,
         );
