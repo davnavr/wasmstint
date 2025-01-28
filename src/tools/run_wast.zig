@@ -231,23 +231,34 @@ fn runScript(
     run_arena: *ArenaAllocator, // Must not be reset for the lifetime of this function call.
     errors: *wasmstint.Wast.Error.List,
 ) std.mem.Allocator.Error!void {
-    //var module_lookups = std.AutoHashMap(wasmstint.Wast.Ident.Interned, comptime V: type);
+    const ModuleInst = wasmstint.runtime.ModuleInst;
 
-    // Live until the next `module` command is executed.
-    var next_module_arena = ArenaAllocator.init(run_arena.allocator());
-    var current_module: ?*const wasmstint.Module = null;
+    var state: struct {
+        /// Allocated in the `run_arena`.
+        module_lookups: std.AutoHashMapUnmanaged(wasmstint.Wast.Ident.Interned, *const ModuleInst) = .empty,
 
-    // Live for the execution of a single command.
-    var cmd_arena = ArenaAllocator.init(run_arena.allocator());
+        /// Live until the next `module` command is executed.
+        next_module_arena: ArenaAllocator,
+        /// Allocated either in the `next_module_arena` or the `run_arena`.
+        current_module: ?*const ModuleInst = null,
+
+        /// Live for the execution of a single command.
+        cmd_arena: ArenaAllocator,
+    } = .{
+        .next_module_arena = ArenaAllocator.init(run_arena.allocator()),
+        .cmd_arena = ArenaAllocator.init(run_arena.allocator()),
+    };
+
     for (script.commands.items(script_arena)) |cmd| {
-        defer _ = cmd_arena.reset(.retain_capacity);
+        defer _ = state.cmd_arena.reset(.retain_capacity);
+        var interp = try wasmstint.Interpreter.init(state.cmd_arena.allocator(), .{});
 
         switch (cmd.keyword.tag(script_tree)) {
             .keyword_module => parse_failed: {
-                _ = next_module_arena.reset(.retain_capacity);
+                _ = state.next_module_arena.reset(.retain_capacity);
                 const module: *const wasmstint.Wast.Module = cmd.inner.module.getPtr(script_arena);
 
-                const module_arena = if (module.name.some) run_arena else &next_module_arena;
+                const module_arena = if (module.name.some) run_arena else &state.next_module_arena;
                 encoding_buffer.clearRetainingCapacity();
                 try module.encode(
                     script_tree,
@@ -255,7 +266,7 @@ fn runScript(
                     script_caches,
                     encoding_buffer.writer(),
                     errors,
-                    &cmd_arena,
+                    &state.cmd_arena,
                 );
 
                 var module_contents: []const u8 = if (module.name.some)
@@ -267,7 +278,7 @@ fn runScript(
                 parsed_module.* = wasmstint.Module.parse(
                     module_arena.allocator(),
                     &module_contents,
-                    &cmd_arena,
+                    &state.cmd_arena,
                     rng,
                     .{ .realloc_contents = true },
                 ) catch |e| switch (e) {
@@ -280,10 +291,10 @@ fn runScript(
                         break :parse_failed;
                     },
                 };
-                //parsed_module.finishCodeValidationInParallel(cmd_arena, thread_pool)
+                //parsed_module.finishCodeValidationInParallel(state.cmd_arena, thread_pool)
                 const validation_finished = parsed_module.finishCodeValidation(
                     module_arena.allocator(),
-                    &cmd_arena,
+                    &state.cmd_arena,
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
                     else => |validation_err| {
@@ -297,11 +308,35 @@ fn runScript(
 
                 std.debug.assert(validation_finished);
 
-                current_module = parsed_module;
-                _ = &current_module;
+                // TODO: This is waiting on a proper module instantiation API.
+                std.debug.assert(!parsed_module.inner.start.exists);
 
-                // TODO: Store modules with an ident into a hashmap and use the run_arena for both hashmap and module encoding
-                // - hashmap should just store wasmstint.Module, not the []const u8
+                const module_inst = try module_arena.allocator().create(wasmstint.runtime.ModuleInst);
+                module_inst.* = wasmstint.runtime.ModuleInst.allocate(
+                    parsed_module,
+                    undefined, // TODO: Provide proper import_provider
+                    module_arena.allocator(),
+                    undefined, // TODO: Using page allocator is annoying here, avoid calling deinit for every module w/ arena (add wrapper over an Arena)
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    else => unreachable, // TODO: how to handle import errors?
+                };
+
+                state.current_module = module_inst;
+
+                if (module.name.some) {
+                    // Are duplicate module names an error? or should it just overwrite?
+                    _ = try state.module_lookups.fetchPut(
+                        run_arena.allocator(),
+                        module.name.ident,
+                        module_inst,
+                    );
+                }
+            },
+            .keyword_assert_return => {
+                const assert_return: *const wasmstint.Wast.Command.AssertReturn = cmd.inner.assert_return.getPtr(script_arena);
+                _ = assert_return;
+                _ = &interp;
             },
             else => |bad| {
                 std.debug.print("TODO: process command {}\n", .{bad});
