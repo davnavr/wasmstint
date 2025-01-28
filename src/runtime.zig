@@ -440,30 +440,30 @@ pub const ModuleInst = struct {
         };
     }
 
-    pub fn funcAddr(inst: *const ModuleInst, idx: Module.FuncIdx) FuncAddr {
+    pub fn funcAddr(inst: *ModuleInst, idx: Module.FuncIdx) FuncAddr {
         const i: usize = @intFromEnum(idx);
         std.debug.assert(i < inst.module.inner.func_count);
         return if (i < inst.func_import_count)
             inst.func_imports[i]
         else
-            FuncAddr.init(.{ .wasm = .{ .module = inst, .code = idx } });
+            FuncAddr.init(.{ .wasm = .{ .module = inst, .idx = idx } });
     }
 
     pub fn tableAddr(inst: *const ModuleInst, idx: Module.TableIdx) TableAddr {
         const i: usize = @intFromEnum(idx);
         return TableAddr{
-            .elem_type = inst.module.tableTypes()[i],
+            .elem_type = inst.module.tableTypes()[i].elem_type,
             .table = inst.tables[i],
         };
     }
 
-    pub fn memAddr(inst: *const ModuleInst, idx: Module.MemIdx) *const MemInst {
+    pub fn memAddr(inst: *const ModuleInst, idx: Module.MemIdx) *MemInst {
         const i: usize = @intFromEnum(idx);
         std.debug.assert(i < inst.module.inner.mem_count);
         return inst.mems[i];
     }
 
-    pub fn globalAddr(inst: *const ModuleInst, idx: Module.TableIdx) GlobalAddr {
+    pub fn globalAddr(inst: *const ModuleInst, idx: Module.GlobalIdx) GlobalAddr {
         const i: usize = @intFromEnum(idx);
         return GlobalAddr{
             .global_type = inst.module.globalTypes()[i],
@@ -473,7 +473,7 @@ pub const ModuleInst = struct {
 
     pub const FindExportError = error{ ModuleNotInstantiated, ExportNotFound };
 
-    pub fn findExport(inst: *const ModuleInst, name: []const u8) FindExportError!ExternVal {
+    pub fn findExport(inst: *ModuleInst, name: []const u8) FindExportError!ExternVal {
         if (!inst.instantiated) return error.ModuleNotInstantiated;
 
         for (inst.module.exports()) |*exp| {
@@ -483,7 +483,7 @@ pub const ModuleInst = struct {
                 .func => .{ .func = inst.funcAddr(exp.desc.func) },
                 .table => .{ .table = inst.tableAddr(exp.desc.table) },
                 .mem => .{ .mem = inst.memAddr(exp.desc.mem) },
-                .global => .{ .global = inst.globalAddr(exp.desc.mem) },
+                .global => .{ .global = inst.globalAddr(exp.desc.global) },
             };
         }
 
@@ -611,7 +611,7 @@ pub const FuncAddr = extern struct {
             idx: Module.FuncIdx,
 
             pub inline fn code(wasm: *const Wasm) *Module.Code {
-                return wasm.code.code(wasm.module).?;
+                return wasm.idx.code(wasm.module.module).?;
             }
         };
 

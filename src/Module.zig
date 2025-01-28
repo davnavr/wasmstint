@@ -23,9 +23,9 @@ pub const FuncIdx = enum(u31) {
         return module.func_types()[@intFromEnum(idx)];
     }
 
-    pub fn code(idx: FuncIdx, module: *const Module) ?*const Code {
-        const i = std.math.sub(u32, idx, module.inner.func_import_count) orelse return null;
-        return module.code()[@intFromEnum(i)];
+    pub fn code(idx: FuncIdx, module: *const Module) ?*Code {
+        const i = std.math.sub(u32, @intFromEnum(idx), module.inner.func_import_count) catch return null;
+        return &module.code()[i];
     }
 };
 
@@ -152,7 +152,7 @@ pub inline fn code(module: *const Module) []Code {
     return module.inner.code_entries[0..module.inner.code_count];
 }
 
-pub inline fn exports(module: *const Module) []const Export {
+pub inline fn exports(module: *const Module) []align(4) const Export {
     return module.inner.exports[0..module.inner.export_count];
 }
 
