@@ -471,6 +471,8 @@ fn encodeText(
                     );
                 }
 
+                try wasm.type_uses.putNoClobber(alloca.allocator(), &func_field_ptr.type_use, undefined);
+
                 if (func_field_ptr.inline_import.get()) |import_keyword| {
                     try wasm.checkImportOrdering(import_keyword, errors);
                     try wasm.imports.append(
@@ -479,11 +481,15 @@ fn encodeText(
                     );
                 } else {
                     try wasm.defined_funcs.append(alloca.allocator(), func_field);
+
+                    const body: *const Module.Text.Expr = &func_field_ptr.body.defined;
+                    var instr_iter = body.iterator(tree, arena);
+                    while (instr_iter.next()) |instr| {
+                        _ = instr;
+                    }
+
+                    // TODO: Get `TypeUse`s from the function's body.
                 }
-
-                try wasm.type_uses.putNoClobber(alloca.allocator(), &func_field_ptr.type_use, undefined);
-
-                // TODO: Get `TypeUse`s from the function's body.
             },
             // .keyword_table => {},
             // .keyword_memory => {},
@@ -538,6 +544,24 @@ fn encodeText(
         }
 
         try encodeSection(output, 2, section_buf.items);
+    }
+
+    if (wasm.defined_funcs.len > 0) {
+        _ = scratch.reset(.retain_capacity);
+        section_buf.clearRetainingCapacity();
+
+        try encodeVecLen(section_buf.writer(), wasm.defined_funcs.len);
+
+        var iter_funcs = wasm.defined_funcs.constIterator(0);
+        while (iter_funcs.next()) |func| {
+            try encodeIdx(
+                output,
+                TypeIdx,
+                wasm.type_uses.get(&func.getPtr(arena).type_use).?,
+            );
+        }
+
+        try encodeSection(output, 3, section_buf.items);
     }
 }
 

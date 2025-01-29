@@ -102,6 +102,7 @@ pub const List = struct {
     }
 
     pub fn appendImplicitEnd(list: *List, arena: *ArenaAllocator, block: sexpr.List.Id) error{OutOfMemory}!void {
+        list.count = std.math.add(u32, list.count, 1) catch return error.OutOfMemory;
         try list.appendInstrKeyword(arena, sexpr.Value.initList(block));
     }
 

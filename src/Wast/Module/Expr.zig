@@ -351,6 +351,11 @@ pub fn parseContents(
         &actual_scratch,
     );
 
+    // All functions have an implicit `end`.
+    try parsed_instructions.appendImplicitEnd(scratch, parent);
+
+    std.debug.assert(parsed_instructions.count <= parsed_instructions.buffer.len);
+
     return .{
         .count = parsed_instructions.count,
         .contents = try parsed_instructions.moveToIndexedArena(arena),
@@ -358,87 +363,62 @@ pub fn parseContents(
 }
 
 // TODO: Make a non-recursive instruction parser
-pub fn parseContentsUnused(
-    contents: *sexpr.Parser,
-    tree: *const sexpr.Tree,
-    parent: sexpr.List.Id,
-    arenas: *IndexedArena,
-    caches: *Caches,
-    instr_arena: *ArenaAllocator,
-    errors: *Error.List,
-) error{OutOfMemory}!Expr {
-    const FoldedInstr = struct {
-        /// The plain instruction that is placed after all of the folded ones.
-        end: Instr,
-        /// Allocated within the `instr_arena`.
-        parsed: Parsed,
-        list: sexpr.List.Id,
-        unmatched_blocks: u32,
-        remaining: sexpr.Parser,
 
-        const Parsed = std.SegmentedList(Instr, 0);
+pub fn iterator(expr: *const Expr, tree: *const sexpr.Tree, arena: anytype) Iterator {
+    return .{
+        .tree = tree,
+        .contents = expr.contents.items(arena),
+        .count = expr.count,
     };
-
-    // These are allocated within the `instr_arena`.
-    var output = std.SegmentedList(Instr, 16){};
-    var stack = std.SegmentedList(FoldedInstr, 4){};
-    var parsed_cache = std.SegmentedList(FoldedInstr.Parsed, 2){};
-
-    _ = instr_arena;
-    _ = &stack;
-
-    var current_contents: *sexpr.Parser = contents;
-    while (@as(?sexpr.Value, current_contents.parseValue() catch null)) |instr_value| {
-        // If value is a list, begin processing a folded instruction.
-        if (instr_value.getList()) |folded_list| {
-            var list_contents = sexpr.Parser.init(folded_list.contents().values(tree));
-
-            // TODO: Parse the keyword!
-
-            // TODO: If folded `if`, check for `then` and `else` and add them to the `stack` (might need a queue or extra list in FoldedInstr?).
-            // - maybe make a new SegmentedList, a queue that is checked before the parsed_cache?
-
-            // TODO: Get parser from `folded_list`, then read the keyword
-            _ = &list_contents;
-        } else {
-            // Plain instructions must be appended to the latest stack entry.
-            const keyword: sexpr.TokenId = instr_value.getAtom().?;
-            const instr_parent = if (parsed_cache.len == 0) parent else parsed_cache.at(parsed_cache.len - 1).list;
-
-            const instr_result = try Instr.parseArgs(
-                keyword,
-                current_contents,
-                tree,
-                instr_parent,
-                arenas,
-                caches,
-                errors,
-            );
-
-            const instr = switch (instr_result) {
-                .ok => |ok| ok,
-                .err => |err| {
-                    // If a single instruction fails to parse, then skip parsing the rest of them.
-                    try errors.append(err);
-                    // TODO: Hmm, need some way to stop parsing instructions in the current context!
-                },
-            };
-
-            //output.append
-            _ = instr;
-        }
-
-        if (current_contents.isEmpty()) {
-            // TODO: Get next thing from stack??
-        }
-    }
-
-    std.debug.assert(contents.isEmpty());
-
-    const instructions = try arenas.out.allocator().alloc(Instr, output.len);
-    errdefer comptime unreachable;
-    output.writeToSlice(instructions, 0);
-    return .{ .instructions = instructions };
 }
 
-//pub const Iterator
+pub const Iterator = struct {
+    tree: *const sexpr.Tree,
+    contents: []const IndexedArena.Word,
+    count: u32,
+
+    fn readWordArray(iter: *Iterator, comptime len: usize) *const [len]IndexedArena.Word {
+        const contents = iter.contents[0..len];
+        iter.contents = iter.contents[len..];
+        return contents;
+    }
+
+    pub fn next(iter: *Iterator) ?Instr {
+        const Lexer = @import("../Lexer.zig");
+
+        if (iter.count == 0) {
+            std.debug.assert(iter.contents.len == 0);
+            return null;
+        }
+
+        defer iter.count -= 1;
+
+        const value: sexpr.Value = @bitCast(@as(u32, @intFromEnum(iter.readWordArray(1).*[0])));
+        const atom = value.getAtom() orelse return Instr{
+            .keyword = value,
+            .arguments = .{ .none = @ptrFromInt(4) },
+        };
+
+        switch (Lexer.Token.tagToInstrTag(atom.tag(iter.tree))) {
+            .@"memory.init",
+            .@"memory.copy",
+            .@"table.init",
+            .@"table.copy",
+            .@"ref.null",
+            => unreachable, // TODO: see Instr.argumentTag()
+            inline else => |tag| {
+                const argument_name = @tagName(comptime Instr.argumentTag(tag));
+                const Args = @typeInfo(@FieldType(Instr.Arguments, argument_name)).pointer.child;
+                const args_array = iter.readWordArray(comptime IndexedArena.byteSizeToWordCount(@sizeOf(Args)) catch unreachable);
+                return Instr{
+                    .keyword = value,
+                    .arguments = @unionInit(
+                        Instr.Arguments,
+                        argument_name,
+                        @ptrCast(args_array),
+                    ),
+                };
+            },
+        }
+    }
+};
