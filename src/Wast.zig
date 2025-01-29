@@ -296,6 +296,10 @@ pub fn nameContents(wast: *const Wast, name: Name.Id) []const u8 {
     return name.bytes(wast.arena, &wast.caches.names);
 }
 
+pub fn identContents(wast: *const Wast, ident: Ident.Interned) []const u8 {
+    return ident.get(wast.tree, &wast.caches.ids);
+}
+
 test {
     _ = Lexer;
     _ = value;

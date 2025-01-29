@@ -281,7 +281,7 @@ fn runScript(
         var fuel = wasmstint.Interpreter.Fuel{ .remaining = 2000 };
 
         switch (cmd.keyword.tag(script.tree)) {
-            .keyword_module => parse_failed: {
+            .keyword_module => {
                 _ = state.next_module_arena.reset(.retain_capacity);
                 const module: *const Wast.Module = cmd.inner.module.getPtr(script.arena);
 
@@ -311,11 +311,12 @@ fn runScript(
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
                     else => |parse_error| {
-                        std.debug.print("TODO: Parse error {}\n", .{parse_error});
+                        std.debug.print("TODO: Module parse error {}\n", .{parse_error});
                         if (@errorReturnTrace()) |err_trace| {
                             std.debug.dumpStackTrace(err_trace.*);
                         }
-                        break :parse_failed;
+
+                        return;
                     },
                 };
                 //parsed_module.finishCodeValidationInParallel(state.cmd_arena, thread_pool)
@@ -329,7 +330,8 @@ fn runScript(
                         if (@errorReturnTrace()) |err_trace| {
                             std.debug.dumpStackTrace(err_trace.*);
                         }
-                        break :parse_failed;
+
+                        return;
                     },
                 };
 
@@ -371,12 +373,15 @@ fn runScript(
                 std.debug.assert(action.keyword.tag(script.tree) == .keyword_invoke);
 
                 const module = state.getModuleInst(action.module) orelse {
-                    std.debug.print("TODO: Missing module?", .{});
+                    std.debug.print(
+                        "TODO: Missing module? {?s}\n",
+                        .{if (action.module.some) script.identContents(action.module.ident) else null},
+                    );
                     continue;
                 };
 
                 const target_export = module.findExport(script.nameContents(action.name.id)) catch |e| {
-                    std.debug.print("TODO: bad export {?}", .{e});
+                    std.debug.print("TODO: bad export {?}\n", .{e});
                     continue;
                 };
 
