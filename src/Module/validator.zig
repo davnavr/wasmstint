@@ -158,20 +158,30 @@ inline fn valTypeToVal(val_type: ValType) Val {
 const ValTypeBuf = std.SegmentedList(ValType, 128);
 
 const BlockType = union(enum) {
-    type_idx: Module.TypeIdx,
+    type: packed struct(u32) {
+        results_only: bool = false,
+        idx: Module.TypeIdx,
+    },
     single_result: ValType,
     void,
 
     fn funcType(block_type: *const BlockType, module: *const Module) Module.FuncType {
-        return switch (block_type.*) {
-            .type_idx => |type_idx| type_idx.funcType(module).*,
-            .single_result => |*ty| Module.FuncType{
+        switch (block_type.*) {
+            .type => |@"type"| {
+                const copied = @"type".idx.funcType(module).*;
+                return if (@"type".results_only) copied else .{
+                    .param_count = 0,
+                    .result_count = copied.result_count,
+                    .types = copied.results().ptr,
+                };
+            },
+            .single_result => |*ty| return .{
                 .types = ty[0..1],
                 .param_count = 0,
                 .result_count = 1,
             },
-            .void => .empty,
-        };
+            .void => return .empty,
+        }
     }
 
     fn read(reader: *Module.Reader, module: *const Module) Error!BlockType {
@@ -185,7 +195,7 @@ const BlockType = union(enum) {
                 return Error.WasmImplementationLimit;
 
             return if (idx < module.inner.types_count)
-                BlockType{ .type_idx = @enumFromInt(idx) }
+                BlockType{ .type = .{ .idx = @enumFromInt(idx) } }
             else
                 Error.InvalidWasm;
         } else return BlockType{
@@ -200,6 +210,10 @@ const BlockType = union(enum) {
                 else => return Error.MalformedWasm,
             },
         };
+    }
+
+    comptime {
+        std.debug.assert(@sizeOf(BlockType) == 8);
     }
 };
 
@@ -216,10 +230,6 @@ const CtrlFrame = struct {
     side_table_idx: u32,
 
     const Height = u28;
-
-    comptime {
-        std.debug.assert(@sizeOf(BlockType) == 8);
-    }
 
     const Opcode = enum(u3) {
         block,
@@ -493,18 +503,26 @@ fn doValidation(
         state.info.error_offset = @intCast(code_ptr.ptr - code.ptr);
     }
 
+    const func_type = signature.funcType(module);
+
     var val_stack: ValStack = undefined;
     const locals: []const ValType = locals: {
         const local_group_count = try reader.readUleb128(u32);
         var local_vars = ValTypeBuf{};
-        if (local_group_count > ValTypeBuf.prealloc_count) {
-            try local_vars.growCapacity(scratch.allocator(), local_group_count);
-        }
+
+        const reserve_count = std.math.add(u32, func_type.param_count, local_group_count) catch
+            return error.OutOfMemory;
+
+        // if (local_group_count > ValTypeBuf.prealloc_count) {
+        try local_vars.setCapacity(scratch.allocator(), reserve_count);
+        //
 
         defer {
             local_vars.clearRetainingCapacity();
             val_stack = ValStack{ .buf = local_vars };
         }
+
+        local_vars.appendSlice(undefined, func_type.parameters()) catch unreachable;
 
         for (0..local_group_count) |_| {
             const local_count = try reader.readUleb128(u32);
@@ -535,7 +553,7 @@ fn doValidation(
     ctrl_stack.append(
         undefined,
         CtrlFrame{
-            .types = .{ .type_idx = signature },
+            .types = .{ .type = .{ .idx = signature, .results_only = true } },
             .info = .{
                 .height = 0,
                 .opcode = .block,
@@ -703,9 +721,10 @@ fn doValidation(
 
     try reader.expectEndOfStream();
 
-    if (ctrl_stack.len != 0 or val_stack.len() != 0)
+    if (ctrl_stack.len != 0)
         return error.MalformedWasm;
 
+    std.debug.assert(val_stack.len() == func_type.result_count);
     std.debug.assert(branch_fixups.active.len == 0);
 
     state.instructions_end = @ptrCast(state.instructions + instr_offset);
