@@ -24,6 +24,11 @@ arguments: Arguments,
 
 const Instr = @This();
 
+pub fn tag(instr: *const Instr, tree: *const sexpr.Tree) ?Lexer.Token.InstrTag {
+    const atom = instr.keyword.getAtom() orelse return null;
+    return Lexer.Token.tagToInstrTag(atom.tag(tree));
+}
+
 /// Optimizations (CSE) should ensure accessing argument information simply
 /// involves a single pointer arithmetic operation.
 pub const Arguments = union {

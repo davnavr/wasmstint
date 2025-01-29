@@ -270,6 +270,10 @@ const Wasm = struct {
 
     const TypeSec = std.SegmentedList(Type, 8);
 
+    fn appendTypeUse(wasm: *Wasm, alloca: *ArenaAllocator, type_use: *const Text.TypeUse) Allocator.Error!void {
+        try wasm.type_uses.putNoClobber(alloca.allocator(), type_use, undefined);
+    }
+
     fn resolveTypeSec(
         wasm: *Wasm,
         wasm_arena: *ArenaAllocator,
@@ -426,10 +430,10 @@ fn encodeText(
     tree: *const sexpr.Tree,
     arena: IndexedArena.ConstData,
     caches: *const Caches,
-    output: anytype,
+    final_output: anytype,
     errors: *Error.List,
     alloca: *ArenaAllocator,
-) EncodeError(@TypeOf(output))!void {
+) EncodeError(@TypeOf(final_output))!void {
     _ = alloca.reset(.retain_capacity);
 
     // Allocated in `alloca`.
@@ -471,7 +475,7 @@ fn encodeText(
                     );
                 }
 
-                try wasm.type_uses.putNoClobber(alloca.allocator(), &func_field_ptr.type_use, undefined);
+                try wasm.appendTypeUse(alloca, &func_field_ptr.type_use);
 
                 if (func_field_ptr.inline_import.get()) |import_keyword| {
                     try wasm.checkImportOrdering(import_keyword, errors);
@@ -482,13 +486,35 @@ fn encodeText(
                 } else {
                     try wasm.defined_funcs.append(alloca.allocator(), func_field);
 
-                    const body: *const Module.Text.Expr = &func_field_ptr.body.defined;
+                    const body: *const Text.Expr = &func_field_ptr.body.defined;
                     var instr_iter = body.iterator(tree, arena);
                     while (instr_iter.next()) |instr| {
-                        _ = instr;
-                    }
+                        const type_use: *const Text.TypeUse = switch (instr.tag(tree) orelse continue) {
+                            .@"memory.init",
+                            .@"memory.copy",
+                            .@"table.init",
+                            .@"table.copy",
+                            .@"ref.null",
+                            => unreachable, // TODO: see Instr.argumentTag()
+                            inline else => |tag| switch (comptime Text.Instr.argumentTag(tag)) {
+                                .block_type => &instr.arguments.block_type.type,
+                                .call_indirect => &instr.arguments.call_indirect.type,
+                                .none,
+                                .ident,
+                                .ident_opt,
+                                .br_table,
+                                .select,
+                                .mem_arg,
+                                .i32,
+                                .f32,
+                                .i64,
+                                .f64,
+                                => continue,
+                            },
+                        };
 
-                    // TODO: Get `TypeUse`s from the function's body.
+                        try wasm.appendTypeUse(alloca, type_use);
+                    }
                 }
             },
             // .keyword_table => {},
@@ -501,11 +527,12 @@ fn encodeText(
     var scratch = ArenaAllocator.init(alloca.allocator());
     var section_buf = std.ArrayList(u8).init(alloca.allocator());
 
-    try output.writeAll(wasm_preamble);
+    try final_output.writeAll(wasm_preamble);
 
     encode_type_sec: {
         const type_sec = try wasm.resolveTypeSec(alloca, tree, arena, errors, &scratch);
         if (type_sec.len == 0) break :encode_type_sec;
+        std.debug.assert(section_buf.items.len == 0);
 
         try encodeVecLen(section_buf.writer(), type_sec.len);
 
@@ -516,14 +543,15 @@ fn encodeText(
             _ = func_type_arena.reset(.retain_capacity);
         }
 
-        try encodeSection(output, 1, section_buf.items);
+        try encodeSection(final_output, 1, section_buf.items);
     }
 
     if (wasm.imports.len > 0) {
         _ = scratch.reset(.retain_capacity);
         section_buf.clearRetainingCapacity();
 
-        try encodeVecLen(section_buf.writer(), wasm.imports.len);
+        var output = section_buf.writer();
+        try encodeVecLen(output, wasm.imports.len);
 
         var iter_imports = wasm.imports.constIterator(0);
         while (iter_imports.next()) |import| {
@@ -543,7 +571,7 @@ fn encodeText(
             }
         }
 
-        try encodeSection(output, 2, section_buf.items);
+        try encodeSection(final_output, 2, section_buf.items);
     }
 
     if (wasm.defined_funcs.len > 0) {
@@ -555,14 +583,18 @@ fn encodeText(
         var iter_funcs = wasm.defined_funcs.constIterator(0);
         while (iter_funcs.next()) |func| {
             try encodeIdx(
-                output,
+                section_buf.writer(),
                 TypeIdx,
                 wasm.type_uses.get(&func.getPtr(arena).type_use).?,
             );
         }
 
-        try encodeSection(output, 3, section_buf.items);
+        try encodeSection(final_output, 3, section_buf.items);
     }
+
+    // std.debug.print("MODULE DUMP START:\n", .{});
+    // std.debug.dumpHex(final_output.context.items);
+    // std.debug.print("MODULE DUMP END:\n", .{});
 }
 
 /// Writes the binary representation of a given WebAssembly Text format module.
