@@ -13,8 +13,8 @@ const Value = extern union {
     f32: f32,
     i64: i64,
     f64: f64,
-    host_ref: runtime.ExternAddr,
-    func_ref: FuncRef,
+    externref: runtime.ExternAddr,
+    funcref: FuncRef,
 };
 
 const Ip = Module.Code.Ip;
@@ -48,8 +48,8 @@ pub const TaggedValue = union(enum) {
     f32: f32,
     i64: i64,
     f64: f64,
-    host_ref: runtime.ExternAddr,
-    func_ref: *const FuncRef,
+    externref: runtime.ExternAddr,
+    funcref: *const FuncRef,
 };
 
 pub const InitOptions = struct {
@@ -220,7 +220,7 @@ pub fn beginCall(
     callee: runtime.FuncAddr,
     arguments: []const TaggedValue,
     fuel: *Fuel,
-) Error!void {
+) (error{ArgumentTypeOrCountMismatch} || Error)!void {
     if (interp.state != .awaiting_host) return Error.InvalidInterpreterState;
 
     const arg_len = std.math.cast(u32, arguments.len) orelse return Error.OutOfMemory;
@@ -233,15 +233,31 @@ pub fn beginCall(
     try interp.value_stack.ensureUnusedCapacity(alloca, arg_len);
     errdefer interp.value_stack.items.len = saved_value_stack_len;
 
-    for (arguments) |arg| {
+    const signature = callee.signature();
+
+    if (arguments.len != signature.param_count) {
+        return error.ArgumentTypeOrCountMismatch;
+    }
+
+    for (arguments, signature.parameters()) |arg, param_type| {
         interp.value_stack.appendAssumeCapacity(
-            switch (@as(std.meta.Tag(TaggedValue), arg)) {
-                .func_ref => Value{ .func_ref = arg.func_ref.* },
-                inline else => |tag| @unionInit(
-                    Value,
-                    @tagName(tag),
-                    @field(arg, @tagName(tag)),
-                ),
+            value: switch (@as(std.meta.Tag(TaggedValue), arg)) {
+                .funcref => {
+                    if (param_type != .funcref)
+                        return error.ArgumentTypeOrCountMismatch;
+
+                    break :value Value{ .funcref = arg.funcref.* };
+                },
+                inline else => |tag| {
+                    if (param_type != @field(Module.ValType, @tagName(tag)))
+                        return error.ArgumentTypeOrCountMismatch;
+
+                    break :value @unionInit(
+                        Value,
+                        @tagName(tag),
+                        @field(arg, @tagName(tag)),
+                    );
+                },
             },
         );
     }
@@ -249,6 +265,15 @@ pub fn beginCall(
     switch (callee.expanded()) {
         .wasm => |wasm| {
             const code: *const Module.Code = wasm.code();
+
+            switch (code.state.flag.load(.acquire)) {
+                .init, .validating => {
+                    interp.state = .awaiting_lazy_validation;
+                    return;
+                },
+                .successful, .failed => {},
+            }
+
             if (code.state.@"error") |_| {
                 interp.state = .{ .trapped = TrapCode.lazy_validation_failed };
                 return;
