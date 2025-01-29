@@ -239,6 +239,8 @@ pub fn beginCall(
         return error.ArgumentTypeOrCountMismatch;
     }
 
+    const values_base = std.math.cast(u32, interp.value_stack.items.len) orelse return Error.OutOfMemory;
+
     for (arguments, signature.parameters()) |arg, param_type| {
         interp.value_stack.appendAssumeCapacity(
             value: switch (@as(std.meta.Tag(TaggedValue), arg)) {
@@ -288,8 +290,7 @@ pub fn beginCall(
                     .function = callee,
                     .instructions = Instructions.init(code.state.instructions, code.state.instructions_end),
                     .branch_table = code.state.side_table_ptr,
-                    .values_base = std.math.cast(u32, interp.value_stack.items.len) orelse
-                        return Error.OutOfMemory,
+                    .values_base = values_base,
                     .values_sizes = sizes.local_values + sizes.max_values,
                 },
             ) catch unreachable;
@@ -299,8 +300,6 @@ pub fn beginCall(
             interp.enterMainLoop(fuel);
         },
         .host => {
-            const values_base = std.math.cast(u32, interp.value_stack.items.len) orelse return Error.OutOfMemory;
-
             errdefer comptime unreachable;
 
             interp.call_stack.append(
