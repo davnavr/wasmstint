@@ -209,17 +209,8 @@ const Export = union(enum) {
     // module_field: IndexedArena.Idx(Text.ExportField),
     inline_func: struct { field: IndexedArena.Idx(Text.Func), idx: FuncIdx },
 
-    fn name(@"export": Export, arena: IndexedArena.ConstData) Text.InlineExports {
-        const list = switch (@"export") {
-            .inline_func => |func| func.field.getPtr(arena).inline_exports,
-        };
-
-        std.debug.assert(!list.isEmpty());
-        return list;
-    }
-
     comptime {
-        std.debug.assert(@sizeOf(Export) == 8);
+        std.debug.assert(@sizeOf(Export) == 8); // TODO: 12
     }
 };
 
@@ -550,7 +541,7 @@ fn encodeText(
         _ = scratch.reset(.retain_capacity);
         section_buf.clearRetainingCapacity();
 
-        var output = section_buf.writer();
+        const output = section_buf.writer();
         try encodeVecLen(output, wasm.imports.len);
 
         var iter_imports = wasm.imports.constIterator(0);
@@ -591,6 +582,36 @@ fn encodeText(
 
         try encodeSection(final_output, 3, section_buf.items);
     }
+
+    if (wasm.exports_count > 0) {
+        _ = scratch.reset(.retain_capacity);
+        section_buf.clearRetainingCapacity();
+
+        const output = section_buf.writer();
+        try encodeVecLen(output, wasm.exports_count);
+
+        var iter_exports = wasm.exports.constIterator(0);
+        while (iter_exports.next()) |exp| {
+            switch (exp.*) {
+                .inline_func => |func| {
+                    var export_desc_buf = std.BoundedArray(u8, 6){};
+                    export_desc_buf.appendAssumeCapacity(0x00);
+                    encodeIdx(export_desc_buf.writer(), FuncIdx, func.idx) catch unreachable;
+
+                    const export_list = func.field.getPtr(arena).inline_exports.items(arena);
+                    std.debug.assert(export_list.len > 0);
+                    for (export_list) |inline_export| {
+                        try encodeByteVec(output, inline_export.name.id.bytes(arena, &caches.names));
+                        try output.writeAll(export_desc_buf.slice());
+                    }
+                },
+            }
+        }
+
+        try encodeSection(final_output, 7, section_buf.items);
+    }
+
+    // if (wasm.defined_funcs.len > 0) {}
 
     // std.debug.print("MODULE DUMP START:\n", .{});
     // std.debug.dumpHex(final_output.context.items);
