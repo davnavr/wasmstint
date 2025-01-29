@@ -98,8 +98,12 @@ pub const State = struct {
         scratch: *ArenaAllocator,
     ) Error!bool {
         check: {
-            const current_flag = state.flag.cmpxchgWeak(Flag.init, Flag.validating, .release, .acquire) orelse
-                break :check;
+            const current_flag = state.flag.cmpxchgWeak(
+                Flag.init,
+                Flag.validating,
+                .acquire,
+                .acquire,
+            ) orelse break :check;
 
             return switch (current_flag) {
                 .init => unreachable,
@@ -493,9 +497,9 @@ fn doValidation(
     const locals: []const ValType = locals: {
         const local_group_count = try reader.readUleb128(u32);
         var local_vars = ValTypeBuf{};
-        // if (local_group_count > ValTypeBuf.prealloc_count) {
-        try local_vars.growCapacity(scratch.allocator(), local_group_count);
-        // }
+        if (local_group_count > ValTypeBuf.prealloc_count) {
+            try local_vars.growCapacity(scratch.allocator(), local_group_count);
+        }
 
         defer {
             local_vars.clearRetainingCapacity();

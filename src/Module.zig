@@ -99,8 +99,8 @@ pub inline fn funcTypeIdx(module: *const Module, func: FuncIdx) TypeIdx {
     const func_idx: u32 = @intFromEnum(func);
     std.debug.assert(func_idx < module.inner.func_count);
 
-    const type_ptr = @intFromPtr(&module.funcTypes()[func_idx]);
-    std.debug.assert(type_ptr < @intFromPtr(module.inner.types + module.inner.types_count));
+    const type_ptr = @intFromPtr(@as(*const FuncType, module.funcTypes()[func_idx]));
+    std.debug.assert(type_ptr < @intFromPtr(@as(*const FuncType, &module.inner.types[module.inner.types_count])));
     return @enumFromInt(type_ptr - @intFromPtr(module.inner.types));
 }
 
@@ -1220,7 +1220,7 @@ pub fn finishCodeValidation(module: *Module, allocator: Allocator, scratch: *Are
         module.code(),
     ) |func_idx, *code_entry| {
         _ = scratch.reset(.retain_capacity);
-        allValidated = allValidated or try code_entry.state.validate(
+        allValidated = allValidated and try code_entry.state.validate(
             allocator,
             module,
             module.funcTypeIdx(@enumFromInt(@as(@typeInfo(FuncIdx).@"enum".tag_type, @intCast(func_idx)))),
