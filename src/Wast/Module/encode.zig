@@ -8,6 +8,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const SegmentedList = std.SegmentedList;
 const writeUleb128 = std.leb.writeUleb128;
 const IndexedArena = @import("../../IndexedArena.zig");
+const opcodes = @import("../../opcodes.zig");
 
 const Ident = @import("../ident.zig").Ident;
 const Name = @import("../Name.zig");
@@ -220,15 +221,15 @@ fn IdxCounter(comptime Idx: type) type {
 
         const Self = @This();
 
+        const Int = @typeInfo(Idx).@"enum".tag_type;
+
+        pub fn incrementBy(counter: *Self, amount: Int) Allocator.Error!void {
+            counter.next = @enumFromInt(try addOrOom(Int, @intFromEnum(counter.next), amount));
+        }
+
         pub fn increment(counter: *Self) Allocator.Error!Idx {
             const give = counter.next;
-            counter.next = @enumFromInt(
-                try addOrOom(
-                    @typeInfo(Idx).@"enum".tag_type,
-                    @intFromEnum(counter.next),
-                    1,
-                ),
-            );
+            try counter.incrementBy(1);
             return give;
         }
     };
@@ -416,6 +417,115 @@ fn encodeTypeSecFunc(
     );
 }
 
+pub const LocalIdx = enum(u32) {
+    probably_invalid = std.math.maxInt(u32),
+    _,
+};
+
+pub const FuncContext = struct {
+    local_lookup: std.AutoHashMapUnmanaged(Ident.Interned, LocalIdx) = .empty,
+    local_counter: IdxCounter(LocalIdx) = .{},
+
+    fn getLocalIdx(
+        ctx: *const FuncContext,
+        ident: Ident,
+        tree: *const sexpr.Tree,
+        errors: *Error.List,
+    ) Allocator.Error!LocalIdx {
+        switch (ident.toUnion(tree)) {
+            .symbolic => |interned| if (ctx.local_lookup.get(interned)) |idx| {
+                return idx;
+            } else {
+                try errors.append(Error.initUndefinedIdent(ident.token));
+                return .probably_invalid;
+            },
+            .numeric => |idx| return @enumFromInt(idx),
+        }
+    }
+
+    fn reset(ctx: *FuncContext) void {
+        ctx.local_lookup.clearRetainingCapacity();
+        ctx.local_counter = .{};
+    }
+};
+
+// TODO: Parameter flag to indicate if data count should be emitted.
+fn encodeExpr(
+    output: std.ArrayList(u8).Writer,
+    expr: *const Text.Expr,
+    ctx: *FuncContext,
+    tree: *const sexpr.Tree,
+    arena: IndexedArena.ConstData,
+    caches: *const Caches,
+    scratch: *ArenaAllocator,
+    errors: *Error.List,
+) Allocator.Error!void {
+    // Allocated in `scratch`.
+    var label_lookup: struct {
+        const LabelLookup = @This();
+
+        stack: std.SegmentedList(?Ident.Interned, 4) = .{},
+        map: std.AutoHashMapUnmanaged(Ident.Interned, u32) = .empty,
+    } = .{};
+
+    try output.context.ensureUnusedCapacity(expr.count);
+
+    var iter_instrs = expr.iterator(tree, arena);
+    while (iter_instrs.next()) |instr| {
+        try output.context.ensureUnusedCapacity(1);
+        const instr_tag = instr.tag(tree) orelse {
+            output.context.appendAssumeCapacity(@intFromEnum(opcodes.ByteOpcode.end));
+            continue;
+        };
+
+        switch (instr_tag) {
+            .@"memory.init",
+            .@"memory.copy",
+            .@"table.init",
+            .@"table.copy",
+            .@"ref.null",
+            => unreachable, // TODO: see Instr.argumentTag()
+            inline else => |tag| {
+                const tag_name = comptime @tagName(tag);
+                if (@hasField(opcodes.ByteOpcode, tag_name)) {
+                    output.context.appendAssumeCapacity(@intFromEnum(@field(opcodes.ByteOpcode, tag_name)));
+                } else opcode: {
+                    inline for (opcodes.PrefixSet.all) |set| {
+                        if (!@hasField(set.@"enum", tag_name)) continue;
+
+                        output.context.appendAssumeCapacity(@intFromEnum(set.prefix));
+                        try writeUleb128(output, @intFromEnum(@field(set.@"enum", tag_name)));
+                        break :opcode;
+                    }
+
+                    @compileError("no corresponding opcode enum for " ++ tag_name);
+                }
+
+                const arg_tag = comptime Text.Instr.argumentTag(tag);
+                const arg = @field(instr.arguments, @tagName(arg_tag));
+                switch (arg_tag) {
+                    .none => {},
+                    .i32 => try std.leb.writeIleb128(output, @as(i32, arg.*)),
+                    .ident => switch (tag) {
+                        .@"local.get", .@"local.set", .@"local.tee" => try encodeIdx(
+                            output,
+                            LocalIdx,
+                            try ctx.getLocalIdx(arg.*, tree, errors),
+                        ),
+                        else => unreachable,
+                    },
+                    else => {
+                        _ = &label_lookup;
+                        _ = caches;
+                        _ = scratch;
+                        std.debug.panic("TODO: {}", .{arg_tag});
+                    },
+                }
+            },
+        }
+    }
+}
+
 fn encodeText(
     module: *const Text,
     tree: *const sexpr.Tree,
@@ -538,7 +648,6 @@ fn encodeText(
     }
 
     if (wasm.imports.len > 0) {
-        _ = scratch.reset(.retain_capacity);
         section_buf.clearRetainingCapacity();
 
         const output = section_buf.writer();
@@ -566,7 +675,6 @@ fn encodeText(
     }
 
     if (wasm.defined_funcs.len > 0) {
-        _ = scratch.reset(.retain_capacity);
         section_buf.clearRetainingCapacity();
 
         try encodeVecLen(section_buf.writer(), wasm.defined_funcs.len);
@@ -584,7 +692,6 @@ fn encodeText(
     }
 
     if (wasm.exports_count > 0) {
-        _ = scratch.reset(.retain_capacity);
         section_buf.clearRetainingCapacity();
 
         const output = section_buf.writer();
@@ -611,7 +718,85 @@ fn encodeText(
         try encodeSection(final_output, 7, section_buf.items);
     }
 
-    // if (wasm.defined_funcs.len > 0) {}
+    if (wasm.defined_funcs.len > 0) {
+        _ = scratch.reset(.retain_capacity); // Must not be reset until all function bodies have been written.
+        section_buf.clearRetainingCapacity();
+
+        const section_output = section_buf.writer();
+        try encodeVecLen(section_output, wasm.exports_count);
+
+        var code_buffer = std.ArrayList(u8).init(scratch.allocator());
+        const code_output = code_buffer.writer();
+
+        // Allocated in `scratch`,
+        var func_context = FuncContext{};
+
+        var expr_arena = ArenaAllocator.init(scratch.allocator());
+
+        var iter_funcs = wasm.defined_funcs.constIterator(0);
+        while (iter_funcs.next()) |func_field| {
+            code_buffer.clearRetainingCapacity();
+            func_context.reset();
+
+            const func: *const Text.Func = func_field.getPtr(arena);
+
+            for (@as([]const Text.Param, func.type_use.func.parameters.items(arena))) |param| {
+                if (param.id.some) {
+                    const local_idx = try func_context.local_counter.increment();
+                    std.debug.assert(param.types.len == 1);
+                    try func_context.local_lookup.putNoClobber(scratch.allocator(), param.id.ident, local_idx);
+                } else {
+                    try func_context.local_counter.incrementBy(param.types.len);
+                }
+            }
+
+            const locals: []const Text.Local = func.locals.items(arena);
+            try encodeVecLen(code_output, locals.len); // TODO: Fix, this count is wrong!
+
+            // TODO: Helper struct to encode locals
+            var local_group_count: u32 = 0;
+            var local_group_type: ValType = undefined;
+            for (locals) |local_group| {
+                const local_types: []const Text.ValType = local_group.types.items(arena);
+                std.debug.assert(local_types.len >= 1);
+                if (local_group.id.some) {
+                    const local_idx = try func_context.local_counter.increment();
+                    std.debug.assert(local_types.len == 1);
+                    try func_context.local_lookup.putNoClobber(scratch.allocator(), local_group.id.ident, local_idx);
+                } else {
+                    try func_context.local_counter.incrementBy(local_group.types.len);
+                }
+
+                if (local_group_count == 0) {
+                    local_group_type = ValType.fromValType(local_types[0], tree);
+                    local_group_count = local_group.types.len;
+                } else {
+                    // TODO: Try and increment?
+                }
+            }
+
+            if (local_group_count > 0) {
+                try writeUleb128(code_output, local_group_count);
+                try code_output.writeByte(@intFromEnum(local_group_type));
+            }
+
+            _ = expr_arena.reset(.retain_capacity);
+            try encodeExpr(
+                code_output,
+                &func.body.defined,
+                &func_context,
+                tree,
+                arena,
+                caches,
+                &expr_arena,
+                errors,
+            );
+
+            try encodeByteVec(section_output, code_buffer.items);
+        }
+
+        try encodeSection(final_output, 10, section_buf.items);
+    }
 
     // std.debug.print("MODULE DUMP START:\n", .{});
     // std.debug.dumpHex(final_output.context.items);

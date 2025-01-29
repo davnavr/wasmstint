@@ -6,6 +6,13 @@ const Value = sexpr.Value;
 const Token = sexpr.Token;
 const Ident = @import("ident.zig").Ident;
 
+// pub const Payload = union {
+//     literal: []const u8,
+//     uint: usize,
+//     location: Value,
+// };
+// value: Value, payload: IndexedArena.Slice(Payload),
+
 value: Value,
 tag: Tag,
 extra: union {
@@ -49,6 +56,7 @@ pub const Tag = enum {
     undefined_ident,
     import_after_definition,
     type_use_mismatch,
+    // label_mismatch
 };
 
 const Error = @This();

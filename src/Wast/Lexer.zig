@@ -179,7 +179,7 @@ pub const Token = struct {
     };
 
     comptime {
-        std.debug.assert(!@hasDecl(InstrTag, "ident"));
+        std.debug.assert(!@hasField(InstrTag, "ident"));
     }
 
     pub fn tagToInstrTag(tag: Tag) InstrTag {

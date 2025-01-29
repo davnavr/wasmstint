@@ -239,26 +239,31 @@ pub const FCPrefixOpcode = enum(u5) {
 //     @"v128.load" = 0,
 // };
 
+pub const PrefixSet = struct {
+    prefix: ByteOpcode,
+    @"enum": type,
+
+    fn init(comptime prefix: ByteOpcode) @This() {
+        return .{
+            .prefix = prefix,
+            .@"enum" = @field(opcodes, @tagName(prefix)[2..4] ++ "PrefixOpcode"),
+        };
+    }
+
+    fn fields(set: *const PrefixSet) []const std.builtin.Type.EnumField {
+        return @typeInfo(set.@"enum").@"enum".fields;
+    }
+
+    pub const all = [1]PrefixSet{PrefixSet.init(.@"0xFC")};
+};
+
 pub const AllOpcodes: type = ty: {
-    const PrefixSet = struct {
-        prefix: ByteOpcode,
-        @"enum": std.builtin.Type.Enum,
-
-        fn init(comptime prefix: ByteOpcode) @This() {
-            return .{
-                .prefix = prefix,
-                .@"enum" = @typeInfo(@field(opcodes, @tagName(prefix)[2..4] ++ "PrefixOpcode")).@"enum",
-            };
-        }
-    };
-
     const byte_opcodes = @typeInfo(ByteOpcode).@"enum".fields;
-    const prefix_sets = [1]PrefixSet{PrefixSet.init(.@"0xFC")};
-    const non_prefix_byte_opcode_count = byte_opcodes.len - prefix_sets.len;
+    const non_prefix_byte_opcode_count = byte_opcodes.len - PrefixSet.all.len;
 
     const total_count = count: {
         var total = non_prefix_byte_opcode_count;
-        for (prefix_sets) |set| total += set.@"enum".fields.len;
+        for (PrefixSet.all) |set| total += set.fields().len;
         break :count total;
     };
 
@@ -277,8 +282,8 @@ pub const AllOpcodes: type = ty: {
 
     std.debug.assert(init_fields == non_prefix_byte_opcode_count);
 
-    for (prefix_sets) |set| {
-        for (set.@"enum".fields) |opcode| {
+    for (PrefixSet.all) |set| {
+        for (set.fields()) |opcode| {
             fields[init_fields] = .{ .name = opcode.name, .value = init_fields };
             init_fields += 1;
         }
