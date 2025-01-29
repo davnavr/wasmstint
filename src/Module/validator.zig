@@ -670,7 +670,13 @@ fn doValidation(
                 const local_type = try readLocalIdx(&reader, locals);
                 try val_stack.popThenPushExpecting(scratch, &ctrl_stack, local_type, local_type);
             },
-            .@"i32.eqz" => try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i32, .i32),
+            .@"i32.eqz",
+            .@"i32.clz",
+            .@"i32.ctz",
+            .@"i32.popcnt",
+            .@"i32.extend8_s",
+            .@"i32.extend16_s",
+            => try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i32, .i32),
             .@"i32.eq",
             .@"i32.ne",
             .@"i32.lt_s",
