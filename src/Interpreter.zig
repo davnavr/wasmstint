@@ -23,10 +23,8 @@ const Stp = [*]const Module.Code.SideTableEntry;
 
 pub const StackFrame = extern struct {
     function: runtime.FuncAddr,
-    ip: Ip,
-    /// The "*end* instruction pointer".
-    eip: Eip,
-    stp: Stp,
+    instructions: Instructions,
+    branch_table: Stp,
     /// The total space taken by local variables and values in the interpreter's `value_stack`.
     values_sizes: u32,
     /// The index into the `value_stack` at which local variables begin.
@@ -156,9 +154,8 @@ pub fn resumeExecution(interp: *Interpreter, alloca: Allocator, fuel: *Fuel) Err
 
             const sizes = code.state.info.sizes;
             try interp.allocateValueStackSpace(alloca, sizes.local_values, sizes.max_values);
-            current_frame.ip = code.state.instructions;
-            current_frame.eip = code.state.instructions_end;
-            current_frame.stp = code.state.side_table_ptr;
+            current_frame.instructions = Instructions.init(code.state.instructions, code.state.instructions_end);
+            current_frame.branch_table = code.state.side_table_ptr;
         },
         .out_of_fuel => {},
     }
@@ -264,9 +261,8 @@ pub fn beginCall(
                 undefined,
                 StackFrame{
                     .function = callee,
-                    .ip = code.state.instructions,
-                    .eip = code.state.instructions_end,
-                    .stp = code.state.side_table_ptr,
+                    .instructions = Instructions.init(code.state.instructions, code.state.instructions_end),
+                    .branch_table = code.state.side_table_ptr,
                     .values_base = std.math.cast(u32, interp.value_stack.items.len) orelse
                         return Error.OutOfMemory,
                     .values_sizes = sizes.local_values + sizes.max_values,
@@ -275,8 +271,7 @@ pub fn beginCall(
 
             errdefer comptime unreachable;
 
-            // enterMainLoop
-            _ = fuel;
+            interp.enterMainLoop(fuel);
         },
         .host => {
             const values_base = std.math.cast(u32, interp.value_stack.items.len) orelse return Error.OutOfMemory;
@@ -287,9 +282,8 @@ pub fn beginCall(
                 undefined,
                 StackFrame{
                     .function = callee,
-                    .ip = undefined,
-                    .eip = undefined,
-                    .stp = undefined,
+                    .instructions = undefined,
+                    .branch_table = undefined,
                     .values_base = values_base,
                     .values_sizes = arg_len,
                 },
@@ -300,51 +294,43 @@ pub fn beginCall(
     }
 }
 
-const OpcodeResult = packed struct(std.meta.Int(.unsigned, @bitSizeOf([2]*anyopaque))) {
-    ip: Ip,
-    stp: Stp,
-};
-
 const OpcodeHandler = *const fn (
-    ip: Ip,
+    i: *Instructions,
+    s: *Stp,
+    loc: u32,
     vals: *ValStack,
     fuel: *Fuel,
-    values_base: u32,
-    stp: Stp,
-    eip: Eip,
-    interp: *Interpreter,
-) OpcodeResult;
+    int: *Interpreter,
+) void;
 
-const IpReader = struct {
-    ip: Ip,
-    eip: Eip,
+const Instructions = extern struct {
+    p: Ip,
+    /// The "*end* instruction pointer" which denotes an implicit return from the function.
+    ep: Eip,
 
-    fn init(ip: Ip, eip: Eip) IpReader {
-        return .{ .ip = ip, .eip = eip };
+    fn init(ip: Ip, eip: Eip) Instructions {
+        return .{ .p = ip, .ep = eip };
     }
 
-    pub fn readByte(reader: *IpReader) Module.NoEofError!u8 {
-        if (@intFromPtr(reader.ip) <= @intFromPtr(reader.eip)) {
-            const b = reader.ip[0];
-            reader.ip += 1;
+    pub fn readByte(i: *Instructions) Module.NoEofError!u8 {
+        if (@intFromPtr(i.p) <= @intFromPtr(i.ep)) {
+            const b = i.p[0];
+            i.p += 1;
             return b;
         } else return error.EndOfStream;
     }
 
-    inline fn readUleb128(reader: *IpReader, comptime T: type) error{ Overflow, EndOfStream }!T {
+    inline fn readUleb128(reader: *Instructions, comptime T: type) error{ Overflow, EndOfStream }!T {
         return std.leb.readUleb128(T, reader);
     }
 
-    inline fn readIleb128(reader: *IpReader, comptime T: type) error{ Overflow, EndOfStream }!T {
+    inline fn readIleb128(reader: *Instructions, comptime T: type) error{ Overflow, EndOfStream }!T {
         return std.leb.readIleb128(T, reader);
     }
 
-    inline fn nextOpcodeHandler(reader: *IpReader, fuel: *Fuel, interp: *Interpreter) ?OpcodeHandler {
+    inline fn nextOpcodeHandler(reader: *Instructions, fuel: *Fuel, interp: *Interpreter) ?OpcodeHandler {
         if (fuel.remaining == 0) {
             interp.state = .{ .interrupted = .out_of_fuel };
-            const current_frame = interp.currentFrame();
-            current_frame.ip = reader.ip;
-            current_frame.stp = reader.stp;
             return null;
         } else {
             fuel.remaining -= 1;
@@ -354,73 +340,100 @@ const IpReader = struct {
 };
 
 const opcode_handlers = struct {
-    fn unspecifiedPanic(ip: Ip, vals: *ValStack, fuel: *Fuel, values_base: u32, stp: Stp, eip: Eip, interp: *Interpreter) OpcodeResult {
+    fn panicInvalidInstruction(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        _ = s;
+        _ = loc;
         _ = vals;
         _ = fuel;
-        _ = values_base;
-        _ = stp;
-        _ = eip;
-        _ = interp;
-        std.debug.panic("unimplemented handler for instruction {X:0.2}", .{(ip - 1)[0]});
+        _ = int;
+        const bad_opcode: u8 = (i.p - 1)[0];
+        const opcode_name = name: {
+            const tag = std.meta.intToEnum(opcodes.ByteOpcode, bad_opcode) catch break :name "unknown";
+            break :name @tagName(tag);
+        };
+
+        std.debug.panic("invalid instruction {X:0.2} ({s})", .{ bad_opcode, opcode_name });
     }
 
-    const unspecified: OpcodeHandler = switch (@import("builtin").mode) {
-        .Debug, .ReleaseSafe => unspecifiedPanic,
+    const invalid: OpcodeHandler = switch (@import("builtin").mode) {
+        .Debug, .ReleaseSafe => panicInvalidInstruction,
         .ReleaseFast, .ReleaseSmall => undefined,
     };
 
-    fn end(ip: Ip, vals: *ValStack, fuel: *Fuel, values_base: u32, stp: Stp, eip: Eip, interp: *Interpreter) OpcodeResult {
-        if (@intFromPtr(ip) == @intFromPtr(eip)) {
+    fn end(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        if (@intFromPtr(i.p) == @intFromPtr(i.ep)) {
             // TODO: Handle function return in a common routine!
             unreachable;
-        } else {
-            var reader = IpReader.init(ip, eip);
-            if (reader.nextOpcodeHandler(fuel, interp)) |next| {
-                @call(.always_tail, next, .{ reader.ip, vals, fuel, values_base, stp, eip, interp });
-            }
+        } else if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
     }
 
-    fn @"i32.const"(ip: Ip, vals: *ValStack, fuel: *Fuel, values_base: u32, stp: Stp, eip: Eip, interp: *Interpreter) OpcodeResult {
-        var reader = IpReader.init(ip, eip);
-        const i = reader.readIleb128(i32) catch unreachable;
-        vals.appendAssumeCapacity(Value{ .i32 = i });
+    fn @"local.get"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const n = i.readUleb128(u32) catch unreachable;
+        const value = vals.items[loc..][n];
+        vals.appendAssumeCapacity(value);
 
-        if (reader.nextOpcodeHandler(fuel, interp)) |next| {
-            @call(.always_tail, next, .{ reader.ip, vals, fuel, values_base, stp, eip, interp });
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
     }
 
-    fn @"i32.add"(ip: Ip, vals: *ValStack, fuel: *Fuel, values_base: u32, stp: Stp, eip: Eip, interp: *Interpreter) OpcodeResult {
-        var reader = IpReader.init(ip, eip);
+    fn @"local.set"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const n = i.readUleb128(u32) catch unreachable;
+        const value = vals.pop();
+        vals.items[loc..][n] = value;
+
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    fn @"local.tee"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const n = i.readUleb128(u32) catch unreachable;
+        vals.items[loc..][n] = vals.items[vals.items.len - 1];
+
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    fn @"i32.const"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const n = i.readIleb128(i32) catch unreachable;
+        vals.appendAssumeCapacity(.{ .i32 = n });
+
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    fn @"i32.add"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const c_2 = vals.pop().i32;
         const c_1 = vals.pop().i32;
-        vals.appendAssumeCapacity(c_1 +% c_2);
+        vals.appendAssumeCapacity(.{ .i32 = c_1 +% c_2 });
 
-        if (reader.nextOpcodeHandler(fuel, interp)) |next| {
-            @call(.always_tail, next, .{ reader.ip, vals, fuel, values_base, stp, eip, interp });
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
     }
 
-    fn @"i32.sub"(ip: Ip, vals: *ValStack, fuel: *Fuel, values_base: u32, stp: Stp, eip: Eip, interp: *Interpreter) OpcodeResult {
-        var reader = IpReader.init(ip, eip);
+    fn @"i32.sub"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const c_2 = vals.pop().i32;
         const c_1 = vals.pop().i32;
-        vals.appendAssumeCapacity(c_1 -% c_2);
+        vals.appendAssumeCapacity(.{ .i32 = c_1 -% c_2 });
 
-        if (reader.nextOpcodeHandler(fuel, interp)) |next| {
-            @call(.always_tail, next, .{ reader.ip, vals, fuel, values_base, stp, eip, interp });
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
     }
 
-    fn @"i32.mul"(ip: Ip, vals: *ValStack, fuel: *Fuel, values_base: u32, stp: Stp, eip: Eip, interp: *Interpreter) OpcodeResult {
-        var reader = IpReader.init(ip, eip);
+    fn @"i32.mul"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const c_2 = vals.pop().i32;
         const c_1 = vals.pop().i32;
-        vals.appendAssumeCapacity(c_1 *% c_2);
+        vals.appendAssumeCapacity(.{ .i32 = c_1 *% c_2 });
 
-        if (reader.nextOpcodeHandler(fuel, interp)) |next| {
-            @call(.always_tail, next, .{ reader.ip, vals, fuel, values_base, stp, eip, interp });
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
     }
 
@@ -428,7 +441,7 @@ const opcode_handlers = struct {
 };
 
 const byte_dispatch_table: [256]OpcodeHandler = handlers: {
-    var table = [_]OpcodeHandler{opcode_handlers.unspecified} ** 256;
+    var table = [_]OpcodeHandler{opcode_handlers.invalid} ** 256;
     for (@typeInfo(opcodes.ByteOpcode).@"enum".fields) |op| {
         if (@hasDecl(opcode_handlers, op.name)) {
             table[op.value] = @as(OpcodeHandler, @field(opcode_handlers, op.name));
@@ -444,21 +457,23 @@ fn enterMainLoop(interp: *Interpreter, fuel: *Fuel) void {
         return;
     }
 
-    const starting_frame = interp.currentFrame();
+    var starting_frame = interp.currentFrame();
     std.debug.assert(starting_frame.function.expanded() == .wasm);
 
-    var reader = IpReader.init(starting_frame.ip, starting_frame.eip);
-    const handler = reader.nextOpcodeHandler(fuel, &interp.state).?;
+    const handler = starting_frame.instructions.nextOpcodeHandler(
+        fuel,
+        interp,
+    ).?;
 
     _ = handler(
-        reader.ip,
+        &starting_frame.instructions,
+        &starting_frame.branch_table,
+        starting_frame.values_base,
         &interp.value_stack,
         fuel,
-        starting_frame.values_base,
-        starting_frame.stp,
-        starting_frame.eip,
         interp,
     );
+    starting_frame = undefined;
 }
 
 // /// Return from the currently executing host function to the calling function, typically WASM code.
