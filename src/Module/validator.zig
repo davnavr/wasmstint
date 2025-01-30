@@ -40,13 +40,14 @@ pub const State = struct {
     side_table_len: u32 = undefined,
     side_table_ptr: [*]const SideTableEntry = undefined,
     @"error": ?Error = null,
-    info: extern union {
-        sizes: Sizes,
-        /// Offset into the code bytes indicating where the error occurred.
-        ///
-        /// For example, `0` means the first byte of the LEB128-encoded count of the locals vector.
-        error_offset: u32,
-    } = undefined,
+    /// The maximum amount of space needed in the value stack for executing this function.
+    max_values: u16 = undefined,
+    /// The number of local variables, excluding parameters.
+    local_values: u16 = undefined,
+    /// Offset into the code bytes indicating where the error occurred.
+    ///
+    /// For example, `0` means the first byte of the LEB128-encoded count of the locals vector.
+    error_offset: u32 = undefined,
 
     pub const Sizes = extern struct {
         /// The maximum amount of space needed in the value stack for executing this function.
@@ -249,20 +250,20 @@ const CtrlStack = std.SegmentedList(CtrlFrame, 16);
 
 const ValStack = struct {
     buf: ValTypeBuf,
-    max: u32 = 0,
+    max: u16 = 0,
 
-    inline fn len(val_stack: *const ValStack) u32 {
+    inline fn len(val_stack: *const ValStack) u16 {
         return @intCast(val_stack.buf.len);
     }
 
     fn push(val_stack: *ValStack, arena: *ArenaAllocator, val_type: ValType) Error!void {
         try val_stack.buf.append(arena.allocator(), val_type);
-        val_stack.max = @max(val_stack.max, std.math.cast(u32, val_stack.buf.len) orelse return Error.WasmImplementationLimit);
+        val_stack.max = @max(val_stack.max, std.math.cast(u16, val_stack.buf.len) orelse return Error.WasmImplementationLimit);
     }
 
-    /// Asserts that `types.len() <= std.math.maxInt(u32)`.
+    /// Asserts that `types.len() <= std.math.maxInt(u16)`.
     fn pushMany(val_stack: *ValStack, arena: *ArenaAllocator, types: []const ValType) Error!void {
-        const new_len = std.math.add(u32, @intCast(val_stack.buf.len), @intCast(types.len)) catch
+        const new_len = std.math.add(u16, val_stack.len(), @intCast(types.len)) catch
             return Error.WasmImplementationLimit;
         try val_stack.buf.growCapacity(arena.allocator(), new_len);
         for (types) |ty| val_stack.buf.append(undefined, ty) catch unreachable;
@@ -500,7 +501,7 @@ fn doValidation(
     errdefer |e| {
         state.@"error" = e;
         state.flag.store(State.Flag.failed, .release);
-        state.info.error_offset = @intCast(code_ptr.ptr - code.ptr);
+        state.error_offset = @intCast(code_ptr.ptr - code.ptr);
     }
 
     const func_type = signature.funcType(module);
@@ -539,7 +540,7 @@ fn doValidation(
             }
         }
 
-        state.info.sizes.local_values = @intCast(local_vars.len);
+        state.local_values = @intCast(local_vars.len);
 
         const buf = try scratch.allocator().alloc(ValType, local_vars.len);
         local_vars.writeToSlice(buf, 0);
@@ -734,7 +735,7 @@ fn doValidation(
     std.debug.assert(branch_fixups.active.len == 0);
 
     state.instructions_end = @ptrCast(state.instructions + instr_offset);
-    state.info.sizes.max_values = val_stack.max;
+    state.max_values = val_stack.max;
     state.side_table_len = std.math.cast(u32, side_table.len) orelse return error.WasmImplementationLimit;
     state.side_table_ptr = side_table: {
         const copied = try allocator.alloc(SideTableEntry, side_table.len);

@@ -1,3 +1,5 @@
+//! Represents a single thread of WebAssembly computation.
+//!
 //! Based on <https://doi.org/10.48550/arXiv.2205.01183>.
 
 const std = @import("std");
@@ -17,6 +19,21 @@ const Value = extern union {
     funcref: FuncRef,
 };
 
+pub const TaggedValue = union(enum) {
+    i32: i32,
+    f32: f32,
+    i64: i64,
+    f64: f64,
+    externref: runtime.ExternAddr,
+    funcref: *const FuncRef,
+
+    comptime {
+        std.debug.assert(@sizeOf(TaggedValue) == 16);
+    }
+};
+
+const ValueTag = std.meta.Tag(TaggedValue);
+
 const Ip = Module.Code.Ip;
 const Eip = *const Module.Code.End;
 const Stp = [*]const Module.Code.SideTableEntry;
@@ -25,9 +42,14 @@ pub const StackFrame = extern struct {
     function: runtime.FuncAddr,
     instructions: Instructions,
     branch_table: Stp,
-    /// The total space taken by local variables and values in the interpreter's `value_stack`.
-    values_sizes: u32,
+    /// The total space taken by parameters, local variables, and values in the interpreter's
+    /// `value_stack`.
+    values_count: u16,
+    /// The number of return values this function has.
+    result_count: u16,
     /// The index into the `value_stack` at which local variables begin.
+    ///
+    /// The length of the value stack to restore when returning from this function is equal to .
     values_base: u32,
 };
 
@@ -35,7 +57,7 @@ const ValStack = std.ArrayListUnmanaged(Value);
 
 value_stack: ValStack,
 call_stack: std.ArrayListUnmanaged(StackFrame),
-state: State = .awaiting_host,
+state: State = .{ .awaiting_host = &[0]Module.ValType{} },
 
 const Interpreter = @This();
 
@@ -43,25 +65,18 @@ pub const Fuel = extern struct {
     remaining: u64,
 };
 
-pub const TaggedValue = union(enum) {
-    i32: i32,
-    f32: f32,
-    i64: i64,
-    f64: f64,
-    externref: runtime.ExternAddr,
-    funcref: *const FuncRef,
-};
-
 pub const InitOptions = struct {
-    value_stack_capacity: usize = @sizeOf(Value) * 2048,
-    call_stack_capacity: usize = 64,
+    /// The initial size, in bytes, of the value stack.
+    value_stack_capacity: u32 = @sizeOf(Value) * 512,
+    /// The initial capacity, in numbers of stack frames, of the call stack.
+    call_stack_capacity: u32 = 64,
 };
 
 pub fn init(alloca: Allocator, options: InitOptions) Allocator.Error!Interpreter {
     return .{
         .value_stack = try std.ArrayListUnmanaged(Value).initCapacity(
             alloca,
-            options.value_stack_capacity,
+            options.value_stack_capacity / @sizeOf(Value),
         ),
         .call_stack = try std.ArrayListUnmanaged(StackFrame).initCapacity(
             alloca,
@@ -103,7 +118,10 @@ pub const InterruptionCause = union(enum) {
 pub const State = union(enum) {
     /// Either WASM code is waiting to be interpreted, or WASM code is awaiting the results of
     /// calling a host function.
-    awaiting_host,
+    ///
+    /// Also indicates the types of the values at the top of the value stack, which are the results of the most
+    /// recently called function.
+    awaiting_host: []const Module.ValType,
     /// The current function is awaiting the results of lazy validation, with arguments already written to a buffer.
     awaiting_lazy_validation,
     /// Execution of WASM bytecode was interrupted due to one of the following:
@@ -122,10 +140,12 @@ pub const Error = error{
     InvalidInterpreterState,
 } || Allocator.Error;
 
-fn allocateValueStackSpace(interp: *Interpreter, alloca: Allocator, locals: u32, total: u32) Allocator.Error!void {
-    std.debug.assert(locals <= total);
+fn allocateValueStackSpace(interp: *Interpreter, alloca: Allocator, code: *const Module.Code) Allocator.Error!u16 {
+    const total = std.math.add(u16, code.state.local_values, code.state.max_values) catch return error.OutOfMemory;
     try interp.value_stack.ensureUnusedCapacity(alloca, total);
-    interp.value_stack.appendNTimes(undefined, std.mem.zeroes(Value), locals) catch unreachable;
+    // In WebAssembly, locals are set to zero on entrance to a function.
+    interp.value_stack.appendNTimes(undefined, std.mem.zeroes(Value), code.state.local_values) catch unreachable;
+    return total;
 }
 
 inline fn currentFrame(interp: *Interpreter) *StackFrame {
@@ -147,13 +167,20 @@ pub fn resumeExecution(interp: *Interpreter, alloca: Allocator, fuel: *Fuel) Err
         .validation_finished => {
             // TODO: How to handle too large stack frame? Introduce new stack_exhausted state?
             const code: *const Module.Code = current_frame.function.expanded().wasm.code();
+
+            switch (code.state.flag.load(.acquire)) {
+                .init, .validating => unreachable,
+                // TODO: Only have a single `.finished` flag.
+                .successful, .failed => {},
+            }
+
             if (code.state.@"error") {
+                @branchHint(.cold);
                 interp.state = .{ .trapped = TrapCode.lazy_validation_failed };
                 return;
             }
 
-            const sizes = code.state.info.sizes;
-            try interp.allocateValueStackSpace(alloca, sizes.local_values, sizes.max_values);
+            try interp.allocateValueStackSpace(alloca, code);
             current_frame.instructions = Instructions.init(code.state.instructions, code.state.instructions_end);
             current_frame.branch_table = code.state.side_table_ptr;
         },
@@ -162,9 +189,7 @@ pub fn resumeExecution(interp: *Interpreter, alloca: Allocator, fuel: *Fuel) Err
 
     errdefer comptime unreachable;
 
-    // TODO: Go back into the interpreter.
-    // enterMainLoop
-    _ = fuel;
+    interp.enterMainLoop(fuel);
 }
 
 //pub fn waitForLazyValidation(Timeout)
@@ -191,6 +216,8 @@ pub fn finishLazyValidation(
         code.contents,
         scratch,
     ) catch |e| {
+        @branchHint(.cold);
+
         // TODO: Should now unused arguments be popped from the stack?
 
         // Trap occurs even if OOM error is reported, since currently `state.flag` is set to `.failed` if OOM occurs
@@ -223,21 +250,18 @@ pub fn beginCall(
 ) (error{ArgumentTypeOrCountMismatch} || Error)!void {
     if (interp.state != .awaiting_host) return Error.InvalidInterpreterState;
 
-    const arg_len = std.math.cast(u32, arguments.len) orelse return Error.OutOfMemory;
+    const signature = callee.signature();
+    if (arguments.len != signature.param_count) {
+        return error.ArgumentTypeOrCountMismatch;
+    }
 
     const saved_call_stack_len = interp.call_stack.items.len;
     try interp.call_stack.ensureUnusedCapacity(alloca, 1);
     errdefer interp.call_stack.items.len = saved_call_stack_len;
 
     const saved_value_stack_len = interp.value_stack.items.len;
-    try interp.value_stack.ensureUnusedCapacity(alloca, arg_len);
+    try interp.value_stack.ensureUnusedCapacity(alloca, signature.param_count);
     errdefer interp.value_stack.items.len = saved_value_stack_len;
-
-    const signature = callee.signature();
-
-    if (arguments.len != signature.param_count) {
-        return error.ArgumentTypeOrCountMismatch;
-    }
 
     const values_base = std.math.cast(u32, interp.value_stack.items.len) orelse return Error.OutOfMemory;
 
@@ -273,16 +297,19 @@ pub fn beginCall(
                     interp.state = .awaiting_lazy_validation;
                     return;
                 },
+                // TODO: Only have a single `.finished` flag.
                 .successful, .failed => {},
             }
 
             if (code.state.@"error") |_| {
+                @branchHint(.cold);
                 interp.state = .{ .trapped = TrapCode.lazy_validation_failed };
                 return;
             }
 
-            const sizes = code.state.info.sizes;
-            try interp.allocateValueStackSpace(alloca, sizes.local_values, sizes.max_values);
+            const total_values = try interp.allocateValueStackSpace(alloca, code);
+
+            errdefer comptime unreachable;
 
             interp.call_stack.append(
                 undefined,
@@ -291,11 +318,10 @@ pub fn beginCall(
                     .instructions = Instructions.init(code.state.instructions, code.state.instructions_end),
                     .branch_table = code.state.side_table_ptr,
                     .values_base = values_base,
-                    .values_sizes = sizes.local_values + sizes.max_values,
+                    .values_count = total_values,
+                    .result_count = signature.result_count,
                 },
             ) catch unreachable;
-
-            errdefer comptime unreachable;
 
             interp.enterMainLoop(fuel);
         },
@@ -309,11 +335,10 @@ pub fn beginCall(
                     .instructions = undefined,
                     .branch_table = undefined,
                     .values_base = values_base,
-                    .values_sizes = arg_len,
+                    .values_count = signature.param_count,
+                    .result_count = signature.result_count,
                 },
             ) catch unreachable;
-
-            interp.state = .awaiting_host;
         },
     }
 }
@@ -363,6 +388,45 @@ const Instructions = extern struct {
     }
 };
 
+/// Moves return values to their appropriate place in the value stack.
+///
+/// Execution of the handlers for the `end` and `return` instructions ends up here.
+fn returnFromWasm(interp: *Interpreter, values_base: u32) void {
+    const popped = interp.currentFrame();
+    interp.call_stack.items.len -= 1;
+
+    const new_value_stack_len = values_base + popped.result_count;
+    std.mem.copyForwards(
+        Value,
+        interp.value_stack.items[values_base..new_value_stack_len],
+        interp.value_stack.items[interp.value_stack.items.len - popped.result_count ..],
+    );
+    interp.value_stack.items.len = new_value_stack_len;
+
+    return_to_host: {
+        if (interp.call_stack.items.len == 0) break :return_to_host;
+
+        const current_frame = interp.currentFrame();
+        switch (current_frame.function.expanded()) {
+            .wasm => |wasm| {
+                _ = wasm;
+            },
+            .host => break :return_to_host,
+        }
+
+        unreachable; // TODO: wasm to wasm calls are not yet implemented (might need to do the tail call stuff again)
+        // - could also just return a bool indicating if execution should continue.
+
+        // TODO: Fixup IP, STP, and interp.value_stack.items.len = values_base for new top of call stack.
+
+        // return;
+    }
+
+    const signature = popped.function.signature();
+    std.debug.assert(signature.result_count == popped.result_count);
+    interp.state = .{ .awaiting_host = signature.results() };
+}
+
 const opcode_handlers = struct {
     fn panicInvalidInstruction(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         _ = s;
@@ -385,9 +449,8 @@ const opcode_handlers = struct {
     };
 
     fn end(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        if (@intFromPtr(i.p) == @intFromPtr(i.ep)) {
-            // TODO: Handle function return in a common routine!
-            unreachable;
+        if (@intFromPtr(i.p - 1) == @intFromPtr(i.ep)) {
+            int.returnFromWasm(loc);
         } else if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
@@ -476,6 +539,8 @@ const byte_dispatch_table: [256]OpcodeHandler = handlers: {
 };
 
 fn enterMainLoop(interp: *Interpreter, fuel: *Fuel) void {
+    std.debug.assert(interp.state == .awaiting_host);
+
     if (fuel.remaining == 0) {
         interp.state = .{ .interrupted = .out_of_fuel };
         return;
@@ -511,7 +576,7 @@ fn enterMainLoop(interp: *Interpreter, fuel: *Fuel) void {
 pub fn reset(interp: *Interpreter) void {
     interp.value_stack.clearRetainingCapacity();
     interp.call_stack.clearRetainingCapacity();
-    interp.state = .awaiting_host;
+    interp.state = .{ .awaiting_host = &[0]Module.ValType{} };
 }
 
 pub fn deinit(interp: *Interpreter, alloca: Allocator) void {
