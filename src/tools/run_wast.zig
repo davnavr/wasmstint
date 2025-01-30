@@ -277,8 +277,10 @@ fn runScript(
 
     for (script.commands.items(script.arena)) |cmd| {
         defer _ = state.cmd_arena.reset(.retain_capacity);
-        var interp = try wasmstint.Interpreter.init(state.cmd_arena.allocator(), .{});
+
         var fuel = wasmstint.Interpreter.Fuel{ .remaining = 2000 };
+        var interp = try wasmstint.Interpreter.init(state.cmd_arena.allocator(), .{});
+        defer interp.reset();
 
         switch (cmd.keyword.tag(script.tree)) {
             .keyword_module => {
@@ -380,8 +382,9 @@ fn runScript(
                     continue;
                 };
 
-                const target_export = module.findExport(script.nameContents(action.name.id)) catch |e| {
-                    std.debug.print("TODO: bad export {?}\n", .{e});
+                const export_name = script.nameContents(action.name.id);
+                const target_export = module.findExport(export_name) catch |e| {
+                    std.debug.print("TODO: bad export {s}, {?}\n", .{ export_name, e });
                     continue;
                 };
 
@@ -397,7 +400,12 @@ fn runScript(
                     else => unreachable,
                 };
 
-                std.debug.print("TODO: process assert_return\n", .{});
+                const results = interp.copyResultValues(&state.cmd_arena) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    else => unreachable,
+                };
+
+                std.debug.print("TODO: process assert_return {any}\n", .{results});
             },
             else => |bad| {
                 std.debug.print("TODO: process command {}\n", .{bad});

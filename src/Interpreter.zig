@@ -136,9 +136,33 @@ pub const State = union(enum) {
     // unhandled_exception: Exception,
 };
 
-pub const Error = error{
-    InvalidInterpreterState,
-} || Allocator.Error;
+pub const Error = error{InvalidInterpreterState} || Allocator.Error;
+
+pub fn copyResultValues(interp: *const Interpreter, arena: *std.heap.ArenaAllocator) Error![]TaggedValue {
+    const types: []const Module.ValType = switch (interp.state) {
+        .awaiting_host => |s| s,
+        else => return error.InvalidInterpreterState,
+    };
+
+    const dst = try arena.allocator().alloc(TaggedValue, types.len);
+    for (dst, types, interp.value_stack.items[interp.value_stack.items.len - types.len ..]) |*tagged, result_type, *result| {
+        tagged.* = switch (result_type) {
+            .v128 => unreachable, // Not implemented
+            .funcref => func: {
+                const dup = try arena.allocator().create(FuncRef);
+                dup.* = result.funcref;
+                break :func TaggedValue{ .funcref = dup };
+            },
+            inline else => |tag| @unionInit(
+                TaggedValue,
+                @tagName(tag),
+                @field(result, @tagName(tag)),
+            ),
+        };
+    }
+
+    return dst;
+}
 
 fn allocateValueStackSpace(interp: *Interpreter, alloca: Allocator, code: *const Module.Code) Allocator.Error!u16 {
     const total = std.math.add(u16, code.state.local_values, code.state.max_values) catch return error.OutOfMemory;
