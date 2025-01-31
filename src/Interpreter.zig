@@ -96,6 +96,7 @@ pub const TrapCode = enum(i32) {
     /// information.
     lazy_validation_failed,
     integer_division_by_zero,
+    integer_overflow,
     _,
 
     pub fn initHost(code: u31) TrapCode {
@@ -104,6 +105,25 @@ pub const TrapCode = enum(i32) {
 
     pub fn host(code: TrapCode) ?u31 {
         return if (code < 0) @intCast(-(@intFromEnum(code) + 1)) else null;
+    }
+
+    fn initIntegerOverflow(e: error{Overflow}) TrapCode {
+        return switch (e) {
+            error.Overflow => .integer_overflow,
+        };
+    }
+
+    fn initIntegerDivisionByZero(e: error{DivisionByZero}) TrapCode {
+        return switch (e) {
+            error.DivisionByZero => .integer_division_by_zero,
+        };
+    }
+
+    fn initSignedIntegerDivision(e: error{ Overflow, DivisionByZero }) TrapCode {
+        return switch (e) {
+            error.Overflow => .integer_overflow,
+            error.DivisionByZero => .integer_division_by_zero,
+        };
     }
 };
 
@@ -451,6 +471,174 @@ fn returnFromWasm(interp: *Interpreter, values_base: u32) void {
     interp.state = .{ .awaiting_host = signature.results() };
 }
 
+fn DefineBinOp(comptime value_field: []const u8, comptime op: anytype, comptime trap: anytype) type {
+    return struct {
+        fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+            const c_2 = @field(vals.pop(), value_field);
+            const c_1 = @field(vals.pop(), value_field);
+            const result = @call(.always_inline, op, .{ c_1, c_2 }) catch |e| {
+                int.state = .{ .trapped = @call(.always_inline, trap, .{e}) };
+                return;
+            };
+
+            vals.appendAssumeCapacity(@unionInit(Value, value_field, result));
+
+            if (i.nextOpcodeHandler(fuel, int)) |next| {
+                @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+            }
+        }
+    };
+}
+
+fn DefineUnOp(comptime value_field: []const u8, comptime op: anytype) type {
+    return struct {
+        fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+            const c_1 = @field(vals.pop(), value_field);
+            const result = @call(.always_inline, op, .{c_1});
+            vals.appendAssumeCapacity(@unionInit(Value, value_field, result));
+
+            if (i.nextOpcodeHandler(fuel, int)) |next| {
+                @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+            }
+        }
+    };
+}
+
+// fn DefineTestOp
+
+fn trapIntegerOverflow(e: error{Overflow}) TrapCode {
+    return switch (e) {
+        error.Overflow => .integer_overflow,
+    };
+}
+
+fn trapSignedIntegerDivision(e: error{ Overflow, DivisionByZero }) TrapCode {
+    return switch (e) {
+        error.Overflow => .integer_overflow,
+        error.DivisionByZero => .integer_division_by_zero,
+    };
+}
+
+fn IntegerOpcodeHandlers(comptime Signed: type) type {
+    return struct {
+        const Unsigned = std.meta.Int(.unsigned, @bitSizeOf(Signed));
+        const value_field = @typeName(Signed);
+
+        const operators = struct {
+            fn add(i_1: Signed, i_2: Signed) !Signed {
+                return i_1 +% i_2;
+            }
+
+            fn sub(i_1: Signed, i_2: Signed) !Signed {
+                return i_1 -% i_2;
+            }
+
+            fn mul(i_1: Signed, i_2: Signed) !Signed {
+                return i_1 *% i_2;
+            }
+
+            fn div_s(j_1: Signed, j_2: Signed) error{ Overflow, DivisionByZero }!Signed {
+                return std.math.divTrunc(Signed, j_1, j_2);
+            }
+
+            fn div_u(i_1: Signed, i_2: Signed) error{DivisionByZero}!Signed {
+                return @bitCast(try std.math.divTrunc(Unsigned, @bitCast(i_1), @bitCast(i_2)));
+            }
+
+            fn rem_s(j_1: Signed, j_2: Signed) error{DivisionByZero}!Signed {
+                return if (j_2 == 0)
+                    error.DivisionByZero
+                else if (j_1 == std.math.minInt(Signed) and j_2 == -1)
+                    0
+                else
+                    j_1 - (j_2 * @divTrunc(j_1, j_2));
+            }
+
+            fn rem_u(i_1: Signed, i_2: Signed) error{DivisionByZero}!Signed {
+                return @bitCast(try std.math.rem(Unsigned, @bitCast(i_1), @bitCast(i_2)));
+            }
+
+            fn @"and"(i_1: Signed, i_2: Signed) !Signed {
+                return i_1 & i_2;
+            }
+
+            fn @"or"(i_1: Signed, i_2: Signed) !Signed {
+                return i_1 | i_2;
+            }
+
+            fn xor(i_1: Signed, i_2: Signed) !Signed {
+                return i_1 ^ i_2;
+            }
+
+            /// *k*
+            inline fn bitShiftAmt(i_2: Signed) std.math.Log2Int(Signed) {
+                return @intCast(@mod(i_2, @bitSizeOf(Signed)));
+            }
+
+            fn shl(i_1: Signed, i_2: Signed) !Signed {
+                return i_1 << bitShiftAmt(i_2);
+            }
+
+            fn shr_s(i_1: Signed, i_2: Signed) !Signed {
+                // Currently assumes Zig sign-extends when shifting right.
+                return i_1 >> bitShiftAmt(i_2);
+            }
+
+            fn shr_u(i_1: Signed, i_2: Signed) !Signed {
+                return @bitCast(@as(Unsigned, @bitCast(i_1)) >> bitShiftAmt(i_2));
+            }
+
+            fn rotl(i_1: Signed, i_2: Signed) !Signed {
+                // Zig's function here handles the `bitShiftAmt()`/`@mod()`
+                return @bitCast(std.math.rotl(Unsigned, @bitCast(i_1), i_2));
+            }
+
+            fn rotr(i_1: Signed, i_2: Signed) !Signed {
+                // Zig's function here handles the `bitShiftAmt()`/`@mod()`
+                return @bitCast(std.math.rotr(Unsigned, @bitCast(i_1), i_2));
+            }
+
+            fn clz(i: Signed) Signed {
+                return @bitCast(@as(Unsigned, @clz(i)));
+            }
+
+            fn ctz(i: Signed) Signed {
+                return @bitCast(@as(Unsigned, @ctz(i)));
+            }
+        };
+
+        fn @"const"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+            const n = i.readIleb128(Signed) catch unreachable;
+            vals.appendAssumeCapacity(@unionInit(Value, value_field, n));
+
+            if (i.nextOpcodeHandler(fuel, int)) |next| {
+                @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+            }
+        }
+
+        const clz = DefineUnOp(value_field, operators.clz).handler;
+        const ctz = DefineUnOp(value_field, operators.ctz).handler;
+        const add = DefineBinOp(value_field, operators.add, undefined).handler;
+        const sub = DefineBinOp(value_field, operators.sub, undefined).handler;
+        const mul = DefineBinOp(value_field, operators.mul, undefined).handler;
+        const div_s = DefineBinOp(value_field, operators.div_s, TrapCode.initSignedIntegerDivision).handler;
+        const div_u = DefineBinOp(value_field, operators.div_u, TrapCode.initIntegerDivisionByZero).handler;
+        const rem_s = DefineBinOp(value_field, operators.rem_s, TrapCode.initIntegerDivisionByZero).handler;
+        const rem_u = DefineBinOp(value_field, operators.rem_u, TrapCode.initIntegerDivisionByZero).handler;
+        const @"and" = DefineBinOp(value_field, operators.@"and", undefined).handler;
+        const @"or" = DefineBinOp(value_field, operators.@"or", undefined).handler;
+        const xor = DefineBinOp(value_field, operators.xor, undefined).handler;
+        const shl = DefineBinOp(value_field, operators.shl, undefined).handler;
+        const shr_s = DefineBinOp(value_field, operators.shr_s, undefined).handler;
+        const shr_u = DefineBinOp(value_field, operators.shr_u, undefined).handler;
+        const rotl = DefineBinOp(value_field, operators.rotl, undefined).handler;
+        const rotr = DefineBinOp(value_field, operators.rotr, undefined).handler;
+    };
+}
+
+const i32_opcode_handlers = IntegerOpcodeHandlers(i32);
+const i64_opcode_handlers = IntegerOpcodeHandlers(i64);
+
 const opcode_handlers = struct {
     fn panicInvalidInstruction(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         _ = s;
@@ -472,7 +660,7 @@ const opcode_handlers = struct {
         .ReleaseFast, .ReleaseSmall => undefined,
     };
 
-    fn end(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+    pub fn end(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         if (@intFromPtr(i.p - 1) == @intFromPtr(i.ep)) {
             int.returnFromWasm(loc);
         } else if (i.nextOpcodeHandler(fuel, int)) |next| {
@@ -480,7 +668,7 @@ const opcode_handlers = struct {
         }
     }
 
-    fn @"local.get"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+    pub fn @"local.get"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const n = i.readUleb128(u32) catch unreachable;
         const value = vals.items[loc..][n];
         vals.appendAssumeCapacity(value);
@@ -490,7 +678,7 @@ const opcode_handlers = struct {
         }
     }
 
-    fn @"local.set"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+    pub fn @"local.set"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const n = i.readUleb128(u32) catch unreachable;
         const value = vals.pop();
         vals.items[loc..][n] = value;
@@ -500,7 +688,7 @@ const opcode_handlers = struct {
         }
     }
 
-    fn @"local.tee"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+    pub fn @"local.tee"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const n = i.readUleb128(u32) catch unreachable;
         vals.items[loc..][n] = vals.items[vals.items.len - 1];
 
@@ -509,48 +697,46 @@ const opcode_handlers = struct {
         }
     }
 
-    fn @"i32.const"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        const n = i.readIleb128(i32) catch unreachable;
-        vals.appendAssumeCapacity(.{ .i32 = n });
+    pub const @"i32.clz" = i32_opcode_handlers.clz;
+    pub const @"i32.ctz" = i32_opcode_handlers.ctz;
+    pub const @"i32.const" = i32_opcode_handlers.@"const";
+    pub const @"i32.add" = i32_opcode_handlers.add;
+    pub const @"i32.sub" = i32_opcode_handlers.sub;
+    pub const @"i32.mul" = i32_opcode_handlers.mul;
+    pub const @"i32.div_s" = i32_opcode_handlers.div_s;
+    pub const @"i32.div_u" = i32_opcode_handlers.div_u;
+    pub const @"i32.rem_s" = i32_opcode_handlers.rem_s;
+    pub const @"i32.rem_u" = i32_opcode_handlers.rem_u;
+    pub const @"i32.and" = i32_opcode_handlers.@"and";
+    pub const @"i32.or" = i32_opcode_handlers.@"or";
+    pub const @"i32.xor" = i32_opcode_handlers.xor;
+    pub const @"i32.shl" = i32_opcode_handlers.shl;
+    pub const @"i32.shr_s" = i32_opcode_handlers.shr_s;
+    pub const @"i32.shr_u" = i32_opcode_handlers.shr_u;
+    pub const @"i32.rotl" = i32_opcode_handlers.rotl;
+    pub const @"i32.rotr" = i32_opcode_handlers.rotr;
 
-        if (i.nextOpcodeHandler(fuel, int)) |next| {
-            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
-        }
-    }
-
-    fn @"i32.add"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        const c_2 = vals.pop().i32;
-        const c_1 = vals.pop().i32;
-        vals.appendAssumeCapacity(.{ .i32 = c_1 +% c_2 });
-
-        if (i.nextOpcodeHandler(fuel, int)) |next| {
-            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
-        }
-    }
-
-    fn @"i32.sub"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        const c_2 = vals.pop().i32;
-        const c_1 = vals.pop().i32;
-        vals.appendAssumeCapacity(.{ .i32 = c_1 -% c_2 });
-
-        if (i.nextOpcodeHandler(fuel, int)) |next| {
-            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
-        }
-    }
-
-    fn @"i32.mul"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        const c_2 = vals.pop().i32;
-        const c_1 = vals.pop().i32;
-        vals.appendAssumeCapacity(.{ .i32 = c_1 *% c_2 });
-
-        if (i.nextOpcodeHandler(fuel, int)) |next| {
-            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
-        }
-    }
-
-    //std.math.divTrunc
+    pub const @"i64.clz" = i64_opcode_handlers.clz;
+    pub const @"i64.ctz" = i64_opcode_handlers.ctz;
+    pub const @"i64.const" = i64_opcode_handlers.@"const";
+    pub const @"i64.add" = i64_opcode_handlers.add;
+    pub const @"i64.sub" = i64_opcode_handlers.sub;
+    pub const @"i64.mul" = i64_opcode_handlers.mul;
+    pub const @"i64.div_s" = i64_opcode_handlers.div_s;
+    pub const @"i64.div_u" = i64_opcode_handlers.div_u;
+    pub const @"i64.rem_s" = i64_opcode_handlers.rem_s;
+    pub const @"i64.rem_u" = i64_opcode_handlers.rem_u;
+    pub const @"i64.and" = i64_opcode_handlers.@"and";
+    pub const @"i64.or" = i64_opcode_handlers.@"or";
+    pub const @"i64.xor" = i64_opcode_handlers.xor;
+    pub const @"i64.shl" = i64_opcode_handlers.shl;
+    pub const @"i64.shr_s" = i64_opcode_handlers.shr_s;
+    pub const @"i64.shr_u" = i64_opcode_handlers.shr_u;
+    pub const @"i64.rotl" = i64_opcode_handlers.rotl;
+    pub const @"i64.rotr" = i64_opcode_handlers.rotr;
 };
 
+/// If the handler is not appearing in this table, make sure it is public first.
 const byte_dispatch_table: [256]OpcodeHandler = handlers: {
     var table = [_]OpcodeHandler{opcode_handlers.invalid} ** 256;
     for (@typeInfo(opcodes.ByteOpcode).@"enum".fields) |op| {
