@@ -504,7 +504,34 @@ fn DefineUnOp(comptime value_field: []const u8, comptime op: anytype) type {
     };
 }
 
-// fn DefineTestOp
+fn DefineTestOp(comptime value_field: []const u8, comptime op: anytype) type {
+    return struct {
+        fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+            const c_1 = @field(vals.pop(), value_field);
+            const result = @call(.always_inline, op, .{c_1});
+            vals.appendAssumeCapacity(Value{ .i32 = @intFromBool(result) });
+
+            if (i.nextOpcodeHandler(fuel, int)) |next| {
+                @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+            }
+        }
+    };
+}
+
+fn DefineRelOp(comptime value_field: []const u8, comptime op: anytype) type {
+    return struct {
+        fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+            const c_2 = @field(vals.pop(), value_field);
+            const c_1 = @field(vals.pop(), value_field);
+            const result = @call(.always_inline, op, .{ c_1, c_2 });
+            vals.appendAssumeCapacity(Value{ .i32 = @intFromBool(result) });
+
+            if (i.nextOpcodeHandler(fuel, int)) |next| {
+                @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+            }
+        }
+    };
+}
 
 fn trapIntegerOverflow(e: error{Overflow}) TrapCode {
     return switch (e) {
@@ -525,6 +552,62 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
         const value_field = @typeName(Signed);
 
         const operators = struct {
+            fn eqz(i: Signed) bool {
+                return i == 0;
+            }
+
+            fn eq(i_1: Signed, i_2: Signed) bool {
+                return i_1 == i_2;
+            }
+
+            fn ne(i_1: Signed, i_2: Signed) bool {
+                return i_1 != i_2;
+            }
+
+            fn lt_s(i_1: Signed, i_2: Signed) bool {
+                return i_1 < i_2;
+            }
+
+            fn lt_u(i_1: Signed, i_2: Signed) bool {
+                return @as(Unsigned, @bitCast(i_1)) < @as(Unsigned, @bitCast(i_2));
+            }
+
+            fn gt_s(i_1: Signed, i_2: Signed) bool {
+                return i_1 > i_2;
+            }
+
+            fn gt_u(i_1: Signed, i_2: Signed) bool {
+                return @as(Unsigned, @bitCast(i_1)) > @as(Unsigned, @bitCast(i_2));
+            }
+
+            fn le_s(i_1: Signed, i_2: Signed) bool {
+                return i_1 <= i_2;
+            }
+
+            fn le_u(i_1: Signed, i_2: Signed) bool {
+                return @as(Unsigned, @bitCast(i_1)) <= @as(Unsigned, @bitCast(i_2));
+            }
+
+            fn ge_s(i_1: Signed, i_2: Signed) bool {
+                return i_1 >= i_2;
+            }
+
+            fn ge_u(i_1: Signed, i_2: Signed) bool {
+                return @as(Unsigned, @bitCast(i_1)) >= @as(Unsigned, @bitCast(i_2));
+            }
+
+            fn clz(i: Signed) Signed {
+                return @bitCast(@as(Unsigned, @clz(i)));
+            }
+
+            fn ctz(i: Signed) Signed {
+                return @bitCast(@as(Unsigned, @ctz(i)));
+            }
+
+            fn popcnt(i: Signed) Signed {
+                return @bitCast(@as(Unsigned, @popCount(i)));
+            }
+
             fn add(i_1: Signed, i_2: Signed) !Signed {
                 return i_1 +% i_2;
             }
@@ -597,14 +680,6 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
                 // Zig's function here handles the `bitShiftAmt()`/`@mod()`
                 return @bitCast(std.math.rotr(Unsigned, @bitCast(i_1), i_2));
             }
-
-            fn clz(i: Signed) Signed {
-                return @bitCast(@as(Unsigned, @clz(i)));
-            }
-
-            fn ctz(i: Signed) Signed {
-                return @bitCast(@as(Unsigned, @ctz(i)));
-            }
         };
 
         fn @"const"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
@@ -616,8 +691,21 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
             }
         }
 
+        const eqz = DefineTestOp(value_field, operators.eqz).handler;
+        const eq = DefineRelOp(value_field, operators.eq).handler;
+        const ne = DefineRelOp(value_field, operators.ne).handler;
+        const lt_s = DefineRelOp(value_field, operators.lt_s).handler;
+        const lt_u = DefineRelOp(value_field, operators.lt_u).handler;
+        const gt_s = DefineRelOp(value_field, operators.gt_s).handler;
+        const gt_u = DefineRelOp(value_field, operators.gt_u).handler;
+        const le_s = DefineRelOp(value_field, operators.le_s).handler;
+        const le_u = DefineRelOp(value_field, operators.le_u).handler;
+        const ge_s = DefineRelOp(value_field, operators.ge_s).handler;
+        const ge_u = DefineRelOp(value_field, operators.ge_u).handler;
+
         const clz = DefineUnOp(value_field, operators.clz).handler;
         const ctz = DefineUnOp(value_field, operators.ctz).handler;
+        const popcnt = DefineUnOp(value_field, operators.popcnt).handler;
         const add = DefineBinOp(value_field, operators.add, undefined).handler;
         const sub = DefineBinOp(value_field, operators.sub, undefined).handler;
         const mul = DefineBinOp(value_field, operators.mul, undefined).handler;
@@ -697,8 +785,33 @@ const opcode_handlers = struct {
         }
     }
 
+    pub const @"i32.eqz" = i32_opcode_handlers.eqz;
+    pub const @"i32.eq" = i32_opcode_handlers.eq;
+    pub const @"i32.ne" = i32_opcode_handlers.ne;
+    pub const @"i32.lt_s" = i32_opcode_handlers.lt_s;
+    pub const @"i32.lt_u" = i32_opcode_handlers.lt_u;
+    pub const @"i32.gt_s" = i32_opcode_handlers.gt_s;
+    pub const @"i32.gt_u" = i32_opcode_handlers.gt_u;
+    pub const @"i32.le_s" = i32_opcode_handlers.le_s;
+    pub const @"i32.le_u" = i32_opcode_handlers.le_u;
+    pub const @"i32.ge_s" = i32_opcode_handlers.ge_s;
+    pub const @"i32.ge_u" = i32_opcode_handlers.ge_u;
+
+    pub const @"i64.eqz" = i64_opcode_handlers.eqz;
+    pub const @"i64.eq" = i64_opcode_handlers.eq;
+    pub const @"i64.ne" = i64_opcode_handlers.ne;
+    pub const @"i64.lt_s" = i64_opcode_handlers.lt_s;
+    pub const @"i64.lt_u" = i64_opcode_handlers.lt_u;
+    pub const @"i64.gt_s" = i64_opcode_handlers.gt_s;
+    pub const @"i64.gt_u" = i64_opcode_handlers.gt_u;
+    pub const @"i64.le_s" = i64_opcode_handlers.le_s;
+    pub const @"i64.le_u" = i64_opcode_handlers.le_u;
+    pub const @"i64.ge_s" = i64_opcode_handlers.ge_s;
+    pub const @"i64.ge_u" = i64_opcode_handlers.ge_u;
+
     pub const @"i32.clz" = i32_opcode_handlers.clz;
     pub const @"i32.ctz" = i32_opcode_handlers.ctz;
+    pub const @"i32.popcnt" = i32_opcode_handlers.popcnt;
     pub const @"i32.const" = i32_opcode_handlers.@"const";
     pub const @"i32.add" = i32_opcode_handlers.add;
     pub const @"i32.sub" = i32_opcode_handlers.sub;
@@ -718,6 +831,7 @@ const opcode_handlers = struct {
 
     pub const @"i64.clz" = i64_opcode_handlers.clz;
     pub const @"i64.ctz" = i64_opcode_handlers.ctz;
+    pub const @"i64.popcnt" = i64_opcode_handlers.popcnt;
     pub const @"i64.const" = i64_opcode_handlers.@"const";
     pub const @"i64.add" = i64_opcode_handlers.add;
     pub const @"i64.sub" = i64_opcode_handlers.sub;
@@ -734,6 +848,19 @@ const opcode_handlers = struct {
     pub const @"i64.shr_u" = i64_opcode_handlers.shr_u;
     pub const @"i64.rotl" = i64_opcode_handlers.rotl;
     pub const @"i64.rotr" = i64_opcode_handlers.rotr;
+
+    fn IExtendS(comptime I: type, comptime M: type) type {
+        std.debug.assert(@bitSizeOf(M) < @bitSizeOf(I));
+        return struct {
+            fn op(i: I) I {
+                const j: I = @mod(i, @as(I, 1 << @bitSizeOf(M)));
+                return @as(M, @truncate(j));
+            }
+        };
+    }
+
+    pub const @"i32.extend8_s" = DefineUnOp("i32", IExtendS(i32, i8).op).handler;
+    pub const @"i32.extend16_s" = DefineUnOp("i32", IExtendS(i32, i16).op).handler;
 };
 
 /// If the handler is not appearing in this table, make sure it is public first.
