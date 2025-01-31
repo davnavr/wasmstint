@@ -96,12 +96,12 @@ pub inline fn funcTypes(module: *const Module) []const *const FuncType {
 }
 
 pub inline fn funcTypeIdx(module: *const Module, func: FuncIdx) TypeIdx {
-    const func_idx: u32 = @intFromEnum(func);
+    const func_idx: @typeInfo(FuncIdx).@"enum".tag_type = @intFromEnum(func);
     std.debug.assert(func_idx < module.inner.func_count);
 
     const type_ptr = @intFromPtr(@as(*const FuncType, module.funcTypes()[func_idx]));
     std.debug.assert(type_ptr < @intFromPtr(@as(*const FuncType, &module.inner.types[module.inner.types_count])));
-    return @enumFromInt(type_ptr - @intFromPtr(module.inner.types));
+    return @enumFromInt((type_ptr - @intFromPtr(module.inner.types)) / @sizeOf(FuncType));
 }
 
 pub inline fn funcImportNames(module: *const Module) []const ImportName {
