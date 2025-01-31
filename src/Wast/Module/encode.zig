@@ -302,8 +302,7 @@ const Wasm = struct {
                         break :type_idx dedup_entry.value_ptr.*;
                     } else {
                         const type_idx: TypeIdx = @enumFromInt(
-                            std.math.cast(u32, wasm.types.len) orelse
-                                return error.OutOfMemory,
+                            std.math.cast(u32, type_sec.len) orelse return error.OutOfMemory,
                         );
 
                         try type_sec.append(output.allocator(), &type_use.func);
