@@ -22,9 +22,10 @@ pub const FromOffset = struct {
         offset: usize,
         line: u32,
     },
-    src: []const u8,
 
-    pub fn locate(lookup: *FromOffset, target: usize) error{Overflow}!LineCol {
+    pub const init = FromOffset{ .prev_line = null };
+
+    pub fn locate(lookup: *FromOffset, src: []const u8, target: usize) LineCol {
         var loc = LineCol{ .line = 1, .col = 1 };
         var offset: usize = 0;
 
@@ -36,7 +37,7 @@ pub const FromOffset = struct {
         }
 
         // This probably handles `\r\n` sequences correctly, but that has not been tested.
-        while (std.mem.indexOfScalarPos(u8, lookup.src, offset, '\n')) |next_line| {
+        while (std.mem.indexOfScalarPos(u8, src, offset, '\n')) |next_line| {
             if (next_line <= target) {
                 offset = next_line + 1;
                 loc.line += 1;
@@ -46,16 +47,16 @@ pub const FromOffset = struct {
             }
         }
 
-        loc.col = std.math.cast(u32, target - offset + 1) orelse return error.Overflow;
+        loc.col = std.math.cast(u32, target - offset + 1) orelse {
+            @branchHint(.cold);
+            return .{ .line = std.math.maxInt(u32), .col = std.math.maxInt(u32) };
+        };
+
         return loc;
     }
 
-    pub fn init(src: []const u8) FromOffset {
-        return .{ .prev_line = null, .src = src };
-    }
-
     test locate {
-        var find = FromOffset.init(
+        const src =
             \\(module
             \\  (func (result i32)
             \\    i32.const 2)
@@ -63,7 +64,9 @@ pub const FromOffset = struct {
             \\  (global i32 (i32.const 5))
             \\)
             \\
-        );
+        ;
+
+        var find = FromOffset.init;
 
         const tests = [_]struct { expected: LineCol, input: usize }{
             .{ .expected = .{ .line = 1, .col = 1 }, .input = 0 },
@@ -80,13 +83,13 @@ pub const FromOffset = struct {
         for (tests) |t| {
             const actual = result: {
                 errdefer std.debug.print("expected {}\n", .{t.expected});
-                break :result try find.locate(t.input);
+                break :result find.locate(src, t.input);
             };
 
             if (!std.meta.eql(t.expected, actual)) {
                 std.debug.print(
                     "expected {any}, got {any} for offset {} ('{c}')\n",
-                    .{ t.expected, actual, t.input, find.src[t.input] },
+                    .{ t.expected, actual, t.input, src[t.input] },
                 );
 
                 return error.TestUnexpectedResult;

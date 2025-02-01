@@ -3,7 +3,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const IndexedArena = @import("../../IndexedArena.zig");
 
 const sexpr = @import("../sexpr.zig");
-const Error = sexpr.Error;
+const ParseContext = sexpr.Parser.Context;
 
 const Caches = @import("../Caches.zig");
 const Ident = @import("../ident.zig").Ident;
@@ -17,13 +17,12 @@ const Expr = @This();
 
 fn parseInstrList(
     contents: *sexpr.Parser,
-    tree: *const sexpr.Tree,
+    ctx: *ParseContext,
     parent: sexpr.List.Id,
     arena: *IndexedArena,
     caches: *Caches,
     instr_list_arena: *ArenaAllocator,
     instr_list_pool: *Instr.List.Pool,
-    errors: *Error.List,
     alloca: *ArenaAllocator,
 ) error{OutOfMemory}!Instr.List {
     // Allocated in `instr_list_arena`.
@@ -47,44 +46,43 @@ fn parseInstrList(
     // Allocated in `alloca`.
     var block_stack = std.SegmentedList(Block, 8){};
 
-    var previous_instr: ?sexpr.Value = null;
+    var previous_instr: ?sexpr.Value = null; // TODO TODO REMOVE
     parse_body: while (@as(?sexpr.Value, contents.parseValue() catch null)) |instr_value| {
         previous_instr = instr_value;
         _ = scratch.reset(.retain_capacity);
         if (instr_value.getAtom()) |keyword| {
             // Parse a plain instruction.
-            const instr_result = try Instr.parseArgs(
+            Instr.parseArgs(
                 keyword,
                 contents,
-                tree,
+                ctx,
                 &output,
                 instr_list_arena,
                 parent,
                 arena,
                 caches,
-                errors,
                 &scratch,
-            );
+            ) catch |e| switch (e) {
+                error.OutOfMemory => |oom| return oom,
+                error.ReportedParserError => {
+                    // If a single instruction fails to parse, then skip parsing the rest of them.
+                    _ = contents.empty();
+                    break :parse_body;
+                },
+            };
 
-            if (instr_result) |err| {
-                // If a single instruction fails to parse, then skip parsing the rest of them.
-                try errors.append(err);
-                _ = contents.empty();
-                break :parse_body;
-            }
-
-            switch (keyword.tag(tree)) {
+            switch (keyword.tag(ctx.tree)) {
                 .keyword_block, .keyword_loop => try block_stack.append(alloca.allocator(), .block_or_loop),
                 .keyword_if => try block_stack.append(alloca.allocator(), .@"if"),
                 .keyword_else => if (block_stack.pop() == .@"if") {
                     block_stack.append(undefined, .@"else") catch unreachable;
                 } else {
-                    try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(keyword), .at_value));
+                    _ = try ctx.errorAtToken(keyword, "expected 'end' or instruction");
                     _ = contents.empty();
                     break :parse_body;
                 },
                 .keyword_end => if (block_stack.pop() == null) {
-                    try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(keyword), .at_value));
+                    _ = try ctx.errorAtToken(keyword, "expected instruction");
                     _ = contents.empty();
                     break :parse_body;
                 },
@@ -93,39 +91,41 @@ fn parseInstrList(
         } else {
             // Parse a folded instruction.
             var list = instr_value.getList().?;
-            var list_contents = sexpr.Parser.init(list.contents(tree).values(tree));
+            var list_contents = sexpr.Parser.init(list.contents(ctx.tree).values(ctx.tree));
 
-            const keyword: sexpr.TokenId = switch (list_contents.parseAtomInList(.keyword_unknown, parent)) {
-                .ok => |ok| ok,
-                .err => |err| {
-                    try errors.append(err);
+            const keyword = list_contents.parseAtomInList(
+                parent,
+                ctx,
+                "instruction",
+            ) catch |e| switch (e) {
+                error.OutOfMemory => |oom| return oom,
+                error.ReportedParserError => {
                     _ = contents.empty();
                     break :parse_body;
                 },
             };
 
             var parent_output = Instr.List.empty;
-            const instr_result = try Instr.parseArgs(
+            Instr.parseArgs(
                 keyword,
                 &list_contents,
-                tree,
+                ctx,
                 &parent_output,
                 instr_list_arena,
                 parent,
                 arena,
                 caches,
-                errors,
                 &scratch,
-            );
+            ) catch |e| switch (e) {
+                error.OutOfMemory => |oom| return oom,
+                error.ReportedParserError => {
+                    // If a single instruction fails to parse, then skip parsing the rest of them.
+                    _ = contents.empty();
+                    break :parse_body;
+                },
+            };
 
-            if (instr_result) |err| {
-                // If a single instruction fails to parse, then skip parsing the rest of them.
-                try errors.append(err);
-                _ = contents.empty();
-                break :parse_body;
-            }
-
-            const parent_tag = keyword.tag(tree);
+            const parent_tag = keyword.tag(ctx.tree);
 
             const BlockBranch = struct {
                 contents: sexpr.Parser,
@@ -147,10 +147,10 @@ fn parseInstrList(
                 var then_index = list_contents.remaining.len;
                 for (list_contents.remaining, 0..) |value, i| {
                     const then_list = value.getList() orelse continue;
-                    var then_contents = sexpr.Parser.init(then_list.contents(tree).values(tree));
+                    var then_contents = sexpr.Parser.init(then_list.contents(ctx.tree).values(ctx.tree));
                     const then_keyword = (then_contents.parseValue() catch continue).getAtom() orelse continue;
 
-                    if (then_keyword.tag(tree) != .keyword_then) continue;
+                    if (then_keyword.tag(ctx.tree) != .keyword_then) continue;
 
                     then_index = i;
                     then_branch = .{
@@ -168,32 +168,19 @@ fn parseInstrList(
                 list_contents.remaining = list_contents.remaining[0..then_index];
 
                 no_else: {
-                    const else_list: sexpr.List.Id = switch (remaining_branches.parseList() catch break :no_else) {
-                        .ok => |ok| ok,
-                        .err => |err| {
-                            try errors.append(err);
-                            break :no_else;
-                        },
+                    const else_list = remaining_branches.parseList(ctx) catch |e| switch (e) {
+                        error.EndOfStream, error.ReportedParserError => break :no_else,
+                        error.OutOfMemory => |oom| return oom,
                     };
 
-                    var else_contents = sexpr.Parser.init(else_list.contents(tree).values(tree));
-                    const else_keyword = switch (else_contents.parseAtomInList(.keyword_else, else_list)) {
-                        .ok => |ok| ok,
-                        .err => |err| {
-                            try errors.append(err);
-                            break :no_else;
-                        },
+                    var else_contents = sexpr.Parser.init(else_list.contents(ctx.tree).values(ctx.tree));
+                    const else_keyword = else_contents.parseAtomInList(else_list, ctx, "'else' instruction") catch |e| switch (e) {
+                        error.OutOfMemory => |oom| return oom,
+                        error.ReportedParserError => break :no_else,
                     };
 
-                    if (else_keyword.tag(tree) != .keyword_else) {
-                        try errors.append(
-                            Error.initExpectedToken(
-                                sexpr.Value.initAtom(else_keyword),
-                                .keyword_else,
-                                .at_value,
-                            ),
-                        );
-
+                    if (else_keyword.tag(ctx.tree) != .keyword_else) {
+                        _ = try ctx.errorAtToken(else_keyword, "expected 'else' instruction");
                         break :no_else;
                     }
 
@@ -204,20 +191,19 @@ fn parseInstrList(
                     };
                 }
 
-                try remaining_branches.expectEmpty(errors);
+                try remaining_branches.expectEmpty(ctx);
             }
 
             // Recursive call!
             _ = scratch.reset(.retain_capacity);
             var folded_instructions = try parseInstrList(
                 &list_contents,
-                tree,
+                ctx,
                 list,
                 arena,
                 caches,
                 instr_list_arena,
                 instr_list_pool,
-                errors,
                 &scratch,
             );
 
@@ -254,7 +240,7 @@ fn parseInstrList(
                     try output.appendMovedList(instr_list_arena, &parent_output, instr_list_pool);
 
                     if (!then_branch.keyword.some) {
-                        try errors.append(Error.initMissingFoldedThen(list));
+                        _ = try ctx.errorAtList(list, .end, "missing then branch in folded if instruction");
                         _ = contents.empty();
                         break :parse_body;
                     }
@@ -264,13 +250,12 @@ fn parseInstrList(
                         _ = scratch.reset(.retain_capacity);
                         var then_body: Instr.List = try parseInstrList(
                             &then_branch.contents,
-                            tree,
+                            ctx,
                             list,
                             arena,
                             caches,
                             instr_list_arena,
                             instr_list_pool,
-                            errors,
                             &scratch,
                         );
 
@@ -281,19 +266,18 @@ fn parseInstrList(
                     then_branch = undefined;
 
                     if (else_branch.keyword.get()) |else_keyword| {
-                        try output.append(instr_list_arena, else_keyword, Ident.Opt.none, tree);
+                        try output.append(instr_list_arena, else_keyword, Ident.Opt.none, ctx.tree);
 
                         // Recursive call!
                         _ = scratch.reset(.retain_capacity);
                         var else_body: Instr.List = try parseInstrList(
                             &else_branch.contents,
-                            tree,
+                            ctx,
                             list,
                             arena,
                             caches,
                             instr_list_arena,
                             instr_list_pool,
-                            errors,
                             &scratch,
                         );
 
@@ -321,7 +305,12 @@ fn parseInstrList(
     std.debug.assert(contents.isEmpty());
 
     if (block_stack.len > 0) {
-        try errors.append(Error.initExpectedToken(previous_instr.?, .keyword_end, .at_value));
+        _ = try ctx.errorFmtAtList(
+            parent,
+            .end,
+            "missing {} 'end' instructions",
+            .{block_stack.len},
+        );
     }
 
     return output;
@@ -329,11 +318,10 @@ fn parseInstrList(
 
 pub fn parseContents(
     contents: *sexpr.Parser,
-    tree: *const sexpr.Tree,
+    ctx: *ParseContext,
     parent: sexpr.List.Id,
     arena: *IndexedArena,
     caches: *Caches,
-    errors: *Error.List,
     scratch: *ArenaAllocator,
 ) error{OutOfMemory}!Expr {
     _ = scratch.reset(.retain_capacity);
@@ -341,13 +329,12 @@ pub fn parseContents(
     var actual_scratch = ArenaAllocator.init(scratch.allocator());
     var parsed_instructions = try parseInstrList(
         contents,
-        tree,
+        ctx,
         parent,
         arena,
         caches,
         scratch,
         &instr_list_pool,
-        errors,
         &actual_scratch,
     );
 

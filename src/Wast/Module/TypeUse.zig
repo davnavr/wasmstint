@@ -6,7 +6,8 @@ const std = @import("std");
 const IndexedArena = @import("../../IndexedArena.zig");
 
 const sexpr = @import("../sexpr.zig");
-const Error = sexpr.Error;
+const ParseContext = sexpr.Parser.Context;
+
 const Ident = @import("../ident.zig").Ident;
 const Text = @import("Text.zig");
 
@@ -47,12 +48,11 @@ const empty = TypeUse{
 
 pub fn parseContents(
     contents: *sexpr.Parser,
-    tree: *const sexpr.Tree,
+    ctx: *ParseContext,
     arena: *IndexedArena,
     caches: *@import("../Caches.zig"),
-    errors: *Error.List,
     temporary: *std.heap.ArenaAllocator,
-) error{OutOfMemory}!sexpr.Parser.Result(TypeUse) {
+) sexpr.Parser.ParseError!TypeUse {
     var type_use = empty;
 
     // Allocated in `temporary`.
@@ -62,52 +62,42 @@ pub fn parseContents(
     var lookahead = contents.*;
     while (@as(?sexpr.Value, lookahead.parseValue() catch null)) |value| {
         const list: sexpr.List.Id = value.getList() orelse break;
-        var list_contents = sexpr.Parser.init(list.contents(tree).values(tree));
+        var list_contents = sexpr.Parser.init(list.contents(ctx.tree).values(ctx.tree));
         const keyword = (list_contents.parseValue() catch break).getAtom() orelse break;
-        switch (keyword.tag(tree)) {
+        switch (keyword.tag(ctx.tree)) {
             .keyword_type => {
-                if (param_buf.len > 0 or result_buf.len > 0 or !type_use.id.header.is_inline) return .{
-                    .err = Error.initUnexpectedValue(sexpr.Value.initAtom(keyword), .at_value),
-                };
+                if (param_buf.len > 0 or result_buf.len > 0 or !type_use.id.header.is_inline)
+                    return (try ctx.errorAtToken(keyword, "expected 'param' or 'result' keyword")).err;
 
                 std.debug.assert(type_use.func.parameters.isEmpty());
-
-                const id_result = try Ident.parse(
-                    &list_contents,
-                    tree,
-                    list,
-                    caches.allocator,
-                    &caches.ids,
-                );
-
-                const id = switch (id_result) {
-                    .ok => |ok| ok,
-                    .err => |err| return .{ .err = err },
-                };
 
                 type_use.id = Id{
                     .header = .{
                         .is_inline = false,
                         .keyword = keyword,
                     },
-                    .type = id,
+                    .type = try Ident.parse(
+                        &list_contents,
+                        ctx,
+                        list,
+                        caches.allocator,
+                        &caches.ids,
+                    ),
                 };
             },
             .keyword_param => {
-                if (result_buf.len > 0) return .{
-                    .err = Error.initExpectedToken(sexpr.Value.initAtom(keyword), .keyword_result, .at_value),
-                };
+                if (result_buf.len > 0)
+                    return (try ctx.errorAtToken(keyword, "expected 'result' keyword")).err;
 
                 try param_buf.append(
                     temporary.allocator(),
                     try Text.Param.parseContents(
                         &list_contents,
-                        tree,
+                        ctx,
                         arena,
                         caches,
                         keyword,
                         list,
-                        errors,
                     ),
                 );
             },
@@ -125,11 +115,10 @@ pub fn parseContents(
                     temporary.allocator(),
                     try Text.Result.parseContents(
                         &list_contents,
-                        tree,
+                        ctx,
                         arena,
                         keyword,
                         list,
-                        errors,
                     ),
                 );
             },
@@ -147,5 +136,5 @@ pub fn parseContents(
     }
 
     type_use.func.results = try arena.dupeSegmentedList(Text.Result, 1, &result_buf);
-    return .{ .ok = type_use };
+    return type_use;
 }

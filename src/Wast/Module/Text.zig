@@ -7,8 +7,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const IndexedArena = @import("../../IndexedArena.zig");
 
 const sexpr = @import("../sexpr.zig");
-const Error = sexpr.Error;
-const ParseResult = sexpr.Parser.Result;
+const ParseContext = sexpr.Parser.Context;
 
 const Ident = @import("../ident.zig").Ident;
 const Name = @import("../Name.zig");
@@ -60,29 +59,22 @@ pub const ValType = struct {
     pub fn parseAtom(
         atom: sexpr.TokenId,
         parser: *sexpr.Parser,
-        tree: *const sexpr.Tree,
+        ctx: *ParseContext,
         parent: sexpr.List.Id,
-    ) ParseResult(ValType) {
-        switch (atom.tag(tree)) {
-            .keyword_i32, .keyword_i64, .keyword_f32, .keyword_f64, .keyword_funcref, .keyword_externref => {},
-            else => return .{
-                .err = Error.initUnexpectedValue(sexpr.Value.initAtom(atom), .at_value),
+    ) sexpr.Parser.ParseError!ValType {
+        switch (atom.tag(ctx.tree)) {
+            .keyword_i32, .keyword_i64, .keyword_f32, .keyword_f64, .keyword_funcref, .keyword_externref => {
+                _ = parser;
+                _ = parent;
+                return .{ .keyword = atom, .type = .{ .simple = {} } };
             },
+            else => return (try ctx.errorAtToken(atom, "expected valtype")).err,
         }
-
-        _ = parser;
-        _ = parent;
-
-        return .{ .ok = .{ .keyword = atom, .type = .{ .simple = {} } } };
     }
 
-    pub fn parse(parser: *sexpr.Parser, tree: *const sexpr.Tree, parent: sexpr.List.Id) ParseResult(ValType) {
-        const atom: sexpr.TokenId = switch (parser.parseAtomInList(.keyword_unknown, parent)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
-
-        return parseAtom(atom, parser, tree, parent);
+    pub fn parse(parser: *sexpr.Parser, ctx: *ParseContext, parent: sexpr.List.Id) sexpr.Parser.ParseError!ValType {
+        const atom = try parser.parseAtomInList(parent, ctx, "valtype");
+        return parseAtom(atom, parser, ctx, parent);
     }
 };
 
@@ -93,18 +85,25 @@ pub const Export = struct {
 
     pub fn parseContents(
         contents: *sexpr.Parser,
-        tree: *const sexpr.Tree,
+        ctx: *ParseContext,
         arena: *IndexedArena,
         caches: *Caches,
         keyword: sexpr.TokenId,
         parent: sexpr.List.Id,
         scratch: *ArenaAllocator,
-    ) error{OutOfMemory}!ParseResult(Export) {
-        std.debug.assert(keyword.tag(tree) == .keyword_export);
-        return switch (try Name.parse(contents, tree, caches.allocator, &caches.names, arena, parent, scratch)) {
-            .ok => |name| .{ .ok = Export{ .keyword = keyword, .name = name } },
-            .err => |err| .{ .err = err },
-        };
+    ) sexpr.Parser.ParseError!Export {
+        std.debug.assert(keyword.tag(ctx.tree) == .keyword_export);
+        const name = try Name.parse(
+            contents,
+            ctx,
+            caches.allocator,
+            &caches.names,
+            arena,
+            parent,
+            scratch,
+        );
+
+        return Export{ .keyword = keyword, .name = name };
     }
 };
 
@@ -117,23 +116,28 @@ pub const ParamOrLocal = struct {
 
     pub fn parseContents(
         contents: *sexpr.Parser,
-        tree: *const sexpr.Tree,
+        ctx: *ParseContext,
         arena: *IndexedArena,
         caches: *Caches,
         keyword: sexpr.TokenId,
         parent: sexpr.List.Id,
-        errors: *Error.List,
     ) error{OutOfMemory}!ParamOrLocal {
-        const ident = try Ident.Symbolic.parse(contents, tree, caches.allocator, &caches.ids);
+        const ident = try Ident.Symbolic.parse(
+            contents,
+            ctx.tree,
+            caches.allocator,
+            &caches.ids,
+        );
 
-        var types = try IndexedArena.BoundedArrayList(ValType).initCapacity(arena, contents.remaining.len);
+        var types = try IndexedArena.BoundedArrayList(ValType).initCapacity(
+            arena,
+            contents.remaining.len,
+        );
+
         while (!contents.isEmpty()) {
-            const val_type = switch (ValType.parse(contents, tree, parent)) {
-                .ok => |ok| ok,
-                .err => |err| {
-                    try errors.append(err);
-                    continue;
-                },
+            const val_type = ValType.parse(contents, ctx, parent) catch |e| switch (e) {
+                error.OutOfMemory => |oom| return oom,
+                error.ReportedParserError => continue,
             };
 
             types.appendAssumeCapacity(arena, val_type);
@@ -151,22 +155,22 @@ pub const Result = struct {
 
     pub fn parseContents(
         contents: *sexpr.Parser,
-        tree: *const sexpr.Tree,
+        ctx: *ParseContext,
         arena: *IndexedArena,
         keyword: sexpr.TokenId,
         parent: sexpr.List.Id,
-        errors: *Error.List,
     ) error{OutOfMemory}!Text.Result {
-        std.debug.assert(keyword.tag(tree) == .keyword_result);
+        std.debug.assert(keyword.tag(ctx.tree) == .keyword_result);
 
-        var types = try IndexedArena.BoundedArrayList(ValType).initCapacity(arena, contents.remaining.len);
+        var types = try IndexedArena.BoundedArrayList(ValType).initCapacity(
+            arena,
+            contents.remaining.len,
+        );
+
         while (!contents.isEmpty()) {
-            const val_type = switch (ValType.parse(contents, tree, parent)) {
-                .ok => |ok| ok,
-                .err => |err| {
-                    try errors.append(err);
-                    continue;
-                },
+            const val_type = ValType.parse(contents, ctx, parent) catch |e| switch (e) {
+                error.OutOfMemory => |oom| return oom,
+                error.ReportedParserError => continue,
             };
 
             types.appendAssumeCapacity(arena, val_type);
@@ -184,24 +188,34 @@ pub const ImportName = struct {
 
     pub fn parseContents(
         contents: *sexpr.Parser,
-        tree: *const sexpr.Tree,
+        ctx: *ParseContext,
         arena: *IndexedArena,
         caches: *Caches,
         parent: sexpr.List.Id,
         scratch: *ArenaAllocator,
-    ) error{OutOfMemory}!ParseResult(ImportName) {
-        const module = switch (try Name.parse(contents, tree, caches.allocator, &caches.names, arena, parent, scratch)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
+    ) sexpr.Parser.ParseError!ImportName {
+        const module = try Name.parse(
+            contents,
+            ctx,
+            caches.allocator,
+            &caches.names,
+            arena,
+            parent,
+            scratch,
+        );
 
         _ = scratch.reset(.retain_capacity);
-        const name = switch (try Name.parse(contents, tree, caches.allocator, &caches.names, arena, parent, scratch)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
+        const name = try Name.parse(
+            contents,
+            ctx,
+            caches.allocator,
+            &caches.names,
+            arena,
+            parent,
+            scratch,
+        );
 
-        return .{ .ok = ImportName{ .module = module, .name = name } };
+        return ImportName{ .module = module, .name = name };
     }
 };
 
@@ -218,24 +232,19 @@ pub const InlineImport = struct {
 
     pub fn parseContents(
         contents: *sexpr.Parser,
-        tree: *const sexpr.Tree,
+        ctx: *ParseContext,
         arena: *IndexedArena,
         caches: *Caches,
         keyword: sexpr.TokenId,
         parent: sexpr.List.Id,
         scratch: *ArenaAllocator,
-    ) error{OutOfMemory}!ParseResult(InlineImport) {
-        std.debug.assert(keyword.tag(tree) == .keyword_import);
+    ) sexpr.Parser.ParseError!InlineImport {
+        std.debug.assert(keyword.tag(ctx.tree) == .keyword_import);
 
-        const name_result = try ImportName.parseContents(contents, tree, arena, caches, parent, scratch);
-        return switch (name_result) {
-            .ok => |name| .{
-                .ok = InlineImport{
-                    .keyword = sexpr.TokenId.Opt.init(keyword),
-                    .name = name,
-                },
-            },
-            .err => |err| .{ .err = err },
+        const name = try ImportName.parseContents(contents, ctx, arena, caches, parent, scratch);
+        return InlineImport{
+            .keyword = sexpr.TokenId.Opt.init(keyword),
+            .name = name,
         };
     }
 };
@@ -245,16 +254,10 @@ pub const MemType = struct {
 
     pub fn parseContents(
         contents: *sexpr.Parser,
-        tree: *const sexpr.Tree,
+        ctx: *ParseContext,
         parent: sexpr.List.Id,
-        errors: *Error.List,
-    ) error{OutOfMemory}!ParseResult(MemType) {
-        const limits = switch (try Limits.parseContents(contents, tree, parent, errors)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
-
-        return .{ .ok = .{ .limits = limits } };
+    ) sexpr.Parser.ParseError!MemType {
+        return .{ .limits = try Limits.parseContents(contents, ctx, parent) };
     }
 };
 
@@ -272,10 +275,9 @@ pub const InlineImportExports = struct {
 
     pub fn parseContents(
         contents: *sexpr.Parser,
-        tree: *const sexpr.Tree,
+        ctx: *ParseContext,
         arena: *IndexedArena,
         caches: *Caches,
-        errors: *Error.List,
         alloca: *ArenaAllocator,
     ) error{OutOfMemory}!InlineImportExports {
         var import_exports = InlineImportExports.none;
@@ -288,51 +290,51 @@ pub const InlineImportExports = struct {
         while (!import_exports.import.keyword.some) {
             _ = scratch.reset(.retain_capacity);
             const list = (lookahead.parseValue() catch break).getList() orelse break;
-            var list_contents = sexpr.Parser.init(list.contents(tree).values(tree));
+            var list_contents = sexpr.Parser.init(list.contents(ctx.tree).values(ctx.tree));
 
             const keyword = (list_contents.parseValue() catch break).getAtom() orelse break;
 
-            switch (keyword.tag(tree)) {
+            switch (keyword.tag(ctx.tree)) {
                 .keyword_export => {
                     if (import_exports.import.keyword.some) break;
 
-                    const result = try Export.parseContents(
+                    const parsed_export = Export.parseContents(
                         &list_contents,
-                        tree,
+                        ctx,
                         arena,
                         caches,
                         keyword,
                         list,
                         &scratch,
-                    );
+                    ) catch |e| switch (e) {
+                        error.OutOfMemory => |oom| return oom,
+                        error.ReportedParserError => break,
+                    };
 
-                    switch (result) {
-                        .ok => |ok| try export_buf.append(scratch.allocator(), ok),
-                        .err => break,
-                    }
+                    try export_buf.append(scratch.allocator(), parsed_export);
                 },
                 .keyword_import => {
                     std.debug.assert(!import_exports.import.keyword.some);
 
-                    const import_result = try InlineImport.parseContents(
+                    const parsed_import = InlineImport.parseContents(
                         &list_contents,
-                        tree,
+                        ctx,
                         arena,
                         caches,
                         keyword,
                         list,
                         &scratch,
-                    );
+                    ) catch |e| switch (e) {
+                        error.OutOfMemory => |oom| return oom,
+                        error.ReportedParserError => break,
+                    };
 
-                    switch (import_result) {
-                        .ok => |ok| import_exports.import = ok,
-                        .err => break,
-                    }
+                    import_exports.import = parsed_import;
                 },
                 else => break,
             }
 
-            try list_contents.expectEmpty(errors);
+            try list_contents.expectEmpty(ctx);
 
             contents.* = lookahead;
         }
@@ -350,28 +352,27 @@ pub const Mem = struct {
 
     pub fn parseContents(
         contents: *sexpr.Parser,
-        tree: *const sexpr.Tree,
+        ctx: *ParseContext,
         parent: sexpr.List.Id,
         arena: *IndexedArena,
         caches: *Caches,
-        errors: *Error.List,
         scratch: *ArenaAllocator,
-    ) error{OutOfMemory}!ParseResult(Mem) {
-        const id = try Ident.Symbolic.parse(contents, tree, caches.allocator, &caches.ids);
-
-        const import_exports = try InlineImportExports.parseContents(contents, tree, arena, caches, errors, scratch);
-
-        const mem_type = switch (try MemType.parseContents(contents, tree, parent, errors)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
-
+    ) sexpr.Parser.ParseError!Mem {
         return .{
-            .ok = .{
-                .id = id,
-                .import_exports = import_exports,
-                .mem_type = mem_type,
-            },
+            .id = try Ident.Symbolic.parse(
+                contents,
+                ctx.tree,
+                caches.allocator,
+                &caches.ids,
+            ),
+            .import_exports = try InlineImportExports.parseContents(
+                contents,
+                ctx,
+                arena,
+                caches,
+                scratch,
+            ),
+            .mem_type = try MemType.parseContents(contents, ctx, parent),
         };
     }
 };
@@ -382,26 +383,17 @@ pub const TableType = struct {
 
     pub fn parseContents(
         contents: *sexpr.Parser,
-        tree: *const sexpr.Tree,
+        ctx: *ParseContext,
         parent: sexpr.List.Id,
-        errors: *Error.List,
-    ) error{OutOfMemory}!ParseResult(TableType) {
-        const limits = switch (try Limits.parseContents(contents, tree, parent, errors)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
-
-        const ref_type = switch (contents.parseAtomInList(null, parent)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
-
-        switch (ref_type.tag(tree)) {
+    ) sexpr.Parser.ParseError!TableType {
+        const limits = try Limits.parseContents(contents, ctx, parent);
+        const ref_type = try contents.parseAtomInList(parent, ctx, "reftype");
+        switch (ref_type.tag(ctx.tree)) {
             .keyword_funcref, .keyword_externref => {},
-            else => return .{ .err = Error.initUnexpectedValue(sexpr.Value.initAtom(ref_type), .at_value) },
+            else => return (try ctx.errorAtToken(ref_type, "expected reftype")).err,
         }
 
-        return .{ .ok = .{ .limits = limits, .ref_type = ref_type } };
+        return .{ .limits = limits, .ref_type = ref_type };
     }
 };
 
@@ -439,36 +431,40 @@ pub const Table = struct {
 
     pub fn parseContents(
         contents: *sexpr.Parser,
-        tree: *const sexpr.Tree,
+        ctx: *ParseContext,
         parent: sexpr.List.Id,
         arena: *IndexedArena,
         caches: *Caches,
-        errors: *Error.List,
         scratch: *ArenaAllocator,
-    ) error{OutOfMemory}!ParseResult(IndexedArena.Idx(Table)) {
+    ) sexpr.Parser.ParseError!IndexedArena.Idx(Table) {
         const table_idx = try arena.create(Table);
 
-        const id = try Ident.Symbolic.parse(contents, tree, caches.allocator, &caches.ids);
+        const id = try Ident.Symbolic.parse(
+            contents,
+            ctx.tree,
+            caches.allocator,
+            &caches.ids,
+        );
 
-        const import_exports = try InlineImportExports.parseContents(contents, tree, arena, caches, errors, scratch);
+        const import_exports = try InlineImportExports.parseContents(
+            contents,
+            ctx,
+            arena,
+            caches,
+            scratch,
+        );
 
         // Decide if a `tabletype` or a `reftype` has to be parsed.
         var lookahead: sexpr.Parser = contents.*;
-        const type_token: sexpr.TokenId = switch (lookahead.parseAtomInList(null, parent)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
+        const type_token = try lookahead.parseAtomInList(parent, ctx, "reftype or table type");
 
-        const table = table: switch (type_token.tag(tree)) {
+        const table = table: switch (type_token.tag(ctx.tree)) {
             // Detect the limits of a `tabletype`.
             .integer => {
                 contents.* = lookahead;
                 lookahead = undefined;
 
-                const table_type = switch (try TableType.parseContents(contents, tree, parent, errors)) {
-                    .ok => |ok| ok,
-                    .err => |err| return .{ .err = err },
-                };
+                const table_type = try TableType.parseContents(contents, ctx, parent);
 
                 break :table Table{
                     .id = id,
@@ -486,24 +482,19 @@ pub const Table = struct {
                 contents.* = lookahead;
                 lookahead = undefined;
 
-                if (import_exports.import.keyword.some) return .{
-                    .err = Error.initUnexpectedValue(sexpr.Value.initAtom(type_token), .at_value),
-                };
+                if (import_exports.import.keyword.some)
+                    return (try ctx.errorAtToken(type_token, "expected inline element segment")).err;
 
-                const elem_list: sexpr.List.Id = switch (contents.parseListInList(parent)) {
-                    .ok => |ok| ok,
-                    .err => |err| return .{ .err = err },
-                };
+                const elem_list = try contents.parseListInList(parent, ctx);
 
-                var elem_contents = sexpr.Parser.init(elem_list.contents(tree).values(tree));
-                const elem_keyword = switch (elem_contents.parseAtomInList(.keyword_elem, elem_list)) {
-                    .ok => |ok| ok,
-                    .err => |err| return .{ .err = err },
-                };
+                var elem_contents = sexpr.Parser.init(elem_list.contents(ctx.tree).values(ctx.tree));
+                const elem_keyword = try elem_contents.parseAtomInList(elem_list, ctx, "'elem' keyword");
 
-                const first_elem_value = elem_contents.parseValue() catch return .{
-                    .err = Error.initExpectedToken(sexpr.Value.initList(elem_list), .integer, .at_list_end),
-                };
+                if (elem_keyword.tag(ctx.tree) != .keyword_elem)
+                    return (try ctx.errorAtToken(elem_keyword, "expected 'elem' keyword")).err;
+
+                const first_elem_value = elem_contents.parseValue() catch
+                    return (try ctx.errorAtList(elem_list, .end, "expected inline element segment")).err;
 
                 const elements = elements: switch (first_elem_value.unpacked()) {
                     .atom => |first_idx| {
@@ -512,16 +503,27 @@ pub const Table = struct {
                             1 + elem_contents.remaining.len,
                         );
 
-                        switch (try Ident.parseAtom(first_idx, tree, caches.allocator, &caches.ids)) {
-                            .ok => |ok| indices.appendAssumeCapacity(arena, ok),
-                            .err => |err| return .{ .err = err },
-                        }
+                        indices.appendAssumeCapacity(
+                            arena,
+                            try Ident.parseAtom(
+                                first_idx,
+                                ctx,
+                                caches.allocator,
+                                &caches.ids,
+                            ),
+                        );
 
                         while (!elem_contents.isEmpty()) {
-                            switch (try Ident.parse(&elem_contents, tree, elem_list, caches.allocator, &caches.ids)) {
-                                .ok => |ok| indices.appendAssumeCapacity(arena, ok),
-                                .err => |err| return .{ .err = err },
-                            }
+                            indices.appendAssumeCapacity(
+                                arena,
+                                try Ident.parse(
+                                    &elem_contents,
+                                    ctx,
+                                    elem_list,
+                                    caches.allocator,
+                                    &caches.ids,
+                                ),
+                            );
                         }
 
                         break :elements InlineElements{ .indices = indices.items };
@@ -533,27 +535,29 @@ pub const Table = struct {
                         );
 
                         _ = scratch.reset(.retain_capacity);
-                        switch (try ElementSegment.Item.parseList(first_elem_list, tree, arena, caches, errors, scratch)) {
-                            .ok => |ok| items.appendAssumeCapacity(arena, ok),
-                            .err => |err| return .{ .err = err },
-                        }
+                        items.appendAssumeCapacity(
+                            arena,
+                            try ElementSegment.Item.parseList(
+                                first_elem_list,
+                                ctx,
+                                arena,
+                                caches,
+                                scratch,
+                            ),
+                        );
 
                         while (!elem_contents.isEmpty()) {
                             _ = scratch.reset(.retain_capacity);
                             const parsed_item = try ElementSegment.Item.parse(
                                 &elem_contents,
-                                tree,
+                                ctx,
                                 elem_list,
                                 arena,
                                 caches,
-                                errors,
                                 scratch,
                             );
 
-                            switch (parsed_item) {
-                                .ok => |ok| items.appendAssumeCapacity(arena, ok),
-                                .err => |err| return .{ .err = err },
-                            }
+                            items.appendAssumeCapacity(arena, parsed_item);
                         }
 
                         break :elements InlineElements{ .expressions = items.items };
@@ -574,12 +578,12 @@ pub const Table = struct {
                     },
                 };
             },
-            else => return .{ .err = Error.initUnexpectedValue(sexpr.Value.initAtom(type_token), .at_value) },
+            else => return (try ctx.errorAtToken(type_token, "expected reftype or table type")).err,
         };
 
         table_idx.set(arena, table);
 
-        return .{ .ok = table_idx };
+        return table_idx;
     }
 };
 
@@ -589,38 +593,29 @@ pub const GlobalType = struct {
 
     pub fn parse(
         parser: *sexpr.Parser,
-        tree: *const sexpr.Tree,
+        ctx: *ParseContext,
         parent: sexpr.List.Id,
-        errors: *Error.List,
-    ) error{OutOfMemory}!ParseResult(GlobalType) {
-        const value = parser.parseValue() catch return .{
-            .err = Error.initUnexpectedValue(sexpr.Value.initList(parent), .at_list_end),
-        };
+    ) sexpr.Parser.ParseError!GlobalType {
+        const value = parser.parseValue() catch
+            return (try ctx.errorAtList(parent, .start, "expected global type")).err;
 
         switch (value.unpacked()) {
-            .atom => |type_keyword| return switch (ValType.parseAtom(type_keyword, parser, tree, parent)) {
-                .ok => |val_type| .{ .ok = .{ .mut = .none, .val_type = val_type } },
-                .err => |err| .{ .err = err },
+            .atom => |type_keyword| return .{
+                .mut = .none,
+                .val_type = try ValType.parseAtom(type_keyword, parser, ctx, parent),
             },
             .list => |list| {
-                var list_contents = sexpr.Parser.init(list.contents(tree).values(tree));
-                const mut_keyword = switch (list_contents.parseAtomInList(.keyword_mut, list)) {
-                    .ok => |ok| ok,
-                    .err => |err| return .{ .err = err },
-                };
+                var list_contents = sexpr.Parser.init(list.contents(ctx.tree).values(ctx.tree));
+                const mut_keyword = try list_contents.parseAtomInList(list, ctx, "'mut' keyword");
 
-                if (mut_keyword.tag(tree) != .keyword_mut) return .{
-                    .err = Error.initExpectedToken(sexpr.Value.initAtom(mut_keyword), .keyword_mut, .at_value),
-                };
+                if (mut_keyword.tag(ctx.tree) != .keyword_mut)
+                    return (try ctx.errorAtToken(mut_keyword, "expected 'mut' keyword")).err;
 
-                const val_type = switch (ValType.parse(&list_contents, tree, parent)) {
-                    .ok => |ok| ok,
-                    .err => |err| return .{ .err = err },
-                };
+                const val_type = try ValType.parse(&list_contents, ctx, parent);
 
-                try list_contents.expectEmpty(errors);
+                try list_contents.expectEmpty(ctx);
 
-                return .{ .ok = .{ .mut = sexpr.TokenId.Opt.init(mut_keyword), .val_type = val_type } };
+                return .{ .mut = sexpr.TokenId.Opt.init(mut_keyword), .val_type = val_type };
             },
         }
     }
@@ -638,30 +633,30 @@ pub const Global = struct {
 
     pub fn parseContents(
         contents: *sexpr.Parser,
-        tree: *const sexpr.Tree,
+        ctx: *ParseContext,
         parent: sexpr.List.Id,
         arena: *IndexedArena,
         caches: *Caches,
-        errors: *Error.List,
         scratch: *ArenaAllocator,
-    ) error{OutOfMemory}!ParseResult(IndexedArena.Idx(Global)) {
+    ) sexpr.Parser.ParseError!IndexedArena.Idx(Global) {
         const global = try arena.create(Global);
 
-        const id = try Ident.Symbolic.parse(contents, tree, caches.allocator, &caches.ids);
+        const id = try Ident.Symbolic.parse(
+            contents,
+            ctx.tree,
+            caches.allocator,
+            &caches.ids,
+        );
 
         const import_exports = try InlineImportExports.parseContents(
             contents,
-            tree,
+            ctx,
             arena,
             caches,
-            errors,
             scratch,
         );
 
-        const global_type = switch (try GlobalType.parse(contents, tree, parent, errors)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
+        const global_type = try GlobalType.parse(contents, ctx, parent);
 
         global.set(
             arena,
@@ -676,20 +671,19 @@ pub const Global = struct {
                     .{
                         .init = try Expr.parseContents(
                             contents,
-                            tree,
+                            ctx,
                             parent,
                             arena,
                             caches,
-                            errors,
                             scratch,
                         ),
                     },
             },
         );
 
-        try contents.expectEmpty(errors);
+        try contents.expectEmpty(ctx);
 
-        return .{ .ok = global };
+        return global;
     }
 };
 
@@ -702,208 +696,162 @@ pub const ElementSegment = struct {
 
         pub fn parseList(
             list: sexpr.List.Id,
-            tree: *const sexpr.Tree,
+            ctx: *ParseContext,
             arena: *IndexedArena,
             caches: *Caches,
-            errors: *Error.List,
             scratch: *ArenaAllocator,
-        ) error{OutOfMemory}!ParseResult(Item) {
-            var contents = sexpr.Parser.init(list.contents(tree).values(tree));
-            var item_keyword = switch (contents.parseAtomInList(.keyword_item, list)) {
-                .ok => |ok| ok,
-                .err => |err| return .{ .err = err },
-            };
+        ) sexpr.Parser.ParseError!Item {
+            var contents = sexpr.Parser.init(list.contents(ctx.tree).values(ctx.tree));
+            var item_keyword = try contents.parseAtomInList(list, ctx, "'item' keyword");
 
-            if (item_keyword.tag(tree) != .keyword_item) return .{
-                .err = Error.initExpectedToken(sexpr.Value.initAtom(item_keyword), .keyword_item, .at_value),
-            };
+            if (item_keyword.tag(ctx.tree) != .keyword_item)
+                return (try ctx.errorAtToken(item_keyword, "expected 'item' keyword")).err;
 
             const expr = try Expr.parseContents(
                 &contents,
-                tree,
+                ctx,
                 list,
                 arena,
                 caches,
-                errors,
                 scratch,
             );
 
             std.debug.assert(contents.isEmpty());
 
-            return .{ .ok = .{ .keyword = item_keyword, .expr = expr } };
+            return .{ .keyword = item_keyword, .expr = expr };
         }
 
         pub fn parse(
             contents: *sexpr.Parser,
-            tree: *const sexpr.Tree,
+            ctx: *ParseContext,
             parent: sexpr.List.Id,
             arena: *IndexedArena,
             caches: *Caches,
-            errors: *Error.List,
             scratch: *ArenaAllocator,
-        ) error{OutOfMemory}!ParseResult(Item) {
-            const list = switch (contents.parseListInList(parent)) {
-                .ok => |ok| ok,
-                .err => |err| return .{ .err = err },
-            };
-
-            return parseList(list, tree, arena, caches, errors, scratch);
+        ) sexpr.Parser.ParseError!Item {
+            const list = try contents.parseListInList(parent, ctx);
+            return parseList(list, ctx, arena, caches, scratch);
         }
     };
 };
 
 pub fn parseFields(
     contents: *sexpr.Parser,
-    tree: *const sexpr.Tree,
+    ctx: *ParseContext,
     arena: *IndexedArena,
     caches: *Caches,
-    errors: *Error.List,
     scratch: *ArenaAllocator,
 ) error{OutOfMemory}!IndexedArena.Slice(Field) {
     var fields = try IndexedArena.BoundedArrayList(Field).initCapacity(arena, contents.remaining.len);
 
     arena.ensureUnusedCapacityForBytes(@import("../../size.zig").averageOfFields(Field) *| fields.capacity) catch {};
 
-    while (contents.parseList() catch null) |field_list_result| {
-        const field_list: sexpr.List.Id = switch (field_list_result) {
-            .ok => |ok| ok,
-            .err => |err| {
-                try errors.append(err);
-                continue;
-            },
+    while (true) {
+        const field_list: sexpr.List.Id = contents.parseList(ctx) catch |e| switch (e) {
+            error.EndOfStream => break,
+            error.OutOfMemory => |oom| return oom,
+            error.ReportedParserError => continue,
         };
 
-        var field_contents = sexpr.Parser.init(field_list.contents(tree).values(tree));
-        const field_keyword = switch (field_contents.parseAtomInList(.keyword_unknown, field_list)) {
-            .ok => |ok| ok,
-            .err => |err| {
-                try errors.append(err);
-                continue;
-            },
+        var field_contents = sexpr.Parser.init(field_list.contents(ctx.tree).values(ctx.tree));
+        const field_keyword = (field_contents.parseAtomInList(field_list, ctx, "module field")) catch |e| switch (e) {
+            error.OutOfMemory => |oom| return oom,
+            error.ReportedParserError => continue,
         };
 
         _ = scratch.reset(.retain_capacity);
-        const module_field: Contents = field: switch (field_keyword.tag(tree)) {
+        const module_field: Contents = field: switch (field_keyword.tag(ctx.tree)) {
             .keyword_type => {
                 const type_def = try arena.create(Type);
 
-                const type_result = try Type.parseContents(
+                const parsed_type = Type.parseContents(
                     &field_contents,
-                    tree,
+                    ctx,
                     field_list,
                     arena,
                     caches,
-                    errors,
                     scratch,
-                );
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
+                };
 
-                type_def.set(
-                    arena,
-                    switch (type_result) {
-                        .ok => |ok| ok,
-                        .err => |err| {
-                            try errors.append(err);
-                            continue;
-                        },
-                    },
-                );
-
+                type_def.set(arena, parsed_type);
                 break :field .{ .type = type_def };
             },
             .keyword_func => {
                 const func = try arena.create(Func);
 
-                const func_result = try Func.parseContents(
+                const parsed_func = Func.parseContents(
                     &field_contents,
-                    tree,
+                    ctx,
                     field_list,
                     arena,
                     caches,
-                    errors,
                     scratch,
-                );
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
+                };
 
-                func.set(
-                    arena,
-                    switch (func_result) {
-                        .ok => |ok| ok,
-                        .err => |err| {
-                            try errors.append(err);
-                            continue;
-                        },
-                    },
-                );
+                func.set(arena, parsed_func);
 
                 break :field .{ .func = func };
             },
             .keyword_table => {
-                const parsed_table = try Table.parseContents(
+                const parsed_table = Table.parseContents(
                     &field_contents,
-                    tree,
+                    ctx,
                     field_list,
                     arena,
                     caches,
-                    errors,
                     scratch,
-                );
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
+                };
 
-                switch (parsed_table) {
-                    .ok => |table| break :field .{ .table = table },
-                    .err => |err| {
-                        try errors.append(err);
-                        continue;
-                    },
-                }
+                break :field .{ .table = parsed_table };
             },
             .keyword_memory => {
                 const mem = try arena.create(Mem);
-                const parsed_mem = try Mem.parseContents(
+                const parsed_mem = Mem.parseContents(
                     &field_contents,
-                    tree,
+                    ctx,
                     field_list,
                     arena,
                     caches,
-                    errors,
                     scratch,
-                );
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
+                };
 
-                switch (parsed_mem) {
-                    .ok => |ok| {
-                        mem.set(arena, ok);
-                        break :field .{ .mem = mem };
-                    },
-                    .err => |err| {
-                        try errors.append(err);
-                        continue;
-                    },
-                }
+                mem.set(arena, parsed_mem);
+                break :field .{ .mem = mem };
             },
             .keyword_global => {
-                const parsed_global = try Global.parseContents(
+                const parsed_global = Global.parseContents(
                     &field_contents,
-                    tree,
+                    ctx,
                     field_list,
                     arena,
                     caches,
-                    errors,
                     scratch,
-                );
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
+                };
 
-                switch (parsed_global) {
-                    .ok => |global| break :field .{ .global = global },
-                    .err => |err| {
-                        try errors.append(err);
-                        continue;
-                    },
-                }
+                break :field .{ .global = parsed_global };
             },
             else => {
-                try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(field_keyword), .at_value));
+                _ = try ctx.errorAtToken(field_keyword, "expected module field keyword");
                 continue;
             },
         };
 
-        try field_contents.expectEmpty(errors);
+        try field_contents.expectEmpty(ctx);
 
         fields.appendAssumeCapacity(
             arena,

@@ -4,10 +4,11 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const Lexer = @import("Lexer.zig");
+const Errors = @import("Errors.zig");
+const LineCol = @import("LineCol.zig");
 
 pub const Token = Lexer.Token;
 pub const Offset = Lexer.Offset;
-pub const Error = @import("Error.zig");
 pub const Parser = @import("sexpr/Parser.zig");
 
 /// An S-expression.
@@ -137,7 +138,7 @@ pub const Tree = struct {
         lexer: Lexer,
         gpa: Allocator,
         scratch: *std.heap.ArenaAllocator,
-        errors: *Error.List,
+        errors: *Errors,
     ) Allocator.Error!Tree {
         var lex = lexer;
 
@@ -178,13 +179,14 @@ pub const Tree = struct {
             },
         };
 
+        var locator = LineCol.FromOffset.init;
         var prev_tok: ?Token = null;
         while (lex.next()) |tok| {
             defer prev_tok = tok;
             switch (tok.tag) {
                 .reserved => {
-                    const value = Value.initAtom(try TokenId.create(tok, &tree.arenas.tokens, gpa));
-                    try errors.append(Error.initUnexpectedValue(value, .at_value));
+                    const token = try TokenId.create(tok, &tree.arenas.tokens, gpa);
+                    _ = try errors.reportUnexpectedToken(token, &tree, &locator);
                 },
                 .open_paren => {
                     try list_stack.headers.append(
@@ -195,9 +197,12 @@ pub const Tree = struct {
                 .close_paren => switch (list_stack.headers.count()) {
                     0 => unreachable,
                     1 => {
-                        // Unmatched closing parenthesis.
-                        const value = Value.initAtom(try TokenId.create(tok, &tree.arenas.tokens, gpa));
-                        try errors.append(Error.initUnexpectedValue(value, .at_value));
+                        _ = try errors.reportAtToken(
+                            try TokenId.create(tok, &tree.arenas.tokens, gpa),
+                            &tree,
+                            &locator,
+                            "unmatched closing parenthesis",
+                        );
                     },
                     else => {
                         const popped_list: ListHeader = list_stack.headers.pop().?;
@@ -240,8 +245,12 @@ pub const Tree = struct {
                     },
                 },
                 .unexpected_eof => {
-                    const value = Value.initAtom(try TokenId.create(tok, &tree.arenas.tokens, gpa));
-                    try errors.append(Error.initUnexpectedValue(value, .at_value));
+                    _ = try errors.reportAtToken(
+                        try TokenId.create(tok, &tree.arenas.tokens, gpa),
+                        &tree,
+                        &locator,
+                        "unexpected end of file or input",
+                    );
                     break;
                 },
                 else => {
@@ -256,10 +265,13 @@ pub const Tree = struct {
 
         if (list_stack.headers.count() > 1) {
             const previous_token = prev_tok.?;
-            {
-                const value = Value.initAtom(try TokenId.create(previous_token, &tree.arenas.tokens, gpa));
-                try errors.append(Error.initUnexpectedValue(value, .at_value));
-            }
+            _ = try errors.reportFmtAtToken(
+                try TokenId.create(previous_token, &tree.arenas.tokens, gpa),
+                &tree,
+                &locator,
+                "expected {} closing parenthesis",
+                .{list_stack.headers.count()},
+            );
 
             while (list_stack.headers.count() > 1) {
                 // TODO: Refactor this duplicated code from `.close_paren` case.
@@ -330,7 +342,7 @@ pub const Tree = struct {
         script: []const u8,
         gpa: Allocator,
         scratch: *std.heap.ArenaAllocator,
-        errors: *Error.List,
+        errors: *Errors,
     ) error{ OutOfMemory, InvalidUtf8 }!Tree {
         return parseFromLexer(try Lexer.init(script), gpa, scratch, errors);
     }

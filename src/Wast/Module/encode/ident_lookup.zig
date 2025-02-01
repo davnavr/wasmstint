@@ -3,7 +3,6 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const IndexedArena = @import("../../../IndexedArena.zig");
 const Wast = @import("../../../Wast.zig");
 const sexpr = Wast.sexpr;
-const Error = sexpr.Error;
 const Ident = Wast.Ident;
 const Text = Wast.Module.Text;
 
@@ -16,26 +15,31 @@ pub const RawIdentLookup = struct {
 
     fn insert(
         lookup: *RawIdentLookup,
+        ctx: *sexpr.Parser.Context,
         id: Ident.Symbolic,
         index: u32,
         alloca: *ArenaAllocator,
-        errors: *Error.List,
-    ) error{OutOfMemory}!void {
+    ) std.mem.Allocator.Error!void {
         if (!id.some) return;
 
         const entry = try lookup.map.getOrPut(alloca.allocator(), id.ident);
         if (entry.found_existing) {
-            try errors.append(Error.initDuplicateIdent(id, entry.value_ptr.id));
+            _ = try ctx.errorAtToken(id.token, "identifier defined twice (TODO: include original location)");
         } else {
             entry.value_ptr.* = Value{ .id = id.token, .index = index };
         }
     }
 
-    fn get(lookup: *const RawIdentLookup, id: Ident.Interned, token: sexpr.TokenId) sexpr.Parser.Result(u32) {
+    fn get(
+        lookup: *const RawIdentLookup,
+        ctx: *sexpr.Parser.Context,
+        id: Ident.Interned,
+        token: sexpr.TokenId,
+    ) sexpr.Parser.ParseError!u32 {
         return if (lookup.map.get(id)) |value|
-            .{ .ok = value.index }
+            value.index
         else
-            .{ .err = Error.initUndefinedIdent(token) };
+            (try ctx.errorAtToken(token, "undefined variable")).err;
     }
 };
 
@@ -52,19 +56,21 @@ pub fn IdentLookup(comptime Idx: type) type {
 
         pub fn insert(
             lookup: *Self,
+            ctx: *sexpr.Parser.Context,
             id: Ident.Symbolic,
             index: Idx,
             alloca: *ArenaAllocator,
-            errors: *Error.List,
         ) error{OutOfMemory}!void {
-            return lookup.inner.insert(id, @intFromEnum(index), alloca, errors);
+            return lookup.inner.insert(ctx, id, @intFromEnum(index), alloca);
         }
 
-        pub fn get(lookup: *const Self, id: Ident.Interned, token: sexpr.TokenId) sexpr.Parser.Result(Idx) {
-            return switch (lookup.inner.get(id, token)) {
-                .ok => |raw_idx| .{ .ok = @enumFromInt(raw_idx) },
-                .err => |err| .{ .err = err },
-            };
+        pub fn get(
+            lookup: *const Self,
+            ctx: *sexpr.Parser.Context,
+            id: Ident.Interned,
+            token: sexpr.TokenId,
+        ) sexpr.Parser.ParseError!Idx {
+            return @enumFromInt(try lookup.inner.get(ctx, id, token));
         }
     };
 }

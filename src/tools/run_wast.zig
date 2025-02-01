@@ -133,7 +133,7 @@ pub fn main() !u8 {
             _ = parse_arena.reset(.retain_capacity);
         }
 
-        var errors = Wast.Error.List.init(parse_arena.allocator());
+        var errors = Wast.Errors.init(parse_arena.allocator());
 
         _ = scratch.reset(.retain_capacity);
         const script_tree = try Wast.sexpr.Tree.parseFromSlice(
@@ -175,26 +175,23 @@ pub fn main() !u8 {
             var buf_stderr = std.io.bufferedWriter(raw_stderr.writer());
 
             var w = buf_stderr.writer();
-            var line_col = Wast.LineCol.FromOffset.init(script_buf);
 
             var errors_iter = errors.list.constIterator(0);
             while (errors_iter.next()) |err| {
-                try w.print(
-                    "{s}:{}: ",
-                    .{
-                        script_path,
-                        // For some errors, use the "end" offset
-                        line_col.locate(err.offset(&script_tree).start) catch unreachable,
-                    },
-                );
-
                 switch (color_config) {
                     .escape_codes => try w.writeAll("\x1B[31m" ++ "error" ++ "\x1B[39m"),
                     else => try w.writeAll("error"),
                 }
 
-                try w.writeAll(": ");
-                try err.print(&script_tree, w);
+                try w.print(": {s}\n", .{err.msg});
+
+                try w.print(
+                    "> in {s}:{}\n{}",
+                    .{
+                        script_path, err.loc, err.src,
+                    },
+                );
+
                 try w.writeByte('\n');
             }
 
@@ -267,7 +264,7 @@ fn runScript(
     rng: std.Random,
     encoding_buffer: *std.ArrayList(u8),
     run_arena: *ArenaAllocator, // Must not be reset for the lifetime of this function call.
-    errors: *Wast.Error.List,
+    errors: *Wast.Errors,
 ) std.mem.Allocator.Error!void {
     var store = wasmstint.runtime.ModuleAllocator.WithinArena{ .arena = run_arena };
     var state: State = .{

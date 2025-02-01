@@ -2,7 +2,7 @@ const std = @import("std");
 const IndexedArena = @import("../../IndexedArena.zig");
 
 const sexpr = @import("../sexpr.zig");
-const Error = sexpr.Error;
+const ParseContext = sexpr.Parser.Context;
 
 const Ident = @import("../ident.zig").Ident;
 const Name = @import("../Name.zig");
@@ -24,33 +24,39 @@ const Func = @This();
 
 pub fn parseContents(
     contents: *sexpr.Parser,
-    tree: *const sexpr.Tree,
+    ctx: *ParseContext,
     parent: sexpr.List.Id,
     arena: *IndexedArena,
     caches: *Caches,
-    errors: *Error.List,
     alloca: *std.heap.ArenaAllocator,
-) error{OutOfMemory}!sexpr.Parser.Result(Func) {
+) sexpr.Parser.ParseError!Func {
     // Arena used for allocations that span the lifetime of this function call.
     _ = alloca.reset(.retain_capacity);
 
     var scratch = std.heap.ArenaAllocator.init(alloca.allocator());
 
-    const id = try Ident.Symbolic.parse(contents, tree, caches.allocator, &caches.ids);
+    const id = try Ident.Symbolic.parse(
+        contents,
+        ctx.tree,
+        caches.allocator,
+        &caches.ids,
+    );
 
     const import_exports = try Text.InlineImportExports.parseContents(
         contents,
-        tree,
+        ctx,
         arena,
         caches,
-        errors,
         &scratch,
     );
 
-    const type_use = switch (try Text.TypeUse.parseContents(contents, tree, arena, caches, errors, &scratch)) {
-        .ok => |ok| ok,
-        .err => |err| return .{ .err = err },
-    };
+    const type_use = try Text.TypeUse.parseContents(
+        contents,
+        ctx,
+        arena,
+        caches,
+        &scratch,
+    );
 
     scratch = undefined;
 
@@ -60,19 +66,18 @@ pub fn parseContents(
         var lookahead = contents.*;
         while (lookahead.parseValue() catch null) |maybe_list| {
             const local_list: sexpr.List.Id = maybe_list.getList() orelse break;
-            var local_contents = sexpr.Parser.init(local_list.contents(tree).values(tree));
+            var local_contents = sexpr.Parser.init(local_list.contents(ctx.tree).values(ctx.tree));
             const local_keyword = (local_contents.parseValue() catch break).getAtom() orelse break;
 
-            if (local_keyword.tag(tree) != .keyword_local) break;
+            if (local_keyword.tag(ctx.tree) != .keyword_local) break;
 
             const local = try Text.Local.parseContents(
                 &local_contents,
-                tree,
+                ctx,
                 arena,
                 caches,
                 local_keyword,
                 local_list,
-                errors,
             );
 
             std.debug.assert(local_contents.isEmpty());
@@ -97,19 +102,18 @@ pub fn parseContents(
     _ = alloca.reset(.retain_capacity);
 
     func.body = if (import_exports.import.keyword.some) inline_import: {
-        try contents.expectEmpty(errors);
+        try contents.expectEmpty(ctx);
         break :inline_import .{ .inline_import = import_exports.import.name };
     } else .{
         .defined = try Text.Expr.parseContents(
             contents,
-            tree,
+            ctx,
             parent,
             arena,
             caches,
-            errors,
             alloca,
         ),
     };
 
-    return .{ .ok = func };
+    return func;
 }

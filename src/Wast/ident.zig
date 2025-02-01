@@ -1,8 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const sexpr = @import("sexpr.zig");
-const Error = sexpr.Error;
-const ParseResult = sexpr.Parser.Result;
+const ParseContext = sexpr.Parser.Context;
 const value = @import("value.zig");
 
 /// An WebAssembly [*id*entifier].
@@ -110,87 +109,65 @@ pub const Ident = packed struct(u63) {
 
         pub fn parseAtom(
             atom: sexpr.TokenId,
-            tree: *const sexpr.Tree,
+            ctx: *ParseContext,
             cache_allocator: Allocator,
             cache: *Cache,
-        ) Allocator.Error!ParseResult(Opt) {
-            switch (atom.tag(tree)) {
+        ) sexpr.Parser.ParseError!Opt {
+            switch (atom.tag(ctx.tree)) {
                 .id => {
-                    const ident = try cache.intern(cache_allocator, tree, atom);
-                    return .{ .ok = Opt.init(Ident.initSymbolic(atom, ident)) };
+                    const ident = try cache.intern(cache_allocator, ctx.tree, atom);
+                    return Opt.init(Ident.initSymbolic(atom, ident));
                 },
                 .integer => {
-                    const n = value.unsignedInteger(u32, atom.contents(tree)) catch |e| switch (e) {
-                        error.Overflow => return .{
-                            .err = Error.initIntegerLiteralOverflow(atom, 32),
-                        },
+                    const n = value.unsignedInteger(u32, atom.contents(ctx.tree)) catch |e| switch (e) {
+                        error.Overflow => return (try ctx.errorAtToken(atom, "invalid numeric")).err,
                     };
 
-                    return .{ .ok = Opt.init(Ident.initNumeric(atom, n)) };
+                    return Opt.init(Ident.initNumeric(atom, n));
                 },
-                else => return .{ .ok = .none },
+                else => return .none,
             }
         }
 
         pub fn parse(
             parser: *sexpr.Parser,
-            tree: *const sexpr.Tree,
+            ctx: *ParseContext,
             cache_allocator: Allocator,
             cache: *Cache,
-        ) Allocator.Error!ParseResult(Opt) {
+        ) sexpr.Parser.ParseError!Opt {
             var lookahead: sexpr.Parser = parser.*;
-            const atom = (lookahead.parseValue() catch return .{ .ok = .none }).getAtom() orelse
-                return .{ .ok = .none };
+            const atom = (lookahead.parseValue() catch return .none).getAtom() orelse return .none;
+            const ident = try Opt.parseAtom(atom, ctx, cache_allocator, cache);
+            if (ident.some) {
+                parser.* = lookahead;
+            }
 
-            const ident: Opt = switch (try Opt.parseAtom(atom, tree, cache_allocator, cache)) {
-                .ok => |ok| ok,
-                .err => |err| return .{ .err = err },
-            };
-
-            if (ident.some) parser.* = lookahead;
-
-            return .{ .ok = ident };
+            return ident;
         }
     };
 
+    const expected_msg = "expected symbolic or numeric identifier";
+
     pub fn parseAtom(
         atom: sexpr.TokenId,
-        tree: *const sexpr.Tree,
+        ctx: *ParseContext,
         cache_allocator: Allocator,
         cache: *Cache,
-    ) Allocator.Error!ParseResult(Ident) {
-        const ident = switch (try Opt.parseAtom(atom, tree, cache_allocator, cache)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
-
-        return if (ident.get()) |id|
-            .{ .ok = id }
-        else
-            .{ .err = Error.initExpectedToken(sexpr.Value.initAtom(atom), .id, .at_value) };
+    ) sexpr.Parser.ParseError!Ident {
+        const ident = try Opt.parseAtom(atom, ctx, cache_allocator, cache);
+        return ident.get() orelse (try ctx.errorAtToken(atom, expected_msg)).err;
     }
 
     pub fn parse(
         parser: *sexpr.Parser,
-        tree: *const sexpr.Tree,
+        ctx: *ParseContext,
         parent: sexpr.List.Id,
         cache_allocator: Allocator,
         cache: *Cache,
-    ) Allocator.Error!ParseResult(Ident) {
-        const atom: sexpr.TokenId = switch (parser.parseAtomInList(.id, parent)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
-
-        const ident: Opt = switch (try Opt.parseAtom(atom, tree, cache_allocator, cache)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
-
-        return if (ident.get()) |id|
-            .{ .ok = id }
-        else
-            .{ .err = Error.initExpectedToken(sexpr.Value.initAtom(atom), .id, .at_value) };
+    ) sexpr.Parser.ParseError!Ident {
+        const atom = try parser.parseAtomInList(parent, ctx, "identifier");
+        const ident = try Opt.parseAtom(atom, ctx, cache_allocator, cache);
+        return ident.get() orelse (try ctx.errorAtToken(atom, expected_msg)).err;
     }
 
     pub const Union = union(enum) {

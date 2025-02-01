@@ -6,6 +6,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const IndexedArena = @import("../IndexedArena.zig");
 const sexpr = @import("sexpr.zig");
+const ParseContext = sexpr.Parser.Context;
 const value = @import("value.zig");
 
 token: sexpr.TokenId,
@@ -96,34 +97,24 @@ pub const Cache = struct {
 
 pub fn parse(
     parser: *sexpr.Parser,
-    tree: *const sexpr.Tree,
+    ctx: *ParseContext,
     cache_allocator: Allocator,
     cache: *Cache,
     arena: *IndexedArena,
     parent: sexpr.List.Id,
     scratch: *std.heap.ArenaAllocator,
-) Allocator.Error!sexpr.Parser.Result(Name) {
-    const atom: sexpr.TokenId = switch (parser.parseAtomInList(.string, parent)) {
-        .ok => |ok| ok,
-        .err => |err| return .{ .err = err },
-    };
-
-    switch (atom.tag(tree)) {
+) sexpr.Parser.ParseError!Name {
+    const atom = try parser.parseAtomInList(parent, ctx, "name string");
+    switch (atom.tag(ctx.tree)) {
         .string, .string_raw => {
-            const id = cache.intern(cache_allocator, arena, atom, tree, scratch) catch |e| return switch (e) {
+            const id = cache.intern(cache_allocator, arena, atom, ctx.tree, scratch) catch |e| return switch (e) {
                 error.OutOfMemory => |oom| oom,
-                error.InvalidUtf8 => .{ .err = sexpr.Error.initInvalidUtf8(atom) },
+                error.InvalidUtf8 => return (try ctx.errorAtToken(atom, "name strings must be valid UTF-8")).err,
             };
 
-            return .{ .ok = .{ .token = atom, .id = id } };
+            return .{ .token = atom, .id = id };
         },
-        else => return .{
-            .err = sexpr.Error.initExpectedToken(
-                sexpr.Value.initAtom(atom),
-                .string,
-                .at_value,
-            ),
-        },
+        else => return (try ctx.errorAtToken(atom, "expected name string")).err,
     }
 }
 

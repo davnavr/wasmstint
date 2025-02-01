@@ -1,5 +1,4 @@
 const sexpr = @import("../sexpr.zig");
-const Error = sexpr.Error;
 
 /// The token containing the integer literal `min`.
 min_token: sexpr.TokenId,
@@ -13,14 +12,10 @@ const Limits = @This();
 
 pub fn parseContents(
     contents: *sexpr.Parser,
-    tree: *const sexpr.Tree,
+    ctx: *sexpr.Parser.Context,
     parent: sexpr.List.Id,
-    errors: *Error.List,
-) error{OutOfMemory}!sexpr.Parser.Result(Limits) {
-    const min = switch (contents.parseUninterpretedIntegerInList(u64, parent, tree)) {
-        .ok => |ok| ok,
-        .err => |err| return .{ .err = err },
-    };
+) sexpr.Parser.ParseError!Limits {
+    const min = try contents.parseUninterpretedIntegerInList(u64, parent, ctx);
 
     var limits = Limits{
         .min_token = min.token,
@@ -32,11 +27,11 @@ pub fn parseContents(
     var lookahead: sexpr.Parser = contents.*;
     no_max: {
         const max_token = (lookahead.parseValue() catch break :no_max).getAtom() orelse break :no_max;
-        if (max_token.tag(tree) != .integer) break :no_max;
+        if (max_token.tag(ctx.tree) != .integer) break :no_max;
         contents.* = lookahead;
 
-        const max_value = @import("../value.zig").unsignedInteger(u64, max_token.contents(tree)) catch {
-            try errors.append(Error.initIntegerLiteralOverflow(max_token, 64));
+        const max_value = @import("../value.zig").unsignedInteger(u64, max_token.contents(ctx.tree)) catch {
+            _ = try ctx.errorAtToken(max_token, "limit maximum is not a valid integer literal");
             break :no_max;
         };
 
@@ -44,5 +39,5 @@ pub fn parseContents(
         limits.max = max_value;
     }
 
-    return .{ .ok = limits };
+    return limits;
 }

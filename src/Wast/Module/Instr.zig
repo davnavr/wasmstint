@@ -6,7 +6,7 @@ const Lexer = @import("../Lexer.zig");
 const sexpr = @import("../sexpr.zig");
 const TokenId = sexpr.TokenId;
 const parseUninterpretedInteger = @import("../value.zig").uninterpretedInteger;
-const Error = sexpr.Error;
+const ParseContext = sexpr.Parser.Context;
 
 const Ident = @import("../ident.zig").Ident;
 const Name = @import("../Name.zig");
@@ -161,34 +161,30 @@ pub const MemArg = struct {
         .align_pow = undefined,
     };
 
-    pub fn parseContents(
-        contents: *sexpr.Parser,
-        tree: *const sexpr.Tree,
-        errors: *Error.List,
-    ) error{OutOfMemory}!MemArg {
+    pub fn parseContents(contents: *sexpr.Parser, ctx: *ParseContext) error{OutOfMemory}!MemArg {
         var mem_arg = MemArg.none;
         var lookahead: sexpr.Parser = contents.*;
 
         {
             const offset_token = (lookahead.parseValue() catch return mem_arg).getAtom() orelse return mem_arg;
-            if (offset_token.tag(tree) != .keyword_unknown) return mem_arg;
-            const offset_contents = offset_token.contents(tree);
+            if (offset_token.tag(ctx.tree) != .keyword_unknown) return mem_arg;
+            const offset_contents = offset_token.contents(ctx.tree);
             if (!std.mem.startsWith(u8, offset_contents, "offset=")) return mem_arg;
 
-            const lexer_offset = offset_token.offset(tree);
+            const lexer_offset = offset_token.offset(ctx.tree);
             var offset_lexer = Lexer.initUtf8(.{
-                .bytes = tree.source[0..lexer_offset.end],
+                .bytes = ctx.tree.source[0..lexer_offset.end],
                 .i = lexer_offset.start + "offset=".len,
             });
 
             const digits_token = offset_lexer.next() orelse return mem_arg;
             if (digits_token.tag != .integer) {
-                try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(offset_token), .at_value));
+                _ = try ctx.errorAtToken(offset_token, "expected memarg 'offset' or instruction");
                 return mem_arg;
             }
 
-            const offset_value = parseUninterpretedInteger(u64, digits_token.contents(tree.source)) catch {
-                try errors.append(Error.initIntegerLiteralOverflow(offset_token, 64));
+            const offset_value = parseUninterpretedInteger(u64, digits_token.contents(ctx.tree.source)) catch {
+                _ = try ctx.errorAtToken(offset_token, "invalid offset integer");
                 return mem_arg;
             };
 
@@ -198,29 +194,29 @@ pub const MemArg = struct {
 
         {
             const align_token = (lookahead.parseValue() catch return mem_arg).getAtom() orelse return mem_arg;
-            if (align_token.tag(tree) != .keyword_unknown) return mem_arg;
-            const align_contents = align_token.contents(tree);
+            if (align_token.tag(ctx.tree) != .keyword_unknown) return mem_arg;
+            const align_contents = align_token.contents(ctx.tree);
             if (!std.mem.startsWith(u8, align_contents, "align=")) return mem_arg;
 
-            const lexer_offset = align_token.offset(tree);
+            const lexer_offset = align_token.offset(ctx.tree);
             var offset_lexer = Lexer.initUtf8(.{
-                .bytes = tree.source[0..lexer_offset.end],
+                .bytes = ctx.tree.source[0..lexer_offset.end],
                 .i = lexer_offset.start + "align=".len,
             });
 
             const digits_token = offset_lexer.next() orelse return mem_arg;
             if (digits_token.tag != .integer) {
-                try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(align_token), .at_value));
+                _ = try ctx.errorAtToken(align_token, "expected memarg 'align' or instruction");
                 return mem_arg;
             }
 
-            const align_value = parseUninterpretedInteger(u32, digits_token.contents(tree.source)) catch {
-                try errors.append(Error.initIntegerLiteralOverflow(align_token, 32));
+            const align_value = parseUninterpretedInteger(u32, digits_token.contents(ctx.tree.source)) catch {
+                _ = try ctx.errorAtToken(align_token, "invalid offset integer");
                 return mem_arg;
             };
 
             if (!std.math.isPowerOfTwo(align_value))
-                try errors.append(Error.initMemArgAlignNonPowerOfTwo(align_token));
+                _ = try ctx.errorAtToken(align_token, "alignment must be a power of two");
 
             mem_arg.align_token = TokenId.Opt.init(align_token);
             mem_arg.align_pow = std.math.log2_int(u32, align_value);
@@ -236,23 +232,15 @@ pub const BlockType = struct {
 
     pub fn parseContents(
         contents: *sexpr.Parser,
-        tree: *const sexpr.Tree,
+        ctx: *ParseContext,
         arena: *IndexedArena,
         caches: *Caches,
-        errors: *Error.List,
         scratch: *ArenaAllocator,
-    ) error{OutOfMemory}!sexpr.Parser.Result(BlockType) {
-        const label = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
+    ) sexpr.Parser.ParseError!BlockType {
+        return .{
+            .label = try Ident.Opt.parse(contents, ctx, caches.allocator, &caches.ids),
+            .type = try TypeUse.parseContents(contents, ctx, arena, caches, scratch),
         };
-
-        const type_use = switch (try TypeUse.parseContents(contents, tree, arena, caches, errors, scratch)) {
-            .ok => |ok| ok,
-            .err => |err| return .{ .err = err },
-        };
-
-        return .{ .ok = .{ .label = label, .type = type_use } };
     }
 };
 
@@ -467,65 +455,92 @@ pub fn argumentTag(instr: Lexer.Token.InstrTag) std.meta.FieldEnum(Arguments) {
 pub fn parseArgs(
     keyword: TokenId,
     contents: *sexpr.Parser,
-    tree: *const sexpr.Tree,
+    ctx: *ParseContext,
     list: *List,
     list_arena: *ArenaAllocator,
     parent: sexpr.List.Id,
     arena: *IndexedArena,
     caches: *Caches,
-    errors: *Error.List,
     scratch: *ArenaAllocator,
-) error{OutOfMemory}!?Error {
-    switch (argumentTag(Lexer.Token.tagToInstrTag(keyword.tag(tree)))) {
-        .none => try list.append(list_arena, keyword, {}, tree),
+) sexpr.Parser.ParseError!void {
+    switch (argumentTag(Lexer.Token.tagToInstrTag(keyword.tag(ctx.tree)))) {
+        .none => try list.append(list_arena, keyword, {}, ctx.tree),
         .block_type => {
             _ = scratch.reset(.retain_capacity);
-            switch (try BlockType.parseContents(contents, tree, arena, caches, errors, scratch)) {
-                .ok => |block_type| try list.append(list_arena, keyword, block_type, tree),
-                .err => |err| return err,
-            }
+            const block_type = try BlockType.parseContents(
+                contents,
+                ctx,
+                arena,
+                caches,
+                scratch,
+            );
+
+            try list.append(list_arena, keyword, block_type, ctx.tree);
         },
-        .ident => switch (try Ident.parse(contents, tree, parent, caches.allocator, &caches.ids)) {
-            .ok => |ident| try list.append(list_arena, keyword, ident, tree),
-            .err => |err| return err,
+        .ident => {
+            const ident = try Ident.parse(
+                contents,
+                ctx,
+                parent,
+                caches.allocator,
+                &caches.ids,
+            );
+
+            try list.append(list_arena, keyword, ident, ctx.tree);
         },
-        .ident_opt => switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
-            .ok => |ident| try list.append(list_arena, keyword, ident, tree),
-            .err => |err| return err,
+        .ident_opt => {
+            const ident = try Ident.Opt.parse(
+                contents,
+                ctx,
+                caches.allocator,
+                &caches.ids,
+            );
+
+            try list.append(list_arena, keyword, ident, ctx.tree);
         },
         .call_indirect => {
-            const table = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
-                .ok => |ok| ok,
-                .err => |err| return err,
-            };
+            const table = try Ident.Opt.parse(
+                contents,
+                ctx,
+                caches.allocator,
+                &caches.ids,
+            );
 
-            const type_use = switch (try TypeUse.parseContents(contents, tree, arena, caches, errors, scratch)) {
-                .ok => |ok| ok,
-                .err => |err| return err,
-            };
+            const type_use = try TypeUse.parseContents(
+                contents,
+                ctx,
+                arena,
+                caches,
+                scratch,
+            );
 
             try list.append(
                 list_arena,
                 keyword,
                 CallIndirect{ .table = table, .type = type_use },
-                tree,
+                ctx.tree,
             );
         },
         .br_table => {
             _ = scratch.reset(.retain_capacity);
             var labels_buf = std.SegmentedList(Ident, 4){};
-            const first_label = switch (try Ident.parse(contents, tree, parent, caches.allocator, &caches.ids)) {
-                .ok => |ok| ok,
-                .err => |err| return err,
-            };
+            const first_label = try Ident.parse(
+                contents,
+                ctx,
+                parent,
+                caches.allocator,
+                &caches.ids,
+            );
 
             labels_buf.append(undefined, first_label) catch unreachable;
 
             while (true) {
-                const ident = switch (try Ident.Opt.parse(contents, tree, caches.allocator, &caches.ids)) {
-                    .ok => |ok| ok,
-                    .err => |err| return err,
-                };
+                const ident = try Ident.Opt.parse(
+                    contents,
+                    ctx,
+                    caches.allocator,
+                    &caches.ids,
+                );
 
                 try labels_buf.append(scratch.allocator(), ident.get() orelse break);
             }
@@ -548,7 +563,7 @@ pub fn parseArgs(
                     .labels = labels,
                     .default_label = labels_buf.at(labels_buf.len - 1).*,
                 },
-                tree,
+                ctx.tree,
             );
         },
         .select => {
@@ -558,17 +573,16 @@ pub fn parseArgs(
 
             while (true) {
                 const result_list = (lookahead.parseValue() catch break).getList() orelse break;
-                var result_contents = sexpr.Parser.init(result_list.contents(tree).values(tree));
+                var result_contents = sexpr.Parser.init(result_list.contents(ctx.tree).values(ctx.tree));
                 const result_token = (result_contents.parseValue() catch break).getAtom() orelse break;
-                if (result_token.tag(tree) != .keyword_result) break;
+                if (result_token.tag(ctx.tree) != .keyword_result) break;
 
                 const result = try Text.Result.parseContents(
                     &result_contents,
-                    tree,
+                    ctx,
                     arena,
                     result_token,
                     result_list,
-                    errors,
                 );
 
                 try result_types.append(scratch.allocator(), result);
@@ -583,43 +597,29 @@ pub fn parseArgs(
             else
                 Select.init(try arena.dupeSegmentedList(Text.Result, 1, &result_types));
 
-            try list.append(list_arena, keyword, select, tree);
+            try list.append(list_arena, keyword, select, ctx.tree);
         },
         .mem_arg => try list.append(
             list_arena,
             keyword,
-            try MemArg.parseContents(contents, tree, errors),
-            tree,
+            try MemArg.parseContents(contents, ctx),
+            ctx.tree,
         ),
-        .i32 => switch (contents.parseUninterpretedIntegerInList(i32, parent, tree)) {
-            .ok => |literal| {
-                try list.append(list_arena, keyword, literal.value, tree);
-                return null;
-            },
-            .err => |err| return err,
+        .i32 => {
+            const literal = try contents.parseUninterpretedIntegerInList(i32, parent, ctx);
+            try list.append(list_arena, keyword, literal.value, ctx.tree);
         },
-        .i64 => switch (contents.parseUninterpretedIntegerInList(i64, parent, tree)) {
-            .ok => |literal| {
-                try list.append(list_arena, keyword, literal.value, tree);
-                return null;
-            },
-            .err => |err| return err,
+        .i64 => {
+            const literal = try contents.parseUninterpretedIntegerInList(i64, parent, ctx);
+            try list.append(list_arena, keyword, literal.value, ctx.tree);
         },
-        .f32 => switch (contents.parseFloatInList(f32, parent, tree)) {
-            .ok => |literal| {
-                try list.append(list_arena, keyword, literal.value, tree);
-                return null;
-            },
-            .err => |err| return err,
+        .f32 => {
+            const literal = try contents.parseFloatInList(f32, parent, ctx);
+            try list.append(list_arena, keyword, literal.value, ctx.tree);
         },
-        .f64 => switch (contents.parseFloatInList(f64, parent, tree)) {
-            .ok => |literal| {
-                try list.append(list_arena, keyword, literal.value, tree);
-                return null;
-            },
-            .err => |err| return err,
+        .f64 => {
+            const literal = try contents.parseFloatInList(f64, parent, ctx);
+            try list.append(list_arena, keyword, literal.value, ctx.tree);
         },
     }
-
-    return null;
 }

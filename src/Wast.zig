@@ -11,7 +11,7 @@ pub const Arena = @import("IndexedArena.zig");
 pub const Lexer = @import("Wast/Lexer.zig");
 pub const sexpr = @import("Wast/sexpr.zig");
 
-pub const Error = @import("Wast/Error.zig");
+pub const Errors = @import("Wast/Errors.zig");
 pub const LineCol = @import("Wast/LineCol.zig");
 
 pub const Ident = @import("Wast/ident.zig").Ident;
@@ -32,7 +32,7 @@ pub fn parse(
     tree: *const sexpr.Tree,
     arena: *Arena,
     caches: *Caches,
-    errors: *Error.List,
+    errors: *Errors,
     scratch: *std.heap.ArenaAllocator,
 ) error{OutOfMemory}!Wast {
     const commands_values = tree.values.values(tree);
@@ -40,139 +40,133 @@ pub fn parse(
 
     arena.ensureUnusedCapacityForBytes(@import("size.zig").averageOfFields(Command.Inner) *| commands_values.len) catch {};
 
+    var parser_context = sexpr.Parser.Context{ .tree = tree, .errors = errors };
     for (commands_values) |cmd_value| {
         _ = scratch.reset(.retain_capacity);
 
-        const cmd_list = cmd_value.getList() orelse {
-            try errors.append(Error.initUnexpectedValue(cmd_value, .at_value));
-            continue;
+        const cmd_list = switch (cmd_value.unpacked()) {
+            .list => |list| list,
+            .atom => |bad_token| {
+                _ = try errors.reportExpectedListAtToken(bad_token, tree, &parser_context.locator);
+                continue;
+            },
         };
 
         var cmd_parser = sexpr.Parser.init(cmd_list.contents(tree).values(tree));
 
-        const cmd_keyword_id = switch (cmd_parser.parseAtomInList(null, cmd_list)) {
-            .ok => |ok| ok,
-            .err => |err| {
-                try errors.append(err);
-                continue;
-            },
+        const cmd_keyword_id = cmd_parser.parseAtomInList(
+            cmd_list,
+            &parser_context,
+            "command keyword",
+        ) catch |e| switch (e) {
+            error.OutOfMemory => |oom| return oom,
+            error.ReportedParserError => continue,
         };
 
         const cmd: Command.Inner = cmd: switch (cmd_keyword_id.tag(tree)) {
             .keyword_module => {
                 const module = try arena.create(Module);
                 _ = scratch.reset(.retain_capacity);
-                switch (try Module.parseContents(&cmd_parser, tree, arena, caches, errors, scratch)) {
-                    .ok => |ok| module.set(arena, ok),
-                    .err => |err| {
-                        try errors.append(err);
-                        continue;
-                    },
-                }
 
+                const parsed_module = Module.parseContents(
+                    &cmd_parser,
+                    &parser_context,
+                    arena,
+                    caches,
+                    scratch,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
+                };
+
+                module.set(arena, parsed_module);
                 break :cmd .{ .module = module };
             },
             .keyword_register => {
                 const register = try arena.create(Command.Register);
 
-                const name_result = try Name.parse(
+                const name = Name.parse(
                     &cmd_parser,
-                    tree,
+                    &parser_context,
                     caches.allocator,
                     &caches.names,
                     arena,
                     cmd_list,
                     scratch,
-                );
-
-                const name = switch (name_result) {
-                    .ok => |ok| ok,
-                    .err => |err| {
-                        try errors.append(err);
-                        continue;
-                    },
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
                 };
 
-                const id = switch (try Ident.Opt.parse(&cmd_parser, tree, caches.allocator, &caches.ids)) {
-                    .ok => |ok| ok,
-                    .err => |err| {
-                        try errors.append(err);
-                        continue;
-                    },
+                const id = Ident.Opt.parse(
+                    &cmd_parser,
+                    &parser_context,
+                    caches.allocator,
+                    &caches.ids,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
                 };
 
                 register.set(arena, .{ .name = name, .id = id });
                 break :cmd .{ .register = register };
             },
             .keyword_invoke => {
-                const action_result = try Command.Action.parseContents(
+                const action = Command.Action.parseContents(
                     &cmd_parser,
-                    tree,
+                    &parser_context,
                     arena,
                     caches,
                     cmd_keyword_id,
                     cmd_list,
-                    errors,
                     scratch,
-                );
-
-                break :cmd .{
-                    .action = switch (action_result) {
-                        .ok => |action| action,
-                        .err => |err| {
-                            try errors.append(err);
-                            continue;
-                        },
-                    },
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
                 };
+
+                break :cmd .{ .action = action };
             },
             .keyword_get => {
-                const action_result = try Command.Action.parseContents(
+                const action = Command.Action.parseContents(
                     &cmd_parser,
-                    tree,
+                    &parser_context,
                     arena,
                     caches,
                     cmd_keyword_id,
                     cmd_list,
-                    errors,
                     scratch,
-                );
-
-                break :cmd .{
-                    .action = switch (action_result) {
-                        .ok => |action| action,
-                        .err => |err| {
-                            try errors.append(err);
-                            continue;
-                        },
-                    },
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
                 };
+
+                break :cmd .{ .action = action };
             },
             .keyword_assert_return => {
                 const assert_return = try arena.create(Command.AssertReturn);
-                const action_result = try Command.Action.parse(
+                const action = Command.Action.parse(
                     &cmd_parser,
-                    tree,
+                    &parser_context,
                     arena,
                     caches,
                     cmd_list,
-                    errors,
                     scratch,
-                );
-
-                const action = switch (action_result) {
-                    .ok => |ok| ok,
-                    .err => |err| {
-                        try errors.append(err);
-                        continue;
-                    },
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
                 };
 
                 assert_return.set(
                     arena,
                     .{
                         .action = action,
-                        .results = try Command.parseConstOrResultList(&cmd_parser, Command.Result, tree, arena, errors),
+                        .results = try Command.parseConstOrResultList(
+                            &cmd_parser,
+                            Command.Result,
+                            &parser_context,
+                            arena,
+                        ),
                     },
                 );
 
@@ -180,35 +174,31 @@ pub fn parse(
             },
             .keyword_assert_trap => {
                 const assert_trap = try arena.create(Command.AssertTrap);
-
-                const action_result = try Command.Action.parse(
+                const action = Command.Action.parse(
                     &cmd_parser,
-                    tree,
+                    &parser_context,
                     arena,
                     caches,
                     cmd_list,
-                    errors,
                     scratch,
-                );
-
-                const action = switch (action_result) {
-                    .ok => |ok| ok,
-                    .err => |err| {
-                        try errors.append(err);
-                        continue;
-                    },
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
                 };
 
                 assert_trap.set(
                     arena,
                     .{
                         .action = action,
-                        .failure = switch (try Command.Failure.parseInList(&cmd_parser, tree, arena, cmd_list, scratch)) {
-                            .ok => |ok| ok,
-                            .err => |err| {
-                                try errors.append(err);
-                                continue;
-                            },
+                        .failure = Command.Failure.parseInList(
+                            &cmd_parser,
+                            &parser_context,
+                            arena,
+                            cmd_list,
+                            scratch,
+                        ) catch |e| switch (e) {
+                            error.OutOfMemory => |oom| return oom,
+                            error.ReportedParserError => continue,
                         },
                     },
                 );
@@ -220,24 +210,31 @@ pub fn parse(
             .keyword_assert_malformed => {
                 // Copied from `.keyword_assert_invalid` case.
                 const assert_malformed = try arena.create(Command.AssertMalformed);
-                const module = switch (try Module.parse(&cmd_parser, tree, arena, caches, cmd_list, errors, scratch)) {
-                    .ok => |ok| ok,
-                    .err => |err| {
-                        try errors.append(err);
-                        continue;
-                    },
+                const module = Module.parse(
+                    &cmd_parser,
+                    &parser_context,
+                    arena,
+                    caches,
+                    cmd_list,
+                    scratch,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
                 };
 
                 assert_malformed.set(
                     arena,
                     .{
                         .module = module,
-                        .failure = switch (try Command.Failure.parseInList(&cmd_parser, tree, arena, cmd_list, scratch)) {
-                            .ok => |ok| ok,
-                            .err => |err| {
-                                try errors.append(err);
-                                continue;
-                            },
+                        .failure = Command.Failure.parseInList(
+                            &cmd_parser,
+                            &parser_context,
+                            arena,
+                            cmd_list,
+                            scratch,
+                        ) catch |e| switch (e) {
+                            error.OutOfMemory => |oom| return oom,
+                            error.ReportedParserError => continue,
                         },
                     },
                 );
@@ -246,24 +243,31 @@ pub fn parse(
             },
             .keyword_assert_invalid => {
                 const assert_invalid = try arena.create(Command.AssertInvalid);
-                const module = switch (try Module.parse(&cmd_parser, tree, arena, caches, cmd_list, errors, scratch)) {
-                    .ok => |ok| ok,
-                    .err => |err| {
-                        try errors.append(err);
-                        continue;
-                    },
+                const module = Module.parse(
+                    &cmd_parser,
+                    &parser_context,
+                    arena,
+                    caches,
+                    cmd_list,
+                    scratch,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
                 };
 
                 assert_invalid.set(
                     arena,
                     .{
                         .module = module,
-                        .failure = switch (try Command.Failure.parseInList(&cmd_parser, tree, arena, cmd_list, scratch)) {
-                            .ok => |ok| ok,
-                            .err => |err| {
-                                try errors.append(err);
-                                continue;
-                            },
+                        .failure = Command.Failure.parseInList(
+                            &cmd_parser,
+                            &parser_context,
+                            arena,
+                            cmd_list,
+                            scratch,
+                        ) catch |e| switch (e) {
+                            error.OutOfMemory => |oom| return oom,
+                            error.ReportedParserError => continue,
                         },
                     },
                 );
@@ -271,7 +275,12 @@ pub fn parse(
                 break :cmd .{ .assert_invalid = assert_invalid };
             },
             else => {
-                try errors.append(Error.initUnexpectedValue(sexpr.Value.initAtom(cmd_keyword_id), .at_value));
+                _ = try errors.reportAtToken(
+                    cmd_keyword_id,
+                    tree,
+                    &parser_context.locator,
+                    "unknown command keyword",
+                );
                 continue;
             },
         };
@@ -281,7 +290,7 @@ pub fn parse(
             Command{ .keyword = cmd_keyword_id, .inner = cmd },
         );
 
-        try cmd_parser.expectEmpty(errors);
+        try cmd_parser.expectEmpty(&parser_context);
     }
 
     return Wast{

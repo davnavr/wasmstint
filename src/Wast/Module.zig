@@ -3,8 +3,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const IndexedArena = @import("../IndexedArena.zig");
 
 const sexpr = @import("sexpr.zig");
-const Error = sexpr.Error;
-const ParseResult = sexpr.Parser.Result;
+const ParseContext = sexpr.Parser.Context;
 
 const Ident = @import("ident.zig").Ident;
 const Name = @import("Name.zig");
@@ -78,13 +77,17 @@ pub const String = struct {
 
 pub fn parseContents(
     contents: *sexpr.Parser,
-    tree: *const sexpr.Tree,
+    ctx: *ParseContext,
     arena: *IndexedArena,
     caches: *Caches,
-    errors: *Error.List,
     scratch: *ArenaAllocator,
-) error{OutOfMemory}!ParseResult(Module) {
-    const name = try Ident.Symbolic.parse(contents, tree, caches.allocator, &caches.ids);
+) sexpr.Parser.ParseError!Module {
+    const name = try Ident.Symbolic.parse(
+        contents,
+        ctx.tree,
+        caches.allocator,
+        &caches.ids,
+    );
 
     var format_keyword = sexpr.TokenId.Opt.none;
     const format: Format = format: {
@@ -92,12 +95,10 @@ pub fn parseContents(
             var lookahead = contents.*;
             const peeked_value = lookahead.parseValue() catch break :text;
             const peeked_atom = peeked_value.getAtom() orelse break :text;
-            const format_tag = peeked_atom.tag(tree);
+            const format_tag = peeked_atom.tag(ctx.tree);
             switch (format_tag) {
                 .keyword_binary, .keyword_quote => format_keyword = sexpr.TokenId.Opt.init(peeked_atom),
-                else => return .{
-                    .err = Error.initUnexpectedValue(sexpr.Value.initAtom(peeked_atom), .at_value),
-                },
+                else => return (try ctx.errorAtToken(peeked_atom, "expected 'binary' or 'quote' keyword")).err,
             }
 
             contents.* = lookahead;
@@ -105,19 +106,14 @@ pub fn parseContents(
 
             var strings = try IndexedArena.BoundedArrayList(String).initCapacity(arena, contents.remaining.len);
             for (0..strings.capacity) |_| {
-                const string_atom: sexpr.TokenId = switch (contents.parseAtom(.string) catch break) {
-                    .ok => |ok| ok,
-                    .err => |err| {
-                        try errors.append(err);
-                        continue;
-                    },
+                const string_atom = contents.parseAtom(ctx, "string literal") catch |e| switch (e) {
+                    error.EndOfStream => break,
+                    else => |err| return err,
                 };
 
-                switch (string_atom.tag(tree)) {
+                switch (string_atom.tag(ctx.tree)) {
                     .string, .string_raw => strings.appendAssumeCapacity(arena, String{ .token = string_atom }),
-                    else => try errors.append(
-                        Error.initExpectedToken(sexpr.Value.initAtom(string_atom), .string, .at_value),
-                    ),
+                    else => return (try ctx.errorAtToken(string_atom, "expected string literal")).err,
                 }
             }
 
@@ -147,10 +143,9 @@ pub fn parseContents(
             .{
                 .fields = try Text.parseFields(
                     contents,
-                    tree,
+                    ctx,
                     arena,
                     caches,
-                    errors,
                     scratch,
                 ),
             },
@@ -159,55 +154,44 @@ pub fn parseContents(
         break :format .{ .text = wat };
     };
 
-    return .{ .ok = Module{ .name = name, .format_keyword = format_keyword, .format = format } };
+    return Module{ .name = name, .format_keyword = format_keyword, .format = format };
 }
 
 pub fn parseOrEmpty(
     parser: *sexpr.Parser,
-    tree: *const sexpr.Tree,
+    ctx: *ParseContext,
     arena: *IndexedArena,
     caches: *Caches,
-    errors: *Error.List,
     scratch: *ArenaAllocator,
-) error{ OutOfMemory, EndOfStream }!ParseResult(Module) {
-    const module_list: sexpr.List.Id = switch (try parser.parseList()) {
-        .ok => |ok| ok,
-        .err => |err| return .{ .err = err },
-    };
+) sexpr.Parser.ParseOrEofError!Module {
+    const module_list = try parser.parseList(ctx);
 
-    var contents = sexpr.Parser.init(module_list.contents(tree).values(tree));
+    var contents = sexpr.Parser.init(module_list.contents(ctx.tree).values(ctx.tree));
 
-    const module_token: sexpr.TokenId = switch (contents.parseAtomInList(.keyword_module, module_list)) {
-        .ok => |ok| ok,
-        .err => |err| return .{ .err = err },
-    };
+    // TODO: Darn, spec allows abbreviation where module fields can be allowed!
+    const module_token = try contents.parseAtomInList(module_list, ctx, "'module' keyword");
 
-    switch (module_token.tag(tree)) {
+    switch (module_token.tag(ctx.tree)) {
         .keyword_module => {
-            const module = try parseContents(&contents, tree, arena, caches, errors, scratch);
-            if (module == .ok)
-                try contents.expectEmpty(errors);
-
+            const module = try parseContents(&contents, ctx, arena, caches, scratch);
+            try contents.expectEmpty(ctx);
             return module;
         },
-        else => return .{
-            .err = Error.initExpectedToken(sexpr.Value.initAtom(module_token), .keyword_module, .at_value),
-        },
+        else => return (try ctx.errorAtToken(module_token, "expected 'module' (TODO: handle module field parsing)")).err,
     }
 }
 
 pub fn parse(
     parser: *sexpr.Parser,
-    tree: *const sexpr.Tree,
+    ctx: *ParseContext,
     arena: *IndexedArena,
     caches: *Caches,
     parent: sexpr.List.Id,
-    errors: *Error.List,
     scratch: *ArenaAllocator,
-) error{OutOfMemory}!ParseResult(Module) {
-    return parseOrEmpty(parser, tree, arena, caches, errors, scratch) catch |e| switch (e) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.EndOfStream => .{ .err = Error.initUnexpectedValue(sexpr.Value.initList(parent), .at_list_end) },
+) sexpr.Parser.ParseError!Module {
+    return parseOrEmpty(parser, ctx, arena, caches, scratch) catch |e| switch (e) {
+        error.EndOfStream => (try ctx.errorAtList(parent, .end, "expected a module")).err,
+        else => |err| err,
     };
 }
 
