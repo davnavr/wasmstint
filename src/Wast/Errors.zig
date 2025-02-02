@@ -25,18 +25,21 @@ pub const Message = struct {
                 break :end offset.end + i;
             } else tree.source.len;
 
+            std.debug.assert(line_start <= offset.start);
+            std.debug.assert(offset.end <= line_end);
+
             return Src{
                 .line = tree.source[line_start..line_end],
-                .end = std.math.cast(u32, line_end - offset.start) orelse std.math.maxInt(u32),
+                .end = std.math.cast(u32, offset.end - line_start) orelse std.math.maxInt(u32),
                 .start = std.math.cast(u32, offset.start - line_start) orelse std.math.maxInt(u32),
             };
         }
 
         pub fn print(src: *const Src, writer: anytype) !void {
             // This naively assumes ASCII input, and does not calculate the visual width of code-points/grapheme clusters
-            try writer.writeAll(src.line);
+            try writer.print("\n{s}", .{src.line});
             try writer.writeByte('\n');
-            if (src.start == src.end) {
+            if (src.start < src.end) {
                 try writer.writeByteNTimes(' ', src.start);
                 try writer.writeByteNTimes('^', src.end - src.start);
                 try writer.writeByte('\n');

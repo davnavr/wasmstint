@@ -178,19 +178,20 @@ pub fn main() !u8 {
 
             var errors_iter = errors.list.constIterator(0);
             while (errors_iter.next()) |err| {
+                try w.print(
+                    "{s}:{}: ",
+                    .{
+                        script_path, err.loc,
+                    },
+                );
+
                 switch (color_config) {
                     .escape_codes => try w.writeAll("\x1B[31m" ++ "error" ++ "\x1B[39m"),
                     else => try w.writeAll("error"),
                 }
 
                 try w.print(": {s}\n", .{err.msg});
-
-                try w.print(
-                    "> in {s}:{}\n{}",
-                    .{
-                        script_path, err.loc, err.src,
-                    },
-                );
+                try err.src.print(w);
 
                 try w.writeByte('\n');
             }
