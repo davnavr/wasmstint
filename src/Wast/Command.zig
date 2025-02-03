@@ -47,11 +47,11 @@ pub fn parseConstOrResult(
             const f = try list_parser.parseFloatInList(f32, list, ctx);
             const value: Value = switch (f.value(ctx.tree)) {
                 .bits => |bits| .{ .f32 = bits },
-                .nan_canonical => if (@hasField(T, "f32_nan"))
+                .nan_canonical => if (@hasField(Value, "f32_nan"))
                     .{ .f32_nan = NanPattern.canonical }
                 else
                     return (try ctx.errorAtToken(f.token, "invalid f32 literal")).err,
-                .nan_arithmetic => if (@hasField(T, "f32_nan"))
+                .nan_arithmetic => if (@hasField(Value, "f32_nan"))
                     .{ .f32_nan = NanPattern.arithmetic }
                 else
                     return (try ctx.errorAtToken(f.token, "invalid f32 literal")).err,
@@ -73,11 +73,11 @@ pub fn parseConstOrResult(
                     alloc.set(arena, bits);
                     break :bits .{ .f64 = alloc };
                 },
-                .nan_canonical => if (@hasField(T, "f64_nan"))
+                .nan_canonical => if (@hasField(Value, "f64_nan"))
                     .{ .f64_nan = NanPattern.canonical }
                 else
                     return (try ctx.errorAtToken(f.token, "invalid f64 literal")).err,
-                .nan_arithmetic => if (@hasField(T, "f64_nan"))
+                .nan_arithmetic => if (@hasField(Value, "f64_nan"))
                     .{ .f64_nan = NanPattern.arithmetic }
                 else
                     return (try ctx.errorAtToken(f.token, "invalid f64 literal")).err,
