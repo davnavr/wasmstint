@@ -615,11 +615,11 @@ pub fn parseArgs(
         },
         .f32 => {
             const literal = try contents.parseFloatInList(f32, parent, ctx);
-            try list.append(list_arena, keyword, literal.value, ctx.tree);
+            try list.append(list_arena, keyword, try literal.expectBits(ctx), ctx.tree);
         },
         .f64 => {
             const literal = try contents.parseFloatInList(f64, parent, ctx);
-            try list.append(list_arena, keyword, literal.value, ctx.tree);
+            try list.append(list_arena, keyword, try literal.expectBits(ctx), ctx.tree);
         },
     }
 }

@@ -177,20 +177,55 @@ pub fn parseUninterpretedIntegerInList(
     };
 }
 
+pub fn ParsedFloat(comptime F: type) type {
+    return struct {
+        token: TokenId,
+        bits_or_undefined: floating_point.Bits(F),
+
+        pub const Value = union(enum) {
+            nan_canonical,
+            nan_arithmetic,
+            bits: floating_point.Bits(F),
+        };
+
+        const Float = @This();
+
+        pub fn value(float: Float, tree: *const sexpr.Tree) Float.Value {
+            return switch (float.token.tag(tree)) {
+                .@"keyword_nan:canonical" => .nan_canonical,
+                .@"keyword_nan:arithmetic" => .nan_arithmetic,
+                else => return .{ .bits = float.bits_or_undefined },
+            };
+        }
+
+        pub fn expectBits(float: Float, ctx: *Context) ParseError!floating_point.Bits(F) {
+            return switch (float.value(ctx.tree)) {
+                .bits => |bits| bits,
+                .nan_arithmetic, .nan_canonical => (try ctx.errorAtToken(
+                    float.token,
+                    "invalid " ++ @typeName(F) ++ " literal",
+                )).err,
+            };
+        }
+    };
+}
+
 pub fn parseFloat(
     parser: *Parser,
     comptime F: type,
     ctx: *Context,
-) ParseOrEofError!ParsedToken(floating_point.Bits(F)) {
+) ParseOrEofError!ParsedFloat(F) {
     const atom = try parser.parseAtom(ctx, @typeName(F) ++ " literal");
     const contents = atom.contents(ctx.tree);
     switch (atom.tag(ctx.tree)) {
+        .@"keyword_nan:canonical", .@"keyword_nan:arithmetic" => return .{
+            .token = atom,
+            .bits_or_undefined = undefined,
+        },
         .integer,
         .float,
         .keyword_inf,
         .keyword_nan,
-        .@"keyword_nan:canonical",
-        .@"keyword_nan:arithmetic",
         => {},
         else => |tag| {
             if (tag != .keyword_unknown or !std.mem.startsWith(u8, contents, "nan:0x")) {
@@ -215,7 +250,7 @@ pub fn parseFloat(
         )).err,
     };
 
-    return .{ .token = atom, .value = @bitCast(f) };
+    return .{ .token = atom, .bits_or_undefined = @bitCast(f) };
 }
 
 pub fn parseFloatInList(
@@ -223,7 +258,7 @@ pub fn parseFloatInList(
     comptime F: type,
     list: List.Id,
     ctx: *Context,
-) ParseError!ParsedToken(floating_point.Bits(F)) {
+) ParseError!ParsedFloat(F) {
     return parser.parseFloat(F, ctx) catch |e| switch (e) {
         error.EndOfStream => (try ctx.errorAtList(
             list,

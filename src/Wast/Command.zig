@@ -44,20 +44,46 @@ pub fn parseConstOrResult(
             break :value .{ .token = c.token, .value = .{ .i32 = c.value } };
         },
         .@"keyword_f32.const" => {
-            const c = try list_parser.parseFloatInList(f32, list, ctx);
-            break :value .{ .token = c.token, .value = .{ .f32 = c.value } };
+            const f = try list_parser.parseFloatInList(f32, list, ctx);
+            const value: Value = switch (f.value(ctx.tree)) {
+                .bits => |bits| .{ .f32 = bits },
+                .nan_canonical => if (@hasField(T, "f32_nan"))
+                    .{ .f32_nan = NanPattern.canonical }
+                else
+                    return (try ctx.errorAtToken(f.token, "invalid f32 literal")).err,
+                .nan_arithmetic => if (@hasField(T, "f32_nan"))
+                    .{ .f32_nan = NanPattern.arithmetic }
+                else
+                    return (try ctx.errorAtToken(f.token, "invalid f32 literal")).err,
+            };
+
+            break :value .{ .token = f.token, .value = value };
         },
         .@"keyword_i64.const" => {
             const c = try list_parser.parseUninterpretedIntegerInList(i64, list, ctx);
-            const val = try arena.alignedCreate(i64, 4);
-            val.set(arena, c.value);
-            break :value .{ .token = c.token, .value = .{ .i64 = val } };
+            const alloc = try arena.alignedCreate(i64, 4);
+            alloc.set(arena, c.value);
+            break :value .{ .token = c.token, .value = .{ .i64 = alloc } };
         },
         .@"keyword_f64.const" => {
-            const c = try list_parser.parseFloatInList(f64, list, ctx);
-            const val = try arena.alignedCreate(u64, 4);
-            val.set(arena, c.value);
-            break :value .{ .token = c.token, .value = .{ .f64 = val } };
+            const f = try list_parser.parseFloatInList(f64, list, ctx);
+            const value: Value = switch (f.value(ctx.tree)) {
+                .bits => |bits| bits: {
+                    const alloc = try arena.alignedCreate(u64, 4);
+                    alloc.set(arena, bits);
+                    break :bits .{ .f64 = alloc };
+                },
+                .nan_canonical => if (@hasField(T, "f64_nan"))
+                    .{ .f64_nan = NanPattern.canonical }
+                else
+                    return (try ctx.errorAtToken(f.token, "invalid f64 literal")).err,
+                .nan_arithmetic => if (@hasField(T, "f64_nan"))
+                    .{ .f64_nan = NanPattern.arithmetic }
+                else
+                    return (try ctx.errorAtToken(f.token, "invalid f64 literal")).err,
+            };
+
+            break :value .{ .token = f.token, .value = value };
         },
         else => return (try ctx.errorAtToken(keyword, "expected " ++ T.expected)).err,
     };
@@ -118,6 +144,8 @@ pub const Const = struct {
     }
 };
 
+pub const NanPattern = enum { canonical, arithmetic };
+
 pub const Result = struct {
     keyword: sexpr.TokenId,
     value_token: sexpr.TokenId,
@@ -138,8 +166,6 @@ pub const Result = struct {
         ref_extern: ?u32,
         ref_func: void,
     };
-
-    pub const NanPattern = enum { canonical, arithmetic };
 };
 
 pub const Register = struct {
