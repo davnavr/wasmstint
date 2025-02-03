@@ -756,7 +756,7 @@ fn doValidation(
                 => try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f64, .i64),
                 else => |bad| std.debug.panic("TODO: handle 0xFC {s}\n", .{@tagName(bad)}),
             },
-            else => |bad| std.debug.panic("TODO: handle {s} (0x{X})\n", .{ @tagName(bad), @intFromEnum(bad) }),
+            else => |bad| std.debug.panic("TODO: handle {s} (0x{X:0>2})\n", .{ @tagName(bad), @intFromEnum(bad) }),
         }
     }
 

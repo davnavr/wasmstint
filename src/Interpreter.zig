@@ -99,6 +99,7 @@ pub const TrapCode = enum(i32) {
     lazy_validation_failed,
     integer_division_by_zero,
     integer_overflow,
+    invalid_conversion_to_integer,
     _,
 
     pub fn initHost(code: u31) TrapCode {
@@ -125,6 +126,13 @@ pub const TrapCode = enum(i32) {
         return switch (e) {
             error.Overflow => .integer_overflow,
             error.DivisionByZero => .integer_division_by_zero,
+        };
+    }
+
+    fn initTrunc(e: error{ Overflow, NotANumber }) TrapCode {
+        return switch (e) {
+            error.Overflow => .integer_overflow,
+            error.NotANumber => .invalid_conversion_to_integer,
         };
     }
 };
@@ -578,6 +586,29 @@ fn DefineRelOp(comptime value_field: []const u8, comptime op: anytype) type {
     };
 }
 
+fn DefineConvOp(
+    comptime src_field: []const u8,
+    comptime dst_field: []const u8,
+    comptime op: anytype,
+    comptime trap: anytype,
+) type {
+    return struct {
+        fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+            const t_1 = @field(vals.pop(), src_field);
+            const result = @call(.always_inline, op, .{t_1}) catch |e| {
+                int.state = .{ .trapped = @call(.always_inline, trap, .{e}) };
+                return;
+            };
+
+            vals.appendAssumeCapacity(@unionInit(Value, dst_field, result));
+
+            if (i.nextOpcodeHandler(fuel, int)) |next| {
+                @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+            }
+        }
+    };
+}
+
 fn trapIntegerOverflow(e: error{Overflow}) TrapCode {
     return switch (e) {
         error.Overflow => .integer_overflow,
@@ -593,7 +624,7 @@ fn trapSignedIntegerDivision(e: error{ Overflow, DivisionByZero }) TrapCode {
 
 fn IntegerOpcodeHandlers(comptime Signed: type) type {
     return struct {
-        const Unsigned = std.meta.Int(.unsigned, @bitSizeOf(Signed));
+        const Unsigned = std.meta.Int(.unsigned, @typeInfo(Signed).int.bits);
         const value_field = @typeName(Signed);
 
         const operators = struct {
@@ -725,6 +756,34 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
                 // Zig's function here handles the `bitShiftAmt()`/`@mod()`
                 return @bitCast(std.math.rotr(Unsigned, @bitCast(i_1), i_2));
             }
+
+            fn trunc_s(z: anytype) !Signed {
+                if (std.math.isNan(z)) return error.NotANumber;
+
+                const tr = @trunc(z);
+                return if (tr < std.math.minInt(Signed) or std.math.maxInt(Signed) < tr)
+                    error.Overflow
+                else
+                    @intFromFloat(tr);
+            }
+
+            fn trunc_u(z: anytype) !Signed {
+                if (std.math.isNan(z)) return error.NotANumber;
+
+                const tr = @trunc(z);
+                return if (tr < -0.0 or std.math.maxInt(Unsigned) < tr)
+                    error.Overflow
+                else
+                    @bitCast(@as(Unsigned, @intFromFloat(tr)));
+            }
+
+            fn trunc_sat_s(z: anytype) !Signed {
+                return std.math.lossyCast(Signed, z);
+            }
+
+            fn trunc_sat_u(z: anytype) !Signed {
+                return @bitCast(std.math.lossyCast(Unsigned, z));
+            }
         };
 
         fn @"const"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
@@ -766,11 +825,99 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
         const shr_u = DefineBinOp(value_field, operators.shr_u, undefined).handler;
         const rotl = DefineBinOp(value_field, operators.rotl, undefined).handler;
         const rotr = DefineBinOp(value_field, operators.rotr, undefined).handler;
+
+        const trunc_f32_s = DefineConvOp("f32", value_field, operators.trunc_s, TrapCode.initTrunc).handler;
+        const trunc_f32_u = DefineConvOp("f32", value_field, operators.trunc_u, TrapCode.initTrunc).handler;
+        const trunc_f64_s = DefineConvOp("f64", value_field, operators.trunc_s, TrapCode.initTrunc).handler;
+        const trunc_f64_u = DefineConvOp("f64", value_field, operators.trunc_u, TrapCode.initTrunc).handler;
+
+        const trunc_sat_f32_s = DefineConvOp("f32", value_field, operators.trunc_sat_s, TrapCode.initTrunc).handler;
+        const trunc_sat_f32_u = DefineConvOp("f32", value_field, operators.trunc_sat_u, TrapCode.initTrunc).handler;
+        const trunc_sat_f64_s = DefineConvOp("f64", value_field, operators.trunc_sat_s, TrapCode.initTrunc).handler;
+        const trunc_sat_f64_u = DefineConvOp("f64", value_field, operators.trunc_sat_u, TrapCode.initTrunc).handler;
     };
 }
 
 const i32_opcode_handlers = IntegerOpcodeHandlers(i32);
 const i64_opcode_handlers = IntegerOpcodeHandlers(i64);
+
+fn FloatOpcodeHandlers(comptime F: type) type {
+    return struct {
+        const value_field = @typeName(F);
+
+        const operators = struct {
+            fn convert_s(i: anytype) !F {
+                comptime std.debug.assert(@typeInfo(@TypeOf(i)).int.signedness == .signed);
+                return @floatFromInt(i);
+            }
+
+            fn convert_u(i: anytype) !F {
+                comptime std.debug.assert(@typeInfo(@TypeOf(i)).int.signedness == .signed);
+                const Unsigned = std.meta.Int(.unsigned, @typeInfo(@TypeOf(i)).int.bits);
+                return @floatFromInt(@as(Unsigned, @bitCast(i)));
+            }
+        };
+
+        const convert_i32_s = DefineConvOp("i32", value_field, operators.convert_s, undefined).handler;
+        const convert_i32_u = DefineConvOp("i32", value_field, operators.convert_u, undefined).handler;
+        const convert_i64_s = DefineConvOp("i64", value_field, operators.convert_s, undefined).handler;
+        const convert_i64_u = DefineConvOp("i64", value_field, operators.convert_u, undefined).handler;
+    };
+}
+
+const f32_opcode_handlers = FloatOpcodeHandlers(f32);
+const f64_opcode_handlers = FloatOpcodeHandlers(f64);
+
+fn dispatchTableLength(comptime Opcode: type) comptime_int {
+    var maximum = 0;
+    for (@typeInfo(Opcode).@"enum".fields) |op| {
+        maximum = @max(maximum, op.value);
+    }
+    return maximum + 1;
+}
+
+fn dispatchTable(comptime Opcode: type, comptime invalid: OpcodeHandler) [dispatchTableLength(Opcode)]OpcodeHandler {
+    var table = [_]OpcodeHandler{invalid} ** dispatchTableLength(Opcode);
+    for (@typeInfo(Opcode).@"enum".fields) |op| {
+        if (@hasDecl(opcode_handlers, op.name)) {
+            table[op.value] = @as(OpcodeHandler, @field(opcode_handlers, op.name));
+        }
+    }
+
+    return table;
+}
+
+fn PrefixDispatchTable(comptime prefix: opcodes.ByteOpcode, comptime Opcode: type) type {
+    return struct {
+        fn panicInvalidInstruction(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+            _ = s;
+            _ = loc;
+            _ = vals;
+            _ = fuel;
+            _ = int;
+            std.debug.panic(
+                "invalid instruction 0x{X:0>2} ... 0x{X:0>2}",
+                .{ @intFromEnum(prefix), (i.p - 1)[0] },
+            );
+        }
+
+        const invalid: OpcodeHandler = switch (@import("builtin").mode) {
+            .Debug, .ReleaseSafe => panicInvalidInstruction,
+            .ReleaseFast, .ReleaseSmall => undefined,
+        };
+
+        const entries = dispatchTable(Opcode, invalid);
+
+        pub fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+            const n = i.readUleb128(@typeInfo(Opcode).@"enum".tag_type) catch unreachable;
+            _ = @as(Opcode, @enumFromInt(n));
+            const next = entries[n];
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    };
+}
+
+const fc_prefixed_dispatch = PrefixDispatchTable(.@"0xFC", opcodes.FCPrefixOpcode);
 
 const opcode_handlers = struct {
     fn panicInvalidInstruction(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
@@ -785,7 +932,7 @@ const opcode_handlers = struct {
             break :name @tagName(tag);
         };
 
-        std.debug.panic("invalid instruction {X:0.2} ({s})", .{ bad_opcode, opcode_name });
+        std.debug.panic("invalid instruction 0x{X:0>2} ({s})", .{ bad_opcode, opcode_name });
     }
 
     const invalid: OpcodeHandler = switch (@import("builtin").mode) {
@@ -894,6 +1041,62 @@ const opcode_handlers = struct {
     pub const @"i64.rotl" = i64_opcode_handlers.rotl;
     pub const @"i64.rotr" = i64_opcode_handlers.rotr;
 
+    const conv_ops = struct {
+        fn @"i32.wrap_i64"(i: i64) !i32 {
+            return @truncate(i);
+        }
+
+        fn @"i64.extend_i32_s"(i: i32) !i64 {
+            return i;
+        }
+
+        fn @"i64.extend_i32_u"(i: i32) !i64 {
+            return @bitCast(@as(u64, @as(u32, @bitCast(i))));
+        }
+
+        fn @"f32.demote_f64"(z: f64) !f32 {
+            return @floatCast(z);
+        }
+
+        fn @"f64.promote_f32"(z: f32) !f64 {
+            return z;
+        }
+    };
+
+    fn ReinterpretOp(comptime Dst: type) type {
+        return struct {
+            fn op(src: anytype) !Dst {
+                return @bitCast(src);
+            }
+        };
+    }
+
+    pub const @"i32.wrap_i64" = DefineConvOp("i64", "i32", conv_ops.@"i32.wrap_i64", undefined).handler;
+    pub const @"i32.trunc_f32_s" = i32_opcode_handlers.trunc_f32_s;
+    pub const @"i32.trunc_f32_u" = i32_opcode_handlers.trunc_f32_u;
+    pub const @"i32.trunc_f64_s" = i32_opcode_handlers.trunc_f64_s;
+    pub const @"i32.trunc_f64_u" = i32_opcode_handlers.trunc_f64_u;
+    pub const @"i64.extend_i32_s" = DefineConvOp("i32", "i64", conv_ops.@"i64.extend_i32_s", undefined).handler;
+    pub const @"i64.extend_i32_u" = DefineConvOp("i32", "i64", conv_ops.@"i64.extend_i32_u", undefined).handler;
+    pub const @"i64.trunc_f32_s" = i64_opcode_handlers.trunc_f32_s;
+    pub const @"i64.trunc_f32_u" = i64_opcode_handlers.trunc_f32_u;
+    pub const @"i64.trunc_f64_s" = i64_opcode_handlers.trunc_f64_s;
+    pub const @"i64.trunc_f64_u" = i64_opcode_handlers.trunc_f64_u;
+    pub const @"f32.convert_i32_s" = f32_opcode_handlers.convert_i32_s;
+    pub const @"f32.convert_i32_u" = f32_opcode_handlers.convert_i32_u;
+    pub const @"f32.convert_i64_s" = f32_opcode_handlers.convert_i64_s;
+    pub const @"f32.convert_i64_u" = f32_opcode_handlers.convert_i64_u;
+    pub const @"f32.demote_f64" = DefineConvOp("f64", "f32", conv_ops.@"f32.demote_f64", undefined).handler;
+    pub const @"f64.convert_i32_s" = f64_opcode_handlers.convert_i32_s;
+    pub const @"f64.convert_i32_u" = f64_opcode_handlers.convert_i32_u;
+    pub const @"f64.convert_i64_s" = f64_opcode_handlers.convert_i64_s;
+    pub const @"f64.convert_i64_u" = f64_opcode_handlers.convert_i64_u;
+    pub const @"f64.promote_f32" = DefineConvOp("f32", "f64", conv_ops.@"f64.promote_f32", undefined).handler;
+    pub const @"i32.reinterpret_f32" = DefineConvOp("f32", "i32", ReinterpretOp(i32).op, undefined).handler;
+    pub const @"i64.reinterpret_f64" = DefineConvOp("f64", "i64", ReinterpretOp(i64).op, undefined).handler;
+    pub const @"f32.reinterpret_i32" = DefineConvOp("i32", "f32", ReinterpretOp(f32).op, undefined).handler;
+    pub const @"f64.reinterpret_i64" = DefineConvOp("i64", "f64", ReinterpretOp(f64).op, undefined).handler;
+
     fn IExtendS(comptime I: type, comptime M: type) type {
         std.debug.assert(@bitSizeOf(M) < @bitSizeOf(I));
         return struct {
@@ -906,19 +1109,20 @@ const opcode_handlers = struct {
 
     pub const @"i32.extend8_s" = DefineUnOp("i32", IExtendS(i32, i8).op).handler;
     pub const @"i32.extend16_s" = DefineUnOp("i32", IExtendS(i32, i16).op).handler;
+
+    pub const @"0xFC" = fc_prefixed_dispatch.handler;
+    pub const @"i32.trunc_sat_f32_s" = i32_opcode_handlers.trunc_sat_f32_s;
+    pub const @"i32.trunc_sat_f32_u" = i32_opcode_handlers.trunc_sat_f32_u;
+    pub const @"i32.trunc_sat_f64_s" = i32_opcode_handlers.trunc_sat_f64_s;
+    pub const @"i32.trunc_sat_f64_u" = i32_opcode_handlers.trunc_sat_f64_u;
+    pub const @"i64.trunc_sat_f32_s" = i64_opcode_handlers.trunc_sat_f32_s;
+    pub const @"i64.trunc_sat_f32_u" = i64_opcode_handlers.trunc_sat_f32_u;
+    pub const @"i64.trunc_sat_f64_s" = i64_opcode_handlers.trunc_sat_f64_s;
+    pub const @"i64.trunc_sat_f64_u" = i64_opcode_handlers.trunc_sat_f64_u;
 };
 
 /// If the handler is not appearing in this table, make sure it is public first.
-const byte_dispatch_table: [256]OpcodeHandler = handlers: {
-    var table = [_]OpcodeHandler{opcode_handlers.invalid} ** 256;
-    for (@typeInfo(opcodes.ByteOpcode).@"enum".fields) |op| {
-        if (@hasDecl(opcode_handlers, op.name)) {
-            table[op.value] = @as(OpcodeHandler, @field(opcode_handlers, op.name));
-        }
-    }
-
-    break :handlers table;
-};
+const byte_dispatch_table = dispatchTable(opcodes.ByteOpcode, opcode_handlers.invalid);
 
 fn enterMainLoop(interp: *Interpreter, fuel: *Fuel) void {
     std.debug.assert(interp.state == .awaiting_host);
