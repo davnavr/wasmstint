@@ -154,22 +154,22 @@ pub fn main() !u8 {
             &parse_caches,
             &errors,
             &scratch,
-        ) catch |e| {
-            std.debug.print("Error parsing script file {s}", .{script_path});
-            // TODO: Don't return, log that this script failed
-            return e;
+        ) catch |e| switch (e) {
+            error.OutOfMemory => return e,
         };
 
-        var rng = initial_rng;
-        try runScript(
-            &script,
-            rng.random(),
-            &encoding_buffer,
-            &parse_arena,
-            &errors,
-        );
+        if (errors.list.len == 0) {
+            var rng = initial_rng;
+            try runScript(
+                &script,
+                rng.random(),
+                &encoding_buffer,
+                &parse_arena,
+                &errors,
+            );
+        }
 
-        if (errors.list.count() > 0) {
+        if (errors.list.len > 0) {
             @branchHint(.unlikely);
             const raw_stderr = std.io.getStdErr();
             var buf_stderr = std.io.bufferedWriter(raw_stderr.writer());
@@ -217,6 +217,146 @@ pub fn main() !u8 {
     return 0;
 }
 
+const SpectestImports = struct {
+    last_failure: ?struct {
+        module: []const u8,
+        name: []const u8,
+    } = null,
+    lookup: std.StringHashMapUnmanaged(wasmstint.runtime.ExternVal),
+
+    const PrintFunction = enum(u8) {
+        print = 0,
+        print_i32,
+        print_i64,
+        print_f32,
+        print_f64,
+        print_i32_f32,
+        print_f64_f64,
+
+        const param_types = [_]wasmstint.Module.ValType{
+            .i32,
+            .f32,
+            .i64,
+            .f64,
+            .f64,
+        };
+
+        fn signature(func: PrintFunction) wasmstint.Module.FuncType {
+            return switch (func) {
+                .print => .empty,
+                .print_i32 => .{ .types = param_types[0..1].ptr, .param_count = 1, .result_count = 0 },
+                .print_i64 => .{ .types = param_types[2..3].ptr, .param_count = 1, .result_count = 0 },
+                .print_f32 => .{ .types = param_types[1..2].ptr, .param_count = 1, .result_count = 0 },
+                .print_f64 => .{ .types = param_types[3..4].ptr, .param_count = 1, .result_count = 0 },
+                .print_i32_f32 => .{ .types = param_types[0..2].ptr, .param_count = 2, .result_count = 0 },
+                .print_f64_f64 => .{ .types = param_types[3..5].ptr, .param_count = 2, .result_count = 0 },
+            };
+        }
+
+        const all = std.enums.values(PrintFunction);
+
+        var functions: [all.len]wasmstint.runtime.FuncAddr.Host = functions: {
+            var result: [all.len]wasmstint.runtime.FuncAddr.Host = undefined;
+            for (all) |func| {
+                result[@intFromEnum(func)] = .{ .signature = func.signature() };
+            }
+            break :functions result;
+        };
+
+        fn addr(func: PrintFunction) wasmstint.runtime.FuncAddr {
+            return wasmstint.runtime.FuncAddr.init(.{
+                .host = .{
+                    .func = &functions[@intFromEnum(func)],
+                    .data = null,
+                },
+            });
+        }
+    };
+
+    const globals = struct {
+        const @"i32" = wasmstint.runtime.GlobalAddr{
+            .global_type = .{ .mut = .@"const", .val_type = .i32 },
+            .value = @constCast(@ptrCast(&@as(i32, 666))),
+        };
+
+        const @"i64" = wasmstint.runtime.GlobalAddr{
+            .global_type = .{ .mut = .@"const", .val_type = .i64 },
+            .value = @constCast(@ptrCast(&@as(i64, 666))),
+        };
+
+        const @"f32" = wasmstint.runtime.GlobalAddr{
+            .global_type = .{ .mut = .@"const", .val_type = .f32 },
+            .value = @constCast(@ptrCast(&@as(f32, 666.6))),
+        };
+
+        const @"f64" = wasmstint.runtime.GlobalAddr{
+            .global_type = .{ .mut = .@"const", .val_type = .f64 },
+            .value = @constCast(@ptrCast(&@as(f64, 666.6))),
+        };
+
+        const names = [4][]const u8{ "i32", "i64", "f32", "f64" };
+    };
+
+    fn init(arena: *ArenaAllocator) std.mem.Allocator.Error!SpectestImports {
+        var imports = SpectestImports{
+            .lookup = std.StringHashMapUnmanaged(wasmstint.runtime.ExternVal).empty,
+        };
+
+        try imports.lookup.ensureTotalCapacity(
+            arena.allocator(),
+            PrintFunction.all.len + globals.names.len,
+        );
+
+        errdefer comptime unreachable;
+
+        for (PrintFunction.all) |func| {
+            imports.lookup.putAssumeCapacityNoClobber(
+                @tagName(func),
+                .{ .func = func.addr() },
+            );
+        }
+
+        inline for (globals.names) |name| {
+            imports.lookup.putAssumeCapacityNoClobber(
+                "global_" ++ name,
+                .{ .global = @field(globals, name) },
+            );
+        }
+
+        return imports;
+    }
+
+    fn provider(host: *SpectestImports) wasmstint.runtime.ImportProvider {
+        return .{
+            .ctx = host,
+            .resolve = resolve,
+        };
+    }
+
+    fn resolve(
+        ctx: *anyopaque,
+        module: std.unicode.Utf8View,
+        name: std.unicode.Utf8View,
+        desc: wasmstint.runtime.ImportProvider.Desc,
+    ) ?wasmstint.runtime.ExternVal {
+        const host: *SpectestImports = @ptrCast(@alignCast(ctx));
+        _ = desc;
+
+        if (!std.mem.eql(u8, "spectest", module.bytes))
+            return null;
+
+        const result = host.lookup.get(name.bytes);
+        if (result == null) {
+            host.last_failure = .{
+                .module = module.bytes,
+                .name = name.bytes,
+            };
+        }
+
+        return result;
+    }
+};
+
 const State = struct {
     /// Allocated in the `run_arena`.
     module_lookups: std.AutoHashMapUnmanaged(Wast.Ident.Interned, *ModuleInst) = .empty,
@@ -237,6 +377,10 @@ const State = struct {
         else
             state.current_module;
     }
+
+    //fn runToCompletion(state: *state, interpreter: *wasmstint.Interpreter) std.mem.Allocator.Error!void {}
+
+    //fn doAction(state: *State, action: *const Wast.Command.Action)
 };
 
 // TODO: What if arguments could be allocated directly in the Interpreter's value_stack?
@@ -273,6 +417,7 @@ fn runScript(
         .cmd_arena = ArenaAllocator.init(run_arena.allocator()),
     };
 
+    var error_ctx = Wast.sexpr.Parser.Context{ .tree = script.tree, .errors = errors };
     for (script.commands.items(script.arena)) |cmd| {
         defer _ = state.cmd_arena.reset(.retain_capacity);
 
@@ -316,9 +461,11 @@ fn runScript(
                             std.debug.dumpStackTrace(err_trace.*);
                         }
 
+                        _ = try error_ctx.errorAtToken(cmd.keyword, "module failed to parse");
                         return;
                     },
                 };
+
                 //parsed_module.finishCodeValidationInParallel(state.cmd_arena, thread_pool)
                 const validation_finished = parsed_module.finishCodeValidation(
                     module_arena.allocator(),
@@ -331,6 +478,7 @@ fn runScript(
                             std.debug.dumpStackTrace(err_trace.*);
                         }
 
+                        _ = try error_ctx.errorAtToken(cmd.keyword, "module was invalid");
                         return;
                     },
                 };
@@ -340,15 +488,24 @@ fn runScript(
                 // TODO: This is waiting on a proper module instantiation API.
                 std.debug.assert(!parsed_module.inner.start.exists);
 
+                var imports = try SpectestImports.init(module_arena);
                 const module_inst = try module_arena.allocator().create(wasmstint.runtime.ModuleInst);
                 module_inst.* = wasmstint.runtime.ModuleInst.allocate(
                     parsed_module,
-                    undefined, // TODO: Provide proper import_provider
+                    imports.provider(),
                     module_arena.allocator(),
                     store.allocator(),
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
-                    else => unreachable, // TODO: how to handle import errors?
+                    error.ImportFailure => {
+                        const name = imports.last_failure.?;
+                        _ = try error_ctx.errorFmtAtToken(
+                            cmd.keyword,
+                            "could not provide import {s} {s}",
+                            .{ name.module, name.name },
+                        );
+                        return;
+                    },
                 };
 
                 // TODO: This is waiting on a proper module instantiation API.
