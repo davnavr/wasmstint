@@ -1109,6 +1109,9 @@ const opcode_handlers = struct {
 
     pub const @"i32.extend8_s" = DefineUnOp("i32", IExtendS(i32, i8).op).handler;
     pub const @"i32.extend16_s" = DefineUnOp("i32", IExtendS(i32, i16).op).handler;
+    pub const @"i64.extend8_s" = DefineUnOp("i64", IExtendS(i64, i8).op).handler;
+    pub const @"i64.extend16_s" = DefineUnOp("i64", IExtendS(i64, i16).op).handler;
+    pub const @"i64.extend32_s" = DefineUnOp("i64", IExtendS(i64, i32).op).handler;
 
     pub const @"0xFC" = fc_prefixed_dispatch.handler;
     pub const @"i32.trunc_sat_f32_s" = i32_opcode_handlers.trunc_sat_f32_s;
