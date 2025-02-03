@@ -705,7 +705,7 @@ pub const ExternAddr = packed union {
         }
 
         pub fn toInt(nat: Nat) ?Size {
-            return if (nat == .zero) null else @intCast(@as(usize, @enumFromInt(nat)) - 1);
+            return if (nat == .null) null else @intCast(@as(usize, @intFromEnum(nat)) - 1);
         }
     };
 

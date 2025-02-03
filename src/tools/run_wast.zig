@@ -464,6 +464,62 @@ const State = struct {
         return scriptError(state.errors.errorAtToken(parent, msg));
     }
 
+    fn errorInterpreterResults(
+        state: *State,
+        parent: Wast.sexpr.TokenId,
+        interpreter: *wasmstint.Interpreter,
+    ) Error {
+        const results = interpreter.copyResultValues(&state.cmd_arena) catch |e| switch (e) {
+            error.OutOfMemory => |oom| return oom,
+            error.InvalidInterpreterState => unreachable,
+        };
+
+        const Results = struct {
+            values: []const wasmstint.Interpreter.TaggedValue,
+
+            pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+                _ = fmt;
+                _ = options;
+                try writer.print("{} results", .{self.values.len});
+                if (self.values.len > 0) {
+                    try writer.writeByte(':');
+                    for (self.values) |value| {
+                        try writer.writeByte(' ');
+                        switch (value) {
+                            .i32 => |i| try writer.print(
+                                "(i32.const 0x{[u]X:0>8} (; {[u]}, {[s]} ;))",
+                                .{ .u = i, .s = @as(u32, @bitCast(i)) },
+                            ),
+                            .i64 => |i| try writer.print(
+                                "(i64.const 0x{[u]X:0>16} (; {[u]}, {[s]} ;))",
+                                .{ .u = i, .s = @as(u64, @bitCast(i)) },
+                            ),
+                            .f32 => |z| try writer.print(
+                                "(f32.const 0x{[z]x} (; {[z]}, {[z]e} ;))",
+                                .{ .z = z },
+                            ),
+                            .f64 => |z| try writer.print(
+                                "(f32.const 0x{[z]x} (; {[z]}, {[z]e} ;))",
+                                .{ .z = z },
+                            ),
+                            .externref => |extern_ref| if (extern_ref.nat.toInt()) |nat|
+                                try writer.print("(ref.extern {})", .{nat})
+                            else
+                                try writer.writeAll("(ref.null extern)"),
+                            .funcref => try writer.writeAll("(ref.func ???)"),
+                        }
+                    }
+                }
+            }
+        };
+
+        return scriptError(state.errors.errorFmtAtToken(
+            parent,
+            "call unexpectedly succeeded with {}",
+            .{Results{ .values = results }},
+        ));
+    }
+
     fn expectResultValues(
         state: *State,
         interpreter: *wasmstint.Interpreter,
@@ -486,6 +542,45 @@ const State = struct {
                 .{ results.len, actual_results.len },
             ));
         }
+    }
+
+    const trap_code_lookup = std.StaticStringMap(wasmstint.Interpreter.TrapCode).initComptime(.{
+        .{ "unreachable", .unreachable_code_reached },
+        .{ "integer divide by zero", .integer_division_by_zero },
+        .{ "integer overflow", .integer_overflow },
+        .{ "invalid conversion to integer", .invalid_conversion_to_integer },
+    });
+
+    fn expectTrap(
+        state: *State,
+        script: *const Wast,
+        interpreter: *wasmstint.Interpreter,
+        parent: Wast.sexpr.TokenId,
+        failure: *const Wast.Command.Failure,
+    ) Error!void {
+        try state.runToCompletion(interpreter);
+        const trap_code: wasmstint.Interpreter.TrapCode = switch (interpreter.state) {
+            .awaiting_lazy_validation => unreachable,
+            .trapped => |code| code,
+            .interrupted => |cause| return state.errorInterpreterInterrupted(parent, cause),
+            .awaiting_host => return state.errorInterpreterResults(parent, interpreter),
+        };
+
+        const expected_code = trap_code_lookup.get(failure.msg.slice(script.arena)) orelse return scriptError(
+            state.errors.errorFmtAtToken(
+                parent,
+                "call failed with wrong trap code ({})",
+                .{trap_code},
+            ),
+        );
+
+        if (trap_code != expected_code) return scriptError(
+            state.errors.errorFmtAtToken(
+                parent,
+                "expected call to fail with trap code {}, but got {}",
+                .{ expected_code, trap_code },
+            ),
+        );
     }
 
     fn beginAction(
@@ -679,6 +774,30 @@ fn runScript(
                     &interp,
                     cmd.keyword,
                     assert_return.results.items(script.arena),
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ScriptError => return,
+                };
+            },
+            .keyword_assert_trap => {
+                const assert_trap: *const Wast.Command.AssertTrap = cmd.inner.assert_trap.getPtr(script.arena);
+
+                state.beginAction(
+                    script,
+                    cmd.keyword,
+                    assert_trap.action.getPtr(script.arena),
+                    &interp,
+                    &fuel,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ScriptError => return,
+                };
+
+                state.expectTrap(
+                    script,
+                    &interp,
+                    cmd.keyword,
+                    &assert_trap.failure,
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
                     error.ScriptError => return,
