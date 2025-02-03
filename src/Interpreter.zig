@@ -51,6 +51,7 @@ pub const StackFrame = extern struct {
     ///
     /// The length of the value stack to restore when returning from this function is equal to .
     values_base: u32,
+    instantiate_flag: *bool,
 };
 
 const ValStack = std.ArrayListUnmanaged(Value);
@@ -58,6 +59,7 @@ const ValStack = std.ArrayListUnmanaged(Value);
 value_stack: ValStack,
 call_stack: std.ArrayListUnmanaged(StackFrame),
 state: State = .{ .awaiting_host = &[0]Module.ValType{} },
+dummy_instantiate_flag: bool = true,
 
 const Interpreter = @This();
 
@@ -332,6 +334,46 @@ pub fn beginCall(
         );
     }
 
+    try interp.callEntryPoint(
+        alloca,
+        callee,
+        values_base,
+        signature,
+        &interp.dummy_instantiate_flag,
+        fuel,
+    );
+}
+
+pub fn instantiateModule(
+    interp: *Interpreter,
+    alloca: Allocator,
+    module_inst: *runtime.ModuleInst,
+    fuel: *Fuel,
+) Error!void {
+    try interp.callEntryPoint(
+        alloca,
+        module_inst.funcAddr(
+            module_inst.module.inner.start.get() orelse {
+                module_inst.instantiated = true;
+                return;
+            },
+        ),
+        std.math.cast(u32, interp.value_stack.items.len) orelse return Error.OutOfMemory,
+        &Module.FuncType.empty,
+        &module_inst.instantiated,
+        fuel,
+    );
+}
+
+fn callEntryPoint(
+    interp: *Interpreter,
+    alloca: Allocator,
+    callee: runtime.FuncAddr,
+    values_base: u32,
+    signature: *const Module.FuncType,
+    instantiate_flag: *bool,
+    fuel: *Fuel,
+) Error!void {
     switch (callee.expanded()) {
         .wasm => |wasm| {
             const code: *const Module.Code = wasm.code();
@@ -364,6 +406,7 @@ pub fn beginCall(
                     .values_base = values_base,
                     .values_count = total_values,
                     .result_count = signature.result_count,
+                    .instantiate_flag = instantiate_flag,
                 },
             ) catch unreachable;
 
@@ -381,6 +424,7 @@ pub fn beginCall(
                     .values_base = values_base,
                     .values_count = signature.param_count,
                     .result_count = signature.result_count,
+                    .instantiate_flag = instantiate_flag,
                 },
             ) catch unreachable;
         },
@@ -438,6 +482,7 @@ const Instructions = extern struct {
 fn returnFromWasm(interp: *Interpreter, values_base: u32) void {
     const popped = interp.currentFrame();
     interp.call_stack.items.len -= 1;
+    popped.instantiate_flag.* = true;
 
     const new_value_stack_len = values_base + popped.result_count;
     std.mem.copyForwards(
