@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const wasmstint = @import("wasmstint");
 const Wast = wasmstint.Wast;
@@ -297,7 +298,7 @@ const SpectestImports = struct {
         const names = [4][]const u8{ "i32", "i64", "f32", "f64" };
     };
 
-    fn init(arena: *ArenaAllocator) std.mem.Allocator.Error!SpectestImports {
+    fn init(arena: *ArenaAllocator) Allocator.Error!SpectestImports {
         var imports = SpectestImports{
             .lookup = std.StringHashMapUnmanaged(wasmstint.runtime.ExternVal).empty,
         };
@@ -357,7 +358,40 @@ const SpectestImports = struct {
     }
 };
 
+// TODO: What if arguments could be allocated directly in the Interpreter's value_stack?
+fn allocateFunctionArguments(
+    script: *const Wast,
+    arguments: Wast.Command.Arguments,
+    arena: *ArenaAllocator,
+) Allocator.Error![]const wasmstint.Interpreter.TaggedValue {
+    const src_arguments: []const Wast.Command.Const = arguments.items(script.arena);
+    const dst_values = try arena.allocator().alloc(wasmstint.Interpreter.TaggedValue, src_arguments.len);
+
+    errdefer comptime unreachable;
+
+    for (src_arguments, dst_values) |*src, *dst| {
+        dst.* = switch (src.keyword.tag(script.tree)) {
+            .@"keyword_i32.const" => .{ .i32 = src.value.i32 },
+            .@"keyword_i64.const" => .{ .i64 = src.value.i64.get(script.arena) },
+            .@"keyword_f32.const" => .{ .f32 = @bitCast(src.value.f32) },
+            .@"keyword_f64.const" => .{ .f64 = @bitCast(src.value.f64.get(script.arena)) },
+            else => unreachable,
+        };
+    }
+
+    return dst_values;
+}
+
+inline fn wrapInterpreterError(result: anytype) Allocator.Error!@typeInfo(@TypeOf(result)).error_union.payload {
+    return result catch |e| switch (e) {
+        error.OutOfMemory => |oom| return oom,
+        wasmstint.Interpreter.Error.InvalidInterpreterState => unreachable,
+    };
+}
+
 const State = struct {
+    errors: Wast.sexpr.Parser.Context,
+
     /// Allocated in the `run_arena`.
     module_lookups: std.AutoHashMapUnmanaged(Wast.Ident.Interned, *ModuleInst) = .empty,
 
@@ -371,38 +405,136 @@ const State = struct {
 
     const ModuleInst = wasmstint.runtime.ModuleInst;
 
-    fn getModuleInst(state: *const State, id: Wast.Ident.Symbolic) ?*ModuleInst {
+    const Error = error{ScriptError} || Allocator.Error;
+
+    inline fn scriptError(report: Allocator.Error!Wast.Errors.Report) Error {
+        _ = try report;
+        return error.ScriptError;
+    }
+
+    const ErrorContext = Wast.sexpr.Parser.Context;
+
+    fn getModuleInst(state: *State, id: Wast.Ident.Symbolic, parent: Wast.sexpr.TokenId) Error!*ModuleInst {
         return if (id.some)
-            state.module_lookups.get(id.ident)
+            if (state.module_lookups.get(id.ident)) |found|
+                found
+            else
+                scriptError(state.errors.errorAtToken(id.token, "no module with the given name was instantiated"))
+        else if (state.current_module) |current|
+            current
         else
-            state.current_module;
+            scriptError(state.errors.errorAtToken(parent, "no module has been instantiated at this point"));
     }
 
-    //fn runToCompletion(state: *state, interpreter: *wasmstint.Interpreter) std.mem.Allocator.Error!void {}
+    fn runToCompletion(state: *State, interpreter: *wasmstint.Interpreter) Allocator.Error!void {
+        // state_label:
+        switch (interpreter.state) {
+            .awaiting_lazy_validation => unreachable,
+            .interrupted => |cause| switch (cause) {
+                .out_of_fuel, .call_stack_exhaustion => return,
+                .validation_finished => unreachable,
+            },
+            .trapped => return,
+            .awaiting_host => if (interpreter.call_stack.items.len == 0) {
+                return;
+            } else {
+                _ = state;
+                std.debug.panic("TODO: Handle host call", .{});
+            },
+        }
 
-    //fn doAction(state: *State, action: *const Wast.Command.Action)
-};
+        comptime unreachable;
+    }
 
-// TODO: What if arguments could be allocated directly in the Interpreter's value_stack?
-fn allocateFunctionArguments(
-    script: *const Wast,
-    arguments: Wast.Command.Arguments,
-    arena: *ArenaAllocator,
-) std.mem.Allocator.Error![]const wasmstint.Interpreter.TaggedValue {
-    const src_arguments: []const Wast.Command.Const = arguments.items(script.arena);
-    const dst_values = try arena.allocator().alloc(wasmstint.Interpreter.TaggedValue, src_arguments.len);
+    fn errorInterpreterTrap(state: *State, parent: Wast.sexpr.TokenId, trap_code: wasmstint.Interpreter.TrapCode) Error {
+        return scriptError(state.errors.errorFmtAtToken(parent, "unexpected trap, {any}", .{trap_code}));
+    }
 
-    errdefer comptime unreachable;
-
-    for (src_arguments, dst_values) |*src, *dst| {
-        dst.* = switch (src.keyword.tag(script.tree)) {
-            .@"keyword_i32.const" => .{ .i32 = src.value.i32 },
-            else => unreachable,
+    fn errorInterpreterInterrupted(
+        state: *State,
+        parent: Wast.sexpr.TokenId,
+        cause: wasmstint.Interpreter.InterruptionCause,
+    ) Error {
+        const msg = switch (cause) {
+            .validation_finished => unreachable,
+            .out_of_fuel => "unexpected error, execution ran out of fuel",
+            .call_stack_exhaustion => "unexpected error, call stack exhausted",
         };
+
+        return scriptError(state.errors.errorAtToken(parent, msg));
     }
 
-    return dst_values;
-}
+    fn expectResultValues(
+        state: *State,
+        interpreter: *wasmstint.Interpreter,
+        parent: Wast.sexpr.TokenId,
+        results: []const Wast.Command.Result,
+    ) Error!void {
+        try state.runToCompletion(interpreter);
+        switch (interpreter.state) {
+            .awaiting_lazy_validation => unreachable,
+            .trapped => |code| return state.errorInterpreterTrap(parent, code),
+            .interrupted => |cause| return state.errorInterpreterInterrupted(parent, cause),
+            .awaiting_host => std.debug.assert(interpreter.call_stack.items.len == 0),
+        }
+
+        const actual_results = try wrapInterpreterError(interpreter.copyResultValues(&state.cmd_arena));
+        if (actual_results.len != results.len) {
+            return scriptError(state.errors.errorFmtAtToken(
+                parent,
+                "expected {} results, but got {}",
+                .{ results.len, actual_results.len },
+            ));
+        }
+    }
+
+    fn beginAction(
+        state: *State,
+        script: *const Wast,
+        keyword: Wast.sexpr.TokenId,
+        action: *const Wast.Command.Action,
+        interpreter: *wasmstint.Interpreter,
+        fuel: *wasmstint.Interpreter.Fuel,
+    ) Error!void {
+        const module = try state.getModuleInst(action.module, keyword);
+        switch (action.keyword.tag(state.errors.tree)) {
+            .keyword_invoke => {
+                const export_name = script.nameContents(action.name.id);
+                const target_export = module.findExport(export_name) catch return scriptError(
+                    state.errors.errorFmtAtToken(
+                        action.name.token,
+                        "no exported value found with name {s}",
+                        .{export_name},
+                    ),
+                );
+
+                const callee = target_export.func;
+                const arguments = try allocateFunctionArguments(
+                    script,
+                    action.target.invoke.arguments,
+                    &state.cmd_arena,
+                );
+
+                interpreter.beginCall(
+                    state.cmd_arena.allocator(),
+                    callee,
+                    arguments,
+                    fuel,
+                ) catch |e| return switch (e) {
+                    error.OutOfMemory => |oom| oom,
+                    error.InvalidInterpreterState => unreachable,
+                    error.ArgumentTypeOrCountMismatch => scriptError(
+                        state.errors.errorAtToken(
+                            action.keyword,
+                            "argument count or type mismatch",
+                        ),
+                    ),
+                };
+            },
+            else => unreachable,
+        }
+    }
+};
 
 fn runScript(
     script: *const Wast,
@@ -410,14 +542,14 @@ fn runScript(
     encoding_buffer: *std.ArrayList(u8),
     run_arena: *ArenaAllocator, // Must not be reset for the lifetime of this function call.
     errors: *Wast.Errors,
-) std.mem.Allocator.Error!void {
+) Allocator.Error!void {
     var store = wasmstint.runtime.ModuleAllocator.WithinArena{ .arena = run_arena };
     var state: State = .{
+        .errors = .{ .tree = script.tree, .errors = errors },
         .next_module_arena = ArenaAllocator.init(run_arena.allocator()),
         .cmd_arena = ArenaAllocator.init(run_arena.allocator()),
     };
 
-    var error_ctx = Wast.sexpr.Parser.Context{ .tree = script.tree, .errors = errors };
     for (script.commands.items(script.arena)) |cmd| {
         defer _ = state.cmd_arena.reset(.retain_capacity);
 
@@ -461,7 +593,7 @@ fn runScript(
                             std.debug.dumpStackTrace(err_trace.*);
                         }
 
-                        _ = try error_ctx.errorAtToken(cmd.keyword, "module failed to parse");
+                        _ = try state.errors.errorAtToken(cmd.keyword, "module failed to parse");
                         return;
                     },
                 };
@@ -478,15 +610,12 @@ fn runScript(
                             std.debug.dumpStackTrace(err_trace.*);
                         }
 
-                        _ = try error_ctx.errorAtToken(cmd.keyword, "module was invalid");
+                        _ = try state.errors.errorAtToken(cmd.keyword, "module was invalid");
                         return;
                     },
                 };
 
                 std.debug.assert(validation_finished);
-
-                // TODO: This is waiting on a proper module instantiation API.
-                std.debug.assert(!parsed_module.inner.start.exists);
 
                 var imports = try SpectestImports.init(module_arena);
                 const module_inst = try module_arena.allocator().create(wasmstint.runtime.ModuleInst);
@@ -499,7 +628,7 @@ fn runScript(
                     error.OutOfMemory => |oom| return oom,
                     error.ImportFailure => {
                         const name = imports.last_failure.?;
-                        _ = try error_ctx.errorFmtAtToken(
+                        _ = try state.errors.errorFmtAtToken(
                             cmd.keyword,
                             "could not provide import {s} {s}",
                             .{ name.module, name.name },
@@ -508,9 +637,19 @@ fn runScript(
                     },
                 };
 
-                // TODO: This is waiting on a proper module instantiation API.
-                module_inst.instantiated = true;
+                try wrapInterpreterError(interp.instantiateModule(state.cmd_arena.allocator(), module_inst, &fuel));
+                state.expectResultValues(&interp, cmd.keyword, &[0]Wast.Command.Result{}) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ScriptError => {
+                        _ = try state.errors.errorAtToken(
+                            cmd.keyword,
+                            "module start function failed",
+                        );
+                        return;
+                    },
+                };
 
+                std.debug.assert(module_inst.instantiated);
                 state.current_module = module_inst;
 
                 if (module.name.some) {
@@ -525,45 +664,31 @@ fn runScript(
             .keyword_assert_return => {
                 const assert_return: *const Wast.Command.AssertReturn = cmd.inner.assert_return.getPtr(script.arena);
 
-                // TODO: Move code that processess an invoke action to a separate function
-                const action: *const Wast.Command.Action = assert_return.action.getPtr(script.arena);
-                std.debug.assert(action.keyword.tag(script.tree) == .keyword_invoke);
-
-                const module = state.getModuleInst(action.module) orelse {
-                    std.debug.print(
-                        "TODO: Missing module? {?s}\n",
-                        .{if (action.module.some) script.identContents(action.module.ident) else null},
-                    );
-                    continue;
-                };
-
-                const export_name = script.nameContents(action.name.id);
-                const target_export = module.findExport(export_name) catch |e| {
-                    std.debug.print("TODO: bad export {s}, {?}\n", .{ export_name, e });
-                    continue;
-                };
-
-                const callee = target_export.func;
-                const arguments = try allocateFunctionArguments(
+                state.beginAction(
                     script,
-                    action.target.invoke.arguments,
-                    &state.cmd_arena,
-                );
-
-                interp.beginCall(state.cmd_arena.allocator(), callee, arguments, &fuel) catch |e| switch (e) {
+                    cmd.keyword,
+                    assert_return.action.getPtr(script.arena),
+                    &interp,
+                    &fuel,
+                ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
-                    else => unreachable,
+                    error.ScriptError => return,
                 };
 
-                const results = interp.copyResultValues(&state.cmd_arena) catch |e| switch (e) {
+                state.expectResultValues(
+                    &interp,
+                    cmd.keyword,
+                    assert_return.results.items(script.arena),
+                ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
-                    else => unreachable,
+                    error.ScriptError => return,
                 };
-
-                std.debug.print("TODO: process assert_return {any}\n", .{results});
             },
-            else => |bad| {
-                std.debug.print("TODO: process command {}\n", .{bad});
+            else => {
+                _ = try state.errors.errorAtToken(
+                    cmd.keyword,
+                    "TODO: process command",
+                );
                 // unreachable
             },
         }
