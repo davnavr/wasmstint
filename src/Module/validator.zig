@@ -336,6 +336,16 @@ const Label = struct {
     copy_count: u8,
     pop_count: u8,
 
+    fn calculatePopCount(
+        ctrl_stack: *const CtrlStack,
+        target_frame_height: u28,
+    ) Module.LimitError!u8 {
+        return std.math.cast(
+            u8,
+            ctrl_stack.at(ctrl_stack.len - 1).info.height - target_frame_height,
+        ) orelse Error.WasmImplementationLimit;
+    }
+
     fn read(reader: *Module.Reader, ctrl_stack: *const CtrlStack, module: *const Module) Error!Label {
         const idx = try reader.readUleb128(u32);
         const frame: *const CtrlFrame = if (idx < ctrl_stack.len)
@@ -348,8 +358,7 @@ const Label = struct {
             .idx = idx,
             .copy_count = std.math.cast(u8, frame.labelTypes(module).len) orelse
                 return Error.WasmImplementationLimit,
-            .pop_count = std.math.cast(u8, ctrl_stack.at(ctrl_stack.len - 1).info.height - frame.info.height) orelse
-                return Error.WasmImplementationLimit,
+            .pop_count = try calculatePopCount(ctrl_stack, frame.info.height),
         };
     }
 };
@@ -645,7 +654,7 @@ fn doValidation(
                     module,
                 );
 
-                // No need to push a fixup lists, since destination of a branch to a loop is already known
+                // No need to push a fixup list, since destination of a branch to a loop is already known
             },
             .@"if" => {
                 const block_type = try BlockType.read(reader, module);
@@ -663,7 +672,7 @@ fn doValidation(
                 );
 
                 // TODO: Skip branch fixup processing for unreachable code.
-                try side_table.pushFixupList(scratch);
+                try side_table.pushFixupList(scratch); // going to 'else'
 
                 _ = try side_table.append(
                     scratch,
@@ -672,6 +681,8 @@ fn doValidation(
                     0,
                     0,
                 );
+
+                try side_table.pushFixupList(scratch); // going to 'end'
             },
             .@"else" => {
                 const frame = try popCtrlFrame(&ctrl_stack, &val_stack, module);
@@ -689,7 +700,25 @@ fn doValidation(
                     module,
                 );
 
-                // No need to modify branch fixup table, branches to the `else` go to the same place as branches to the `if`.
+                std.mem.swap(
+                    BranchFixup.List,
+                    side_table.active.at(side_table.active.len - 1),
+                    side_table.active.at(side_table.active.len - 2),
+                );
+
+                // Interpreter's `else` handler jumps to the `end`, so branches out of the `if` should be redirected to `else`
+                try side_table.popAndResolveFixups(scratch, instr_offset);
+
+                // going to 'end'
+                const block_type = frame.types.funcType(module);
+                _ = try side_table.append(
+                    scratch,
+                    instr_offset,
+                    null,
+                    std.math.cast(u8, block_type.result_count) orelse
+                        return error.WasmImplementationLimit,
+                    try Label.calculatePopCount(&ctrl_stack, frame.info.height),
+                );
             },
             .end => {
                 const frame = try popCtrlFrame(&ctrl_stack, &val_stack, module);
@@ -697,6 +726,9 @@ fn doValidation(
                 if (frame.info.opcode != .loop) {
                     // TODO: Skip branch fixup processing for unreachable code.
                     try side_table.popAndResolveFixups(scratch, instr_offset);
+
+                    if (frame.info.opcode == .@"if")
+                        try side_table.popAndResolveFixups(scratch, instr_offset);
                 }
 
                 try val_stack.pushMany(scratch, frame.types.funcType(module).results());
