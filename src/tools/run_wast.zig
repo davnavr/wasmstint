@@ -674,8 +674,16 @@ fn runScript(
     for (script.commands.items(script.arena)) |cmd| {
         defer _ = state.cmd_arena.reset(.retain_capacity);
 
-        var fuel = wasmstint.Interpreter.Fuel{ .remaining = 2000 };
-        var interp = try wasmstint.Interpreter.init(state.cmd_arena.allocator(), .{});
+        // Some tests e.g. `fac.wast` have really nested recursive calls.
+        var fuel = wasmstint.Interpreter.Fuel{ .remaining = 1_000_000 };
+        const interp_options = wasmstint.Interpreter.InitOptions{
+            .value_stack_capacity = 100_000,
+            .call_stack_capacity = 10_000,
+        };
+        var interp = try wasmstint.Interpreter.init(
+            state.cmd_arena.allocator(),
+            interp_options,
+        );
         defer interp.reset();
 
         switch (cmd.keyword.tag(script.tree)) {

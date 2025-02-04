@@ -3,6 +3,7 @@
 //! Based on <https://doi.org/10.48550/arXiv.2205.01183>.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const runtime = @import("runtime.zig");
 const Module = @import("Module.zig");
@@ -69,9 +70,9 @@ pub const Fuel = extern struct {
 
 pub const InitOptions = struct {
     /// The initial size, in bytes, of the value stack.
-    value_stack_capacity: u32 = @sizeOf(Value) * 512,
+    value_stack_capacity: u32 = @sizeOf(Value) * 600,
     /// The initial capacity, in numbers of stack frames, of the call stack.
-    call_stack_capacity: u32 = 64,
+    call_stack_capacity: u32 = 100,
 };
 
 pub fn init(alloca: Allocator, options: InitOptions) Allocator.Error!Interpreter {
@@ -342,14 +343,18 @@ pub fn beginCall(
         );
     }
 
-    try interp.callEntryPoint(
+    const entry_point = try interp.setupStackFrame(
         alloca,
         callee,
         values_base,
         signature,
         &interp.dummy_instantiate_flag,
-        fuel,
     );
+
+    switch (entry_point) {
+        .wasm => interp.enterMainLoop(fuel),
+        .host, .complete => {},
+    }
 }
 
 pub fn instantiateModule(
@@ -358,7 +363,7 @@ pub fn instantiateModule(
     module_inst: *runtime.ModuleInst,
     fuel: *Fuel,
 ) Error!void {
-    try interp.callEntryPoint(
+    const entry_point = try interp.setupStackFrame(
         alloca,
         module_inst.funcAddr(
             module_inst.module.inner.start.get() orelse {
@@ -369,19 +374,26 @@ pub fn instantiateModule(
         std.math.cast(u32, interp.value_stack.items.len) orelse return Error.OutOfMemory,
         &Module.FuncType.empty,
         &module_inst.instantiated,
-        fuel,
     );
+
+    switch (entry_point) {
+        .wasm => interp.enterMainLoop(fuel),
+        .host, .complete => {},
+    }
 }
 
-fn callEntryPoint(
+/// Pushes a new frame onto the call stack, with function arguments expected to already be on the stack.
+///
+/// Asserts that there is already enough space on the call stack.
+fn setupStackFrame(
     interp: *Interpreter,
     alloca: Allocator,
     callee: runtime.FuncAddr,
     values_base: u32,
     signature: *const Module.FuncType,
     instantiate_flag: *bool,
-    fuel: *Fuel,
-) Error!void {
+) Allocator.Error!enum { host, wasm, complete } {
+    std.debug.assert(interp.value_stack.items[values_base..].len >= signature.param_count);
     switch (callee.expanded()) {
         .wasm => |wasm| {
             const code: *const Module.Code = wasm.code();
@@ -389,7 +401,7 @@ fn callEntryPoint(
             switch (code.state.flag.load(.acquire)) {
                 .init, .validating => {
                     interp.state = .awaiting_lazy_validation;
-                    return;
+                    return .complete;
                 },
                 // TODO: Only have a single `.finished` flag.
                 .successful, .failed => {},
@@ -398,15 +410,13 @@ fn callEntryPoint(
             if (code.state.@"error") |_| {
                 @branchHint(.cold);
                 interp.state = .{ .trapped = TrapCode.lazy_validation_failed };
-                return;
+                return .complete;
             }
 
             const total_values = try interp.allocateValueStackSpace(alloca, code);
 
-            errdefer comptime unreachable;
-
-            interp.call_stack.append(
-                undefined,
+            try interp.call_stack.append(
+                alloca,
                 StackFrame{
                     .function = callee,
                     .instructions = Instructions.init(code.state.instructions, code.state.instructions_end),
@@ -416,15 +426,12 @@ fn callEntryPoint(
                     .result_count = signature.result_count,
                     .instantiate_flag = instantiate_flag,
                 },
-            ) catch unreachable;
-
-            interp.enterMainLoop(fuel);
+            );
+            return .wasm;
         },
         .host => {
-            errdefer comptime unreachable;
-
-            interp.call_stack.append(
-                undefined,
+            try interp.call_stack.append(
+                alloca,
                 StackFrame{
                     .function = callee,
                     .instructions = undefined,
@@ -434,7 +441,8 @@ fn callEntryPoint(
                     .result_count = signature.result_count,
                     .instantiate_flag = instantiate_flag,
                 },
-            ) catch unreachable;
+            );
+            return .host;
         },
     }
 }
@@ -901,7 +909,7 @@ fn PrefixDispatchTable(comptime prefix: opcodes.ByteOpcode, comptime Opcode: typ
             );
         }
 
-        const invalid: OpcodeHandler = switch (@import("builtin").mode) {
+        const invalid: OpcodeHandler = switch (builtin.mode) {
             .Debug, .ReleaseSafe => panicInvalidInstruction,
             .ReleaseFast, .ReleaseSmall => undefined,
         };
@@ -919,6 +927,66 @@ fn PrefixDispatchTable(comptime prefix: opcodes.ByteOpcode, comptime Opcode: typ
 
 const fc_prefixed_dispatch = PrefixDispatchTable(.@"0xFC", opcodes.FCPrefixOpcode);
 
+const no_allocation = struct {
+    const vtable = Allocator.VTable{
+        .alloc = noAlloc,
+        .resize = Allocator.noResize,
+        .free = neverFree,
+    };
+
+    fn noAlloc(_: *anyopaque, _: usize, _: u8, _: usize) ?[*]u8 {
+        @branchHint(.cold);
+        return null;
+    }
+
+    fn noResize(_: *anyopaque, _: []u8, _: u8, _: usize, _: usize) bool {
+        @branchHint(.cold);
+        return false;
+    }
+
+    fn neverFree(_: *anyopaque, _: []u8, _: u8, _: usize) void {
+        unreachable;
+    }
+
+    const allocator = Allocator{ .ptr = undefined, .vtable = &vtable };
+};
+
+fn addPtrWithOffset(ptr: anytype, offset: isize) @TypeOf(ptr) {
+    return @ptrFromInt(@as(
+        usize,
+        @bitCast(@as(isize, @bitCast(@intFromPtr(ptr))) + (offset * @sizeOf(std.meta.Child(@TypeOf(ptr))))),
+    ));
+}
+
+inline fn takeBranch(
+    i: *Instructions,
+    s: *Stp,
+    vals: *ValStack,
+    target: Module.Code.SideTableEntry,
+) void {
+    i.p = addPtrWithOffset(i.p, target.delta_ip.done);
+    std.debug.assert(@intFromPtr(i.p) <= @intFromPtr(i.ep));
+    s.* = addPtrWithOffset(s.*, target.delta_stp);
+    const src = vals.items[vals.items.len - target.copy_count ..];
+    std.mem.copyBackwards(
+        Value,
+        vals.items[vals.items.len - target.pop_count ..][0..target.copy_count],
+        src,
+    );
+}
+
+inline fn postBranchBoundsCheck(i: *Instructions, s: *const Stp, int: *Interpreter) void {
+    if (builtin.mode != .Debug) return;
+    const code = int.currentFrame().function.expanded().wasm.code();
+    const ip = @intFromPtr(i.p);
+    std.debug.assert(@intFromPtr(code.state.instructions) <= ip);
+    std.debug.assert(ip <= @intFromPtr(code.state.instructions_end));
+
+    const sp = @intFromPtr(s.*);
+    std.debug.assert(@intFromPtr(code.state.side_table_ptr) <= sp);
+    std.debug.assert(sp <= @intFromPtr(code.state.side_table_ptr + code.state.side_table_len));
+}
+
 const opcode_handlers = struct {
     fn panicInvalidInstruction(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         _ = s;
@@ -935,16 +1003,102 @@ const opcode_handlers = struct {
         std.debug.panic("invalid instruction 0x{X:0>2} ({s})", .{ bad_opcode, opcode_name });
     }
 
-    const invalid: OpcodeHandler = switch (@import("builtin").mode) {
+    const invalid: OpcodeHandler = switch (builtin.mode) {
         .Debug, .ReleaseSafe => panicInvalidInstruction,
         .ReleaseFast, .ReleaseSmall => undefined,
     };
+
+    pub fn @"unreachable"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        _ = i;
+        _ = s;
+        _ = loc;
+        _ = vals;
+        _ = fuel;
+        int.state = .{ .trapped = .unreachable_code_reached };
+    }
+
+    pub fn nop(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    pub const block = nop;
+    pub const loop = nop;
+
+    pub fn @"if"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const c = vals.pop().i32;
+        if (c == 0) {
+            takeBranch(i, s, vals, s.*[0]);
+            postBranchBoundsCheck(i, s, int);
+        }
+
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    pub fn @"else"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        takeBranch(i, s, vals, s.*[0]);
+
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
 
     pub fn end(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         if (@intFromPtr(i.p - 1) == @intFromPtr(i.ep)) {
             int.returnFromWasm(loc);
         } else if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    //fn return
+
+    pub fn call(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const func_idx = i.readUleb128(@typeInfo(Module.FuncIdx).@"enum".tag_type) catch unreachable;
+        const current_frame = int.currentFrame();
+        const current_function = current_frame.function.expanded().wasm;
+        const target_function = current_function.module.funcAddr(@enumFromInt(func_idx));
+        const signature = current_frame.function.signature();
+
+        // Overlap trick to avoid copying arguments.
+        const values_base = @as(u32, @intCast(vals.items.len)) - signature.param_count;
+
+        const entry_point = int.setupStackFrame(
+            no_allocation.allocator,
+            target_function,
+            values_base,
+            signature,
+            &int.dummy_instantiate_flag,
+        ) catch |e| switch (e) {
+            error.OutOfMemory => {
+                // Could set ip back to before the call instruction to allow trying again.
+                // std.debug.print("call stack depth: {}\n", .{int.call_stack.items.len});
+                int.state = .{ .interrupted = .call_stack_exhaustion };
+                return;
+            },
+        };
+
+        switch (entry_point) {
+            .wasm => {
+                _ = s;
+                std.debug.assert(loc <= values_base);
+
+                const new_frame = int.currentFrame();
+                if (new_frame.instructions.nextOpcodeHandler(fuel, int)) |next| {
+                    @call(
+                        .always_tail,
+                        next,
+                        .{ &new_frame.instructions, &new_frame.branch_table, values_base, vals, fuel, int },
+                    );
+                }
+            },
+            .host => {
+                int.state = State{ .awaiting_host = signature.parameters() };
+            },
+            .complete => {},
         }
     }
 
@@ -1127,6 +1281,7 @@ const opcode_handlers = struct {
 /// If the handler is not appearing in this table, make sure it is public first.
 const byte_dispatch_table = dispatchTable(opcodes.ByteOpcode, opcode_handlers.invalid);
 
+/// Given a WASM function at the top of the call stack, resumes execution.
 fn enterMainLoop(interp: *Interpreter, fuel: *Fuel) void {
     std.debug.assert(interp.state == .awaiting_host);
 
