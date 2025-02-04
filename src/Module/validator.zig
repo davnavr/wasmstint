@@ -22,7 +22,12 @@ pub const Error = error{InvalidWasm} ||
 
 /// Describes the changes to interpreter state should occur if its corresponding branch is taken.
 pub const SideTableEntry = packed struct(u64) {
-    delta_ip: i32,
+    delta_ip: packed union {
+        done: i32,
+        /// Offset from the first byte of the first instruction to the first byte of the
+        /// branch instruction.
+        fixup_origin: u32,
+    },
     delta_stp: i16,
     copy_count: u8,
     pop_count: u8,
@@ -355,7 +360,7 @@ fn pushCtrlFrame(
     arena: *ArenaAllocator,
     ctrl_stack: *CtrlStack,
     val_stack: *ValStack,
-    side_table: *const SideTableBuf,
+    side_table: *const SideTableBuilder,
     opcode: CtrlFrame.Opcode,
     offset: u32,
     block_type: BlockType,
@@ -371,8 +376,7 @@ fn pushCtrlFrame(
                     return Error.WasmImplementationLimit,
             },
             .offset = offset,
-            .side_table_idx = std.math.cast(u32, side_table.len) orelse
-                return Error.WasmImplementationLimit,
+            .side_table_idx = try side_table.nextEntryIdx(),
         },
     );
 
@@ -400,101 +404,124 @@ fn markUnreachable(val_stack: *ValStack, ctrl_stack: *CtrlStack) void {
     current_frame.info.@"unreachable" = true;
 }
 
-const SideTableBuf = std.SegmentedList(SideTableEntry, 4);
-
-const BranchFixup = packed struct(u64) {
-    /// Offset from the first byte of the first instruction to the first byte of the
-    /// branch instruction.
-    origin: u32, // Could stash this field in the SideTableEntry.delta_ip instead, @bitCast-ed.
+const BranchFixup = packed struct(u32) {
     entry_idx: u32,
 
     const List = std.SegmentedList(BranchFixup, 4);
+};
 
-    fn resolveList(fixups: *const List, end_offset: u32, entries: *SideTableBuf) Module.LimitError!void {
-        const target_side_table_idx = std.math.cast(u32, entries.len) orelse
+const SideTableBuilder = struct {
+    entries: std.SegmentedList(SideTableEntry, 4) = .{},
+    active: std.SegmentedList(BranchFixup.List, 4) = .{},
+    free: std.SegmentedList(BranchFixup.List, 4) = .{},
+
+    fn nextEntryIdx(table: *const SideTableBuilder) Module.LimitError!u32 {
+        return std.math.cast(u32, table.entries.len) orelse return error.WasmImplementationLimit;
+    }
+
+    fn pushFixupList(table: *SideTableBuilder, arena: *ArenaAllocator) Allocator.Error!void {
+        const pushed = try table.active.addOne(arena.allocator());
+        pushed.* = table.free.pop() orelse BranchFixup.List{};
+        std.debug.assert(pushed.len == 0);
+    }
+
+    const KnownTarget = struct {
+        instr_offset: u32,
+        side_table_idx: u32,
+    };
+
+    fn append(
+        table: *SideTableBuilder,
+        arena: *ArenaAllocator,
+        origin: u32,
+        known_target: ?KnownTarget,
+        copy_count: u8,
+        pop_count: u8,
+    ) (Module.LimitError || Allocator.Error)!u32 {
+        const idx = try table.nextEntryIdx();
+        const entry = try table.entries.addOne(arena.allocator());
+        entry.copy_count = copy_count;
+        entry.pop_count = pop_count;
+        if (known_target) |target| {
+            // TODO: +1 to go directly to the loop body.
+            const delta_ip = std.math.negateCast(origin - target.instr_offset) catch
+                return Error.WasmImplementationLimit;
+
+            entry.delta_ip = .{ .done = delta_ip };
+
+            const delta_stp = std.math.negateCast(idx - target.side_table_idx) catch
+                return Error.WasmImplementationLimit;
+
+            entry.delta_stp = std.math.cast(i16, delta_stp) orelse
+                return Error.WasmImplementationLimit;
+        } else {
+            entry.delta_ip = .{ .fixup_origin = origin };
+            entry.delta_stp = undefined;
+
+            const current_list: *BranchFixup.List = table.active.at(table.active.len - 1);
+            try current_list.append(
+                arena.allocator(),
+                BranchFixup{ .entry_idx = idx },
+            );
+        }
+
+        return idx;
+    }
+
+    fn resolveFixupList(table: *SideTableBuilder, fixups: *const BranchFixup.List, end_offset: u32) Module.LimitError!void {
+        const target_side_table_idx = std.math.cast(u32, table.entries.len) orelse
             return error.WasmImplementationLimit;
 
         var iter_fixups = fixups.constIterator(0);
         while (iter_fixups.next()) |fixup_entry| {
-            const entry: *SideTableEntry = entries.at(fixup_entry.entry_idx);
+            const entry: *SideTableEntry = table.entries.at(fixup_entry.entry_idx);
+            const origin = entry.delta_ip.fixup_origin;
 
             // TODO: +1 to go directly to the block body.
-            entry.delta_ip = std.math.cast(i32, end_offset - fixup_entry.origin) orelse
+            entry.delta_ip.done = std.math.cast(i32, end_offset - origin) orelse
                 return error.WasmImplementationLimit;
 
             entry.delta_stp = std.math.cast(i16, target_side_table_idx - fixup_entry.entry_idx) orelse
                 return error.WasmImplementationLimit;
         }
     }
-};
-
-const BranchFixupStack = struct {
-    active: std.SegmentedList(BranchFixup.List, 4) = .{},
-    free: std.SegmentedList(BranchFixup.List, 4) = .{},
-
-    fn push(fixups: *BranchFixupStack, arena: *ArenaAllocator) Allocator.Error!void {
-        const to_push = fixups.free.pop() orelse BranchFixup.List{};
-        std.debug.assert(to_push.len == 0);
-        try fixups.active.append(arena.allocator(), to_push);
-    }
-
-    fn append(fixups: *BranchFixupStack, arena: *ArenaAllocator, entry: BranchFixup) Allocator.Error!void {
-        const current_list: *BranchFixup.List = fixups.active.at(fixups.active.len - 1);
-        try current_list.append(arena.allocator(), entry);
-    }
 
     /// Asserts that `active.len > 0`, and that all of the branch fixup entries correspond to branches
     /// that are placed before `end_offset`.
-    fn popAndResolve(
-        fixups: *BranchFixupStack,
+    fn popAndResolveFixups(
+        table: *SideTableBuilder,
         arena: *ArenaAllocator,
         end_offset: u32,
-        entries: *SideTableBuf,
     ) Module.LimitError!void {
-        var to_fixup: BranchFixup.List = fixups.active.pop().?;
+        var to_fixup: BranchFixup.List = table.active.pop().?;
         defer {
             to_fixup.clearRetainingCapacity();
-            fixups.free.append(arena.allocator(), to_fixup) catch {};
+            table.free.append(arena.allocator(), to_fixup) catch {};
         }
 
-        try BranchFixup.resolveList(&to_fixup, end_offset, entries);
+        try table.resolveFixupList(&to_fixup, end_offset);
     }
 };
 
 fn appendSideTableEntry(
     arena: *ArenaAllocator,
-    side_table: *SideTableBuf,
-    branch_fixups: *BranchFixupStack,
+    side_table: *SideTableBuilder,
     origin_offset: u32,
     target: Label,
 ) Error!void {
-    const side_table_idx = std.math.cast(u32, side_table.len) orelse
-        return Error.WasmImplementationLimit;
-
-    const entry: *SideTableEntry = try side_table.addOne(arena.allocator());
-    entry.* = .{
-        .copy_count = target.copy_count,
-        .pop_count = target.pop_count,
-        .delta_ip = undefined,
-        .delta_stp = undefined,
-    };
-
-    if (target.frame.info.opcode == .loop) {
-        // TODO: +1 to go directly to the loop body.
-        entry.delta_ip = std.math.negateCast(origin_offset - target.frame.offset) catch
-            return Error.WasmImplementationLimit;
-
-        const delta_stp = std.math.negateCast(side_table_idx - target.frame.side_table_idx) catch
-            return Error.WasmImplementationLimit;
-
-        entry.delta_stp = std.math.cast(i16, delta_stp) orelse
-            return Error.WasmImplementationLimit;
-    } else {
-        try branch_fixups.append(arena, .{
-            .origin = origin_offset,
-            .entry_idx = side_table_idx,
-        });
-    }
+    _ = try side_table.append(
+        arena,
+        origin_offset,
+        if (target.frame.info.opcode == .loop)
+            .{
+                .instr_offset = target.frame.offset,
+                .side_table_idx = target.frame.side_table_idx,
+            }
+        else
+            null,
+        target.copy_count,
+        target.pop_count,
+    );
 }
 
 fn doValidation(
@@ -557,7 +584,7 @@ fn doValidation(
         break :locals buf;
     };
 
-    var side_table = SideTableBuf{};
+    var side_table = SideTableBuilder{};
     _ = &side_table;
 
     var ctrl_stack = CtrlStack{};
@@ -574,8 +601,7 @@ fn doValidation(
         },
     ) catch unreachable;
 
-    var branch_fixups = BranchFixupStack{};
-    branch_fixups.push(scratch) catch unreachable;
+    side_table.pushFixupList(scratch) catch unreachable;
 
     state.instructions = @ptrCast(reader.bytes.ptr);
 
@@ -603,7 +629,7 @@ fn doValidation(
                 );
 
                 // TODO: Skip branch fixup processing for unreachable code.
-                try branch_fixups.push(scratch);
+                try side_table.pushFixupList(scratch);
             },
             .loop => {
                 const block_type = try BlockType.read(reader, module);
@@ -618,6 +644,8 @@ fn doValidation(
                     block_type,
                     module,
                 );
+
+                // No need to push a fixup lists, since destination of a branch to a loop is already known
             },
             .@"if" => {
                 const block_type = try BlockType.read(reader, module);
@@ -633,8 +661,17 @@ fn doValidation(
                     block_type,
                     module,
                 );
+
                 // TODO: Skip branch fixup processing for unreachable code.
-                try branch_fixups.push(scratch);
+                try side_table.pushFixupList(scratch);
+
+                _ = try side_table.append(
+                    scratch,
+                    instr_offset,
+                    null,
+                    0,
+                    0,
+                );
             },
             .@"else" => {
                 const frame = try popCtrlFrame(&ctrl_stack, &val_stack, module);
@@ -659,7 +696,7 @@ fn doValidation(
 
                 if (frame.info.opcode != .loop) {
                     // TODO: Skip branch fixup processing for unreachable code.
-                    try branch_fixups.popAndResolve(scratch, instr_offset, &side_table);
+                    try side_table.popAndResolveFixups(scratch, instr_offset);
                 }
 
                 try val_stack.pushMany(scratch, frame.types.funcType(module).results());
@@ -667,13 +704,13 @@ fn doValidation(
             .br => {
                 const label = try Label.read(&reader, &ctrl_stack, module);
                 // TODO: Skip branch fixup processing for unreachable code.
-                try appendSideTableEntry(scratch, &side_table, &branch_fixups, instr_offset, label);
+                try appendSideTableEntry(scratch, &side_table, instr_offset, label);
                 try val_stack.popManyExpecting(&ctrl_stack, label.frame.labelTypes(module));
             },
             .br_if => {
                 const label = try Label.read(&reader, &ctrl_stack, module);
                 // TODO: Skip branch fixup processing for unreachable code.
-                try appendSideTableEntry(scratch, &side_table, &branch_fixups, instr_offset, label);
+                try appendSideTableEntry(scratch, &side_table, instr_offset, label);
                 try val_stack.popExpecting(&ctrl_stack, .i32);
                 const label_types = label.frame.labelTypes(module);
                 try val_stack.popManyExpecting(&ctrl_stack, label_types);
@@ -859,14 +896,14 @@ fn doValidation(
         return error.MalformedWasm;
 
     std.debug.assert(val_stack.len() == func_type.result_count);
-    std.debug.assert(branch_fixups.active.len == 0);
+    std.debug.assert(side_table.active.len == 0);
 
     state.instructions_end = @ptrCast(state.instructions + instr_offset);
     state.max_values = val_stack.max;
-    state.side_table_len = std.math.cast(u32, side_table.len) orelse return error.WasmImplementationLimit;
+    state.side_table_len = std.math.cast(u32, side_table.entries.len) orelse return error.WasmImplementationLimit;
     state.side_table_ptr = side_table: {
-        const copied = try allocator.alloc(SideTableEntry, side_table.len);
-        side_table.writeToSlice(copied, 0);
+        const copied = try allocator.alloc(SideTableEntry, side_table.entries.len);
+        side_table.entries.writeToSlice(copied, 0);
         break :side_table @as([]const SideTableEntry, copied).ptr;
     };
 
