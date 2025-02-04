@@ -340,10 +340,9 @@ const Label = struct {
         ctrl_stack: *const CtrlStack,
         target_frame_height: u28,
     ) Module.LimitError!u8 {
-        return std.math.cast(
-            u8,
-            ctrl_stack.at(ctrl_stack.len - 1).info.height - target_frame_height,
-        ) orelse Error.WasmImplementationLimit;
+        const current_frame_height = ctrl_stack.at(ctrl_stack.len - 1).info.height;
+        return std.math.cast(u8, current_frame_height - target_frame_height) orelse
+            Error.WasmImplementationLimit;
     }
 
     fn read(reader: *Module.Reader, ctrl_stack: *const CtrlStack, module: *const Module) Error!Label {

@@ -987,12 +987,14 @@ inline fn takeBranch(
     std.debug.assert(@intFromPtr(code.state.side_table_ptr) <= @intFromPtr(s.*));
     std.debug.assert(@intFromPtr(s.*) <= @intFromPtr(code.state.side_table_ptr + code.state.side_table_len));
 
-    const src = vals.items[vals.items.len - target.copy_count ..];
-    std.mem.copyBackwards(
-        Value,
-        vals.items[vals.items.len - target.pop_count ..][0..target.copy_count],
-        src,
-    );
+    const vals_base = vals.items.len;
+    const src = vals.items[vals_base - target.copy_count ..];
+    if (target.copy_count > target.pop_count) {
+        vals.appendNTimesAssumeCapacity(undefined, target.copy_count - target.pop_count);
+    }
+
+    const dest = vals.items[vals_base - target.pop_count ..];
+    std.mem.copyBackwards(Value, dest[0..target.copy_count], src);
 }
 
 const opcode_handlers = struct {
