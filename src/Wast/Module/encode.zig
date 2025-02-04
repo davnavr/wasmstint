@@ -148,7 +148,7 @@ const TypeDedup = struct {
                 var b_params_iter = IterParamTypes.init(b.parameters.items(ctx.arena));
                 while (a_params_iter.next(ctx.tree, ctx.arena)) |a_param| {
                     const b_param = b_params_iter.next(ctx.tree, ctx.arena) orelse return false;
-                    if (@intFromEnum(a_param) != @intFromEnum(b_param))
+                    if (a_param != b_param)
                         return false;
                 }
 
@@ -159,7 +159,7 @@ const TypeDedup = struct {
                 var b_results_iter = IterResultTypes.init(b.results.items(ctx.arena));
                 while (a_results_iter.next(ctx.tree, ctx.arena)) |a_param| {
                     const b_param = b_results_iter.next(ctx.tree, ctx.arena) orelse return false;
-                    if (@intFromEnum(a_param) != @intFromEnum(b_param))
+                    if (a_param != b_param)
                         return false;
                 }
 
@@ -632,7 +632,7 @@ fn encodeExpr(
                         try label_lookup.enter(scratch, block_type.label);
 
                         const results: []const Text.Result = block_type.type.func.results.items(arena);
-                        if (block_type.type.func.parameters.isEmpty() and results.len > 0) inline_idx: {
+                        if (block_type.type.func.parameters.isEmpty()) inline_idx: {
                             var result_type: ?ValType = null;
                             for (results) |*result_list| {
                                 const types: []const Text.ValType = result_list.types.items(arena);

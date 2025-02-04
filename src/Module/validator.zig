@@ -170,7 +170,7 @@ const BlockType = union(enum) {
         switch (block_type.*) {
             .type => |@"type"| {
                 const copied = @"type".idx.funcType(module).*;
-                return if (@"type".results_only) copied else .{
+                return if (!@"type".results_only) copied else .{
                     .param_count = 0,
                     .result_count = copied.result_count,
                     .types = copied.results().ptr,
@@ -313,6 +313,7 @@ const ValStack = struct {
     }
 
     fn popManyExpecting(val_stack: *ValStack, ctrl_stack: *const CtrlStack, expected: []const ValType) Error!void {
+        // std.debug.print("current height = {}, want to pop = {any}\n", .{ val_stack.len(), expected });
         for (0..expected.len) |i| {
             try val_stack.popExpecting(ctrl_stack, expected[expected.len - 1 - i]);
         }
@@ -375,6 +376,7 @@ fn pushCtrlFrame(
         },
     );
 
+    // std.debug.print("pushed {s} parameters = {any}\n", .{ @tagName(opcode), block_type.funcType(module).parameters() });
     try val_stack.pushMany(arena, block_type.funcType(module).parameters());
 }
 
@@ -667,6 +669,29 @@ fn doValidation(
                 // TODO: Skip branch fixup processing for unreachable code.
                 try appendSideTableEntry(scratch, &side_table, &branch_fixups, instr_offset, label);
                 try val_stack.popManyExpecting(&ctrl_stack, label.frame.labelTypes(module));
+            },
+            .br_if => {
+                const label = try Label.read(&reader, &ctrl_stack, module);
+                // TODO: Skip branch fixup processing for unreachable code.
+                try appendSideTableEntry(scratch, &side_table, &branch_fixups, instr_offset, label);
+                try val_stack.popExpecting(&ctrl_stack, .i32);
+                const label_types = label.frame.labelTypes(module);
+                try val_stack.popManyExpecting(&ctrl_stack, label_types);
+                try val_stack.pushMany(scratch, label_types);
+            },
+            .@"return" => {
+                try val_stack.popManyExpecting(&ctrl_stack, func_type.results());
+                markUnreachable(&val_stack, &ctrl_stack);
+            },
+            .call => {
+                const callee = try reader.readUleb128(u32);
+                const callee_signature: *const Module.FuncType = if (callee < module.funcTypes().len)
+                    module.funcTypes()[callee]
+                else
+                    return error.InvalidWasm;
+
+                try val_stack.popManyExpecting(&ctrl_stack, callee_signature.parameters());
+                try val_stack.pushMany(scratch, callee_signature.results());
             },
             .drop => _ = try val_stack.popAny(&ctrl_stack),
             .@"local.get" => {
