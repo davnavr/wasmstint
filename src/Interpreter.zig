@@ -1037,8 +1037,14 @@ const opcode_handlers = struct {
         }
     }
 
-    pub const block = nop;
-    pub const loop = nop;
+    pub fn block(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        i.skipBlockType();
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    pub const loop = block;
 
     pub fn @"if"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         i.skipBlockType();
