@@ -200,16 +200,10 @@ const BlockType = union(enum) {
             else
                 Error.InvalidWasm;
         } else return BlockType{
-            .single_result = switch (tag) {
-                0xFF => .i32,
-                0xFE => .i64,
-                0xFD => .f32,
-                0xFC => .f64,
-                0xFB => .v128,
-                0xF0 => .funcref,
-                0xE0 => .externref,
-                else => return Error.MalformedWasm,
-            },
+            .single_result = std.meta.intToEnum(
+                ValType,
+                byte_tag,
+            ) catch return Error.MalformedWasm,
         };
     }
 
@@ -265,7 +259,11 @@ const ValStack = struct {
     fn pushMany(val_stack: *ValStack, arena: *ArenaAllocator, types: []const ValType) Error!void {
         const new_len = std.math.add(u16, val_stack.len(), @intCast(types.len)) catch
             return Error.WasmImplementationLimit;
-        try val_stack.buf.growCapacity(arena.allocator(), new_len);
+
+        if (new_len > ValTypeBuf.prealloc_count) {
+            try val_stack.buf.growCapacity(arena.allocator(), new_len);
+        }
+
         for (types) |ty| val_stack.buf.append(undefined, ty) catch unreachable;
         val_stack.max = @max(new_len, val_stack.max);
     }
