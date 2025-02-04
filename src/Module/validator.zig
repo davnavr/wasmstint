@@ -185,23 +185,29 @@ const BlockType = union(enum) {
         }
     }
 
-    fn read(reader: *Module.Reader, module: *const Module) Error!BlockType {
-        var byte_reader = reader.*;
-        const byte_tag = try byte_reader.readByte();
-        const tag_int = try reader.readIleb128(i33);
+    fn read(reader: Module.Reader, module: *const Module) Error!BlockType {
+        var int_bytes = reader.bytes.*;
+        const int_reader = Module.Reader{ .bytes = &int_bytes };
+        const tag_int = try int_reader.readIleb128(i33);
+
+        var byte_bytes = reader.bytes.*;
+        const byte_reader = Module.Reader{ .bytes = &byte_bytes };
+        const byte_tag = byte_reader.readByte() catch unreachable;
+
         if (byte_tag == 0x40) {
-            reader.* = byte_reader;
+            reader.bytes.* = byte_bytes;
             return BlockType.void;
         } else if (tag_int >= 0) {
             const idx = std.math.cast(@typeInfo(Module.TypeIdx).@"enum".tag_type, tag_int) orelse
                 return Error.WasmImplementationLimit;
 
+            reader.bytes.* = int_bytes;
             return if (idx < module.inner.types_count)
                 BlockType{ .type = .{ .idx = @enumFromInt(idx) } }
             else
                 Error.InvalidWasm;
         } else {
-            reader.* = byte_reader;
+            reader.bytes.* = byte_bytes;
             return BlockType{
                 .single_result = std.meta.intToEnum(
                     ValType,
@@ -275,7 +281,6 @@ const ValStack = struct {
     fn popAny(val_stack: *ValStack, ctrl_stack: *const CtrlStack) Error!Val {
         const current_frame: *const CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
         if (val_stack.len() == current_frame.info.height) {
-            std.debug.print("INFO: current len = {}, frame height = {}\n", .{ val_stack.len(), current_frame.info.height });
             return if (current_frame.info.@"unreachable") Val.unknown else Error.InvalidWasm;
         }
 
@@ -308,7 +313,6 @@ const ValStack = struct {
     }
 
     fn popManyExpecting(val_stack: *ValStack, ctrl_stack: *const CtrlStack, expected: []const ValType) Error!void {
-        std.debug.print("WANT TO POP {} ENTRIES: {any}\n", .{ expected.len, expected });
         for (0..expected.len) |i| {
             try val_stack.popExpecting(ctrl_stack, expected[expected.len - 1 - i]);
         }
@@ -578,12 +582,12 @@ fn doValidation(
         // Offset from the first byte of the first instruction to the first byte of the instruction being parsed.
         instr_offset = @intCast(@intFromPtr(reader.bytes.ptr) - @intFromPtr(state.instructions));
         const byte_tag = try reader.readByteTag(opcodes.ByteOpcode);
-        std.debug.print("validate: {}\n", .{byte_tag});
+        // std.debug.print("validate: {}\n", .{byte_tag});
         switch (byte_tag) {
             .@"unreachable" => markUnreachable(&val_stack, &ctrl_stack),
             .nop => {},
             .block => {
-                const block_type = try BlockType.read(&reader, module);
+                const block_type = try BlockType.read(reader, module);
                 try val_stack.popManyExpecting(&ctrl_stack, block_type.funcType(module).parameters());
                 try pushCtrlFrame(
                     scratch,
@@ -600,7 +604,7 @@ fn doValidation(
                 try branch_fixups.push(scratch);
             },
             .loop => {
-                const block_type = try BlockType.read(&reader, module);
+                const block_type = try BlockType.read(reader, module);
                 try val_stack.popManyExpecting(&ctrl_stack, block_type.funcType(module).parameters());
                 try pushCtrlFrame(
                     scratch,
@@ -614,7 +618,7 @@ fn doValidation(
                 );
             },
             .@"if" => {
-                const block_type = try BlockType.read(&reader, module);
+                const block_type = try BlockType.read(reader, module);
                 try val_stack.popExpecting(&ctrl_stack, .i32);
                 try val_stack.popManyExpecting(&ctrl_stack, block_type.funcType(module).parameters());
                 try pushCtrlFrame(
