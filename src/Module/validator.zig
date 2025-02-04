@@ -706,8 +706,8 @@ fn doValidation(
                     side_table.active.at(side_table.active.len - 2),
                 );
 
-                // Interpreter's `else` handler jumps to the `end`, so branches out of the `if` should be redirected to `else`
-                try side_table.popAndResolveFixups(scratch, instr_offset);
+                // Interpreter's `else` handler jumps to the `end`, so failing branch in `if` should be redirected to `else` body.
+                try side_table.popAndResolveFixups(scratch, instr_offset + 1);
 
                 // going to 'end'
                 const block_type = frame.types.funcType(module);

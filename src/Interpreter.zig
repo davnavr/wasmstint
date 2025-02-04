@@ -968,39 +968,31 @@ const no_allocation = struct {
 };
 
 fn addPtrWithOffset(ptr: anytype, offset: isize) @TypeOf(ptr) {
-    return @ptrFromInt(@as(
-        usize,
-        @bitCast(@as(isize, @bitCast(@intFromPtr(ptr))) + (offset * @sizeOf(std.meta.Child(@TypeOf(ptr))))),
-    ));
+    return if (offset < 0) ptr - @abs(offset) else ptr + @as(usize, @intCast(offset));
 }
 
 inline fn takeBranch(
+    interp: *Interpreter,
     i: *Instructions,
     s: *Stp,
     vals: *ValStack,
     target: Module.Code.SideTableEntry,
 ) void {
+    const code = interp.currentFrame().function.expanded().wasm.code();
     i.p = addPtrWithOffset(i.p, target.delta_ip.done);
+    std.debug.assert(@intFromPtr(code.state.instructions) <= @intFromPtr(i.p));
     std.debug.assert(@intFromPtr(i.p) <= @intFromPtr(i.ep));
+
     s.* = addPtrWithOffset(s.*, target.delta_stp);
+    std.debug.assert(@intFromPtr(code.state.side_table_ptr) <= @intFromPtr(s.*));
+    std.debug.assert(@intFromPtr(s.*) <= @intFromPtr(code.state.side_table_ptr + code.state.side_table_len));
+
     const src = vals.items[vals.items.len - target.copy_count ..];
     std.mem.copyBackwards(
         Value,
         vals.items[vals.items.len - target.pop_count ..][0..target.copy_count],
         src,
     );
-}
-
-inline fn postBranchBoundsCheck(i: *Instructions, s: *const Stp, int: *Interpreter) void {
-    if (builtin.mode != .Debug) return;
-    const code = int.currentFrame().function.expanded().wasm.code();
-    const ip = @intFromPtr(i.p);
-    std.debug.assert(@intFromPtr(code.state.instructions) <= ip);
-    std.debug.assert(ip <= @intFromPtr(code.state.instructions_end));
-
-    const sp = @intFromPtr(s.*);
-    std.debug.assert(@intFromPtr(code.state.side_table_ptr) <= sp);
-    std.debug.assert(sp <= @intFromPtr(code.state.side_table_ptr + code.state.side_table_len));
 }
 
 const opcode_handlers = struct {
@@ -1047,8 +1039,9 @@ const opcode_handlers = struct {
         const c = vals.pop().i32;
         std.debug.print(" > (if) {}?\n", .{c != 0});
         if (c == 0) {
-            takeBranch(i, s, vals, s.*[0]);
-            postBranchBoundsCheck(i, s, int);
+            int.takeBranch(i, s, vals, s.*[0]);
+        } else {
+            s.* += 1;
         }
 
         if (i.nextOpcodeHandler(fuel, int)) |next| {
@@ -1057,8 +1050,7 @@ const opcode_handlers = struct {
     }
 
     pub fn @"else"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        takeBranch(i, s, vals, s.*[0]);
-        postBranchBoundsCheck(i, s, int);
+        int.takeBranch(i, s, vals, s.*[0]);
 
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
