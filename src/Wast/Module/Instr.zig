@@ -36,6 +36,7 @@ pub const Arguments = union {
     block_type: *align(4) const BlockType,
     ident: *align(4) const Ident,
     ident_opt: *align(4) const Ident.Opt,
+    label: *align(4) const Ident.Symbolic,
     call_indirect: *align(4) const CallIndirect,
     br_table: *align(4) const BrTable,
     select: *align(4) const Select,
@@ -90,7 +91,11 @@ pub const List = struct {
     ) error{OutOfMemory}!void {
         const Args: type = @TypeOf(arguments);
 
-        std.debug.assert(Arguments.tagFromType(Args) == argumentTag(Lexer.Token.tagToInstrTag(keyword.tag(tree))));
+        const expected = Arguments.tagFromType(Args);
+        const actual = argumentTag(Lexer.Token.tagToInstrTag(keyword.tag(tree)));
+        if (expected != actual and @import("builtin").mode == .Debug) {
+            std.debug.panic("{} != {} for {s}", .{ expected, actual, @typeName(Args) });
+        }
 
         const word_count: usize = comptime (IndexedArena.byteSizeToWordCount(@sizeOf(Args)) catch unreachable) + 1;
 
@@ -227,7 +232,7 @@ pub const MemArg = struct {
 };
 
 pub const BlockType = struct {
-    label: Ident.Opt align(4),
+    label: Ident.Symbolic align(4),
     type: TypeUse,
 
     pub fn parseContents(
@@ -238,7 +243,7 @@ pub const BlockType = struct {
         scratch: *ArenaAllocator,
     ) sexpr.Parser.ParseError!BlockType {
         return .{
-            .label = try Ident.Opt.parse(contents, ctx, caches.allocator, &caches.ids),
+            .label = try Ident.Symbolic.parse(contents, ctx.tree, caches.allocator, &caches.ids),
             .type = try TypeUse.parseContents(contents, ctx, arena, caches, scratch),
         };
     }
@@ -403,6 +408,7 @@ pub fn argumentTag(instr: Lexer.Token.InstrTag) std.meta.FieldEnum(Arguments) {
         => .ident,
         .@"else",
         .end,
+        => .label,
         .@"memory.size",
         .@"memory.grow",
         .@"table.get",
@@ -482,6 +488,16 @@ pub fn parseArgs(
                 contents,
                 ctx,
                 parent,
+                caches.allocator,
+                &caches.ids,
+            );
+
+            try list.append(list_arena, keyword, ident, ctx.tree);
+        },
+        .label => {
+            const ident = try Ident.Symbolic.parse(
+                contents,
+                ctx.tree,
                 caches.allocator,
                 &caches.ids,
             );

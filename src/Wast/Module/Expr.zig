@@ -266,7 +266,7 @@ fn parseInstrList(
                     then_branch = undefined;
 
                     if (else_branch.keyword.get()) |else_keyword| {
-                        try output.append(instr_list_arena, else_keyword, Ident.Opt.none, ctx.tree);
+                        try output.append(instr_list_arena, else_keyword, Ident.Symbolic.none, ctx.tree);
 
                         // Recursive call!
                         _ = scratch.reset(.retain_capacity);

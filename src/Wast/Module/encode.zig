@@ -76,7 +76,11 @@ pub const ValType = enum(u8) {
 pub const Type = *const Text.Type.Func;
 
 pub const TypeIdx = enum(u32) { _ };
-pub const FuncIdx = enum(u32) { _ };
+
+pub const FuncIdx = enum(u32) {
+    probably_invalid = std.math.maxInt(u32),
+    _,
+};
 
 const IterParamTypes = struct {
     types: []const Text.ValType,
@@ -431,34 +435,123 @@ pub const LocalIdx = enum(u32) {
 };
 
 pub const FuncContext = struct {
-    local_lookup: std.AutoHashMapUnmanaged(Ident.Interned, LocalIdx) = .empty,
+    local_lookup: IdentLookup(LocalIdx) = .empty,
     local_counter: IdxCounter(LocalIdx) = .{},
 
-    fn getLocalIdx(
-        ctx: *const FuncContext,
-        text: *TextContext,
-        ident: Ident,
-    ) Allocator.Error!LocalIdx {
-        switch (ident.toUnion(text.tree)) {
-            .symbolic => |interned| if (ctx.local_lookup.get(interned)) |idx| {
-                return idx;
-            } else {
-                _ = try text.errorAtToken(ident.token, "local variable with name does not exist");
-                return .probably_invalid;
-            },
-            .numeric => |idx| return @enumFromInt(idx),
+    fn reset(ctx: *FuncContext) void {
+        ctx.local_lookup.inner.map.clearRetainingCapacity();
+        ctx.local_counter = .{};
+    }
+};
+
+fn checkMatchingLabels(
+    text: *TextContext,
+    popped: ?Ident.Interned,
+    label: Ident.Symbolic,
+    cache: *const Ident.Cache,
+) Allocator.Error!void {
+    if (popped) |expected| {
+        if (label.some and label.ident != expected) {
+            _ = try text.errorFmtAtToken(
+                label.token,
+                "mismatching label '{s}' != '{s}'",
+                .{
+                    expected.get(text.tree, cache),
+                    label.ident.get(text.tree, cache),
+                },
+            );
+        }
+    } else if (label.some) {
+        _ = try text.errorAtToken(label.token, "unexpected label");
+    }
+}
+
+const LabelLookup = struct {
+    stack: std.SegmentedList(?Ident.Interned, 4) = .{},
+    map: std.AutoHashMapUnmanaged(Ident.Interned, Entry) = .empty,
+
+    const LabelId = enum(u32) { _ };
+
+    const Entry = struct {
+        /// Always `>= 0`.
+        count: u32,
+        id: LabelId,
+    };
+
+    fn enter(
+        labels: *LabelLookup,
+        arena: *ArenaAllocator,
+        block: Ident.Symbolic,
+    ) Allocator.Error!void {
+        const label_id: LabelId = @enumFromInt(std.math.cast(u32, labels.stack.len) orelse return error.OutOfMemory);
+        try labels.stack.append(arena.allocator(), if (block.some) block.ident else null);
+        if (block.some) {
+            const entry = try labels.map.getOrPut(arena.allocator(), block.ident);
+            entry.value_ptr.* = .{
+                .id = label_id,
+                .count = if (entry.found_existing)
+                    std.math.add(u32, entry.value_ptr.count, 1) catch
+                        return error.OutOfMemory
+                else
+                    1,
+            };
         }
     }
 
-    fn reset(ctx: *FuncContext) void {
-        ctx.local_lookup.clearRetainingCapacity();
-        ctx.local_counter = .{};
+    fn exit(
+        labels: *LabelLookup,
+        text: *TextContext,
+        label: Ident.Symbolic,
+        cache: *const Ident.Cache,
+    ) Allocator.Error!void {
+        // Parser ensures 'end' instructions are nested properly.
+        const popped = labels.stack.pop() orelse unreachable;
+        try checkMatchingLabels(text, popped, label, cache);
+
+        // Check if a label below the stack was overwritten in the lookup.
+        if (popped) |label_id| no_overwritten: {
+            const entry = labels.map.getPtr(label_id) orelse break :no_overwritten;
+            entry.count -= 1;
+
+            if (entry.count == 0) {
+                @branchHint(.likely);
+                const removed = labels.map.remove(label_id);
+                std.debug.assert(removed);
+                break :no_overwritten;
+            }
+
+            for (0..labels.stack.len) |i| {
+                const idx: u32 = @intCast(labels.stack.len - i - 1);
+                const other_label: Ident.Interned = labels.stack.at(idx).* orelse continue;
+                if (label_id == other_label) {
+                    entry.id = @enumFromInt(idx);
+                    break;
+                }
+            }
+        }
+    }
+
+    fn getLabel(
+        lookup: *LabelLookup,
+        text: *TextContext,
+        ident: Ident,
+    ) Allocator.Error!u32 {
+        switch (ident.toUnion(text.tree)) {
+            .symbolic => |id| if (lookup.map.get(id)) |entry| {
+                return @as(u32, @intCast(lookup.stack.len)) - @intFromEnum(entry.id) - 1;
+            } else {
+                _ = try text.errorAtToken(ident.token, "undefined label variable");
+                return std.math.maxInt(u32);
+            },
+            .numeric => |idx| return idx,
+        }
     }
 };
 
 // TODO: Parameter flag to indicate if data count should be emitted.
 fn encodeExpr(
     output: std.ArrayList(u8).Writer,
+    wasm: *const Wasm,
     expr: *const Text.Expr,
     ctx: *FuncContext,
     text: *TextContext,
@@ -467,12 +560,7 @@ fn encodeExpr(
     scratch: *ArenaAllocator,
 ) Allocator.Error!void {
     // Allocated in `scratch`.
-    var label_lookup: struct {
-        const LabelLookup = @This();
-
-        stack: std.SegmentedList(?Ident.Interned, 4) = .{},
-        map: std.AutoHashMapUnmanaged(Ident.Interned, u32) = .empty,
-    } = .{};
+    var label_lookup = LabelLookup{};
 
     try output.context.ensureUnusedCapacity(expr.count);
 
@@ -512,18 +600,65 @@ fn encodeExpr(
                 switch (arg_tag) {
                     .none => {},
                     .i32 => try std.leb.writeIleb128(output, @as(i32, arg.*)),
+                    .i64 => try std.leb.writeIleb128(output, @as(i64, arg.*)),
                     .ident => switch (tag) {
+                        .br, .br_if => try writeUleb128(
+                            output,
+                            try label_lookup.getLabel(text, arg.*),
+                        ),
+                        .call => try encodeIdx(
+                            output,
+                            FuncIdx,
+                            try wasm.func_ids.getFromIdent(text, arg.*),
+                        ),
                         .@"local.get", .@"local.set", .@"local.tee" => try encodeIdx(
                             output,
                             LocalIdx,
-                            try ctx.getLocalIdx(text, arg.*),
+                            try ctx.local_lookup.getFromIdent(text, arg.*),
                         ),
-                        else => unreachable,
+                        else => std.debug.panic("cannot encode id for {}", .{tag}),
+                    },
+                    .label => switch (tag) {
+                        .end => try label_lookup.exit(text, arg.*, &caches.ids),
+                        .@"else" => {
+                            // Parser ensures `else` instructions are correctly nested.
+                            const if_label = label_lookup.stack.at(label_lookup.stack.len - 1).*;
+                            try checkMatchingLabels(text, if_label, arg.*, &caches.ids);
+                        },
+                        else => std.debug.panic("cannot encode label for {}", .{tag}),
+                    },
+                    .block_type => block_type: {
+                        const block_type: *align(4) const Text.Instr.BlockType = arg;
+                        try label_lookup.enter(scratch, block_type.label);
+
+                        const results: []const Text.Result = block_type.type.func.results.items(arena);
+                        if (block_type.type.func.parameters.isEmpty() and results.len > 0) inline_idx: {
+                            var result_type: ?ValType = null;
+                            for (results) |*result_list| {
+                                const types: []const Text.ValType = result_list.types.items(arena);
+                                switch (types.len) {
+                                    0 => continue,
+                                    1 => if (result_type == null) {
+                                        result_type = ValType.fromValType(types[0], text.tree);
+                                        continue;
+                                    },
+                                    else => {},
+                                }
+
+                                break :inline_idx;
+                            }
+
+                            try output.writeByte(if (result_type) |ty| @intFromEnum(ty) else 0x40);
+                            break :block_type;
+                        }
+
+                        try encodeIdx(
+                            output,
+                            TypeIdx,
+                            wasm.type_uses.get(&block_type.type).?,
+                        );
                     },
                     else => {
-                        _ = &label_lookup;
-                        _ = caches;
-                        _ = scratch;
                         std.debug.panic("TODO: {}", .{arg_tag});
                     },
                 }
@@ -608,6 +743,7 @@ fn encodeText(
                                 .none,
                                 .ident,
                                 .ident_opt,
+                                .label,
                                 .br_table,
                                 .select,
                                 .mem_arg,
@@ -749,7 +885,7 @@ fn encodeText(
                 if (param.id.some) {
                     const local_idx = try func_context.local_counter.increment();
                     std.debug.assert(param.types.len == 1);
-                    try func_context.local_lookup.putNoClobber(scratch.allocator(), param.id.ident, local_idx);
+                    try func_context.local_lookup.insert(text_ctx, param.id, local_idx, &scratch);
                 } else {
                     try func_context.local_counter.incrementBy(param.types.len);
                 }
@@ -767,7 +903,7 @@ fn encodeText(
                 if (local_group.id.some) {
                     const local_idx = try func_context.local_counter.increment();
                     std.debug.assert(local_types.len == 1);
-                    try func_context.local_lookup.putNoClobber(scratch.allocator(), local_group.id.ident, local_idx);
+                    try func_context.local_lookup.insert(text_ctx, local_group.id, local_idx, &scratch);
                 } else {
                     try func_context.local_counter.incrementBy(local_group.types.len);
                 }
@@ -788,6 +924,7 @@ fn encodeText(
             _ = expr_arena.reset(.retain_capacity);
             try encodeExpr(
                 code_output,
+                &wasm,
                 &func.body.defined,
                 &func_context,
                 text_ctx,

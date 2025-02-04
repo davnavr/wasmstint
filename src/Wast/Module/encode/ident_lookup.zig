@@ -72,5 +72,19 @@ pub fn IdentLookup(comptime Idx: type) type {
         ) sexpr.Parser.ParseError!Idx {
             return @enumFromInt(try lookup.inner.get(ctx, id, token));
         }
+
+        pub fn getFromIdent(
+            lookup: *const Self,
+            ctx: *sexpr.Parser.Context,
+            ident: Ident,
+        ) std.mem.Allocator.Error!Idx {
+            return switch (ident.toUnion(ctx.tree)) {
+                .symbolic => |interned| lookup.get(ctx, interned, ident.token) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| oom,
+                    error.ReportedParserError => Idx.probably_invalid,
+                },
+                .numeric => |idx| @enumFromInt(idx),
+            };
+        }
     };
 }
