@@ -188,23 +188,27 @@ const BlockType = union(enum) {
     fn read(reader: *Module.Reader, module: *const Module) Error!BlockType {
         var byte_reader = reader.*;
         const byte_tag = try byte_reader.readByte();
-        const tag = try reader.readIleb128(i33);
+        const tag_int = try reader.readIleb128(i33);
         if (byte_tag == 0x40) {
+            reader.* = byte_reader;
             return BlockType.void;
-        } else if (tag >= 0) {
-            const idx = std.math.cast(@typeInfo(Module.TypeIdx).@"enum".tag_type, tag) orelse
+        } else if (tag_int >= 0) {
+            const idx = std.math.cast(@typeInfo(Module.TypeIdx).@"enum".tag_type, tag_int) orelse
                 return Error.WasmImplementationLimit;
 
             return if (idx < module.inner.types_count)
                 BlockType{ .type = .{ .idx = @enumFromInt(idx) } }
             else
                 Error.InvalidWasm;
-        } else return BlockType{
-            .single_result = std.meta.intToEnum(
-                ValType,
-                byte_tag,
-            ) catch return Error.MalformedWasm,
-        };
+        } else {
+            reader.* = byte_reader;
+            return BlockType{
+                .single_result = std.meta.intToEnum(
+                    ValType,
+                    byte_tag,
+                ) catch return Error.MalformedWasm,
+            };
+        }
     }
 
     comptime {
@@ -271,6 +275,7 @@ const ValStack = struct {
     fn popAny(val_stack: *ValStack, ctrl_stack: *const CtrlStack) Error!Val {
         const current_frame: *const CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
         if (val_stack.len() == current_frame.info.height) {
+            std.debug.print("INFO: current len = {}, frame height = {}\n", .{ val_stack.len(), current_frame.info.height });
             return if (current_frame.info.@"unreachable") Val.unknown else Error.InvalidWasm;
         }
 
@@ -303,6 +308,7 @@ const ValStack = struct {
     }
 
     fn popManyExpecting(val_stack: *ValStack, ctrl_stack: *const CtrlStack, expected: []const ValType) Error!void {
+        std.debug.print("WANT TO POP {} ENTRIES: {any}\n", .{ expected.len, expected });
         for (0..expected.len) |i| {
             try val_stack.popExpecting(ctrl_stack, expected[expected.len - 1 - i]);
         }
@@ -571,7 +577,9 @@ fn doValidation(
     while (ctrl_stack.len > 0) {
         // Offset from the first byte of the first instruction to the first byte of the instruction being parsed.
         instr_offset = @intCast(@intFromPtr(reader.bytes.ptr) - @intFromPtr(state.instructions));
-        switch (try reader.readByteTag(opcodes.ByteOpcode)) {
+        const byte_tag = try reader.readByteTag(opcodes.ByteOpcode);
+        std.debug.print("validate: {}\n", .{byte_tag});
+        switch (byte_tag) {
             .@"unreachable" => markUnreachable(&val_stack, &ctrl_stack),
             .nop => {},
             .block => {
@@ -669,10 +677,22 @@ fn doValidation(
                 const local_type = try readLocalIdx(&reader, locals);
                 try val_stack.popThenPushExpecting(scratch, &ctrl_stack, local_type, local_type);
             },
-            .@"i32.const" => try val_stack.push(scratch, .i32),
-            .@"i64.const" => try val_stack.push(scratch, .i64),
-            .@"f32.const" => try val_stack.push(scratch, .f32),
-            .@"f64.const" => try val_stack.push(scratch, .f64),
+            .@"i32.const" => {
+                _ = try reader.readIleb128(i32);
+                try val_stack.push(scratch, .i32);
+            },
+            .@"i64.const" => {
+                _ = try reader.readIleb128(i64);
+                try val_stack.push(scratch, .i64);
+            },
+            .@"f32.const" => {
+                _ = try reader.readArray(4);
+                try val_stack.push(scratch, .f32);
+            },
+            .@"f64.const" => {
+                _ = try reader.readArray(8);
+                try val_stack.push(scratch, .f64);
+            },
             .@"i32.eqz",
             .@"i32.clz",
             .@"i32.ctz",
