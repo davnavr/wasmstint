@@ -205,7 +205,40 @@ pub fn parse(
 
                 break :cmd .{ .assert_trap = assert_trap };
             },
-            // .keyword_assert_exhaustion => {},
+            .keyword_assert_exhaustion => {
+                // Duplicate code taken from `assert_trap`.
+                const assert_exhaustion = try arena.create(Command.AssertExhaustion);
+                const action = Command.Action.parse(
+                    &cmd_parser,
+                    &parser_context,
+                    arena,
+                    caches,
+                    cmd_list,
+                    scratch,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
+                };
+
+                assert_exhaustion.set(
+                    arena,
+                    .{
+                        .action = action,
+                        .failure = Command.Failure.parseInList(
+                            &cmd_parser,
+                            &parser_context,
+                            arena,
+                            cmd_list,
+                            scratch,
+                        ) catch |e| switch (e) {
+                            error.OutOfMemory => |oom| return oom,
+                            error.ReportedParserError => continue,
+                        },
+                    },
+                );
+
+                break :cmd .{ .assert_exhaustion = assert_exhaustion };
+            },
             // .keyword_assert_malformed => {},
             .keyword_assert_malformed => {
                 // Copied from `.keyword_assert_invalid` case.

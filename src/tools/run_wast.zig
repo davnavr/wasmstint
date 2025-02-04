@@ -467,7 +467,7 @@ const State = struct {
     fn errorInterpreterResults(
         state: *State,
         parent: Wast.sexpr.TokenId,
-        interpreter: *wasmstint.Interpreter,
+        interpreter: *const wasmstint.Interpreter,
     ) Error {
         const results = interpreter.copyResultValues(&state.cmd_arena) catch |e| switch (e) {
             error.OutOfMemory => |oom| return oom,
@@ -583,6 +583,32 @@ const State = struct {
         );
     }
 
+    fn expectExhaustion(
+        state: *State,
+        script: *const Wast,
+        interpreter: *wasmstint.Interpreter,
+        parent: Wast.sexpr.TokenId,
+        failure: *const Wast.Command.Failure,
+    ) Error!void {
+        try state.runToCompletion(interpreter);
+        const interruption_cause: wasmstint.Interpreter.InterruptionCause = switch (interpreter.state) {
+            .awaiting_lazy_validation => unreachable,
+            .trapped => |code| return state.errorInterpreterTrap(parent, code),
+            .interrupted => |cause| cause,
+            .awaiting_host => return state.errorInterpreterResults(parent, interpreter),
+        };
+
+        switch (interruption_cause) {
+            .validation_finished => unreachable,
+            .out_of_fuel, .call_stack_exhaustion => {},
+        }
+
+        const expected_msg = "call stack exhausted";
+        if (!std.mem.eql(u8, failure.msg.slice(script.arena), expected_msg)) {
+            return scriptError(state.errors.errorAtToken(parent, "expected failure string \"" ++ expected_msg ++ "\""));
+        }
+    }
+
     fn beginAction(
         state: *State,
         script: *const Wast,
@@ -659,6 +685,7 @@ fn runScript(
 
                 const module_arena = if (module.name.some) run_arena else &state.next_module_arena;
                 encoding_buffer.clearRetainingCapacity();
+                const before_encode_error_count = errors.list.len;
                 try module.encode(
                     script.tree,
                     script.arena.dataSlice(),
@@ -667,6 +694,8 @@ fn runScript(
                     errors,
                     &state.cmd_arena,
                 );
+
+                if (before_encode_error_count < errors.list.len) return;
 
                 var module_contents: []const u8 = if (module.name.some)
                     try run_arena.allocator().dupe(u8, encoding_buffer.items)
@@ -798,6 +827,20 @@ fn runScript(
                     &interp,
                     cmd.keyword,
                     &assert_trap.failure,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ScriptError => return,
+                };
+            },
+            .keyword_assert_exhaustion => {
+                const assert_exhaustion: *const Wast.Command.AssertExhaustion = cmd.inner.assert_exhaustion.getPtr(script.arena);
+
+                state.beginAction(
+                    script,
+                    cmd.keyword,
+                    assert_exhaustion.action.getPtr(script.arena),
+                    &interp,
+                    &fuel,
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
                     error.ScriptError => return,

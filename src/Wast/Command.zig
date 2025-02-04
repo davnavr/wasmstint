@@ -20,7 +20,7 @@ pub const Inner = union {
     action: IndexedArena.Idx(Action),
     assert_return: IndexedArena.Idx(AssertReturn),
     assert_trap: IndexedArena.Idx(AssertTrap), // TODO: Need assert_trap to also accept <module>
-    // assert_exhaustion: AssertExhaustion,
+    assert_exhaustion: IndexedArena.Idx(AssertExhaustion),
     assert_malformed: IndexedArena.Idx(AssertMalformed),
     assert_invalid: IndexedArena.Idx(AssertInvalid),
     // assert_unlinkable: AssertUnlinkable,
