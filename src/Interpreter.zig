@@ -509,42 +509,46 @@ const Instructions = extern struct {
 
 /// Moves return values to their appropriate place in the value stack.
 ///
-/// Execution of the handlers for the `end` and `return` instructions ends up here.
-fn returnFromWasm(interp: *Interpreter, values_base: u32) void {
-    const popped = interp.currentFrame();
-    interp.call_stack.items.len -= 1;
+/// Execution of the handlers for the `end` (only when it is last opcode of a function)
+/// and `return` instructions ends up here.
+fn returnFromWasm(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+    _ = i;
+    _ = s;
+
+    const popped = int.currentFrame();
+    std.debug.assert(popped.function.expanded() == .wasm);
+    int.call_stack.items.len -= 1;
     popped.instantiate_flag.* = true;
 
-    const new_value_stack_len = values_base + popped.result_count;
+    const new_value_stack_len = loc + popped.result_count;
     std.mem.copyForwards(
         Value,
-        interp.value_stack.items[values_base..new_value_stack_len],
-        interp.value_stack.items[interp.value_stack.items.len - popped.result_count ..],
+        int.value_stack.items[loc..new_value_stack_len],
+        int.value_stack.items[int.value_stack.items.len - popped.result_count ..],
     );
-    interp.value_stack.items.len = new_value_stack_len;
+    int.value_stack.items.len = new_value_stack_len;
 
     return_to_host: {
-        if (interp.call_stack.items.len == 0) break :return_to_host;
+        if (int.call_stack.items.len == 0) break :return_to_host;
 
-        const current_frame = interp.currentFrame();
-        switch (current_frame.function.expanded()) {
-            .wasm => |wasm| {
-                _ = wasm;
-            },
+        const caller_frame = int.currentFrame();
+        switch (caller_frame.function.expanded()) {
+            .wasm => if (caller_frame.instructions.nextOpcodeHandler(fuel, int)) |next| {
+                @call(
+                    .always_tail,
+                    next,
+                    .{ &caller_frame.instructions, &caller_frame.branch_table, caller_frame.values_base, vals, fuel, int },
+                );
+            } else return,
             .host => break :return_to_host,
         }
 
-        unreachable; // TODO: wasm to wasm calls are not yet implemented (might need to do the tail call stuff again)
-        // - could also just return a bool/?OpcodeHandler indicating if/where execution should continue.
-
-        // TODO: Fixup IP, STP, and interp.value_stack.items.len = values_base for new top of call stack.
-
-        // return;
+        comptime unreachable;
     }
 
     const signature = popped.function.signature();
     std.debug.assert(signature.result_count == popped.result_count);
-    interp.state = .{ .awaiting_host = signature.results() };
+    int.state = .{ .awaiting_host = signature.results() };
 }
 
 fn DefineBinOp(comptime value_field: []const u8, comptime op: anytype, comptime trap: anytype) type {
@@ -1061,7 +1065,7 @@ const opcode_handlers = struct {
 
     pub fn end(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         if (@intFromPtr(i.p - 1) == @intFromPtr(i.ep)) {
-            int.returnFromWasm(loc);
+            @call(.always_tail, returnFromWasm, .{ i, s, loc, vals, fuel, int });
         } else if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
