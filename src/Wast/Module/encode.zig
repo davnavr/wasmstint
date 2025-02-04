@@ -881,6 +881,7 @@ fn encodeText(
 
             const func: *const Text.Func = func_field.getPtr(arena);
 
+            // Assign local indices to parameters with ids.
             for (@as([]const Text.Param, func.type_use.func.parameters.items(arena))) |param| {
                 if (param.id.some) {
                     const local_idx = try func_context.local_counter.increment();
@@ -892,34 +893,72 @@ fn encodeText(
             }
 
             const locals: []const Text.Local = func.locals.items(arena);
-            //if (locals.len)
-            try encodeVecLen(code_output, locals.len); // TODO: Fix, this count is wrong!
+            if (locals.len == 0) {
+                try code_buffer.append(0);
+            } else {
+                const LocalGroup = packed struct(u32) {
+                    count: u24,
+                    type: ValType,
+                };
 
-            // TODO: Helper struct to encode locals
-            var local_group_count: u32 = 0;
-            var local_group_type: ValType = undefined;
-            for (locals) |local_group| {
-                const local_types: []const Text.ValType = local_group.types.items(arena);
-                std.debug.assert(local_types.len >= 1);
-                if (local_group.id.some) {
-                    const local_idx = try func_context.local_counter.increment();
-                    std.debug.assert(local_types.len == 1);
-                    try func_context.local_lookup.insert(text_ctx, local_group.id, local_idx, &scratch);
-                } else {
-                    try func_context.local_counter.incrementBy(local_group.types.len);
+                _ = expr_arena.reset(.retain_capacity);
+                var local_groups = std.SegmentedList(LocalGroup, 4){};
+
+                for (locals) |local_group| {
+                    const local_types: []const Text.ValType = local_group.types.items(arena);
+                    std.debug.assert(local_types.len >= 1);
+
+                    if (local_group.id.some) {
+                        const local_idx = try func_context.local_counter.increment();
+                        std.debug.assert(local_types.len == 1);
+                        try func_context.local_lookup.insert(text_ctx, local_group.id, local_idx, &scratch);
+                    } else {
+                        try func_context.local_counter.incrementBy(local_group.types.len);
+                    }
+
+                    var remaining_local_types = local_types;
+                    while (remaining_local_types.len > 0) {
+                        const current_type = ValType.fromValType(remaining_local_types[0], text_ctx.tree);
+                        var next_group_idx = remaining_local_types.len;
+                        for (1..remaining_local_types.len) |i| {
+                            if (ValType.fromValType(remaining_local_types[i], text_ctx.tree) != current_type) {
+                                next_group_idx = i;
+                                break;
+                            }
+                        }
+
+                        const new_entry = LocalGroup{
+                            .type = current_type,
+                            .count = std.math.cast(u24, next_group_idx) orelse
+                                return error.OutOfMemory,
+                        };
+
+                        if (local_groups.len == 0) {
+                            local_groups.append(undefined, new_entry) catch unreachable;
+                        } else {
+                            const prev_group = local_groups.at(local_groups.len - 1);
+                            if (prev_group.type == current_type) {
+                                // Coalesce two local groups with the same type
+                                prev_group.count = std.math.add(
+                                    u24,
+                                    prev_group.count,
+                                    new_entry.count,
+                                ) catch return error.OutOfMemory;
+                            } else {
+                                try local_groups.append(expr_arena.allocator(), new_entry);
+                            }
+                        }
+
+                        remaining_local_types = remaining_local_types[next_group_idx..];
+                    }
                 }
 
-                if (local_group_count == 0) {
-                    local_group_type = ValType.fromValType(local_types[0], text_ctx.tree);
-                    local_group_count = local_group.types.len;
-                } else {
-                    // TODO: Try and increment?
+                try encodeVecLen(code_output, local_groups.len);
+                for (0..local_groups.len) |i| {
+                    const group: LocalGroup = local_groups.at(i).*;
+                    try writeUleb128(code_output, group.count);
+                    try group.type.encode(code_output);
                 }
-            }
-
-            if (local_group_count > 0) {
-                try writeUleb128(code_output, local_group_count);
-                try code_output.writeByte(@intFromEnum(local_group_type));
             }
 
             _ = expr_arena.reset(.retain_capacity);
