@@ -70,9 +70,9 @@ pub const Fuel = extern struct {
 
 pub const InitOptions = struct {
     /// The initial size, in bytes, of the value stack.
-    value_stack_capacity: u32 = @sizeOf(Value) * 600,
+    value_stack_capacity: u32 = @sizeOf(Value) * 512,
     /// The initial capacity, in numbers of stack frames, of the call stack.
-    call_stack_capacity: u32 = 100,
+    call_stack_capacity: u32 = 32,
 };
 
 pub fn init(alloca: Allocator, options: InitOptions) Allocator.Error!Interpreter {
@@ -487,8 +487,23 @@ const Instructions = extern struct {
             return null;
         } else {
             fuel.remaining -= 1;
-            return byte_dispatch_table[reader.readByte() catch unreachable];
+
+            const saved_ip = @intFromPtr(reader.p) -
+                @intFromPtr(interp.currentFrame().function.expanded().wasm.module.module.wasm.ptr);
+
+            const next_opcode = reader.readByte() catch unreachable;
+
+            std.debug.print(
+                "TRACE[{X:0>6}]: {s}\n",
+                .{ saved_ip, @tagName(@as(opcodes.ByteOpcode, @enumFromInt(next_opcode))) },
+            );
+
+            return byte_dispatch_table[next_opcode];
         }
+    }
+
+    inline fn skipBlockType(reader: *Instructions) void {
+        _ = std.leb.readIleb128(i33, reader) catch unreachable;
     }
 };
 
@@ -520,7 +535,7 @@ fn returnFromWasm(interp: *Interpreter, values_base: u32) void {
         }
 
         unreachable; // TODO: wasm to wasm calls are not yet implemented (might need to do the tail call stuff again)
-        // - could also just return a bool indicating if execution should continue.
+        // - could also just return a bool/?OpcodeHandler indicating if/where execution should continue.
 
         // TODO: Fixup IP, STP, and interp.value_stack.items.len = values_base for new top of call stack.
 
@@ -641,6 +656,7 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
             }
 
             fn eq(i_1: Signed, i_2: Signed) bool {
+                std.debug.print(" > (" ++ @typeName(Signed) ++ ".eq) {0X} ({0}) == {1X} ({1})?\n", .{ i_1, i_2 });
                 return i_1 == i_2;
             }
 
@@ -1027,7 +1043,9 @@ const opcode_handlers = struct {
     pub const loop = nop;
 
     pub fn @"if"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        i.skipBlockType();
         const c = vals.pop().i32;
+        std.debug.print(" > (if) {}?\n", .{c != 0});
         if (c == 0) {
             takeBranch(i, s, vals, s.*[0]);
             postBranchBoundsCheck(i, s, int);
@@ -1040,6 +1058,7 @@ const opcode_handlers = struct {
 
     pub fn @"else"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         takeBranch(i, s, vals, s.*[0]);
+        postBranchBoundsCheck(i, s, int);
 
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
@@ -1058,6 +1077,7 @@ const opcode_handlers = struct {
 
     pub fn call(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const func_idx = i.readUleb128(@typeInfo(Module.FuncIdx).@"enum".tag_type) catch unreachable;
+        // std.debug.print(" > (call) {}\n", .{func_idx});
         const current_frame = int.currentFrame();
         const current_function = current_frame.function.expanded().wasm;
         const target_function = current_function.module.funcAddr(@enumFromInt(func_idx));
@@ -1075,7 +1095,7 @@ const opcode_handlers = struct {
         ) catch |e| switch (e) {
             error.OutOfMemory => {
                 // Could set ip back to before the call instruction to allow trying again.
-                // std.debug.print("call stack depth: {}\n", .{int.call_stack.items.len});
+                std.debug.print("call stack depth: {}\n", .{int.call_stack.items.len});
                 int.state = .{ .interrupted = .call_stack_exhaustion };
                 return;
             },

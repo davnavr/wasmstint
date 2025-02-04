@@ -299,7 +299,10 @@ pub const ConstExpr = union {
     @"global.get": GlobalIdx,
 
     comptime {
-        std.debug.assert(@sizeOf(ConstExpr) == 8);
+        std.debug.assert(@sizeOf(ConstExpr) == switch (@import("builtin").mode) {
+            .Debug, .ReleaseSafe => 8,
+            .ReleaseFast, .ReleaseSmall => 4,
+        });
     }
 };
 
