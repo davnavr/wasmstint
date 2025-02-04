@@ -1104,7 +1104,10 @@ pub fn parse(
         errdefer wasm.* = code_reader.bytes.*;
 
         const code_len = try code_reader.readUleb128(u32);
-        if (code_len != defined_func_count) return error.MalformedWasm;
+        if (code_len != defined_func_count) {
+            // std.debug.print("expected {} but got {}\n", .{ defined_func_count, code_len });
+            return error.MalformedWasm;
+        }
 
         const code_sec = CodeSec{
             .start = code_reader.bytes.*.ptr,

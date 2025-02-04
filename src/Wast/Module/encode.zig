@@ -864,7 +864,7 @@ fn encodeText(
         section_buf.clearRetainingCapacity();
 
         const section_output = section_buf.writer();
-        try encodeVecLen(section_output, wasm.exports_count);
+        try encodeVecLen(section_output, wasm.defined_funcs.len);
 
         var code_buffer = std.ArrayList(u8).init(scratch.allocator());
         const code_output = code_buffer.writer();
@@ -892,6 +892,7 @@ fn encodeText(
             }
 
             const locals: []const Text.Local = func.locals.items(arena);
+            //if (locals.len)
             try encodeVecLen(code_output, locals.len); // TODO: Fix, this count is wrong!
 
             // TODO: Helper struct to encode locals
