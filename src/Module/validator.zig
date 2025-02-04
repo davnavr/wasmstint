@@ -485,7 +485,6 @@ const SideTableBuilder = struct {
             const entry: *SideTableEntry = table.entries.at(fixup_entry.entry_idx);
             const origin = entry.delta_ip.fixup_origin;
 
-            // TODO: +1 to go directly to the block body.
             entry.delta_ip.done = std.math.cast(i32, end_offset - origin) orelse
                 return error.WasmImplementationLimit;
 

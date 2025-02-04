@@ -972,20 +972,33 @@ const no_allocation = struct {
 };
 
 fn addPtrWithOffset(ptr: anytype, offset: isize) @TypeOf(ptr) {
-    return if (offset < 0) ptr - @abs(offset) else ptr + @as(usize, @intCast(offset));
+    const sum = if (offset < 0) ptr - @abs(offset) else ptr + @as(usize, @intCast(offset));
+    std.debug.print(" > {*} + {} = {*}\n", .{ ptr, offset, sum });
+    return sum;
 }
 
 inline fn takeBranch(
     interp: *Interpreter,
+    base_ip: Ip,
     i: *Instructions,
     s: *Stp,
     vals: *ValStack,
     target: Module.Code.SideTableEntry,
 ) void {
+    // TODO: Fix! Addition is based off math in bytes *AFTER* the opcode, not where it is!
     const code = interp.currentFrame().function.expanded().wasm.code();
-    i.p = addPtrWithOffset(i.p, target.delta_ip.done);
+    i.p = addPtrWithOffset(base_ip, target.delta_ip.done);
     std.debug.assert(@intFromPtr(code.state.instructions) <= @intFromPtr(i.p));
     std.debug.assert(@intFromPtr(i.p) <= @intFromPtr(i.ep));
+
+    std.debug.print(
+        "NEXT[{X:0>6}]: 0x{X} ({s})\n",
+        .{
+            @intFromPtr(i.p) - @intFromPtr(interp.currentFrame().function.expanded().wasm.module.module.wasm.ptr),
+            i.p[0],
+            @tagName(@as(opcodes.ByteOpcode, @enumFromInt(i.p[0]))),
+        },
+    );
 
     s.* = addPtrWithOffset(s.*, target.delta_stp);
     std.debug.assert(@intFromPtr(code.state.side_table_ptr) <= @intFromPtr(s.*));
@@ -1047,12 +1060,12 @@ const opcode_handlers = struct {
     pub const loop = block;
 
     pub fn @"if"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        i.skipBlockType();
         const c = vals.pop().i32;
         std.debug.print(" > (if) {}?\n", .{c != 0});
         if (c == 0) {
-            int.takeBranch(i, s, vals, s.*[0]);
+            int.takeBranch(i.p - 1, i, s, vals, s.*[0]);
         } else {
+            i.skipBlockType();
             s.* += 1;
         }
 
@@ -1062,7 +1075,7 @@ const opcode_handlers = struct {
     }
 
     pub fn @"else"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        int.takeBranch(i, s, vals, s.*[0]);
+        int.takeBranch(i.p - 1, i, s, vals, s.*[0]);
 
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
@@ -1073,6 +1086,14 @@ const opcode_handlers = struct {
         if (@intFromPtr(i.p - 1) == @intFromPtr(i.ep)) {
             @call(.always_tail, returnFromWasm, .{ i, s, loc, vals, fuel, int });
         } else if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    pub fn br(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        // No need to read LEB128 branch target
+        int.takeBranch(i.p - 1, i, s, vals, s.*[0]);
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
     }
