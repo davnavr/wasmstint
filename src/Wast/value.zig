@@ -242,18 +242,16 @@ pub const StringEscape = union(enum) {
             return .{ .escaped = seq };
         }
 
-        pub fn allocPrint(iter: Iterator, allocator: std.mem.Allocator) error{OutOfMemory}!std.ArrayListUnmanaged(u8) {
-            var iterator = iter;
-
-            var buf = std.ArrayListUnmanaged(u8).empty;
-            errdefer buf.deinit(allocator);
-
+        pub fn appendToBuf(
+            iterator: *Iterator,
+            buf: *std.ArrayList(u8),
+            is_last: bool,
+        ) error{OutOfMemory}!void {
             while (iterator.next()) |escape| {
                 const append = escape.bytes();
-                if (iterator.remaining.len == 0) {
+                if (iterator.remaining.len == 0 and is_last) {
                     // Last escape sequence.
                     try buf.ensureTotalCapacityPrecise(
-                        allocator,
                         std.math.add(
                             usize,
                             buf.items.len,
@@ -263,11 +261,22 @@ pub const StringEscape = union(enum) {
 
                     buf.appendSliceAssumeCapacity(append);
                 } else {
-                    try buf.appendSlice(allocator, append);
+                    try buf.appendSlice(append);
                 }
             }
+        }
 
-            return buf;
+        pub fn allocPrint(
+            iter: Iterator,
+            allocator: std.mem.Allocator,
+        ) error{OutOfMemory}!std.ArrayListUnmanaged(u8) {
+            var iterator = iter;
+
+            var buf = std.ArrayList(u8).init(allocator);
+            errdefer buf.deinit();
+
+            try iterator.appendToBuf(&buf, true);
+            return buf.moveToUnmanaged();
         }
     };
 };

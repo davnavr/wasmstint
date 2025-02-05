@@ -366,7 +366,7 @@ pub const DataString = struct {
         contents: *sexpr.Parser,
         ctx: *ParseContext,
         arena: *IndexedArena,
-    ) std.mem.Allocator.Error!DataString {
+    ) error{OutOfMemory}!DataString {
         var strings = try IndexedArena.BoundedArrayList(StringLiteral).initCapacity(
             arena,
             contents.remaining.len,
@@ -392,6 +392,33 @@ pub const DataString = struct {
         }
 
         return .{ .contents = strings.items };
+    }
+
+    pub fn writeToBuf(
+        data: *const DataString,
+        tree: *const sexpr.Tree,
+        arena: IndexedArena.ConstData,
+        allocator: std.mem.Allocator,
+    ) error{OutOfMemory}!std.ArrayListUnmanaged(u8) {
+        var buf = std.ArrayList(u8).init(allocator);
+        errdefer buf.deinit();
+
+        for (
+            @as([]const StringLiteral, data.contents.items(arena)),
+            0..data.contents.len,
+        ) |data_string, i| {
+            const raw_string = data_string.rawContents(tree);
+            var string_escapes = @import("../value.zig").string(raw_string);
+
+            // In the worst case, all of the remaining input encodes UTF-8 codepoints at a 10-to-1 ratio.
+            // In the best case, 1 byte in the string corresponds to one byte in the output.
+            try buf.ensureUnusedCapacity(raw_string.len / 2);
+            try string_escapes.appendToBuf(&buf, i == data.contents.len - 1);
+
+            std.debug.assert(string_escapes.remaining.len == 0);
+        }
+
+        return buf.moveToUnmanaged();
     }
 };
 

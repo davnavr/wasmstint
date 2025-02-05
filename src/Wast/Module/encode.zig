@@ -82,6 +82,16 @@ pub const FuncIdx = enum(u32) {
     _,
 };
 
+pub const MemIdx = enum(u32) {
+    probably_invalid = std.math.maxInt(u32),
+    _,
+};
+
+pub const DataIdx = enum(u32) {
+    probably_invalid = std.math.maxInt(u32),
+    _,
+};
+
 const IterParamTypes = struct {
     types: []const Text.ValType,
     params: []const Text.Param,
@@ -214,9 +224,13 @@ const Import = union(enum) {
 const Export = union(enum) {
     // module_field: IndexedArena.Idx(Text.ExportField),
     inline_func: struct { field: IndexedArena.Idx(Text.Func), idx: FuncIdx },
+    inline_mem: struct {
+        field: IndexedArena.Idx(Text.Mem),
+        idx: MemIdx,
+    },
 
     comptime {
-        std.debug.assert(@sizeOf(Export) == 8); // TODO: 12
+        std.debug.assert(@sizeOf(Export) == 12);
     }
 };
 
@@ -240,6 +254,68 @@ fn IdxCounter(comptime Idx: type) type {
     };
 }
 
+const Mem = struct {
+    idx: IndexedArena.Idx(Text.Mem),
+    /// Given in pages. Only set when the memory has an inline data segment.
+    inferred_limit: u32,
+};
+
+const DataSegment = struct {
+    source: packed struct(u32) {
+        tag: Tag,
+        inner: Inner,
+    },
+    /// Set only when `.tag == .inline_mem`.
+    mem_idx: MemIdx,
+    bytes_len: u32,
+    bytes: [*]const u8,
+
+    const Inner = packed union {
+        module_field: IndexedArena.Idx(Text.Data),
+        inline_mem: IndexedArena.Idx(Text.Mem),
+    };
+
+    const Tag = std.meta.FieldEnum(Inner);
+
+    const Expanded = union(Tag) {
+        module_field: IndexedArena.Idx(Text.Data),
+        inline_mem: struct {
+            field: IndexedArena.Idx(Text.Mem),
+            idx: MemIdx,
+        },
+    };
+
+    fn init(data: Expanded, bytes: []const u8) Allocator.Error!DataSegment {
+        return .{
+            .bytes_len = std.math.cast(u32, bytes.len) orelse return error.OutOfMemory,
+            .bytes = bytes.ptr,
+            .source = .{
+                .tag = data,
+                .inner = switch (data) {
+                    .module_field => |field| .{ .module_field = field },
+                    .inline_mem => |mem| .{ .inline_mem = mem.field },
+                },
+            },
+            .mem_idx = switch (data) {
+                .module_field => .probably_invalid,
+                .inline_mem => |mem| mem.idx,
+            },
+        };
+    }
+
+    fn expanded(data: DataSegment) Expanded {
+        return switch (data.source.tag) {
+            .module_field => .{ .module_field = data.source.inner.module_field },
+            .inline_mem => .{
+                .inline_mem = .{
+                    .field = data.source.inner.inline_mem,
+                    .idx = data.mem_idx,
+                },
+            },
+        };
+    }
+};
+
 const Wasm = struct {
     /// Types originating from `Text.Type` fields come before those inserted by `TypeUse`s.
     types: std.SegmentedList(IndexedArena.Idx(Text.Type), 8) = .{},
@@ -250,18 +326,27 @@ const Wasm = struct {
     func_count: IdxCounter(FuncIdx) = .{},
     defined_funcs: std.SegmentedList(IndexedArena.Idx(Text.Func), 8) = .{},
 
+    mem_count: IdxCounter(MemIdx) = .{},
+    defined_mems: std.SegmentedList(Mem, 1) = .{},
+
+    data_segments: std.SegmentedList(DataSegment, 1) = .{},
+
     type_uses: std.AutoArrayHashMapUnmanaged(*const Text.TypeUse, TypeIdx) = .empty,
     type_dedup: TypeDedup = .empty,
 
     type_ids: IdentLookup(TypeIdx) = .empty,
     func_ids: IdentLookup(FuncIdx) = .empty,
+    // table_ids: IdentLookup(TableIdx) = .empty,
+    mem_ids: IdentLookup(MemIdx) = .empty,
+    data_ids: IdentLookup(DataIdx) = .empty,
 
     fn checkImportOrdering(
         wasm: *const Wasm,
         ctx: *TextContext,
         import_keyword: sexpr.TokenId,
     ) Allocator.Error!void {
-        if (wasm.defined_funcs.len > 0)
+        if (wasm.defined_funcs.len > 0 or
+            wasm.defined_mems.len > 0)
             _ = try ctx.errorAtToken(import_keyword, "imports must occur before all non-import definitions");
     }
 
@@ -707,6 +792,22 @@ fn encodeExpr(
     }
 }
 
+fn encodeLimits(
+    output: std.ArrayList(u8).Writer,
+    limits: *const Text.Limits,
+) Allocator.Error!void {
+    try output.writeByte(if (limits.max_token.some) 0x01 else 0x00);
+    try writeUleb128(output, limits.min);
+    if (limits.max_token.some) try writeUleb128(output, limits.max);
+}
+
+fn encodeMemType(
+    output: std.ArrayList(u8).Writer,
+    mem_type: *const Text.MemType,
+) Allocator.Error!void {
+    try encodeLimits(output, &mem_type.limits);
+}
+
 fn encodeText(
     module: *const Text,
     text_ctx: *TextContext,
@@ -717,8 +818,11 @@ fn encodeText(
 ) EncodeError(@TypeOf(final_output))!void {
     _ = alloca.reset(.retain_capacity);
 
+    var scratch = ArenaAllocator.init(alloca.allocator());
+
     // Allocated in `alloca`.
     var wasm = Wasm{};
+    var code_needs_data_count = false;
     for (@as([]const Text.Field, module.fields.items(arena))) |field| {
         switch (field.keyword.tag(text_ctx.tree)) {
             // .keyword_import => {wasm.checkImportOrdering();},
@@ -770,6 +874,7 @@ fn encodeText(
                     const body: *const Text.Expr = &func_field_ptr.body.defined;
                     var instr_iter = body.iterator(text_ctx.tree, arena);
                     while (instr_iter.next()) |instr| {
+                        _ = &code_needs_data_count;
                         const type_use: *const Text.TypeUse = switch (instr.tag(text_ctx.tree) orelse continue) {
                             .@"memory.init",
                             .@"memory.copy",
@@ -777,6 +882,7 @@ fn encodeText(
                             .@"table.copy",
                             .@"ref.null",
                             => unreachable, // TODO: see Instr.argumentTag()
+                            // .@"data.drop", .@"memory.init" => code_needs_data_count = true,
                             inline else => |tag| switch (comptime Text.Instr.argumentTag(tag)) {
                                 .block_type => &instr.arguments.block_type.type,
                                 .call_indirect => &instr.arguments.call_indirect.type,
@@ -800,7 +906,113 @@ fn encodeText(
                 }
             },
             // .keyword_table => {},
-            // .keyword_memory => {},
+            .keyword_memory => {
+                const mem_field = field.contents.mem;
+                const mem_field_ptr: *const Text.Mem = mem_field.getPtr(arena);
+                const mem_idx = try wasm.mem_count.increment();
+
+                try wasm.mem_ids.insert(
+                    text_ctx,
+                    mem_field_ptr.id,
+                    mem_idx,
+                    alloca,
+                );
+
+                if (!mem_field_ptr.inline_exports.isEmpty()) {
+                    wasm.exports_count = try addOrOom(u32, wasm.exports_count, mem_field_ptr.inline_exports.len);
+                    try wasm.exports.append(
+                        alloca.allocator(),
+                        Export{ .inline_mem = .{ .field = mem_field, .idx = mem_idx } },
+                    );
+                }
+
+                const has_data = mem_field_ptr.data_keyword.some;
+
+                var data_bytes: []const u8 = undefined;
+                if (has_data) {
+                    _ = scratch.reset(.retain_capacity);
+                    const temp_buf = try mem_field_ptr.inner.data.writeToBuf(
+                        text_ctx.tree,
+                        arena,
+                        scratch.allocator(),
+                    );
+
+                    data_bytes = try alloca.allocator().dupe(u8, temp_buf.items);
+                }
+
+                if (!has_data and mem_field_ptr.inner.no_data.inline_import.keyword.some) {
+                    try wasm.checkImportOrdering(
+                        text_ctx,
+                        mem_field_ptr.inner.no_data.inline_import.keyword.inner_id,
+                    );
+                    try wasm.imports.append(
+                        alloca.allocator(),
+                        Import{ .inline_mem = mem_field },
+                    );
+                } else {
+                    const page_size = 65536;
+                    try wasm.defined_mems.append(
+                        alloca.allocator(),
+                        .{
+                            .idx = mem_field,
+                            .inferred_limit = if (has_data)
+                                std.mem.alignForward(
+                                    u32,
+                                    std.math.cast(u32, data_bytes.len) orelse
+                                        return error.OutOfMemory,
+                                    page_size,
+                                ) / page_size
+                            else
+                                undefined,
+                        },
+                    );
+                }
+
+                if (has_data) {
+                    try wasm.data_segments.append(
+                        alloca.allocator(),
+                        try DataSegment.init(
+                            .{
+                                .inline_mem = .{
+                                    .field = mem_field,
+                                    .idx = mem_idx,
+                                },
+                            },
+                            data_bytes,
+                        ),
+                    );
+                }
+            },
+            .keyword_data => {
+                const data_field = field.contents.data;
+                const data_field_ptr: *const Text.Data = data_field.getPtr(arena);
+                const data_idx: DataIdx = @enumFromInt(
+                    std.math.cast(u32, wasm.data_segments.len) orelse return error.OutOfMemory,
+                );
+
+                try wasm.data_ids.insert(
+                    text_ctx,
+                    data_field_ptr.id,
+                    data_idx,
+                    alloca,
+                );
+                _ = scratch.reset(.retain_capacity);
+                const temp_buf = try data_field_ptr.data.writeToBuf(
+                    text_ctx.tree,
+                    arena,
+                    scratch.allocator(),
+                );
+
+                const data_bytes = try alloca.allocator().dupe(u8, temp_buf.items);
+
+                try wasm.data_segments.append(
+                    alloca.allocator(),
+                    try DataSegment.init(
+                        .{ .module_field = data_field },
+                        data_bytes,
+                    ),
+                );
+            },
             // .keyword_global => {},
             else => |bad| if (@import("builtin").mode == .Debug)
                 std.debug.panic("TODO: handle module field {s}", .{@tagName(bad)})
@@ -809,7 +1021,8 @@ fn encodeText(
         }
     }
 
-    var scratch = ArenaAllocator.init(alloca.allocator());
+    _ = scratch.reset(.retain_capacity);
+
     var section_buf = std.ArrayList(u8).init(alloca.allocator());
 
     try final_output.writeAll(wasm_preamble);
@@ -875,6 +1088,35 @@ fn encodeText(
         try encodeSection(final_output, 3, section_buf.items);
     }
 
+    // table
+
+    if (wasm.defined_mems.len > 0) {
+        section_buf.clearRetainingCapacity();
+
+        const output = section_buf.writer();
+        try encodeVecLen(output, wasm.data_segments.len);
+
+        var iter_mems = wasm.defined_mems.constIterator(0);
+        while (iter_mems.next()) |mem| {
+            const mem_field: *const Text.Mem = mem.idx.getPtr(arena);
+            if (!mem_field.data_keyword.some) {
+                try output.writeByte(0x01);
+
+                var limit_buf = std.BoundedArray(u8, 5){};
+                writeUleb128(limit_buf.writer(), mem.inferred_limit) catch unreachable;
+
+                try output.writeBytesNTimes(limit_buf.constSlice(), 2);
+            } else {
+                try encodeMemType(output, &mem_field.inner.no_data.mem_type);
+            }
+        }
+
+        try encodeSection(final_output, 5, section_buf.items);
+    }
+
+    // global
+
+    std.debug.assert(wasm.exports.len <= wasm.exports_count);
     if (wasm.exports_count > 0) {
         section_buf.clearRetainingCapacity();
 
@@ -883,23 +1125,38 @@ fn encodeText(
 
         var iter_exports = wasm.exports.constIterator(0);
         while (iter_exports.next()) |exp| {
-            switch (exp.*) {
+            // 1 byte ID + 5 bytes maximum LEB128 encoding of u32
+            var export_desc_buf = std.BoundedArray(u8, 6){};
+            const export_list: Text.InlineExports = exports: switch (exp.*) {
                 .inline_func => |func| {
-                    var export_desc_buf = std.BoundedArray(u8, 6){};
                     export_desc_buf.appendAssumeCapacity(0x00);
                     encodeIdx(export_desc_buf.writer(), FuncIdx, func.idx) catch unreachable;
-
-                    const export_list = func.field.getPtr(arena).inline_exports.items(arena);
-                    std.debug.assert(export_list.len > 0);
-                    for (export_list) |inline_export| {
-                        try encodeByteVec(output, inline_export.name.id.bytes(arena, &caches.names));
-                        try output.writeAll(export_desc_buf.slice());
-                    }
+                    break :exports func.field.getPtr(arena).inline_exports;
                 },
+                .inline_mem => |mem| {
+                    export_desc_buf.appendAssumeCapacity(0x02);
+                    encodeIdx(export_desc_buf.writer(), MemIdx, mem.idx) catch unreachable;
+                    break :exports mem.field.getPtr(arena).inline_exports;
+                },
+            };
+
+            std.debug.assert(export_desc_buf.len >= 2);
+            std.debug.assert(export_list.len > 0);
+            for (export_list.items(arena)) |inline_export| {
+                try encodeByteVec(output, inline_export.name.id.bytes(arena, &caches.names));
+                try output.writeAll(export_desc_buf.constSlice());
             }
         }
 
         try encodeSection(final_output, 7, section_buf.items);
+    }
+
+    if (code_needs_data_count) {
+        std.debug.assert(wasm.data_segments.len > 0);
+        section_buf.clearRetainingCapacity();
+
+        try encodeVecLen(section_buf.writer(), wasm.data_segments.len);
+        try encodeSection(final_output, 12, section_buf.items);
     }
 
     if (wasm.defined_funcs.len > 0) {
@@ -1020,6 +1277,55 @@ fn encodeText(
         }
 
         try encodeSection(final_output, 10, section_buf.items);
+    }
+
+    if (wasm.data_segments.len > 0) {
+        section_buf.clearRetainingCapacity();
+
+        const output = section_buf.writer();
+        try encodeVecLen(output, wasm.data_segments.len);
+
+        var iter_datas = wasm.data_segments.constIterator(0);
+        while (iter_datas.next()) |data_segment| {
+            const bytes = data_segment.bytes[0..data_segment.bytes_len];
+            const data: DataSegment.Expanded = data_segment.expanded();
+            switch (data) {
+                .module_field => |field| {
+                    const data_field: *const Text.Data = field.getPtr(arena);
+                    if (data_field.active.has_offset) {
+                        try output.writeByte(0x00); // active data segment
+                        _ = scratch.reset(.retain_capacity);
+                        var func_ctx = FuncContext{};
+                        try encodeExpr(
+                            output,
+                            &wasm,
+                            &data_field.offset.expr,
+                            &func_ctx,
+                            text_ctx,
+                            arena,
+                            caches,
+                            &scratch,
+                        );
+                    } else {
+                        try output.writeByte(0x01); // passive data segment
+                    }
+                },
+                .inline_mem => {
+                    try output.writeAll(&[_]u8{
+                        0x00, // active data segment
+
+                        // offset expression
+                        @intFromEnum(opcodes.ByteOpcode.@"i32.const"),
+                        0,
+                        @intFromEnum(opcodes.ByteOpcode.end),
+                    });
+                },
+            }
+
+            try encodeByteVec(output, bytes);
+        }
+
+        try encodeSection(final_output, 11, section_buf.items);
     }
 
     // std.debug.print("MODULE DUMP START:\n", .{});
