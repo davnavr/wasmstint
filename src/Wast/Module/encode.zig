@@ -770,7 +770,10 @@ fn encodeExpr(
                     },
                     .br_table => {
                         std.debug.assert(tag == .br_table);
-                        for (@as([]align(4) const Ident, arg.*.labels.items(arena))) |label| {
+                        const non_default_labels: []align(4) const Ident = arg.*.labels.items(arena);
+                        try encodeVecLen(output, non_default_labels.len);
+
+                        for (non_default_labels) |label| {
                             try writeUleb128(
                                 output,
                                 try label_lookup.getLabel(text, label),
@@ -1279,6 +1282,8 @@ fn encodeText(
                 caches,
                 &expr_arena,
             );
+
+            std.debug.dumpHex(code_buffer.items);
 
             try encodeByteVec(section_output, code_buffer.items);
         }
