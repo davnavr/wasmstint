@@ -421,6 +421,7 @@ const BranchFixup = packed struct(u32) {
 const SideTableBuilder = struct {
     entries: std.SegmentedList(SideTableEntry, 4) = .{},
     active: std.SegmentedList(BranchFixup.List, 4) = .{},
+    alternate: std.SegmentedList(BranchFixup, 4) = .{},
     free: std.SegmentedList(BranchFixup.List, 4) = .{},
 
     fn nextEntryIdx(table: *const SideTableBuilder) Module.LimitError!u32 {
@@ -431,6 +432,26 @@ const SideTableBuilder = struct {
         const pushed = try table.active.addOne(arena.allocator());
         pushed.* = table.free.pop() orelse BranchFixup.List{};
         std.debug.assert(pushed.len == 0);
+    }
+
+    fn appendAlternate(
+        table: *SideTableBuilder,
+        arena: *ArenaAllocator,
+        origin: u32,
+        copy_count: u8,
+        pop_count: u8,
+    ) (Module.LimitError || Allocator.Error)!void {
+        const idx = try table.nextEntryIdx();
+        const entry = try table.entries.addOne(arena.allocator());
+        const fixup = try table.alternate.addOne(arena.allocator());
+
+        fixup.* = .{ .entry_idx = idx };
+        entry.* = .{
+            .delta_ip = .{ .fixup_origin = origin },
+            .delta_stp = undefined,
+            .copy_count = copy_count,
+            .pop_count = pop_count,
+        };
     }
 
     const KnownTarget = struct {
@@ -451,6 +472,7 @@ const SideTableBuilder = struct {
         const entry = try table.entries.addOne(arena.allocator());
         entry.copy_count = copy_count;
         entry.pop_count = pop_count;
+
         if (known_target) |target| {
             const delta_ip = std.math.negateCast(origin - target.instr_offset) catch
                 return Error.WasmImplementationLimit;
@@ -473,36 +495,44 @@ const SideTableBuilder = struct {
         return idx;
     }
 
+    fn resolveFixupEntry(
+        table: *SideTableBuilder,
+        fixup_entry: *const BranchFixup,
+        target_side_table_idx: u32,
+        end_offset: u32,
+    ) Module.LimitError!void {
+        const entry: *SideTableEntry = table.entries.at(fixup_entry.entry_idx);
+        const origin = entry.delta_ip.fixup_origin;
+
+        entry.delta_ip.done = std.math.cast(i32, end_offset - origin) orelse
+            return error.WasmImplementationLimit;
+
+        entry.delta_stp = std.math.cast(i16, target_side_table_idx - fixup_entry.entry_idx) orelse
+            return error.WasmImplementationLimit;
+
+        // std.debug.print(
+        //     "FIXUP targeting 0x{X} originating from 0x{X} (dip = {}, dstp = {})\n",
+        //     .{
+        //         end_offset,
+        //         origin,
+        //         entry.delta_ip.done,
+        //         entry.delta_stp,
+        //     },
+        // );
+    }
+
     fn resolveFixupList(
         table: *SideTableBuilder,
         fixups: *const BranchFixup.List,
         end_offset: u32,
     ) Module.LimitError!void {
-        const target_side_table_idx = std.math.cast(u32, table.entries.len) orelse
-            return error.WasmImplementationLimit;
+        const target_side_table_idx = try table.nextEntryIdx();
 
-        std.debug.print("RESOLVING FIXUPS targeting {X}\n", .{end_offset});
+        // std.debug.print("RESOLVING FIXUPS targeting {X}\n", .{end_offset});
 
         var iter_fixups = fixups.constIterator(0);
         while (iter_fixups.next()) |fixup_entry| {
-            const entry: *SideTableEntry = table.entries.at(fixup_entry.entry_idx);
-            const origin = entry.delta_ip.fixup_origin;
-
-            entry.delta_ip.done = std.math.cast(i32, end_offset - origin) orelse
-                return error.WasmImplementationLimit;
-
-            entry.delta_stp = std.math.cast(i16, target_side_table_idx - fixup_entry.entry_idx) orelse
-                return error.WasmImplementationLimit;
-
-            std.debug.print(
-                "FIXUP targeting 0x{X} originating from 0x{X} (dip = {}, dstp = {})\n",
-                .{
-                    end_offset,
-                    origin,
-                    entry.delta_ip.done,
-                    entry.delta_stp,
-                },
-            );
+            try table.resolveFixupEntry(fixup_entry, target_side_table_idx, end_offset);
         }
     }
 
@@ -521,6 +551,20 @@ const SideTableBuilder = struct {
 
         try table.resolveFixupList(&to_fixup, end_offset);
     }
+
+    fn popAndResolveAlternate(
+        table: *SideTableBuilder,
+        end_offset: u32,
+    ) Module.LimitError!void {
+        const target_side_table_idx = try table.nextEntryIdx();
+        const fixup: *const BranchFixup = table.alternate.at(table.alternate.len - 1);
+        defer _ = table.alternate.pop();
+        try table.resolveFixupEntry(
+            fixup,
+            target_side_table_idx,
+            end_offset,
+        );
+    }
 };
 
 fn appendSideTableEntry(
@@ -530,8 +574,8 @@ fn appendSideTableEntry(
     target: Label,
 ) Error!void {
     const loop_target = target.frame.info.opcode == .loop;
-    if (loop_target)
-        std.debug.print("BRNCH targeting 0x{X} (loop) originating from 0x{X}\n", .{ target.frame.offset, origin_offset });
+    // if (loop_target)
+    //     std.debug.print("BRNCH targeting 0x{X} (loop) originating from 0x{X}\n", .{ target.frame.offset, origin_offset });
 
     // TODO: Fix, this needs to specify in which list it wants to append the fixup!
     _ = try side_table.append(
@@ -690,13 +734,9 @@ fn doValidation(
                 );
 
                 // TODO: Skip branch fixup processing for unreachable code.
-                try side_table.pushFixupList(scratch); // going to 'else'
-
-                _ = try side_table.append(
+                try side_table.appendAlternate(
                     scratch,
                     instr_offset,
-                    null,
-                    0,
                     0,
                     0,
                 );
@@ -731,17 +771,8 @@ fn doValidation(
                     0,
                 );
 
-                const active_side_table_fixup_list = side_table.active.at(side_table.active.len - 1);
-                std.mem.swap(
-                    BranchFixup.List,
-                    active_side_table_fixup_list,
-                    side_table.active.at(side_table.active.len - 2),
-                );
-
-                std.debug.assert(active_side_table_fixup_list.len == 1);
-
                 // Interpreter's `else` handler jumps to the `end`, so failing branch in `if` should be redirected to `else` body.
-                try side_table.popAndResolveFixups(scratch, instr_offset + 1);
+                try side_table.popAndResolveAlternate(instr_offset + 1);
             },
             .end => {
                 const frame = try popCtrlFrame(&ctrl_stack, &val_stack, module);
@@ -750,8 +781,10 @@ fn doValidation(
                 if (frame.info.opcode != .loop) {
                     try side_table.popAndResolveFixups(scratch, instr_offset);
 
-                    if (frame.info.opcode == .@"if")
+                    if (frame.info.opcode == .@"if") {
+                        try side_table.popAndResolveAlternate(instr_offset);
                         try side_table.popAndResolveFixups(scratch, instr_offset);
+                    }
                 }
 
                 try val_stack.pushMany(scratch, frame.types.funcType(module).results());
@@ -952,6 +985,7 @@ fn doValidation(
 
     std.debug.assert(val_stack.len() == func_type.result_count);
     std.debug.assert(side_table.active.len == 0);
+    std.debug.assert(side_table.alternate.len == 0);
 
     state.instructions_end = @ptrCast(state.instructions + instr_offset);
     state.max_values = val_stack.max;
