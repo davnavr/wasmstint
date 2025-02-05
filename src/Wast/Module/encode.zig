@@ -579,6 +579,31 @@ fn encodeExpr(
             .@"table.copy",
             .@"ref.null",
             => unreachable, // TODO: see Instr.argumentTag()
+            .select => {
+                const select = instr.arguments.select;
+                var chosen_type: ?ValType = null;
+                if (select.opt()) |results| {
+                    for (@as([]const Text.Result, results.items(arena))) |result_list| {
+                        for (@as([]const Text.ValType, result_list.types.items(arena))) |result_type| {
+                            if (chosen_type == null)
+                                chosen_type = ValType.fromValType(result_type, text.tree)
+                            else
+                                _ = try text.errorAtToken(
+                                    instr.keyword.getAtom().?,
+                                    "invalid arity in select instruction",
+                                );
+                        }
+                    }
+                }
+
+                if (chosen_type) |explicit| {
+                    output.context.appendAssumeCapacity(@intFromEnum(opcodes.ByteOpcode.@"select t"));
+                    try output.writeByte(1);
+                    try explicit.encode(output);
+                } else {
+                    output.context.appendAssumeCapacity(@intFromEnum(opcodes.ByteOpcode.select));
+                }
+            },
             inline else => |tag| {
                 const tag_name = comptime @tagName(tag);
                 if (@hasField(opcodes.ByteOpcode, tag_name)) {
@@ -658,6 +683,21 @@ fn encodeExpr(
                             wasm.type_uses.get(&block_type.type).?,
                         );
                     },
+                    .br_table => {
+                        std.debug.assert(tag == .br_table);
+                        for (@as([]align(4) const Ident, arg.*.labels.items(arena))) |label| {
+                            try writeUleb128(
+                                output,
+                                try label_lookup.getLabel(text, label),
+                            );
+                        }
+
+                        try writeUleb128(
+                            output,
+                            try label_lookup.getLabel(text, arg.default_label),
+                        );
+                    },
+                    .select => unreachable,
                     else => {
                         std.debug.panic("TODO: {}", .{arg_tag});
                     },
@@ -762,7 +802,10 @@ fn encodeText(
             // .keyword_table => {},
             // .keyword_memory => {},
             // .keyword_global => {},
-            else => unreachable,
+            else => |bad| if (@import("builtin").mode == .Debug)
+                std.debug.panic("TODO: handle module field {s}", .{@tagName(bad)})
+            else
+                unreachable,
         }
     }
 
