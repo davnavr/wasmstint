@@ -779,6 +779,7 @@ fn doValidation(
 
                 // TODO: Skip branch fixup processing for unreachable code.
                 if (frame.info.opcode != .loop) {
+                    // TODO: Possible optimization, target the instruction after the branch only if this is not the last `end` instruction.
                     try side_table.popAndResolveFixups(scratch, instr_offset);
 
                     if (frame.info.opcode == .@"if") {
@@ -791,14 +792,18 @@ fn doValidation(
             },
             .br => {
                 const label = try Label.read(&reader, &ctrl_stack, module);
+
                 // TODO: Skip branch fixup processing for unreachable code.
                 try appendSideTableEntry(scratch, &side_table, instr_offset, label);
+
                 try val_stack.popManyExpecting(&ctrl_stack, label.frame.labelTypes(module));
             },
             .br_if => {
                 const label = try Label.read(&reader, &ctrl_stack, module);
+
                 // TODO: Skip branch fixup processing for unreachable code.
                 try appendSideTableEntry(scratch, &side_table, instr_offset, label);
+
                 try val_stack.popExpecting(&ctrl_stack, .i32);
                 const label_types = label.frame.labelTypes(module);
                 try val_stack.popManyExpecting(&ctrl_stack, label_types);

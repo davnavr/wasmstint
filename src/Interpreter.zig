@@ -660,7 +660,7 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
             }
 
             fn eq(i_1: Signed, i_2: Signed) bool {
-                std.debug.print(" > (" ++ @typeName(Signed) ++ ".eq) {0X} ({0}) == {1X} ({1})?\n", .{ i_1, i_2 });
+                std.debug.print(" > (" ++ @typeName(Signed) ++ ".eq) {0X} (0x{0}) == {1X} (0x{1})?\n", .{ i_1, i_2 });
                 return i_1 == i_2;
             }
 
@@ -713,6 +713,7 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
             }
 
             fn add(i_1: Signed, i_2: Signed) !Signed {
+                std.debug.print(" > (" ++ @typeName(Signed) ++ ".add) {0X} (0x{0}) + {1X} (0x{1})\n", .{ i_1, i_2 });
                 return i_1 +% i_2;
             }
 
@@ -721,6 +722,7 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
             }
 
             fn mul(i_1: Signed, i_2: Signed) !Signed {
+                std.debug.print(" > (" ++ @typeName(Signed) ++ ".mul) {0X} (0x{0}) * {1X} (0x{1})\n", .{ i_1, i_2 });
                 return i_1 *% i_2;
             }
 
@@ -1062,6 +1064,7 @@ const opcode_handlers = struct {
         const c = vals.pop().i32;
         std.debug.print(" > (if) {}?\n", .{c != 0});
         if (c == 0) {
+            // No need to read LEB128 block type.
             int.takeBranch(i.p - 1, i, s, vals);
         } else {
             i.skipBlockType();
@@ -1097,7 +1100,25 @@ const opcode_handlers = struct {
         }
     }
 
-    //fn return
+    pub fn br_if(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const c = vals.pop().i32;
+        std.debug.print(" > (br_if) {}?\n", .{c != 0});
+        if (c != 0) {
+            // No need to read LEB128 branch target
+            int.takeBranch(i.p - 1, i, s, vals);
+        } else {
+            _ = i.readUleb128(u32) catch unreachable;
+            s.* += 1;
+        }
+
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    fn @"return"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        @call(.always_tail, returnFromWasm, .{ i, s, loc, vals, fuel, int });
+    }
 
     pub fn call(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const func_idx = i.readUleb128(@typeInfo(Module.FuncIdx).@"enum".tag_type) catch unreachable;
@@ -1143,6 +1164,14 @@ const opcode_handlers = struct {
                 int.state = State{ .awaiting_host = signature.parameters() };
             },
             .complete => {},
+        }
+    }
+
+    pub fn drop(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        _ = vals.pop();
+
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
     }
 
