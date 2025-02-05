@@ -200,8 +200,8 @@ const Import = union(enum) {
     fn name(import: Import, arena: IndexedArena.ConstData) *const Text.ImportName {
         return switch (import) {
             .inline_func => |func| &func.getPtr(arena).body.inline_import,
-            .inline_table => |table| &table.getPtr(arena).inner.no_elements.inline_import.name,
-            .inline_mem => |mem| &mem.getPtr(arena).import_exports.import.name,
+            .inline_table => |table| &table.getPtr(arena).inlineImport().?.name,
+            .inline_mem => |mem| &mem.getPtr(arena).inlineImport().?.name,
             .inline_global => |global| &global.getPtr(arena).inner.inline_import,
         };
     }

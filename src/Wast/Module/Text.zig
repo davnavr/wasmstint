@@ -344,11 +344,75 @@ pub const InlineImportExports = struct {
     }
 };
 
+pub const StringLiteral = struct {
+    token: sexpr.TokenId,
+
+    /// The contents of the string literal, without translating escape sequences.
+    ///
+    /// This is always valid UTF-8, though it may not be after translating its escape sequences.
+    pub fn rawContents(lit: StringLiteral, tree: *const sexpr.Tree) []const u8 {
+        const bytes = lit.token.contents(tree);
+        const tag = lit.token.tag(tree);
+        std.debug.assert(tag == .string or tag == .string_raw);
+        return bytes[1 .. bytes.len - 2];
+    }
+};
+
+pub const DataString = struct {
+    contents: IndexedArena.Slice(StringLiteral),
+
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        ctx: *ParseContext,
+        arena: *IndexedArena,
+    ) std.mem.Allocator.Error!DataString {
+        var strings = try IndexedArena.BoundedArrayList(StringLiteral).initCapacity(
+            arena,
+            contents.remaining.len,
+        );
+
+        for (0..strings.capacity) |_| {
+            const lit_token = contents.parseAtom(
+                ctx,
+                "data string literal",
+            ) catch |e| switch (e) {
+                error.OutOfMemory => |err| return err,
+                error.ReportedParserError => continue,
+                error.EndOfStream => unreachable,
+            };
+
+            switch (lit_token.tag(ctx.tree)) {
+                .string, .string_raw => strings.appendAssumeCapacity(
+                    arena,
+                    StringLiteral{ .token = lit_token },
+                ),
+                else => _ = try ctx.errorAtToken(lit_token, "expected data string literal"),
+            }
+        }
+
+        return .{ .contents = strings.items };
+    }
+};
+
 pub const Mem = struct {
     id: Ident.Symbolic align(4),
-    import_exports: InlineImportExports,
-    mem_type: MemType,
-    // TODO: Inline data segments, split import_exports field
+    inline_exports: InlineExports,
+    /// Indicates that a memory type is not explicitly specified, and that an inline data segment is present.
+    ///
+    /// If `.none`, then `inner == no_data`.
+    data_keyword: sexpr.TokenId.Opt,
+    inner: union {
+        /// Invariant that `data_keyword == .none`.
+        no_data: struct {
+            inline_import: InlineImport,
+            mem_type: MemType,
+        },
+        /// A data segment with an implicit offset of `0`.
+        ///
+        /// The memory type is also implied to be the length of the data segment rounded up to the nearest
+        /// multiple of the page size.
+        data: DataString,
+    },
 
     pub fn parseContents(
         contents: *sexpr.Parser,
@@ -357,23 +421,66 @@ pub const Mem = struct {
         arena: *IndexedArena,
         caches: *Caches,
         scratch: *ArenaAllocator,
-    ) sexpr.Parser.ParseError!Mem {
-        return .{
-            .id = try Ident.Symbolic.parse(
-                contents,
-                ctx.tree,
-                caches.allocator,
-                &caches.ids,
-            ),
-            .import_exports = try InlineImportExports.parseContents(
-                contents,
-                ctx,
-                arena,
-                caches,
-                scratch,
-            ),
-            .mem_type = try MemType.parseContents(contents, ctx, parent),
+    ) sexpr.Parser.ParseError!IndexedArena.Idx(Mem) {
+        const mem_idx = try arena.create(Mem);
+
+        const id = try Ident.Symbolic.parse(
+            contents,
+            ctx.tree,
+            caches.allocator,
+            &caches.ids,
+        );
+
+        const import_exports = try InlineImportExports.parseContents(
+            contents,
+            ctx,
+            arena,
+            caches,
+            scratch,
+        );
+
+        // Decide if a `memtype` or inline data segment is present.
+        var lookahead: sexpr.Parser = contents.*;
+        const memtype_or_data = lookahead.parseValue() catch
+            return (try ctx.errorAtList(parent, .end, "expected memtype or inline data segment")).err;
+
+        const mem: Mem = switch (memtype_or_data.unpacked()) {
+            .atom => .{
+                .id = id,
+                .inline_exports = import_exports.exports,
+                .data_keyword = .none,
+                .inner = .{
+                    .no_data = .{
+                        .inline_import = import_exports.import,
+                        .mem_type = try MemType.parseContents(contents, ctx, parent),
+                    },
+                },
+            },
+            .list => |data_list| with_data: {
+                contents.* = lookahead;
+                var in_data = sexpr.Parser.init(data_list.contents(ctx.tree).values(ctx.tree));
+                const data_keyword = try in_data.parseAtomInList(data_list, ctx, "'data' keyword");
+                if (data_keyword.tag(ctx.tree) != .keyword_data)
+                    return (try ctx.errorAtToken(data_keyword, "expected 'data' keyword")).err;
+
+                const data = try DataString.parseContents(&in_data, ctx, arena);
+
+                std.debug.assert(in_data.isEmpty());
+                break :with_data .{
+                    .id = id,
+                    .inline_exports = import_exports.exports,
+                    .data_keyword = sexpr.TokenId.Opt.init(data_keyword),
+                    .inner = .{ .data = data },
+                };
+            },
         };
+
+        mem_idx.set(arena, mem);
+        return mem_idx;
+    }
+
+    pub fn inlineImport(mem: *const Mem) ?*const InlineImport {
+        return if (mem.data_keyword.some) null else &mem.inner.no_data.inline_import;
     }
 };
 
@@ -458,10 +565,9 @@ pub const Table = struct {
         var lookahead: sexpr.Parser = contents.*;
         const type_token = try lookahead.parseAtomInList(parent, ctx, "reftype or table type");
 
-        const table = table: switch (type_token.tag(ctx.tree)) {
+        const table: Table = table: switch (type_token.tag(ctx.tree)) {
             // Detect the limits of a `tabletype`.
             .integer => {
-                contents.* = lookahead;
                 lookahead = undefined;
 
                 const table_type = try TableType.parseContents(contents, ctx, parent);
@@ -584,6 +690,10 @@ pub const Table = struct {
         table_idx.set(arena, table);
 
         return table_idx;
+    }
+
+    pub fn inlineImport(table: *const Table) ?*const InlineImport {
+        return if (table.ref_type_keyword.some) null else &table.inner.no_elements.inline_import;
     }
 };
 
@@ -814,7 +924,6 @@ pub fn parseFields(
                 break :field .{ .table = parsed_table };
             },
             .keyword_memory => {
-                const mem = try arena.create(Mem);
                 const parsed_mem = Mem.parseContents(
                     &field_contents,
                     ctx,
@@ -827,8 +936,7 @@ pub fn parseFields(
                     error.ReportedParserError => continue,
                 };
 
-                mem.set(arena, parsed_mem);
-                break :field .{ .mem = mem };
+                break :field .{ .mem = parsed_mem };
             },
             .keyword_global => {
                 const parsed_global = Global.parseContents(
