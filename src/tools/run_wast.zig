@@ -846,6 +846,40 @@ fn runScript(
                     error.ScriptError => return,
                 };
             },
+            .keyword_assert_invalid => {
+                var alloca = ArenaAllocator.init(state.cmd_arena.allocator());
+                const assert_invalid: *const Wast.Command.AssertInvalid = cmd.inner.assert_invalid.getPtr(script.arena);
+
+                // TODO: Actually check that validation fails with the right message.
+
+                var module_errors = Wast.Errors.init(state.cmd_arena.allocator());
+
+                encoding_buffer.clearRetainingCapacity();
+                try assert_invalid.module.encode(
+                    script.tree,
+                    script.arena.dataSlice(),
+                    script.caches,
+                    encoding_buffer.writer(),
+                    &module_errors,
+                    &alloca,
+                );
+
+                if (module_errors.list.len > 0) continue;
+
+                var module_contents: []const u8 = encoding_buffer.items;
+                _ = wasmstint.Module.parse(
+                    state.cmd_arena.allocator(),
+                    &module_contents,
+                    &alloca,
+                    rng,
+                    .{ .realloc_contents = true },
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    else => continue,
+                };
+
+                _ = try state.errors.errorAtToken(cmd.keyword, "module unexpectedly succeeded validation");
+            },
             else => {
                 _ = try state.errors.errorAtToken(
                     cmd.keyword,
