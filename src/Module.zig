@@ -1235,6 +1235,7 @@ pub fn finishCodeValidation(module: *Module, allocator: Allocator, scratch: *Are
         );
     }
 
+    // unreachable; // allows print debugging in validation code when interpreter also has print statements
     return allValidated;
 }
 

@@ -983,9 +983,8 @@ inline fn takeBranch(
     i: *Instructions,
     s: *Stp,
     vals: *ValStack,
-    target: Module.Code.SideTableEntry,
 ) void {
-    // TODO: Fix! Addition is based off math in bytes *AFTER* the opcode, not where it is!
+    const target = s.*[0];
     const code = interp.currentFrame().function.expanded().wasm.code();
     i.p = addPtrWithOffset(base_ip, target.delta_ip.done);
     std.debug.assert(@intFromPtr(code.state.instructions) <= @intFromPtr(i.p));
@@ -1063,7 +1062,7 @@ const opcode_handlers = struct {
         const c = vals.pop().i32;
         std.debug.print(" > (if) {}?\n", .{c != 0});
         if (c == 0) {
-            int.takeBranch(i.p - 1, i, s, vals, s.*[0]);
+            int.takeBranch(i.p - 1, i, s, vals);
         } else {
             i.skipBlockType();
             s.* += 1;
@@ -1075,7 +1074,7 @@ const opcode_handlers = struct {
     }
 
     pub fn @"else"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        int.takeBranch(i.p - 1, i, s, vals, s.*[0]);
+        int.takeBranch(i.p - 1, i, s, vals);
 
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
@@ -1092,7 +1091,7 @@ const opcode_handlers = struct {
 
     pub fn br(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         // No need to read LEB128 branch target
-        int.takeBranch(i.p - 1, i, s, vals, s.*[0]);
+        int.takeBranch(i.p - 1, i, s, vals);
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
