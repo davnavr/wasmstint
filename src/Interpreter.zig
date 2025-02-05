@@ -488,15 +488,15 @@ const Instructions = extern struct {
         } else {
             fuel.remaining -= 1;
 
-            const saved_ip = @intFromPtr(reader.p) -
-                @intFromPtr(interp.currentFrame().function.expanded().wasm.module.module.wasm.ptr);
+            // const saved_ip = @intFromPtr(reader.p) -
+            //     @intFromPtr(interp.currentFrame().function.expanded().wasm.module.module.wasm.ptr);
 
             const next_opcode = reader.readByte() catch unreachable;
 
-            std.debug.print(
-                "TRACE[{X:0>6}]: {s}\n",
-                .{ saved_ip, @tagName(@as(opcodes.ByteOpcode, @enumFromInt(next_opcode))) },
-            );
+            // std.debug.print(
+            //     "TRACE[{X:0>6}]: {s}\n",
+            //     .{ saved_ip, @tagName(@as(opcodes.ByteOpcode, @enumFromInt(next_opcode))) },
+            // );
 
             return byte_dispatch_table[next_opcode];
         }
@@ -660,7 +660,7 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
             }
 
             fn eq(i_1: Signed, i_2: Signed) bool {
-                std.debug.print(" > (" ++ @typeName(Signed) ++ ".eq) {0} (0x{0X}) == {1} (0x{1X})?\n", .{ i_1, i_2 });
+                // std.debug.print(" > (" ++ @typeName(Signed) ++ ".eq) {0} (0x{0X}) == {1} (0x{1X})?\n", .{ i_1, i_2 });
                 return i_1 == i_2;
             }
 
@@ -681,7 +681,7 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
             }
 
             fn gt_u(i_1: Signed, i_2: Signed) bool {
-                std.debug.print(" > (" ++ @typeName(Signed) ++ ".gt_u) {[0]X} (0x{[0]X}) > {[1]} ([{1}X])\n", .{ i_1, i_2 });
+                // std.debug.print(" > (" ++ @typeName(Signed) ++ ".gt_u) {[0]X} (0x{[0]X}) > {[1]} ([{1}X])\n", .{ i_1, i_2 });
                 return @as(Unsigned, @bitCast(i_1)) > @as(Unsigned, @bitCast(i_2));
             }
 
@@ -714,17 +714,17 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
             }
 
             fn add(i_1: Signed, i_2: Signed) !Signed {
-                std.debug.print(" > (" ++ @typeName(Signed) ++ ".add) {0} (0x{0X}) + {1} (0x{1X})\n", .{ i_1, i_2 });
+                // std.debug.print(" > (" ++ @typeName(Signed) ++ ".add) {0} (0x{0X}) + {1} (0x{1X})\n", .{ i_1, i_2 });
                 return i_1 +% i_2;
             }
 
             fn sub(i_1: Signed, i_2: Signed) !Signed {
-                std.debug.print(" > (" ++ @typeName(Signed) ++ ".sub) {0} (0x{0X}) - {1} (0x{1X})\n", .{ i_1, i_2 });
+                // std.debug.print(" > (" ++ @typeName(Signed) ++ ".sub) {0} (0x{0X}) - {1} (0x{1X})\n", .{ i_1, i_2 });
                 return i_1 -% i_2;
             }
 
             fn mul(i_1: Signed, i_2: Signed) !Signed {
-                std.debug.print(" > (" ++ @typeName(Signed) ++ ".mul) {0} (0x{0X}) * {1} (0x{1X})\n", .{ i_1, i_2 });
+                // std.debug.print(" > (" ++ @typeName(Signed) ++ ".mul) {0} (0x{0X}) * {1} (0x{1X})\n", .{ i_1, i_2 });
                 return i_1 *% i_2;
             }
 
@@ -821,7 +821,7 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
         fn @"const"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
             const n = i.readIleb128(Signed) catch unreachable;
             vals.appendAssumeCapacity(@unionInit(Value, value_field, n));
-            std.debug.print(" > (" ++ @typeName(Signed) ++ ".const) {[0]} (0x{[0]X})\n", .{n});
+            // std.debug.print(" > (" ++ @typeName(Signed) ++ ".const) {[0]} (0x{[0]X})\n", .{n});
 
             if (i.nextOpcodeHandler(fuel, int)) |next| {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
@@ -978,7 +978,7 @@ const no_allocation = struct {
 
 fn addPtrWithOffset(ptr: anytype, offset: isize) @TypeOf(ptr) {
     const sum = if (offset < 0) ptr - @abs(offset) else ptr + @as(usize, @intCast(offset));
-    std.debug.print(" > {*} + {} = {*}\n", .{ ptr, offset, sum });
+    // std.debug.print(" > {*} + {} = {*}\n", .{ ptr, offset, sum });
     return sum;
 }
 
@@ -995,14 +995,14 @@ inline fn takeBranch(
     std.debug.assert(@intFromPtr(code.state.instructions) <= @intFromPtr(i.p));
     std.debug.assert(@intFromPtr(i.p) <= @intFromPtr(i.ep));
 
-    std.debug.print(
-        "NEXT[{X:0>6}]: 0x{X} ({s})\n",
-        .{
-            @intFromPtr(i.p) - @intFromPtr(interp.currentFrame().function.expanded().wasm.module.module.wasm.ptr),
-            i.p[0],
-            @tagName(@as(opcodes.ByteOpcode, @enumFromInt(i.p[0]))),
-        },
-    );
+    // std.debug.print(
+    //     "NEXT[{X:0>6}]: 0x{X} ({s})\n",
+    //     .{
+    //         @intFromPtr(i.p) - @intFromPtr(interp.currentFrame().function.expanded().wasm.module.module.wasm.ptr),
+    //         i.p[0],
+    //         @tagName(@as(opcodes.ByteOpcode, @enumFromInt(i.p[0]))),
+    //     },
+    // );
 
     s.* = addPtrWithOffset(s.*, target.delta_stp);
     std.debug.assert(@intFromPtr(code.state.side_table_ptr) <= @intFromPtr(s.*));
@@ -1065,7 +1065,7 @@ const opcode_handlers = struct {
 
     pub fn @"if"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const c = vals.pop().i32;
-        std.debug.print(" > (if) {}?\n", .{c != 0});
+        // std.debug.print(" > (if) {}?\n", .{c != 0});
         if (c == 0) {
             // No need to read LEB128 block type.
             int.takeBranch(i.p - 1, i, s, vals);
@@ -1105,7 +1105,7 @@ const opcode_handlers = struct {
 
     pub fn br_if(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const c = vals.pop().i32;
-        std.debug.print(" > (br_if) {}?\n", .{c != 0});
+        // std.debug.print(" > (br_if) {}?\n", .{c != 0});
         if (c != 0) {
             // No need to read LEB128 branch target
             int.takeBranch(i.p - 1, i, s, vals);
@@ -1140,7 +1140,7 @@ const opcode_handlers = struct {
         ) catch |e| switch (e) {
             error.OutOfMemory => {
                 // Could set ip back to before the call instruction to allow trying again.
-                std.debug.print("call stack depth: {}\n", .{int.call_stack.items.len});
+                // std.debug.print("call stack depth: {}\n", .{int.call_stack.items.len});
                 int.state = .{ .interrupted = .call_stack_exhaustion };
                 return;
             },
@@ -1180,7 +1180,7 @@ const opcode_handlers = struct {
         const value = vals.items[loc..][n];
         vals.appendAssumeCapacity(value);
 
-        std.debug.print(" > (local.get {}) (i64.const {})\n", .{ n, value.i64 });
+        // std.debug.print(" > (local.get {}) (i64.const {})\n", .{ n, value.i64 });
 
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
