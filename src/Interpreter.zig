@@ -570,6 +570,7 @@ fn linearMemoryAccessors(comptime access_size: u5) type {
     return struct {
         comptime {
             std.debug.assert(0 < access_size);
+            std.debug.assert(std.math.isPowerOfTwo(access_size));
             std.debug.assert(builtin.cpu.arch.endian() == .little);
         }
 
@@ -584,15 +585,38 @@ fn linearMemoryAccessors(comptime access_size: u5) type {
             if (mem_arg.mem.size <= end_addr) return null;
             return mem_arg.mem.bytes()[effective_addr..][0..access_size];
         }
+
+        fn performStore(
+            i: *Instructions,
+            vals: *ValStack,
+            interp: *Interpreter,
+            value: Bytes,
+        ) error{OutOfBounds}!void {
+            const mem_arg = MemArg.read(i, interp);
+            const base_addr: u32 = @bitCast(vals.pop().i32);
+            const effective_addr = std.math.add(u32, base_addr, mem_arg.offset) catch
+                return error.OutOfBounds;
+            const end_addr = std.math.add(u32, effective_addr, access_size - 1) catch
+                return error.OutOfBounds;
+            if (mem_arg.mem.size <= end_addr)
+                return error.OutOfBounds;
+
+            mem_arg.mem.bytes()[effective_addr..][0..access_size].* = value;
+        }
     };
 }
 
 fn linearMemoryHandlers(comptime field_name: []const u8) type {
     return struct {
+        comptime {
+            std.debug.assert(builtin.cpu.arch.endian() == .little);
+        }
+
         const T = @FieldType(Value, field_name);
+        const accessors = linearMemoryAccessors(@sizeOf(T));
 
         fn load(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-            const bytes = linearMemoryAccessors(@sizeOf(T)).performLoad(i, vals, int) orelse {
+            const bytes = accessors.performLoad(i, vals, int) orelse {
                 int.state = .{ .trapped = .memory_access_out_of_bounds };
                 return;
             };
@@ -603,10 +627,23 @@ fn linearMemoryHandlers(comptime field_name: []const u8) type {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
         }
+
+        fn store(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+            const c: accessors.Bytes = @bitCast(@field(vals.pop(), field_name));
+            accessors.performStore(i, vals, int, c) catch |e| {
+                comptime std.debug.assert(@TypeOf(e) == error{OutOfBounds});
+                int.state = .{ .trapped = .memory_access_out_of_bounds };
+                return;
+            };
+
+            if (i.nextOpcodeHandler(fuel, int)) |next| {
+                @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+            }
+        }
     };
 }
 
-fn extendingLinearMemoryHandlers(comptime field_name: []const u8, comptime S: type) type {
+fn extendingLinearMemoryLoad(comptime field_name: []const u8, comptime S: type) type {
     return struct {
         const T = @FieldType(Value, field_name);
 
@@ -614,7 +651,7 @@ fn extendingLinearMemoryHandlers(comptime field_name: []const u8, comptime S: ty
             std.debug.assert(@bitSizeOf(S) < @bitSizeOf(T));
         }
 
-        fn load(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
             const bytes = linearMemoryAccessors(@sizeOf(S)).performLoad(i, vals, int) orelse {
                 int.state = .{ .trapped = .memory_access_out_of_bounds };
                 return;
@@ -627,6 +664,30 @@ fn extendingLinearMemoryHandlers(comptime field_name: []const u8, comptime S: ty
                     @as(S, @bitCast(bytes.*)),
                 ),
             );
+
+            if (i.nextOpcodeHandler(fuel, int)) |next| {
+                @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+            }
+        }
+    };
+}
+
+fn narrowingLinearMemoryStore(comptime field_name: []const u8, comptime size: u6) type {
+    return struct {
+        const T = @FieldType(Value, field_name);
+        const S = std.meta.Int(.signed, size);
+
+        comptime {
+            std.debug.assert(@bitSizeOf(S) < @bitSizeOf(T));
+        }
+
+        fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+            const narrowed: S = @truncate(@field(vals.pop(), field_name));
+            linearMemoryAccessors(size / 8).performStore(i, vals, int, @bitCast(narrowed)) catch |e| {
+                comptime std.debug.assert(@TypeOf(e) == error{OutOfBounds});
+                int.state = .{ .trapped = .memory_access_out_of_bounds };
+                return;
+            };
 
             if (i.nextOpcodeHandler(fuel, int)) |next| {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
@@ -1298,14 +1359,25 @@ const opcode_handlers = struct {
     pub const @"i64.load" = linearMemoryHandlers("i64").load;
     pub const @"f32.load" = linearMemoryHandlers("f32").load;
     pub const @"f64.load" = linearMemoryHandlers("f64").load;
-    pub const @"i32.load8_s" = extendingLinearMemoryHandlers("i32", i8).load;
-    pub const @"i32.load8_u" = extendingLinearMemoryHandlers("i32", u8).load;
-    pub const @"i32.load16_s" = extendingLinearMemoryHandlers("i32", i16).load;
-    pub const @"i32.load16_u" = extendingLinearMemoryHandlers("i32", u16).load;
-    pub const @"i64.load8_s" = extendingLinearMemoryHandlers("i64", i8).load;
-    pub const @"i64.load8_u" = extendingLinearMemoryHandlers("i64", u8).load;
-    pub const @"i64.load16_s" = extendingLinearMemoryHandlers("i64", i16).load;
-    pub const @"i64.load16_u" = extendingLinearMemoryHandlers("i64", u16).load;
+    pub const @"i32.load8_s" = extendingLinearMemoryLoad("i32", i8).handler;
+    pub const @"i32.load8_u" = extendingLinearMemoryLoad("i32", u8).handler;
+    pub const @"i32.load16_s" = extendingLinearMemoryLoad("i32", i16).handler;
+    pub const @"i32.load16_u" = extendingLinearMemoryLoad("i32", u16).handler;
+    pub const @"i64.load8_s" = extendingLinearMemoryLoad("i64", i8).handler;
+    pub const @"i64.load8_u" = extendingLinearMemoryLoad("i64", u8).handler;
+    pub const @"i64.load16_s" = extendingLinearMemoryLoad("i64", i16).handler;
+    pub const @"i64.load16_u" = extendingLinearMemoryLoad("i64", u16).handler;
+    pub const @"i64.load32_s" = extendingLinearMemoryLoad("i64", i32).handler;
+    pub const @"i64.load32_u" = extendingLinearMemoryLoad("i64", u32).handler;
+    pub const @"i32.store" = linearMemoryHandlers("i32").store;
+    pub const @"i64.store" = linearMemoryHandlers("i64").store;
+    pub const @"f32.store" = linearMemoryHandlers("f32").store;
+    pub const @"f64.store" = linearMemoryHandlers("f64").store;
+    pub const @"i32.store8" = narrowingLinearMemoryStore("i32", 8).handler;
+    pub const @"i32.store16" = narrowingLinearMemoryStore("i32", 16).handler;
+    pub const @"i64.store8" = narrowingLinearMemoryStore("i64", 8).handler;
+    pub const @"i64.store16" = narrowingLinearMemoryStore("i64", 16).handler;
+    pub const @"i64.store32" = narrowingLinearMemoryStore("i64", 32).handler;
 
     pub const @"i32.eqz" = i32_opcode_handlers.eqz;
     pub const @"i32.eq" = i32_opcode_handlers.eq;
