@@ -789,6 +789,8 @@ fn encodeExpr(
                         try writeUleb128(output, alignment);
                         try writeUleb128(output, offset);
                     },
+                    .f32 => try output.writeInt(u32, arg.*, .little),
+                    .f64 => try output.writeInt(u64, arg.*, .little),
                     else => {
                         std.debug.panic("TODO: {}", .{arg_tag});
                     },
