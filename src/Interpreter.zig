@@ -466,12 +466,16 @@ const Instructions = extern struct {
         return .{ .p = ip, .ep = eip };
     }
 
-    pub fn readByte(i: *Instructions) Module.NoEofError!u8 {
-        if (@intFromPtr(i.p) <= @intFromPtr(i.ep)) {
-            const b = i.p[0];
-            i.p += 1;
-            return b;
+    fn readByteArray(i: *Instructions, comptime n: usize) Module.NoEofError!*const [n]u8 {
+        if (@intFromPtr(i.p) + (n - 1) <= @intFromPtr(i.ep)) {
+            const result = i.p[0..n];
+            i.p += n;
+            return result;
         } else return error.EndOfStream;
+    }
+
+    pub inline fn readByte(i: *Instructions) Module.NoEofError!u8 {
+        return (try i.readByteArray(1))[0];
     }
 
     inline fn readUleb128(reader: *Instructions, comptime T: type) error{ Overflow, EndOfStream }!T {
@@ -1036,6 +1040,20 @@ fn floatOpcodeHandlers(comptime F: type) type {
             }
         };
 
+        fn @"const"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+            const z = std.mem.readInt(
+                std.meta.Int(.unsigned, @bitSizeOf(F)),
+                i.readByteArray(@sizeOf(F)) catch unreachable,
+                .little,
+            );
+
+            vals.appendAssumeCapacity(@unionInit(Value, value_field, @bitCast(z)));
+
+            if (i.nextOpcodeHandler(fuel, int)) |next| {
+                @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+            }
+        }
+
         const convert_i32_s = defineConvOp("i32", value_field, operators.convert_s, undefined).handler;
         const convert_i32_u = defineConvOp("i32", value_field, operators.convert_u, undefined).handler;
         const convert_i64_s = defineConvOp("i64", value_field, operators.convert_s, undefined).handler;
@@ -1379,6 +1397,11 @@ const opcode_handlers = struct {
     pub const @"i64.store16" = narrowingLinearMemoryStore("i64", 16).handler;
     pub const @"i64.store32" = narrowingLinearMemoryStore("i64", 32).handler;
 
+    pub const @"i32.const" = i32_opcode_handlers.@"const";
+    pub const @"i64.const" = i64_opcode_handlers.@"const";
+    pub const @"f32.const" = f32_opcode_handlers.@"const";
+    pub const @"f64.const" = f64_opcode_handlers.@"const";
+
     pub const @"i32.eqz" = i32_opcode_handlers.eqz;
     pub const @"i32.eq" = i32_opcode_handlers.eq;
     pub const @"i32.ne" = i32_opcode_handlers.ne;
@@ -1406,7 +1429,6 @@ const opcode_handlers = struct {
     pub const @"i32.clz" = i32_opcode_handlers.clz;
     pub const @"i32.ctz" = i32_opcode_handlers.ctz;
     pub const @"i32.popcnt" = i32_opcode_handlers.popcnt;
-    pub const @"i32.const" = i32_opcode_handlers.@"const";
     pub const @"i32.add" = i32_opcode_handlers.add;
     pub const @"i32.sub" = i32_opcode_handlers.sub;
     pub const @"i32.mul" = i32_opcode_handlers.mul;
@@ -1426,7 +1448,6 @@ const opcode_handlers = struct {
     pub const @"i64.clz" = i64_opcode_handlers.clz;
     pub const @"i64.ctz" = i64_opcode_handlers.ctz;
     pub const @"i64.popcnt" = i64_opcode_handlers.popcnt;
-    pub const @"i64.const" = i64_opcode_handlers.@"const";
     pub const @"i64.add" = i64_opcode_handlers.add;
     pub const @"i64.sub" = i64_opcode_handlers.sub;
     pub const @"i64.mul" = i64_opcode_handlers.mul;
