@@ -885,13 +885,20 @@ fn doValidation(
 
                 // TODO: Skip branch fixup processing for unreachable code.
                 const last_label = try Label.read(&reader, &ctrl_stack, module);
+
+                try appendSideTableEntry(scratch, &side_table, instr_offset, last_label);
+
                 const last_label_types = last_label.frame.labelTypes(module);
                 const arity: u32 = @intCast(last_label_types.len);
 
                 for (labels) |n| {
                     const l = try Label.init(n, &ctrl_stack, module);
+
+                    try appendSideTableEntry(scratch, &side_table, instr_offset, l);
+
                     const l_types = l.frame.labelTypes(module);
                     if (l_types.len != arity) return error.InvalidWasm;
+
                     try val_stack.popManyExpecting(&ctrl_stack, l_types);
                     try val_stack.pushMany(undefined, l_types);
                 }
