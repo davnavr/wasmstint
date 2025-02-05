@@ -545,6 +545,10 @@ pub const MemInst = extern struct {
             },
         };
     }
+
+    pub inline fn bytes(inst: *const MemInst) []u8 {
+        return inst.base[0..inst.size];
+    }
 };
 
 pub const TableInst = extern struct {

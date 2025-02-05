@@ -101,6 +101,7 @@ pub const TrapCode = enum(i32) {
     integer_division_by_zero,
     integer_overflow,
     invalid_conversion_to_integer,
+    memory_access_out_of_bounds,
     _,
 
     pub fn initHost(code: u31) TrapCode {
@@ -549,6 +550,89 @@ fn returnFromWasm(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *F
     const signature = popped.function.signature();
     std.debug.assert(signature.result_count == popped.result_count);
     int.state = .{ .awaiting_host = signature.results() };
+}
+
+const MemArg = struct {
+    mem: *const runtime.MemInst,
+    offset: u32,
+
+    // TODO: Should opcode handlers take extra ModuleInst parameter?
+    fn read(i: *Instructions, interp: *Interpreter) MemArg {
+        _ = i.readUleb128(u32) catch unreachable; // align
+        return .{
+            .offset = i.readUleb128(u32) catch unreachable,
+            .mem = interp.currentFrame().function.expanded().wasm.module.memAddr(.default),
+        };
+    }
+};
+
+fn linearMemoryAccessors(comptime access_size: u5) type {
+    return struct {
+        comptime {
+            std.debug.assert(0 < access_size);
+            std.debug.assert(builtin.cpu.arch.endian() == .little);
+        }
+
+        const Bytes = [access_size]u8;
+
+        fn performLoad(i: *Instructions, vals: *ValStack, interp: *Interpreter) ?*const Bytes {
+            const mem_arg = MemArg.read(i, interp);
+            const base_addr: u32 = @bitCast(vals.pop().i32);
+            // std.debug.print(" > load of size {} @ 0x{X} + {} into memory size={}\n", .{ access_size, base_addr, mem_arg.offset, mem_arg.mem.size });
+            const effective_addr = std.math.add(u32, base_addr, mem_arg.offset) catch return null;
+            const end_addr = std.math.add(u32, effective_addr, access_size - 1) catch return null;
+            if (mem_arg.mem.size <= end_addr) return null;
+            return mem_arg.mem.bytes()[effective_addr..][0..access_size];
+        }
+    };
+}
+
+fn linearMemoryHandlers(comptime field_name: []const u8) type {
+    return struct {
+        const T = @FieldType(Value, field_name);
+
+        fn load(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+            const bytes = linearMemoryAccessors(@sizeOf(T)).performLoad(i, vals, int) orelse {
+                int.state = .{ .trapped = .memory_access_out_of_bounds };
+                return;
+            };
+
+            vals.appendAssumeCapacity(@unionInit(Value, field_name, @bitCast(bytes.*)));
+
+            if (i.nextOpcodeHandler(fuel, int)) |next| {
+                @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+            }
+        }
+    };
+}
+
+fn extendingLinearMemoryHandlers(comptime field_name: []const u8, comptime S: type) type {
+    return struct {
+        const T = @FieldType(Value, field_name);
+
+        comptime {
+            std.debug.assert(@bitSizeOf(S) < @bitSizeOf(T));
+        }
+
+        fn load(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+            const bytes = linearMemoryAccessors(@sizeOf(S)).performLoad(i, vals, int) orelse {
+                int.state = .{ .trapped = .memory_access_out_of_bounds };
+                return;
+            };
+
+            vals.appendAssumeCapacity(
+                @unionInit(
+                    Value,
+                    field_name,
+                    @as(S, @bitCast(bytes.*)),
+                ),
+            );
+
+            if (i.nextOpcodeHandler(fuel, int)) |next| {
+                @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+            }
+        }
+    };
 }
 
 fn DefineBinOp(comptime value_field: []const u8, comptime op: anytype, comptime trap: anytype) type {
@@ -1205,6 +1289,23 @@ const opcode_handlers = struct {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
     }
+
+    // global.get/set
+
+    // table.get/set
+
+    pub const @"i32.load" = linearMemoryHandlers("i32").load;
+    pub const @"i64.load" = linearMemoryHandlers("i64").load;
+    pub const @"f32.load" = linearMemoryHandlers("f32").load;
+    pub const @"f64.load" = linearMemoryHandlers("f64").load;
+    pub const @"i32.load8_s" = extendingLinearMemoryHandlers("i32", i8).load;
+    pub const @"i32.load8_u" = extendingLinearMemoryHandlers("i32", u8).load;
+    pub const @"i32.load16_s" = extendingLinearMemoryHandlers("i32", i16).load;
+    pub const @"i32.load16_u" = extendingLinearMemoryHandlers("i32", u16).load;
+    pub const @"i64.load8_s" = extendingLinearMemoryHandlers("i64", i8).load;
+    pub const @"i64.load8_u" = extendingLinearMemoryHandlers("i64", u8).load;
+    pub const @"i64.load16_s" = extendingLinearMemoryHandlers("i64", i16).load;
+    pub const @"i64.load16_u" = extendingLinearMemoryHandlers("i64", u16).load;
 
     pub const @"i32.eqz" = i32_opcode_handlers.eqz;
     pub const @"i32.eq" = i32_opcode_handlers.eq;
