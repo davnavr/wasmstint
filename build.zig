@@ -12,6 +12,7 @@ pub fn build(b: *std.Build) void {
         .run_wasip1 = b.step("run-wasip1", "Run the WASI (preview 1) application interpreter"),
         // .@"test" = b.step("test", "Run all unit and specification tests"),
         .test_unit = b.step("test-unit", "Run unit tests"),
+        .test_spec = b.step("test-spec", "Run all specification tests (that are currently expected to pass)"),
     };
 
     const root_mod = b.createModule(.{ .root_source_file = b.path("src/root.zig") });
@@ -58,4 +59,20 @@ pub fn build(b: *std.Build) void {
 
     const unit_tests_run = b.addRunArtifact(unit_tests);
     steps.test_unit.dependOn(&unit_tests_run.step);
+
+    {
+        const run_spec_tests_cmd = b.addRunArtifact(run_wast_exe);
+        const tests = [_][]const u8{
+            "tests/spec/address.wast",
+            "tests/spec/i32.wast",
+            "tests/spec/i64.wast",
+            "tests/spec/fac.wast",
+        };
+
+        for (tests) |path| {
+            run_spec_tests_cmd.addArg("--run");
+            run_spec_tests_cmd.addFileArg(b.path(path));
+        }
+        steps.test_spec.dependOn(&run_spec_tests_cmd.step);
+    }
 }
