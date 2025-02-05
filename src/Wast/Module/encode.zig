@@ -783,6 +783,12 @@ fn encodeExpr(
                         );
                     },
                     .select => unreachable,
+                    .mem_arg => {
+                        const alignment: u5 = if (arg.align_token.some) arg.align_pow else 0;
+                        const offset: u64 = if (arg.offset_token.some) arg.offset else 0;
+                        try writeUleb128(output, alignment);
+                        try writeUleb128(output, offset);
+                    },
                     else => {
                         std.debug.panic("TODO: {}", .{arg_tag});
                     },
