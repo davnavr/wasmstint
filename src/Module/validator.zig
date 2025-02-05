@@ -325,9 +325,16 @@ const ValStack = struct {
     }
 };
 
-fn readMemArg(reader: *Module.Reader, natural_alignment: u4) Error!void {
+fn readMemArg(
+    reader: *Module.Reader,
+    natural_alignment: u4,
+    module: *const Module,
+) Error!void {
     const a = try reader.readUleb128(u32);
-    if (a > natural_alignment) return Error.InvalidWasm;
+
+    if (a > natural_alignment or module.inner.mem_count == 0)
+        return Error.InvalidWasm;
+
     _ = try reader.readUleb128(u32); // offset
 }
 
@@ -607,11 +614,12 @@ fn validateLoadInstr(
     ctrl_stack: *const CtrlStack,
     natural_alignment: u4,
     loaded: ValType,
+    module: *const Module,
     arena: *ArenaAllocator,
 ) Error!void {
     // Pop index, push loaded value.
     try val_stack.popThenPushExpecting(arena, ctrl_stack, .i32, loaded);
-    try readMemArg(reader, natural_alignment);
+    try readMemArg(reader, natural_alignment, module);
 }
 
 fn validateStoreInstr(
@@ -620,9 +628,10 @@ fn validateStoreInstr(
     ctrl_stack: *const CtrlStack,
     natural_alignment: u4,
     stored: ValType,
+    module: *const Module,
 ) Error!void {
     try val_stack.popManyExpecting(ctrl_stack, &[_]ValType{ .i32, stored });
-    try readMemArg(reader, natural_alignment);
+    try readMemArg(reader, natural_alignment, module);
 }
 
 fn doValidation(
@@ -875,6 +884,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(4),
                 .i32,
+                module,
                 scratch,
             ),
             .@"i64.load" => try validateLoadInstr(
@@ -883,6 +893,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(8),
                 .i64,
+                module,
                 scratch,
             ),
             .@"f32.load" => try validateLoadInstr(
@@ -891,6 +902,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(4),
                 .f32,
+                module,
                 scratch,
             ),
             .@"f64.load" => try validateLoadInstr(
@@ -899,6 +911,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(8),
                 .i64,
+                module,
                 scratch,
             ),
             .@"i32.load8_s", .@"i32.load8_u" => try validateLoadInstr(
@@ -907,6 +920,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(1),
                 .i32,
+                module,
                 scratch,
             ),
             .@"i32.load16_s", .@"i32.load16_u" => try validateLoadInstr(
@@ -915,6 +929,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(2),
                 .i32,
+                module,
                 scratch,
             ),
             .@"i64.load8_s", .@"i64.load8_u" => try validateLoadInstr(
@@ -923,6 +938,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(1),
                 .i64,
+                module,
                 scratch,
             ),
             .@"i64.load16_s", .@"i64.load16_u" => try validateLoadInstr(
@@ -931,6 +947,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(2),
                 .i64,
+                module,
                 scratch,
             ),
             .@"i64.load32_s", .@"i64.load32_u" => try validateLoadInstr(
@@ -939,6 +956,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(4),
                 .i64,
+                module,
                 scratch,
             ),
             .@"i32.store" => try validateStoreInstr(
@@ -947,6 +965,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(4),
                 .i32,
+                module,
             ),
             .@"i64.store" => try validateStoreInstr(
                 &reader,
@@ -954,6 +973,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(8),
                 .i64,
+                module,
             ),
             .@"f32.store" => try validateStoreInstr(
                 &reader,
@@ -961,6 +981,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(4),
                 .f32,
+                module,
             ),
             .@"f64.store" => try validateStoreInstr(
                 &reader,
@@ -968,6 +989,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(8),
                 .f64,
+                module,
             ),
             .@"i32.store8" => try validateStoreInstr(
                 &reader,
@@ -975,6 +997,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(1),
                 .i32,
+                module,
             ),
             .@"i32.store16" => try validateStoreInstr(
                 &reader,
@@ -982,6 +1005,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(2),
                 .i32,
+                module,
             ),
             .@"i64.store8" => try validateStoreInstr(
                 &reader,
@@ -989,6 +1013,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(1),
                 .i64,
+                module,
             ),
             .@"i64.store16" => try validateStoreInstr(
                 &reader,
@@ -996,6 +1021,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(2),
                 .i64,
+                module,
             ),
             .@"i64.store32" => try validateStoreInstr(
                 &reader,
@@ -1003,6 +1029,7 @@ fn doValidation(
                 &ctrl_stack,
                 std.math.log2(4),
                 .i64,
+                module,
             ),
 
             .@"i32.const" => {
