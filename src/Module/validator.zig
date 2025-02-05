@@ -832,10 +832,8 @@ fn doValidation(
                     // TODO: Possible optimization, target the instruction after the branch only if this is not the last `end` instruction.
                     try side_table.popAndResolveFixups(scratch, instr_offset);
 
-                    if (frame.info.opcode == .@"if") {
+                    if (frame.info.opcode == .@"if")
                         try side_table.popAndResolveAlternate(instr_offset);
-                        try side_table.popAndResolveFixups(scratch, instr_offset);
-                    }
                 }
 
                 try val_stack.pushMany(scratch, frame.types.funcType(module).results());
