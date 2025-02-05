@@ -355,7 +355,7 @@ pub const StringLiteral = struct {
         const bytes = lit.token.contents(tree);
         const tag = lit.token.tag(tree);
         std.debug.assert(tag == .string or tag == .string_raw);
-        return bytes[1 .. bytes.len - 2];
+        return bytes[1 .. bytes.len - 1];
     }
 };
 

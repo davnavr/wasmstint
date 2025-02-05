@@ -717,3 +717,14 @@ test "keywords" {
         },
     );
 }
+
+test "string literals" {
+    try lexerSuccessfulTest(
+        \\"\00\00\00\00\00\00\a0\7f\01\00\d0\7f"
+    ,
+        &[_]?Token{
+            .{ .offset = .{ .start = 0, .end = 38 }, .tag = .string_raw },
+            null,
+        },
+    );
+}
