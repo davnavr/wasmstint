@@ -33,7 +33,10 @@ pub const GlobalIdx = enum(u31) { _ };
 
 // A 7-bit index allows parsing a byte instead of a LEB128 index.
 pub const TableIdx = enum(u7) { _ };
-pub const MemIdx = enum(u7) { _ };
+pub const MemIdx = enum(u7) {
+    default = 0,
+    _,
+};
 
 const Module = @This();
 
@@ -1189,7 +1192,7 @@ pub fn parse(
             .table_count = @intCast(table_types.len),
 
             .mem_types = mem_types.items(arena_data).ptr,
-            .mem_count = 0,
+            .mem_count = @intCast(mem_types.len),
 
             .global_types = global_sec.types.items(arena_data).ptr,
             .global_exprs = global_sec.exprs.items(arena_data).ptr,
