@@ -44,7 +44,10 @@ pub fn unsignedInteger(comptime T: type, token: []const u8) error{Overflow}!T {
                 );
             },
             '_' => {},
-            else => unreachable,
+            else => if (@import("builtin").mode == .Debug)
+                std.debug.panic("invalid unsigned integer {s}", .{token})
+            else
+                unreachable,
         };
     }
 

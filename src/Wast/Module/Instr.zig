@@ -177,8 +177,9 @@ pub const MemArg = struct {
             if (!std.mem.startsWith(u8, offset_contents, "offset=")) return mem_arg;
 
             const lexer_offset = offset_token.offset(ctx.tree);
+            const lexer_bytes = ctx.tree.source[0..lexer_offset.end];
             var offset_lexer = Lexer.initUtf8(.{
-                .bytes = ctx.tree.source[0..lexer_offset.end],
+                .bytes = lexer_bytes,
                 .i = lexer_offset.start + "offset=".len,
             });
 
@@ -188,7 +189,7 @@ pub const MemArg = struct {
                 return mem_arg;
             }
 
-            const offset_value = parseUninterpretedInteger(u64, digits_token.contents(ctx.tree.source)) catch {
+            const offset_value = parseUninterpretedInteger(u64, digits_token.contents(lexer_bytes)) catch {
                 _ = try ctx.errorAtToken(offset_token, "invalid offset integer");
                 return mem_arg;
             };

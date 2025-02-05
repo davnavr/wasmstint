@@ -191,7 +191,7 @@ pub const Token = struct {
     }
 
     pub fn contents(token: *const Token, src: []const u8) []const u8 {
-        return src[token.offset.start..][0..token.offset.end];
+        return src[token.offset.start..token.offset.end];
     }
 
     test {
