@@ -325,6 +325,12 @@ const ValStack = struct {
     }
 };
 
+fn readMemArg(reader: *Module.Reader, natural_alignment: u4) Error!void {
+    const a = try reader.readUleb128(u32);
+    if (a > natural_alignment) return Error.InvalidWasm;
+    _ = try reader.readUleb128(u32); // offset
+}
+
 fn readLocalIdx(reader: *Module.Reader, locals: []const ValType) Error!ValType {
     const idx = try reader.readUleb128(u32);
     return if (idx < locals.len) locals[idx] else Error.InvalidWasm;
@@ -595,6 +601,30 @@ fn appendSideTableEntry(
     );
 }
 
+fn validateLoadInstr(
+    reader: *Module.Reader,
+    val_stack: *ValStack,
+    ctrl_stack: *const CtrlStack,
+    natural_alignment: u4,
+    loaded: ValType,
+    arena: *ArenaAllocator,
+) Error!void {
+    // Pop index, push loaded value.
+    try val_stack.popThenPushExpecting(arena, ctrl_stack, .i32, loaded);
+    try readMemArg(reader, natural_alignment);
+}
+
+fn validateStoreInstr(
+    reader: *Module.Reader,
+    val_stack: *ValStack,
+    ctrl_stack: *const CtrlStack,
+    natural_alignment: u4,
+    stored: ValType,
+) Error!void {
+    try val_stack.popManyExpecting(ctrl_stack, &[_]ValType{ .i32, stored });
+    try readMemArg(reader, natural_alignment);
+}
+
 fn doValidation(
     state: *State,
     allocator: Allocator,
@@ -823,7 +853,9 @@ fn doValidation(
                 try val_stack.popManyExpecting(&ctrl_stack, callee_signature.parameters());
                 try val_stack.pushMany(scratch, callee_signature.results());
             },
+
             .drop => _ = try val_stack.popAny(&ctrl_stack),
+
             .@"local.get" => {
                 const local_type = try readLocalIdx(&reader, locals);
                 try val_stack.push(scratch, local_type);
@@ -836,6 +868,143 @@ fn doValidation(
                 const local_type = try readLocalIdx(&reader, locals);
                 try val_stack.popThenPushExpecting(scratch, &ctrl_stack, local_type, local_type);
             },
+
+            .@"i32.load" => try validateLoadInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(4),
+                .i32,
+                scratch,
+            ),
+            .@"i64.load" => try validateLoadInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(8),
+                .i64,
+                scratch,
+            ),
+            .@"f32.load" => try validateLoadInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(4),
+                .f32,
+                scratch,
+            ),
+            .@"f64.load" => try validateLoadInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(8),
+                .i64,
+                scratch,
+            ),
+            .@"i32.load8_s", .@"i32.load8_u" => try validateLoadInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(1),
+                .i32,
+                scratch,
+            ),
+            .@"i32.load16_s", .@"i32.load16_u" => try validateLoadInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(2),
+                .i32,
+                scratch,
+            ),
+            .@"i64.load8_s", .@"i64.load8_u" => try validateLoadInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(1),
+                .i64,
+                scratch,
+            ),
+            .@"i64.load16_s", .@"i64.load16_u" => try validateLoadInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(2),
+                .i64,
+                scratch,
+            ),
+            .@"i64.load32_s", .@"i64.load32_u" => try validateLoadInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(4),
+                .i64,
+                scratch,
+            ),
+            .@"i32.store" => try validateStoreInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(4),
+                .i32,
+            ),
+            .@"i64.store" => try validateStoreInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(8),
+                .i64,
+            ),
+            .@"f32.store" => try validateStoreInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(4),
+                .f32,
+            ),
+            .@"f64.store" => try validateStoreInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(8),
+                .f64,
+            ),
+            .@"i32.store8" => try validateStoreInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(1),
+                .i32,
+            ),
+            .@"i32.store16" => try validateStoreInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(2),
+                .i32,
+            ),
+            .@"i64.store8" => try validateStoreInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(1),
+                .i64,
+            ),
+            .@"i64.store16" => try validateStoreInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(2),
+                .i64,
+            ),
+            .@"i64.store32" => try validateStoreInstr(
+                &reader,
+                &val_stack,
+                &ctrl_stack,
+                std.math.log2(4),
+                .i64,
+            ),
+
             .@"i32.const" => {
                 _ = try reader.readIleb128(i32);
                 try val_stack.push(scratch, .i32);
