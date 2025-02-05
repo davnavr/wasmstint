@@ -168,13 +168,13 @@ pub const MemArg = struct {
 
     pub fn parseContents(contents: *sexpr.Parser, ctx: *ParseContext) error{OutOfMemory}!MemArg {
         var mem_arg = MemArg.none;
-        var lookahead: sexpr.Parser = contents.*;
 
-        {
+        parse_offset: {
+            var lookahead: sexpr.Parser = contents.*;
             const offset_token = (lookahead.parseValue() catch return mem_arg).getAtom() orelse return mem_arg;
             if (offset_token.tag(ctx.tree) != .keyword_unknown) return mem_arg;
             const offset_contents = offset_token.contents(ctx.tree);
-            if (!std.mem.startsWith(u8, offset_contents, "offset=")) return mem_arg;
+            if (!std.mem.startsWith(u8, offset_contents, "offset=")) break :parse_offset;
 
             const lexer_offset = offset_token.offset(ctx.tree);
             const lexer_bytes = ctx.tree.source[0..lexer_offset.end];
@@ -189,9 +189,11 @@ pub const MemArg = struct {
                 return mem_arg;
             }
 
+            contents.* = lookahead;
+
             const offset_value = parseUninterpretedInteger(u64, digits_token.contents(lexer_bytes)) catch {
                 _ = try ctx.errorAtToken(offset_token, "invalid offset integer");
-                return mem_arg;
+                break :parse_offset;
             };
 
             mem_arg.offset_token = TokenId.Opt.init(offset_token);
@@ -199,14 +201,16 @@ pub const MemArg = struct {
         }
 
         {
+            var lookahead: sexpr.Parser = contents.*;
             const align_token = (lookahead.parseValue() catch return mem_arg).getAtom() orelse return mem_arg;
             if (align_token.tag(ctx.tree) != .keyword_unknown) return mem_arg;
             const align_contents = align_token.contents(ctx.tree);
             if (!std.mem.startsWith(u8, align_contents, "align=")) return mem_arg;
 
             const lexer_offset = align_token.offset(ctx.tree);
+            const lexer_bytes = ctx.tree.source[0..lexer_offset.end];
             var offset_lexer = Lexer.initUtf8(.{
-                .bytes = ctx.tree.source[0..lexer_offset.end],
+                .bytes = lexer_bytes,
                 .i = lexer_offset.start + "align=".len,
             });
 
@@ -216,7 +220,9 @@ pub const MemArg = struct {
                 return mem_arg;
             }
 
-            const align_value = parseUninterpretedInteger(u32, digits_token.contents(ctx.tree.source)) catch {
+            contents.* = lookahead;
+
+            const align_value = parseUninterpretedInteger(u32, digits_token.contents(lexer_bytes)) catch {
                 _ = try ctx.errorAtToken(align_token, "invalid offset integer");
                 return mem_arg;
             };
@@ -470,6 +476,7 @@ pub fn parseArgs(
     caches: *Caches,
     scratch: *ArenaAllocator,
 ) sexpr.Parser.ParseError!void {
+    // TODO: If keyword.tag is not an instruction, shouldn't this just return an error?
     switch (argumentTag(Lexer.Token.tagToInstrTag(keyword.tag(ctx.tree)))) {
         .none => try list.append(list_arena, keyword, {}, ctx.tree),
         .block_type => {
