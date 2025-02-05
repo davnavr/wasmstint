@@ -44,6 +44,7 @@ pub const Contents = union {
     table: IndexedArena.Idx(Table),
     mem: IndexedArena.Idx(Mem),
     global: IndexedArena.Idx(Global),
+    data: IndexedArena.Idx(Data),
 };
 
 pub const ValType = struct {
@@ -797,6 +798,142 @@ pub const Global = struct {
     }
 };
 
+pub const Data = struct {
+    id: Ident.Symbolic align(4),
+    memory: Ident.Opt align(4),
+    active: packed struct(u32) {
+        /// Must only be set and read when `memory.some`.
+        memory_keyword: sexpr.TokenId,
+        /// If `true`, then this is an *active* data segment, and an `offset` is present.
+        has_offset: bool,
+    },
+    /// Must only be set and read when `has_offset` is `true`.
+    offset: Offset,
+    data: DataString,
+
+    pub const Offset = struct {
+        /// The `offset` keyword.
+        ///
+        /// If omitted, then it is an invariant that `expr.count == 1`.
+        keyword: sexpr.TokenId.Opt,
+        expr: Expr,
+    };
+
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        ctx: *ParseContext,
+        parent: sexpr.List.Id,
+        arena: *IndexedArena,
+        caches: *Caches,
+        scratch: *ArenaAllocator,
+    ) sexpr.Parser.ParseError!IndexedArena.Idx(Data) {
+        const data_idx = try arena.create(Data);
+        var data = Data{
+            .id = try Ident.Symbolic.parse(
+                contents,
+                ctx.tree,
+                caches.allocator,
+                &caches.ids,
+            ),
+            .memory = .none,
+            .active = .{
+                .memory_keyword = undefined,
+                .has_offset = false,
+            },
+            .offset = undefined,
+            .data = undefined,
+        };
+
+        is_passive: {
+            var lookahead = contents.*;
+            const memuse_or_offset_list = (lookahead.parseValue() catch break :is_passive)
+                .getList() orelse break :is_passive;
+
+            contents.* = lookahead;
+            lookahead = undefined;
+            data.active.has_offset = true;
+            data.offset.keyword = .none;
+
+            var memuse_parser = sexpr.Parser.init(
+                memuse_or_offset_list
+                    .contents(ctx.tree)
+                    .values(ctx.tree),
+            );
+            var offset_parser = memuse_parser;
+
+            const memuse_or_offset_keyword = try memuse_parser.parseAtomInList(
+                memuse_or_offset_list,
+                ctx,
+                "'memory' or 'offset' keyword, or an instruction",
+            );
+
+            var offset_list = memuse_or_offset_list;
+            var offset_expr_parser = offset_parser;
+            var maybe_offset_keyword = memuse_or_offset_keyword;
+            if (memuse_or_offset_keyword.tag(ctx.tree) == .keyword_memory) {
+                const mem_idx = try Ident.parse(
+                    &memuse_parser,
+                    ctx,
+                    memuse_or_offset_list,
+                    caches.allocator,
+                    &caches.ids,
+                );
+
+                data.memory = Ident.Opt.init(mem_idx);
+                data.active.memory_keyword = memuse_or_offset_keyword;
+
+                try memuse_parser.expectEmpty(ctx);
+
+                offset_list = try contents.parseListInList(parent, ctx);
+                offset_parser = sexpr.Parser.init(offset_list.contents(ctx.tree).values(ctx.tree));
+                offset_expr_parser = offset_parser;
+                maybe_offset_keyword = try offset_parser.parseAtomInList(
+                    offset_list,
+                    ctx,
+                    "'offset' keyword or instruction",
+                );
+            }
+
+            const maybe_offset_tag = maybe_offset_keyword.tag(ctx.tree);
+            std.debug.assert(maybe_offset_tag != .keyword_memory);
+
+            const has_offset_keyword = maybe_offset_tag == .keyword_offset;
+            if (has_offset_keyword) {
+                offset_expr_parser = offset_parser;
+                data.offset.keyword = sexpr.TokenId.Opt.init(maybe_offset_keyword);
+            }
+
+            offset_parser = undefined;
+
+            data.offset.expr = try Expr.parseContents(
+                &offset_expr_parser,
+                ctx,
+                offset_list,
+                arena,
+                caches,
+                scratch,
+            );
+
+            if (!has_offset_keyword and data.offset.expr.count != 2) {
+                _ = try ctx.errorFmtAtList(
+                    offset_list,
+                    .all,
+                    "offset abbreviation requires a single instruction, got {} instructions",
+                    .{data.offset.expr.count - 1},
+                );
+            }
+
+            std.debug.assert(offset_expr_parser.isEmpty());
+        }
+
+        data.data = try DataString.parseContents(contents, ctx, arena);
+        std.debug.assert(contents.isEmpty());
+
+        data_idx.set(arena, data);
+        return data_idx;
+    }
+};
+
 pub const ElementSegment = struct {
     /// An *`elemexpr`*.
     pub const Item = struct {
@@ -843,6 +980,8 @@ pub const ElementSegment = struct {
             return parseList(list, ctx, arena, caches, scratch);
         }
     };
+
+    // TODO: parser for standalone element segment module field
 };
 
 pub fn parseFields(
@@ -952,6 +1091,21 @@ pub fn parseFields(
                 };
 
                 break :field .{ .global = parsed_global };
+            },
+            .keyword_data => {
+                const parsed_data = Data.parseContents(
+                    &field_contents,
+                    ctx,
+                    field_list,
+                    arena,
+                    caches,
+                    scratch,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
+                };
+
+                break :field .{ .data = parsed_data };
             },
             else => {
                 _ = try ctx.errorAtToken(field_keyword, "expected module field keyword");

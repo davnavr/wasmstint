@@ -139,12 +139,14 @@ pub fn reportAtToken(
 pub const ListParenthesis = enum {
     start,
     end,
+    all,
 
     pub fn offset(position: ListParenthesis, list: sexpr.List.Id, tree: *const sexpr.Tree) sexpr.Offset {
         const offsets = list.parenthesis(tree);
         return switch (position) {
             .start => .{ .start = offsets.start, .end = offsets.start +| 1 },
             .end => .{ .start = offsets.end -| 1, .end = offsets.end },
+            .all => .{ .start = offsets.start, .end = offsets.end },
         };
     }
 };
