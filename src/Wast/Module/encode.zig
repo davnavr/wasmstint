@@ -654,6 +654,10 @@ fn encodeExpr(
         try output.context.ensureUnusedCapacity(1);
         const instr_tag = instr.tag(text.tree) orelse {
             output.context.appendAssumeCapacity(@intFromEnum(opcodes.ByteOpcode.end));
+            if (iter_instrs.count > 0) {
+                try label_lookup.exit(text, .none, &caches.ids);
+            }
+
             continue;
         };
 
@@ -1283,7 +1287,7 @@ fn encodeText(
                 &expr_arena,
             );
 
-            std.debug.dumpHex(code_buffer.items);
+            // std.debug.dumpHex(code_buffer.items);
 
             try encodeByteVec(section_output, code_buffer.items);
         }
