@@ -358,8 +358,7 @@ const Label = struct {
             Error.WasmImplementationLimit;
     }
 
-    fn read(reader: *Module.Reader, ctrl_stack: *const CtrlStack, module: *const Module) Error!Label {
-        const depth = try reader.readUleb128(u32);
+    fn init(depth: u32, ctrl_stack: *const CtrlStack, module: *const Module) Error!Label {
         const frame: *const CtrlFrame = if (depth < ctrl_stack.len)
             ctrl_stack.at(ctrl_stack.len - 1 - depth)
         else
@@ -372,6 +371,11 @@ const Label = struct {
                 return Error.WasmImplementationLimit,
             .pop_count = try calculatePopCount(ctrl_stack, frame.info.height),
         };
+    }
+
+    fn read(reader: *Module.Reader, ctrl_stack: *const CtrlStack, module: *const Module) Error!Label {
+        const depth = try reader.readUleb128(u32);
+        return Label.init(depth, ctrl_stack, module);
     }
 };
 
@@ -432,7 +436,9 @@ const BranchFixup = packed struct(u32) {
 };
 
 const SideTableBuilder = struct {
-    entries: std.SegmentedList(SideTableEntry, 4) = .{},
+    const Entries = std.SegmentedList(SideTableEntry, 4);
+
+    entries: Entries = .{},
     active: std.SegmentedList(BranchFixup.List, 4) = .{},
     alternate: std.SegmentedList(BranchFixup, 4) = .{},
     free: std.SegmentedList(BranchFixup.List, 4) = .{},
@@ -715,10 +721,15 @@ fn doValidation(
 
     state.instructions = @ptrCast(reader.bytes.ptr);
 
+    var per_instr_arena = ArenaAllocator.init(scratch.allocator());
+
     var instr_offset: u32 = 0;
     while (ctrl_stack.len > 0) {
+        _ = per_instr_arena.reset(.retain_capacity);
+
         // Offset from the first byte of the first instruction to the first byte of the instruction being parsed.
         instr_offset = @intCast(@intFromPtr(reader.bytes.ptr) - @intFromPtr(state.instructions));
+
         const byte_tag = try reader.readByteTag(opcodes.ByteOpcode);
         // std.debug.print("validate: {}\n", .{byte_tag});
         switch (byte_tag) {
@@ -836,6 +847,7 @@ fn doValidation(
                 try appendSideTableEntry(scratch, &side_table, instr_offset, label);
 
                 try val_stack.popManyExpecting(&ctrl_stack, label.frame.labelTypes(module));
+                markUnreachable(&val_stack, &ctrl_stack);
             },
             .br_if => {
                 const label = try Label.read(&reader, &ctrl_stack, module);
@@ -847,6 +859,45 @@ fn doValidation(
                 const label_types = label.frame.labelTypes(module);
                 try val_stack.popManyExpecting(&ctrl_stack, label_types);
                 try val_stack.pushMany(scratch, label_types);
+            },
+            .br_table => {
+                try val_stack.popExpecting(&ctrl_stack, .i32);
+
+                const label_count = try reader.readUleb128(u32);
+                const labels = try per_instr_arena.allocator().alloc(u32, label_count);
+
+                // Reserve space for the new side table entries.
+                {
+                    const grow_side_table = std.math.add(
+                        usize,
+                        std.math.add(usize, 1, labels.len) catch
+                            return error.OutOfMemory,
+                        side_table.entries.len,
+                    ) catch return error.OutOfMemory;
+
+                    if (grow_side_table > SideTableBuilder.Entries.prealloc_count)
+                        try side_table.entries.growCapacity(scratch.allocator(), grow_side_table);
+                }
+
+                // Validation bases the "arity" on the default branch, so all labels must be parsed to get to the
+                // default label.
+                for (labels) |*n| n.* = try reader.readUleb128(u32);
+
+                // TODO: Skip branch fixup processing for unreachable code.
+                const last_label = try Label.read(&reader, &ctrl_stack, module);
+                const last_label_types = last_label.frame.labelTypes(module);
+                const arity: u32 = @intCast(last_label_types.len);
+
+                for (labels) |n| {
+                    const l = try Label.init(n, &ctrl_stack, module);
+                    const l_types = l.frame.labelTypes(module);
+                    if (l_types.len != arity) return error.InvalidWasm;
+                    try val_stack.popManyExpecting(&ctrl_stack, l_types);
+                    try val_stack.pushMany(undefined, l_types);
+                }
+
+                try val_stack.popManyExpecting(&ctrl_stack, last_label_types);
+                markUnreachable(&val_stack, &ctrl_stack);
             },
             .@"return" => {
                 try val_stack.popManyExpecting(&ctrl_stack, func_type.results());
