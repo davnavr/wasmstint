@@ -910,7 +910,7 @@ fn doValidation(
                 &val_stack,
                 &ctrl_stack,
                 std.math.log2(8),
-                .i64,
+                .f64,
                 module,
                 scratch,
             ),
