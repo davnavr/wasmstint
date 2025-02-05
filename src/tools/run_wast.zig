@@ -549,6 +549,7 @@ const State = struct {
         .{ "integer divide by zero", .integer_division_by_zero },
         .{ "integer overflow", .integer_overflow },
         .{ "invalid conversion to integer", .invalid_conversion_to_integer },
+        .{ "out of bounds memory access", .memory_access_out_of_bounds },
     });
 
     fn expectTrap(
@@ -847,7 +848,7 @@ fn runScript(
                 };
             },
             .keyword_assert_invalid => {
-                // if (true) continue; // For debugging purposes only!
+                if (true) continue; // For debugging purposes only!
 
                 var alloca = ArenaAllocator.init(state.cmd_arena.allocator());
                 const assert_invalid: *const Wast.Command.AssertInvalid = cmd.inner.assert_invalid.getPtr(script.arena);
