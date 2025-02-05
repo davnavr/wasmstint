@@ -962,12 +962,11 @@ fn encodeText(
                         .{
                             .idx = mem_field,
                             .inferred_limit = if (has_data)
-                                std.mem.alignForward(
+                                std.math.divFloor(
                                     u32,
-                                    std.math.cast(u32, data_bytes.len) orelse
-                                        return error.OutOfMemory,
+                                    @intCast(data_bytes.len),
                                     page_size,
-                                ) / page_size
+                                ) catch return error.OutOfMemory
                             else
                                 undefined,
                         },
@@ -1105,7 +1104,7 @@ fn encodeText(
         var iter_mems = wasm.defined_mems.constIterator(0);
         while (iter_mems.next()) |mem| {
             const mem_field: *const Text.Mem = mem.idx.getPtr(arena);
-            if (!mem_field.data_keyword.some) {
+            if (mem_field.data_keyword.some) {
                 try output.writeByte(0x01);
 
                 var limit_buf = std.BoundedArray(u8, 5){};
