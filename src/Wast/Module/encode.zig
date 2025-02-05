@@ -1100,7 +1100,7 @@ fn encodeText(
         section_buf.clearRetainingCapacity();
 
         const output = section_buf.writer();
-        try encodeVecLen(output, wasm.data_segments.len);
+        try encodeVecLen(output, wasm.defined_mems.len);
 
         var iter_mems = wasm.defined_mems.constIterator(0);
         while (iter_mems.next()) |mem| {
