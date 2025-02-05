@@ -183,27 +183,31 @@ pub const ModuleAllocator = struct {
 
             // TODO: Duplicate code, maybe make a common wraper over an `std.mem.Allocator`?
             while (request.nextMemType()) |mem_type| {
-                _ = request.allocateMemory(
-                    try into_arena.alignedAlloc(
-                        u8,
-                        MemInst.buffer_align,
-                        mem_type.limits.min * MemInst.page_size,
-                    ),
-                ) catch unreachable;
+                const buf = try into_arena.alignedAlloc(
+                    u8,
+                    MemInst.buffer_align,
+                    mem_type.limits.min * MemInst.page_size,
+                );
+
+                @memset(buf, 0);
+
+                _ = request.allocateMemory(buf) catch unreachable;
             }
 
             while (request.nextTableType()) |table_type| {
-                _ = request.allocateTable(
-                    try into_arena.alignedAlloc(
-                        u8,
-                        TableInst.buffer_align,
-                        std.math.mul(
-                            usize,
-                            table_type.limits.min,
-                            tableElementStride(table_type.elem_type),
-                        ) catch return error.OutOfMemory,
-                    ),
-                ) catch unreachable;
+                const buf = try into_arena.alignedAlloc(
+                    u8,
+                    TableInst.buffer_align,
+                    std.math.mul(
+                        usize,
+                        table_type.limits.min,
+                        tableElementStride(table_type.elem_type),
+                    ) catch return error.OutOfMemory,
+                );
+
+                @memset(buf, 0);
+
+                _ = request.allocateTable(buf) catch unreachable;
             }
         }
 

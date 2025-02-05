@@ -847,6 +847,8 @@ fn runScript(
                 };
             },
             .keyword_assert_invalid => {
+                // if (true) continue; // For debugging purposes only!
+
                 var alloca = ArenaAllocator.init(state.cmd_arena.allocator());
                 const assert_invalid: *const Wast.Command.AssertInvalid = cmd.inner.assert_invalid.getPtr(script.arena);
 
