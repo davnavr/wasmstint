@@ -660,7 +660,7 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
             }
 
             fn eq(i_1: Signed, i_2: Signed) bool {
-                std.debug.print(" > (" ++ @typeName(Signed) ++ ".eq) {0X} (0x{0}) == {1X} (0x{1})?\n", .{ i_1, i_2 });
+                std.debug.print(" > (" ++ @typeName(Signed) ++ ".eq) {0} (0x{0X}) == {1} (0x{1X})?\n", .{ i_1, i_2 });
                 return i_1 == i_2;
             }
 
@@ -681,6 +681,7 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
             }
 
             fn gt_u(i_1: Signed, i_2: Signed) bool {
+                std.debug.print(" > (" ++ @typeName(Signed) ++ ".gt_u) {[0]X} (0x{[0]X}) > {[1]} ([{1}X])\n", .{ i_1, i_2 });
                 return @as(Unsigned, @bitCast(i_1)) > @as(Unsigned, @bitCast(i_2));
             }
 
@@ -713,16 +714,17 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
             }
 
             fn add(i_1: Signed, i_2: Signed) !Signed {
-                std.debug.print(" > (" ++ @typeName(Signed) ++ ".add) {0X} (0x{0}) + {1X} (0x{1})\n", .{ i_1, i_2 });
+                std.debug.print(" > (" ++ @typeName(Signed) ++ ".add) {0} (0x{0X}) + {1} (0x{1X})\n", .{ i_1, i_2 });
                 return i_1 +% i_2;
             }
 
             fn sub(i_1: Signed, i_2: Signed) !Signed {
+                std.debug.print(" > (" ++ @typeName(Signed) ++ ".sub) {0} (0x{0X}) - {1} (0x{1X})\n", .{ i_1, i_2 });
                 return i_1 -% i_2;
             }
 
             fn mul(i_1: Signed, i_2: Signed) !Signed {
-                std.debug.print(" > (" ++ @typeName(Signed) ++ ".mul) {0X} (0x{0}) * {1X} (0x{1})\n", .{ i_1, i_2 });
+                std.debug.print(" > (" ++ @typeName(Signed) ++ ".mul) {0} (0x{0X}) * {1} (0x{1X})\n", .{ i_1, i_2 });
                 return i_1 *% i_2;
             }
 
@@ -819,6 +821,7 @@ fn IntegerOpcodeHandlers(comptime Signed: type) type {
         fn @"const"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
             const n = i.readIleb128(Signed) catch unreachable;
             vals.appendAssumeCapacity(@unionInit(Value, value_field, n));
+            std.debug.print(" > (" ++ @typeName(Signed) ++ ".const) {[0]} (0x{[0]X})\n", .{n});
 
             if (i.nextOpcodeHandler(fuel, int)) |next| {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
@@ -1122,11 +1125,8 @@ const opcode_handlers = struct {
 
     pub fn call(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const func_idx = i.readUleb128(@typeInfo(Module.FuncIdx).@"enum".tag_type) catch unreachable;
-        // std.debug.print(" > (call) {}\n", .{func_idx});
-        const current_frame = int.currentFrame();
-        const current_function = current_frame.function.expanded().wasm;
-        const target_function = current_function.module.funcAddr(@enumFromInt(func_idx));
-        const signature = current_frame.function.signature();
+        const target_function = int.currentFrame().function.expanded().wasm.module.funcAddr(@enumFromInt(func_idx));
+        const signature = target_function.signature();
 
         // Overlap trick to avoid copying arguments.
         const values_base = @as(u32, @intCast(vals.items.len)) - signature.param_count;
@@ -1179,6 +1179,8 @@ const opcode_handlers = struct {
         const n = i.readUleb128(u32) catch unreachable;
         const value = vals.items[loc..][n];
         vals.appendAssumeCapacity(value);
+
+        std.debug.print(" > (local.get {}) (i64.const {})\n", .{ n, value.i64 });
 
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
