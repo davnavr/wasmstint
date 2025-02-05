@@ -526,7 +526,7 @@ pub const MemInst = extern struct {
     pub const buffer_align = 16;
 
     /// The size of a WebAssembly page, in bytes.
-    pub const page_size = 0x10_0000;
+    pub const page_size = 65536;
 
     comptime {
         if (@import("builtin").cpu.arch.endian() != .little)
