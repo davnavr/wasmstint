@@ -770,6 +770,23 @@ fn encodeExpr(
                         },
                         else => std.debug.panic("cannot encode label for {}", .{tag}),
                     },
+                    .call_indirect => {
+                        std.debug.assert(tag == .call_indirect);
+                        try encodeIdx(
+                            output,
+                            TypeIdx,
+                            wasm.type_uses.get(&arg.type).?,
+                        );
+                        if (arg.table.get()) |table_id| {
+                            try encodeIdx(
+                                output,
+                                TableIdx,
+                                try wasm.table_ids.getFromIdent(text, table_id),
+                            );
+                        } else {
+                            try output.writeByte(0x00);
+                        }
+                    },
                     .block_type => block_type: {
                         const block_type: *align(4) const Text.Instr.BlockType = arg;
                         try label_lookup.enter(scratch, block_type.label);
