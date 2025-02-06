@@ -922,8 +922,8 @@ fn encodeGlobalType(
     tree: *const sexpr.Tree,
     global_type: *const Text.GlobalType,
 ) Allocator.Error!void {
-    try output.writeByte(if (global_type.mut.some) 0x01 else 0x00);
     try ValType.fromValType(global_type.val_type, tree).encode(output);
+    try output.writeByte(if (global_type.mut.some) 0x01 else 0x00);
 }
 
 fn encodeText(
