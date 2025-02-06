@@ -714,9 +714,9 @@ fn doValidation(
             const new_local_len = std.math.add(u32, @intCast(local_vars.len), local_count) catch
                 return error.WasmImplementationLimit;
 
-            // if (new_local_len > ValTypeBuf.prealloc_count) {
-            try local_vars.growCapacity(scratch.allocator(), new_local_len);
-            // }
+            if (new_local_len > ValTypeBuf.prealloc_count) {
+                try local_vars.growCapacity(scratch.allocator(), new_local_len);
+            }
 
             for (0..local_count) |_| {
                 local_vars.append(undefined, local_type) catch unreachable;
