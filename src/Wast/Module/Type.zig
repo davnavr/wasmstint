@@ -18,10 +18,14 @@ func: Func,
 pub const Func = struct {
     parameters: IndexedArena.Slice(Text.Param),
     results: IndexedArena.Slice(Text.Result),
+    parameters_count: u32,
+    results_count: u32,
 
     pub const empty = Func{
         .parameters = .empty,
         .results = .empty,
+        .parameters_count = 0,
+        .results_count = 0,
     };
 };
 
@@ -55,7 +59,9 @@ pub fn parseContents(
 
     _ = temporary.reset(.retain_capacity);
     var parameters = IndexedArena.Slice(Text.Param).empty;
+    var parameters_count: u32 = 0;
     var params_buf = std.SegmentedList(Text.Param, 8){};
+    var results_count: u32 = 0;
     var results_buf = std.SegmentedList(Text.Result, 1){};
 
     while (true) {
@@ -92,6 +98,10 @@ pub fn parseContents(
                 );
 
                 std.debug.assert(parameters.len == 0);
+
+                parameters_count = std.math.add(u32, parameters_count, param.types.len) catch
+                    return error.OutOfMemory;
+
                 try params_buf.append(temporary.allocator(), param);
             },
             .keyword_result => {
@@ -109,6 +119,9 @@ pub fn parseContents(
                     func_list,
                 );
 
+                results_count = std.math.add(u32, results_count, result.types.len) catch
+                    return error.OutOfMemory;
+
                 try results_buf.append(temporary.allocator(), result);
             },
             else => {
@@ -122,10 +135,14 @@ pub fn parseContents(
         parameters = try arena.dupeSegmentedList(Text.Param, 8, &params_buf);
     }
 
-    const func = Func{
-        .parameters = parameters,
-        .results = try arena.dupeSegmentedList(Text.Result, 1, &results_buf),
+    return Type{
+        .id = id,
+        .keyword = func_keyword,
+        .func = Func{
+            .parameters = parameters,
+            .results = try arena.dupeSegmentedList(Text.Result, 1, &results_buf),
+            .parameters_count = parameters_count,
+            .results_count = results_count,
+        },
     };
-
-    return Type{ .id = id, .keyword = func_keyword, .func = func };
 }

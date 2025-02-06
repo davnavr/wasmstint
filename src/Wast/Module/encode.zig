@@ -104,53 +104,34 @@ pub const DataIdx = enum(u32) {
     _,
 };
 
-const IterParamTypes = struct {
-    types: []const Text.ValType,
-    params: []const Text.Param,
+fn IterParamOrResultTypes(comptime T: type) type {
+    return struct {
+        types: []const Text.ValType,
+        lists: []const T,
 
-    fn init(parameters: []const Text.Param) @This() {
-        return .{ .types = &[0]Text.ValType{}, .params = parameters };
-    }
-
-    fn next(iter: *@This(), tree: *const sexpr.Tree, arena: IndexedArena.ConstData) ?ValType {
-        if (iter.types.len == 0 and iter.params.len > 0) {
-            iter.types = iter.params[0].types.items(arena);
-            iter.params = iter.params[1..];
+        fn init(lists: []const T) @This() {
+            return .{ .types = &[0]Text.ValType{}, .lists = lists };
         }
 
-        if (iter.types.len > 0) {
-            const item = iter.types[0];
-            iter.types = iter.types[1..];
-            return ValType.fromValType(item, tree);
-        } else {
-            return null;
+        fn next(iter: *@This(), tree: *const sexpr.Tree, arena: IndexedArena.ConstData) ?ValType {
+            if (iter.types.len == 0 and iter.lists.len > 0) {
+                iter.types = iter.lists[0].types.items(arena);
+                iter.lists = iter.lists[1..];
+            }
+
+            if (iter.types.len > 0) {
+                const item = iter.types[0];
+                iter.types = iter.types[1..];
+                return ValType.fromValType(item, tree);
+            } else {
+                return null;
+            }
         }
-    }
-};
+    };
+}
 
-const IterResultTypes = struct {
-    types: []const Text.ValType,
-    results: []const Text.Result,
-
-    fn init(results: []const Text.Result) @This() {
-        return .{ .types = &[0]Text.ValType{}, .results = results };
-    }
-
-    fn next(iter: *@This(), tree: *const sexpr.Tree, arena: IndexedArena.ConstData) ?ValType {
-        if (iter.types.len == 0 and iter.results.len > 0) {
-            iter.types = iter.results[0].types.items(arena);
-            iter.results = iter.results[1..];
-        }
-
-        if (iter.types.len > 0) {
-            const item = iter.types[0];
-            iter.types = iter.types[1..];
-            return ValType.fromValType(item, tree);
-        } else {
-            return null;
-        }
-    }
-};
+const IterParamTypes = IterParamOrResultTypes(Text.Param);
+const IterResultTypes = IterParamOrResultTypes(Text.Result);
 
 const TypeDedup = struct {
     lookup: std.HashMapUnmanaged(
@@ -165,27 +146,33 @@ const TypeDedup = struct {
         tree: *const sexpr.Tree,
 
         pub fn eql(ctx: Context, a: Type, b: Type) bool {
+            if (a.parameters_count != b.parameters_count or a.results_count != b.results_count)
+                return false;
+
             {
-                var a_params_iter = IterParamTypes.init(a.parameters.items(ctx.arena));
-                var b_params_iter = IterParamTypes.init(b.parameters.items(ctx.arena));
-                while (a_params_iter.next(ctx.tree, ctx.arena)) |a_param| {
-                    const b_param = b_params_iter.next(ctx.tree, ctx.arena) orelse return false;
-                    if (a_param != b_param)
+                var iter_a_params = IterParamTypes.init(a.parameters.items(ctx.arena));
+                var iter_b_params = IterParamTypes.init(b.parameters.items(ctx.arena));
+                for (0..a.parameters_count) |_| {
+                    if (iter_a_params.next(ctx.tree, ctx.arena).? !=
+                        iter_b_params.next(ctx.tree, ctx.arena).?)
                         return false;
                 }
 
-                if (b_params_iter.next(ctx.tree, ctx.arena) != null) return false;
+                std.debug.assert(iter_a_params.next(ctx.tree, ctx.arena) == null);
+                std.debug.assert(iter_b_params.next(ctx.tree, ctx.arena) == null);
             }
+
             {
-                var a_results_iter = IterResultTypes.init(a.results.items(ctx.arena));
-                var b_results_iter = IterResultTypes.init(b.results.items(ctx.arena));
-                while (a_results_iter.next(ctx.tree, ctx.arena)) |a_param| {
-                    const b_param = b_results_iter.next(ctx.tree, ctx.arena) orelse return false;
-                    if (a_param != b_param)
+                var iter_a_results = IterResultTypes.init(a.results.items(ctx.arena));
+                var iter_b_results = IterResultTypes.init(b.results.items(ctx.arena));
+                for (0..a.results_count) |_| {
+                    if (iter_a_results.next(ctx.tree, ctx.arena).? !=
+                        iter_b_results.next(ctx.tree, ctx.arena).?)
                         return false;
                 }
 
-                if (b_results_iter.next(ctx.tree, ctx.arena) != null) return false;
+                std.debug.assert(iter_a_results.next(ctx.tree, ctx.arena) == null);
+                std.debug.assert(iter_b_results.next(ctx.tree, ctx.arena) == null);
             }
 
             return true;
@@ -195,14 +182,15 @@ const TypeDedup = struct {
             var hasher = std.hash.Wyhash.init(0);
             {
                 var iter_params = IterParamTypes.init(key.parameters.items(ctx.arena));
-                while (iter_params.next(ctx.tree, ctx.arena)) |param| {
-                    std.hash.autoHash(&hasher, param);
+                for (0..key.parameters_count) |_| {
+                    std.hash.autoHash(&hasher, iter_params.next(ctx.tree, ctx.arena).?);
                 }
+                std.debug.assert(iter_params.next(ctx.tree, ctx.arena) == null);
             }
             {
                 var iter_results = IterResultTypes.init(key.results.items(ctx.arena));
-                while (iter_results.next(ctx.tree, ctx.arena)) |result| {
-                    std.hash.autoHash(&hasher, result);
+                for (0..key.results_count) |_| {
+                    std.hash.autoHash(&hasher, iter_results.next(ctx.tree, ctx.arena).?);
                 }
             }
             return hasher.final();
@@ -406,6 +394,11 @@ const Wasm = struct {
         }
         // Resolve all `TypeUse`s into types to append after all of the defined ones.
         {
+            const type_cmp_ctx = TypeDedup.Context{
+                .arena = arena,
+                .tree = ctx.tree,
+            };
+
             var iter_type_uses = wasm.type_uses.iterator();
             while (iter_type_uses.next()) |entry| {
                 const type_use = entry.key_ptr.*;
@@ -413,7 +406,7 @@ const Wasm = struct {
                     const dedup_entry = try wasm.type_dedup.lookup.getOrPutContext(
                         wasm_arena.allocator(),
                         &type_use.func,
-                        .{ .arena = arena, .tree = ctx.tree },
+                        type_cmp_ctx,
                     );
 
                     if (dedup_entry.found_existing) {
@@ -438,14 +431,15 @@ const Wasm = struct {
                             error.ReportedParserError => break :type_idx undefined,
                         };
 
-                        const actual_signature = &wasm.types.at(@intFromEnum(idx)).getPtr(arena).func;
-                        const expected_signature = &type_use.func;
-                        const type_cmp_ctx = TypeDedup.Context{ .arena = arena, .tree = ctx.tree };
-                        if (!type_cmp_ctx.eql(actual_signature, expected_signature)) {
-                            _ = try ctx.errorAtToken(
-                                type_use.id.type.token,
-                                "type use does not match its definition (TODO: include why)",
-                            );
+                        if (type_use.func.parameters_count > 0 or type_use.func.results_count > 0) {
+                            const actual_signature = &wasm.types.at(@intFromEnum(idx)).getPtr(arena).func;
+                            const expected_signature = &type_use.func;
+                            if (!type_cmp_ctx.eql(actual_signature, expected_signature)) {
+                                _ = try ctx.errorAtToken(
+                                    type_use.id.type.token,
+                                    "type use does not match its definition (TODO: include why)",
+                                );
+                            }
                         }
 
                         break :type_idx idx;

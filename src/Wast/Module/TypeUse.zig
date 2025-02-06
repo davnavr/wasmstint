@@ -58,7 +58,9 @@ pub fn parseContents(
     // Allocated in `temporary`.
     _ = temporary.reset(.retain_capacity);
     var param_buf = std.SegmentedList(Text.Param, 4){};
+    var param_count: u32 = 0;
     var result_buf = std.SegmentedList(Text.Result, 1){};
+    var result_count: u32 = 0;
     var lookahead = contents.*;
     while (@as(?sexpr.Value, lookahead.parseValue() catch null)) |value| {
         const list: sexpr.List.Id = value.getList() orelse break;
@@ -89,17 +91,19 @@ pub fn parseContents(
                 if (result_buf.len > 0)
                     return (try ctx.errorAtToken(keyword, "expected 'result' keyword")).err;
 
-                try param_buf.append(
-                    temporary.allocator(),
-                    try Text.Param.parseContents(
-                        &list_contents,
-                        ctx,
-                        arena,
-                        caches,
-                        keyword,
-                        list,
-                    ),
+                const parsed_param = try Text.Param.parseContents(
+                    &list_contents,
+                    ctx,
+                    arena,
+                    caches,
+                    keyword,
+                    list,
                 );
+
+                param_count = std.math.add(u32, param_count, parsed_param.types.len) catch
+                    return error.OutOfMemory;
+
+                try param_buf.append(temporary.allocator(), parsed_param);
             },
             .keyword_result => {
                 if (param_buf.len > 0) {
@@ -111,16 +115,19 @@ pub fn parseContents(
                     _ = temporary.reset(.retain_capacity);
                 }
 
-                try result_buf.append(
-                    temporary.allocator(),
+                const parsed_result =
                     try Text.Result.parseContents(
-                        &list_contents,
-                        ctx,
-                        arena,
-                        keyword,
-                        list,
-                    ),
+                    &list_contents,
+                    ctx,
+                    arena,
+                    keyword,
+                    list,
                 );
+
+                result_count = std.math.add(u32, result_count, parsed_result.types.len) catch
+                    return error.OutOfMemory;
+
+                try result_buf.append(temporary.allocator(), parsed_result);
             },
             else => break,
         }
@@ -136,5 +143,7 @@ pub fn parseContents(
     }
 
     type_use.func.results = try arena.dupeSegmentedList(Text.Result, 1, &result_buf);
+    type_use.func.parameters_count = param_count;
+    type_use.func.results_count = result_count;
     return type_use;
 }
