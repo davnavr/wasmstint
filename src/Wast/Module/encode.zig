@@ -1324,6 +1324,7 @@ fn encodeText(
             const table_field: *const Text.Table = table.getPtr(arena);
             if (table_field.ref_type_keyword.get()) |ref_type| {
                 try encodeRefType(output, text_ctx.tree, ref_type);
+                try output.writeByte(0x01); // maximum is present
 
                 var limit_buf = std.BoundedArray(u8, 5){};
                 writeUleb128(
