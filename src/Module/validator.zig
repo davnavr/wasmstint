@@ -379,6 +379,12 @@ const ValStack = struct {
     }
 };
 
+fn readMemIdx(reader: *Module.Reader, module: *const Module) Error!void {
+    if (module.inner.mem_count == 0) return Error.InvalidWasm;
+    const idx = try reader.readUleb128(u32);
+    if (idx != 0) return Error.InvalidWasm;
+}
+
 fn readMemArg(
     reader: *Module.Reader,
     natural_alignment: u4,
@@ -386,8 +392,8 @@ fn readMemArg(
 ) Error!void {
     const a = try reader.readUleb128(u32);
 
-    if (a > natural_alignment or module.inner.mem_count == 0)
-        return Error.InvalidWasm;
+    if (a > natural_alignment) return Error.InvalidWasm;
+    if (module.inner.mem_count == 0) return Error.InvalidWasm;
 
     _ = try reader.readUleb128(u32); // offset
 }
@@ -1212,6 +1218,14 @@ fn doValidation(
                 .i64,
                 module,
             ),
+            .@"memory.size" => {
+                try readMemIdx(&reader, module);
+                try val_stack.push(scratch, .i32);
+            },
+            .@"memory.grow" => {
+                try readMemIdx(&reader, module);
+                try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i32, .i32);
+            },
 
             .@"i32.const" => {
                 _ = try reader.readIleb128(i32);
