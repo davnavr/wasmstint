@@ -1158,7 +1158,7 @@ inline fn takeBranch(
 
     const side_table_end = @intFromPtr(code.state.side_table_ptr + code.state.side_table_len);
     std.debug.assert(@intFromPtr(s.* + branch) < side_table_end);
-    const target = &s.*[branch];
+    const target: *const Module.Code.SideTableEntry = &s.*[branch];
 
     const origin_ip = code.state.instructions + target.origin;
     if (builtin.mode == .Debug and @intFromPtr(base_ip) != @intFromPtr(origin_ip)) {
@@ -1168,32 +1168,37 @@ inline fn takeBranch(
         );
     }
 
-    std.debug.print(
-        " ? TGT FIXUP #{} (current is #{}): delta_ip={}, delta_stp={}\n",
-        .{
-            (@intFromPtr(target) - @intFromPtr(code.state.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry),
-            (@intFromPtr(s.*) - @intFromPtr(code.state.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry),
-            target.delta_ip.done,
-            target.delta_stp,
-        },
-    );
+    // std.debug.print(
+    //     " ? TGT BRANCH #{} (current is #{}): delta_ip={}, delta_stp={}\n",
+    //     .{
+    //         (@intFromPtr(target) - @intFromPtr(code.state.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry),
+    //         (@intFromPtr(s.*) - @intFromPtr(code.state.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry),
+    //         target.delta_ip.done,
+    //         target.delta_stp,
+    //     },
+    // );
 
     i.p = addPtrWithOffset(base_ip, target.delta_ip.done);
     std.debug.assert(@intFromPtr(code.state.instructions) <= @intFromPtr(i.p));
     std.debug.assert(@intFromPtr(i.p) <= @intFromPtr(i.ep));
 
-    std.debug.print(
-        " ? NEXT[{X:0>6}]: 0x{X} ({s})\n",
-        .{
-            @intFromPtr(i.p) - wasm_base_ptr,
-            i.p[0],
-            @tagName(@as(opcodes.ByteOpcode, @enumFromInt(i.p[0]))),
-        },
-    );
+    // std.debug.print(
+    //     " ? NEXT[{X:0>6}]: 0x{X} ({s})\n",
+    //     .{
+    //         @intFromPtr(i.p) - wasm_base_ptr,
+    //         i.p[0],
+    //         @tagName(@as(opcodes.ByteOpcode, @enumFromInt(i.p[0]))),
+    //     },
+    // );
 
-    s.* = addPtrWithOffset(s.*, target.delta_stp);
+    s.* = addPtrWithOffset(s.* + branch, target.delta_stp);
     std.debug.assert(@intFromPtr(code.state.side_table_ptr) <= @intFromPtr(s.*));
     std.debug.assert(@intFromPtr(s.*) <= side_table_end);
+
+    // std.debug.print(
+    //     " ? STP=#{}\n",
+    //     .{(@intFromPtr(s.*) - @intFromPtr(code.state.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry)},
+    // );
 
     const vals_base = vals.items.len;
     const src = vals.items[vals_base - target.copy_count ..];
@@ -1314,7 +1319,7 @@ const opcode_handlers = struct {
 
         const n: u32 = @bitCast(vals.pop().i32);
 
-        std.debug.print(" > br_table [{}]\n", .{n});
+        // std.debug.print(" > br_table [{}]\n", .{n});
 
         int.takeBranch(base_ip, i, s, vals, @min(n, label_count));
 

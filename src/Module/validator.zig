@@ -557,17 +557,17 @@ const SideTableBuilder = struct {
         entry.delta_stp = std.math.cast(i16, target_side_table_idx - fixup_entry.entry_idx) orelse
             return error.WasmImplementationLimit;
 
-        std.debug.print(
-            "FIXUP #{} targeting 0x{X} originating from 0x{X} (dip = {}, dstp = {}, target STP={})\n",
-            .{
-                fixup_entry.entry_idx,
-                end_offset,
-                origin,
-                entry.delta_ip.done,
-                entry.delta_stp,
-                target_side_table_idx,
-            },
-        );
+        // std.debug.print(
+        //     "FIXUP #{} targeting 0x{X} originating from 0x{X} (dip = {}, dstp = {}, target STP={})\n",
+        //     .{
+        //         fixup_entry.entry_idx,
+        //         end_offset,
+        //         origin,
+        //         entry.delta_ip.done,
+        //         entry.delta_stp,
+        //         target_side_table_idx,
+        //     },
+        // );
     }
 
     fn resolveFixupList(
@@ -577,7 +577,7 @@ const SideTableBuilder = struct {
     ) Module.LimitError!void {
         const target_side_table_idx = try table.nextEntryIdx();
 
-        // std.debug.print("RESOLVING FIXUPS targeting {X}\n", .{end_offset});
+        // std.debug.print("RESOLVING FIXUPS targeting 0x{X}\n", .{end_offset});
 
         var iter_fixups = fixups.constIterator(0);
         while (iter_fixups.next()) |fixup_entry| {
