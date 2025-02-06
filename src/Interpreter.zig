@@ -493,15 +493,15 @@ const Instructions = extern struct {
         } else {
             fuel.remaining -= 1;
 
-            const saved_ip = @intFromPtr(reader.p) -
-                @intFromPtr(interp.currentFrame().function.expanded().wasm.module.module.wasm.ptr);
+            // const saved_ip = @intFromPtr(reader.p) -
+            //     @intFromPtr(interp.currentFrame().function.expanded().wasm.module.module.wasm.ptr);
 
             const next_opcode = reader.readByte() catch unreachable;
 
-            std.debug.print(
-                "TRACE[{X:0>6}]: {s}\n",
-                .{ saved_ip, @tagName(@as(opcodes.ByteOpcode, @enumFromInt(next_opcode))) },
-            );
+            // std.debug.print(
+            //     "TRACE[{X:0>6}]: {s}\n",
+            //     .{ saved_ip, @tagName(@as(opcodes.ByteOpcode, @enumFromInt(next_opcode))) },
+            // );
 
             return byte_dispatch_table[next_opcode];
         }

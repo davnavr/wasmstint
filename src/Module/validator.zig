@@ -494,7 +494,7 @@ const SideTableBuilder = struct {
             .origin = if (builtin.mode == .Debug) origin else {},
         };
 
-        std.debug.print(" PLACED ALT FIXUP #{} originating from 0x{X}\n", .{ idx, origin });
+        // std.debug.print(" PLACED ALT FIXUP #{} originating from 0x{X}\n", .{ idx, origin });
     }
 
     const KnownTarget = struct {
@@ -529,7 +529,7 @@ const SideTableBuilder = struct {
             entry.delta_stp = std.math.cast(i16, delta_stp) orelse
                 return Error.WasmImplementationLimit;
         } else {
-            std.debug.print(" PLACED FIXUP #{} originating from 0x{X}\n", .{ idx, origin });
+            // std.debug.print(" PLACED FIXUP #{} originating from 0x{X}\n", .{ idx, origin });
             entry.delta_ip = .{ .fixup_origin = origin };
             entry.delta_stp = undefined;
 
@@ -917,7 +917,7 @@ fn doValidation(
                 const last_label_types = last_label.frame.labelTypes(module);
                 const arity: u32 = @intCast(last_label_types.len);
 
-                std.debug.print("BEGIN BR_TABLE\n", .{});
+                // std.debug.print("BEGIN BR_TABLE\n", .{});
 
                 for (labels) |n| {
                     const l = try Label.init(n, &ctrl_stack, module);
@@ -933,7 +933,7 @@ fn doValidation(
 
                 try appendSideTableEntry(scratch, &side_table, instr_offset, last_label);
 
-                std.debug.print("END BR_TABLE\n", .{});
+                // std.debug.print("END BR_TABLE\n", .{});
 
                 try val_stack.popManyExpecting(&ctrl_stack, last_label_types);
                 markUnreachable(&val_stack, &ctrl_stack);

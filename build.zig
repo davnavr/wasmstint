@@ -64,6 +64,7 @@ pub fn build(b: *std.Build) void {
         const run_spec_tests_cmd = b.addRunArtifact(run_wast_exe);
         const tests = [_][]const u8{
             "tests/spec/address.wast",
+            "tests/spec/align.wast",
             "tests/spec/i32.wast",
             "tests/spec/i64.wast",
             "tests/spec/fac.wast",

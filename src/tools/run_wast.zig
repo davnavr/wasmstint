@@ -883,6 +883,11 @@ fn runScript(
 
                 _ = try state.errors.errorAtToken(cmd.keyword, "module unexpectedly succeeded validation");
             },
+            .keyword_assert_malformed => {
+                if (true) continue; // For debugging purposes only!
+
+                unreachable; // TODO: Process 'assert_malformed'
+            },
             else => {
                 _ = try state.errors.errorAtToken(
                     cmd.keyword,
