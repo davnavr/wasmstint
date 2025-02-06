@@ -77,7 +77,14 @@ pub const Type = *const Text.Type.Func;
 
 pub const TypeIdx = enum(u32) { _ };
 
+// If a helper type function to define these index types is used, will it return different types per invocation?
+
 pub const FuncIdx = enum(u32) {
+    probably_invalid = std.math.maxInt(u32),
+    _,
+};
+
+pub const TableIdx = enum(u32) {
     probably_invalid = std.math.maxInt(u32),
     _,
 };
@@ -201,7 +208,7 @@ const TypeDedup = struct {
 };
 
 const Import = union(enum) {
-    // field: IndexedArena.Idx(Text.ImportField),
+    // module_field: IndexedArena.Idx(Text.ImportField),
     inline_func: IndexedArena.Idx(Text.Func),
     inline_table: IndexedArena.Idx(Text.Table),
     inline_mem: IndexedArena.Idx(Text.Mem),
@@ -224,6 +231,10 @@ const Import = union(enum) {
 const Export = union(enum) {
     // module_field: IndexedArena.Idx(Text.ExportField),
     inline_func: struct { field: IndexedArena.Idx(Text.Func), idx: FuncIdx },
+    inline_table: struct {
+        field: IndexedArena.Idx(Text.Table),
+        idx: TableIdx,
+    },
     inline_mem: struct {
         field: IndexedArena.Idx(Text.Mem),
         idx: MemIdx,
@@ -326,6 +337,9 @@ const Wasm = struct {
     func_count: IdxCounter(FuncIdx) = .{},
     defined_funcs: std.SegmentedList(IndexedArena.Idx(Text.Func), 8) = .{},
 
+    table_count: IdxCounter(TableIdx) = .{},
+    defined_tables: std.SegmentedList(IndexedArena.Idx(Text.Table), 1) = .{},
+
     mem_count: IdxCounter(MemIdx) = .{},
     defined_mems: std.SegmentedList(Mem, 1) = .{},
 
@@ -336,7 +350,7 @@ const Wasm = struct {
 
     type_ids: IdentLookup(TypeIdx) = .empty,
     func_ids: IdentLookup(FuncIdx) = .empty,
-    // table_ids: IdentLookup(TableIdx) = .empty,
+    table_ids: IdentLookup(TableIdx) = .empty,
     mem_ids: IdentLookup(MemIdx) = .empty,
     data_ids: IdentLookup(DataIdx) = .empty,
 
@@ -816,6 +830,30 @@ fn encodeLimits(
     if (limits.max_token.some) try writeUleb128(output, limits.max);
 }
 
+fn encodeRefType(
+    output: std.ArrayList(u8).Writer,
+    ctx: *TextContext,
+    ref_type: sexpr.TokenId,
+) Allocator.Error!void {
+    try output.writeByte(switch (ref_type.tag(ctx.tree)) {
+        .keyword_funcref => @intFromEnum(ValType.funcref),
+        .keyword_externref => @intFromEnum(ValType.externref),
+        else => invalid: {
+            _ = try ctx.errorAtToken(ref_type, "expected 'funcref' or 'externref'");
+            break :invalid 0xFF;
+        },
+    });
+}
+
+fn encodeTableType(
+    output: std.ArrayList(u8).Writer,
+    ctx: *TextContext,
+    table_type: *const Text.TableType,
+) Allocator.Error!void {
+    try encodeRefType(output, ctx, table_type.ref_type);
+    try encodeLimits(output, &table_type.limits);
+}
+
 fn encodeMemType(
     output: std.ArrayList(u8).Writer,
     mem_type: *const Text.MemType,
@@ -920,7 +958,47 @@ fn encodeText(
                     }
                 }
             },
-            // .keyword_table => {},
+            .keyword_table => {
+                const table_field = field.contents.table;
+                const table_field_ptr: *const Text.Table = table_field.getPtr(arena);
+                const table_idx = try wasm.table_count.increment();
+
+                try wasm.table_ids.insert(
+                    text_ctx,
+                    table_field_ptr.id,
+                    table_idx,
+                    alloca,
+                );
+
+                if (!table_field_ptr.inline_exports.isEmpty()) {
+                    wasm.exports_count = try addOrOom(u32, wasm.exports_count, table_field_ptr.inline_exports.len);
+                    try wasm.exports.append(
+                        alloca.allocator(),
+                        Export{
+                            .inline_table = .{
+                                .field = table_field,
+                                .idx = table_idx,
+                            },
+                        },
+                    );
+                }
+
+                const has_elems = table_field_ptr.ref_type_keyword.some;
+                if (!has_elems and table_field_ptr.inner.no_elements.inline_import.keyword.some) {
+                    try wasm.checkImportOrdering(
+                        text_ctx,
+                        table_field_ptr.inner.no_elements.inline_import.keyword.inner_id,
+                    );
+                    try wasm.imports.append(
+                        alloca.allocator(),
+                        Import{ .inline_table = table_field },
+                    );
+                } else {
+                    try wasm.defined_tables.append(alloca.allocator(), table_field);
+                }
+
+                // TODO: Add the inline element segment.
+            },
             .keyword_memory => {
                 const mem_field = field.contents.mem;
                 const mem_field_ptr: *const Text.Mem = mem_field.getPtr(arena);
@@ -937,7 +1015,12 @@ fn encodeText(
                     wasm.exports_count = try addOrOom(u32, wasm.exports_count, mem_field_ptr.inline_exports.len);
                     try wasm.exports.append(
                         alloca.allocator(),
-                        Export{ .inline_mem = .{ .field = mem_field, .idx = mem_idx } },
+                        Export{
+                            .inline_mem = .{
+                                .field = mem_field,
+                                .idx = mem_idx,
+                            },
+                        },
                     );
                 }
 
@@ -1071,11 +1154,26 @@ fn encodeText(
             try encodeByteVec(output, name.name.id.bytes(arena, &caches.names));
             switch (import.*) {
                 .inline_func => |func_field| {
-                    try output.writeByte(0);
+                    try output.writeByte(0x00);
                     try encodeIdx(
                         output,
                         TypeIdx,
                         wasm.type_uses.get(&func_field.getPtr(arena).type_use).?,
+                    );
+                },
+                .inline_table => |table_field| {
+                    try output.writeByte(0x01);
+                    try encodeTableType(
+                        output,
+                        text_ctx,
+                        &table_field.getPtr(arena).inner.no_elements.table_type,
+                    );
+                },
+                .inline_mem => |mem_field| {
+                    try output.writeByte(0x02);
+                    try encodeMemType(
+                        output,
+                        &mem_field.getPtr(arena).inner.no_data.mem_type,
                     );
                 },
                 else => unreachable, // TODO
@@ -1102,7 +1200,39 @@ fn encodeText(
         try encodeSection(final_output, 3, section_buf.items);
     }
 
-    // table
+    if (wasm.defined_tables.len > 0) {
+        section_buf.clearRetainingCapacity();
+
+        const output = section_buf.writer();
+        try encodeVecLen(output, wasm.defined_tables.len);
+
+        var iter_tables = wasm.defined_tables.constIterator(0);
+        while (iter_tables.next()) |table| {
+            const table_field: *const Text.Table = table.getPtr(arena);
+            if (table_field.ref_type_keyword.get()) |ref_type| {
+                try encodeRefType(output, text_ctx, ref_type);
+
+                var limit_buf = std.BoundedArray(u8, 5){};
+                writeUleb128(
+                    limit_buf.writer(),
+                    switch (table_field.inner.ref_type.elements) {
+                        .expressions => |exprs| exprs.len,
+                        .indices => |indices| indices.len,
+                    },
+                ) catch unreachable;
+
+                try output.writeBytesNTimes(limit_buf.constSlice(), 2);
+            } else {
+                try encodeTableType(
+                    output,
+                    text_ctx,
+                    &table_field.inner.no_elements.table_type,
+                );
+            }
+        }
+
+        try encodeSection(final_output, 4, section_buf.items);
+    }
 
     if (wasm.defined_mems.len > 0) {
         section_buf.clearRetainingCapacity();
@@ -1146,6 +1276,11 @@ fn encodeText(
                     export_desc_buf.appendAssumeCapacity(0x00);
                     encodeIdx(export_desc_buf.writer(), FuncIdx, func.idx) catch unreachable;
                     break :exports func.field.getPtr(arena).inline_exports;
+                },
+                .inline_table => |table| {
+                    export_desc_buf.appendAssumeCapacity(0x01);
+                    encodeIdx(export_desc_buf.writer(), TableIdx, table.idx) catch unreachable;
+                    break :exports table.field.getPtr(arena).inline_exports;
                 },
                 .inline_mem => |mem| {
                     export_desc_buf.appendAssumeCapacity(0x02);
