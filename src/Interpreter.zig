@@ -493,15 +493,15 @@ const Instructions = extern struct {
         } else {
             fuel.remaining -= 1;
 
-            // const saved_ip = @intFromPtr(reader.p) -
-            //     @intFromPtr(interp.currentFrame().function.expanded().wasm.module.module.wasm.ptr);
+            const saved_ip = @intFromPtr(reader.p) -
+                @intFromPtr(interp.currentFrame().function.expanded().wasm.module.module.wasm.ptr);
 
             const next_opcode = reader.readByte() catch unreachable;
 
-            // std.debug.print(
-            //     "TRACE[{X:0>6}]: {s}\n",
-            //     .{ saved_ip, @tagName(@as(opcodes.ByteOpcode, @enumFromInt(next_opcode))) },
-            // );
+            std.debug.print(
+                "TRACE[{X:0>6}]: {s}\n",
+                .{ saved_ip, @tagName(@as(opcodes.ByteOpcode, @enumFromInt(next_opcode))) },
+            );
 
             return byte_dispatch_table[next_opcode];
         }
@@ -1151,25 +1151,49 @@ inline fn takeBranch(
     i: *Instructions,
     s: *Stp,
     vals: *ValStack,
+    branch: u32,
 ) void {
-    const target = s.*[0];
     const code = interp.currentFrame().function.expanded().wasm.code();
+    const wasm_base_ptr = @intFromPtr(interp.currentFrame().function.expanded().wasm.module.module.wasm.ptr);
+
+    const side_table_end = @intFromPtr(code.state.side_table_ptr + code.state.side_table_len);
+    std.debug.assert(@intFromPtr(s.* + branch) < side_table_end);
+    const target = &s.*[branch];
+
+    const origin_ip = code.state.instructions + target.origin;
+    if (builtin.mode == .Debug and @intFromPtr(base_ip) != @intFromPtr(origin_ip)) {
+        std.debug.panic(
+            "expected this branch to originate from {X:0>6}, but got {X:0>6}",
+            .{ @intFromPtr(origin_ip) - wasm_base_ptr, @intFromPtr(base_ip) - wasm_base_ptr },
+        );
+    }
+
+    std.debug.print(
+        " ? TGT FIXUP #{} (current is #{}): delta_ip={}, delta_stp={}\n",
+        .{
+            (@intFromPtr(target) - @intFromPtr(code.state.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry),
+            (@intFromPtr(s.*) - @intFromPtr(code.state.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry),
+            target.delta_ip.done,
+            target.delta_stp,
+        },
+    );
+
     i.p = addPtrWithOffset(base_ip, target.delta_ip.done);
     std.debug.assert(@intFromPtr(code.state.instructions) <= @intFromPtr(i.p));
     std.debug.assert(@intFromPtr(i.p) <= @intFromPtr(i.ep));
 
-    // std.debug.print(
-    //     "NEXT[{X:0>6}]: 0x{X} ({s})\n",
-    //     .{
-    //         @intFromPtr(i.p) - @intFromPtr(interp.currentFrame().function.expanded().wasm.module.module.wasm.ptr),
-    //         i.p[0],
-    //         @tagName(@as(opcodes.ByteOpcode, @enumFromInt(i.p[0]))),
-    //     },
-    // );
+    std.debug.print(
+        " ? NEXT[{X:0>6}]: 0x{X} ({s})\n",
+        .{
+            @intFromPtr(i.p) - wasm_base_ptr,
+            i.p[0],
+            @tagName(@as(opcodes.ByteOpcode, @enumFromInt(i.p[0]))),
+        },
+    );
 
     s.* = addPtrWithOffset(s.*, target.delta_stp);
     std.debug.assert(@intFromPtr(code.state.side_table_ptr) <= @intFromPtr(s.*));
-    std.debug.assert(@intFromPtr(s.*) <= @intFromPtr(code.state.side_table_ptr + code.state.side_table_len));
+    std.debug.assert(@intFromPtr(s.*) <= side_table_end);
 
     const vals_base = vals.items.len;
     const src = vals.items[vals_base - target.copy_count ..];
@@ -1231,7 +1255,7 @@ const opcode_handlers = struct {
         // std.debug.print(" > (if) {}?\n", .{c != 0});
         if (c == 0) {
             // No need to read LEB128 block type.
-            int.takeBranch(i.p - 1, i, s, vals);
+            int.takeBranch(i.p - 1, i, s, vals, 0);
         } else {
             i.skipBlockType();
             s.* += 1;
@@ -1243,7 +1267,7 @@ const opcode_handlers = struct {
     }
 
     pub fn @"else"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        int.takeBranch(i.p - 1, i, s, vals);
+        int.takeBranch(i.p - 1, i, s, vals, 0);
 
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
@@ -1260,7 +1284,7 @@ const opcode_handlers = struct {
 
     pub fn br(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         // No need to read LEB128 branch target
-        int.takeBranch(i.p - 1, i, s, vals);
+        int.takeBranch(i.p - 1, i, s, vals, 0);
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
@@ -1271,11 +1295,28 @@ const opcode_handlers = struct {
         // std.debug.print(" > (br_if) {}?\n", .{c != 0});
         if (c != 0) {
             // No need to read LEB128 branch target
-            int.takeBranch(i.p - 1, i, s, vals);
+            int.takeBranch(i.p - 1, i, s, vals, 0);
         } else {
             _ = i.readUleb128(u32) catch unreachable;
             s.* += 1;
         }
+
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    pub fn br_table(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const base_ip = i.p - 1;
+        const label_count = i.readUleb128(u32) catch unreachable;
+
+        // No need to read LEB128 labels
+
+        const n: u32 = @bitCast(vals.pop().i32);
+
+        std.debug.print(" > br_table [{}]\n", .{n});
+
+        int.takeBranch(base_ip, i, s, vals, @min(n, label_count));
 
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });

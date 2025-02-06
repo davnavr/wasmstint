@@ -8,6 +8,7 @@
 //! ["A fast in-place interpreter for WebAssembly"]: https://doi.org/10.48550/arXiv.2205.01183
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
@@ -20,8 +21,21 @@ pub const Error = error{InvalidWasm} ||
     Module.LimitError ||
     Allocator.Error;
 
-/// Describes the changes to interpreter state should occur if its corresponding branch is taken.
-pub const SideTableEntry = packed struct(u64) {
+const DebugSideTableEntry = struct {
+    delta_ip: union {
+        done: i32,
+        /// Offset from the first byte of the first instruction to the first byte of the
+        /// branch instruction.
+        fixup_origin: u32,
+    },
+    delta_stp: i16,
+    copy_count: u8,
+    pop_count: u8,
+    /// Set to the same value as `fixup_origin`.
+    origin: u32,
+};
+
+pub const ReleaseSideTableEntry = packed struct(u64) {
     delta_ip: packed union {
         done: i32,
         /// Offset from the first byte of the first instruction to the first byte of the
@@ -31,7 +45,14 @@ pub const SideTableEntry = packed struct(u64) {
     delta_stp: i16,
     copy_count: u8,
     pop_count: u8,
+    origin: void = {},
 };
+
+/// Describes the changes to interpreter state should occur if its corresponding branch is taken.
+pub const SideTableEntry = if (builtin.mode == .Debug)
+    DebugSideTableEntry
+else
+    ReleaseSideTableEntry;
 
 pub const End = enum(u8) { end = @intFromEnum(opcodes.ByteOpcode.end) };
 
@@ -465,12 +486,15 @@ const SideTableBuilder = struct {
         const fixup = try table.alternate.addOne(arena.allocator());
 
         fixup.* = .{ .entry_idx = idx };
-        entry.* = .{
+        entry.* = SideTableEntry{
             .delta_ip = .{ .fixup_origin = origin },
             .delta_stp = undefined,
             .copy_count = copy_count,
             .pop_count = pop_count,
+            .origin = if (builtin.mode == .Debug) origin else {},
         };
+
+        std.debug.print(" PLACED ALT FIXUP #{} originating from 0x{X}\n", .{ idx, origin });
     }
 
     const KnownTarget = struct {
@@ -491,6 +515,7 @@ const SideTableBuilder = struct {
         const entry = try table.entries.addOne(arena.allocator());
         entry.copy_count = copy_count;
         entry.pop_count = pop_count;
+        entry.origin = if (builtin.mode == .Debug) origin else {};
 
         if (known_target) |target| {
             const delta_ip = std.math.negateCast(origin - target.instr_offset) catch
@@ -504,6 +529,7 @@ const SideTableBuilder = struct {
             entry.delta_stp = std.math.cast(i16, delta_stp) orelse
                 return Error.WasmImplementationLimit;
         } else {
+            std.debug.print(" PLACED FIXUP #{} originating from 0x{X}\n", .{ idx, origin });
             entry.delta_ip = .{ .fixup_origin = origin };
             entry.delta_stp = undefined;
 
@@ -523,21 +549,25 @@ const SideTableBuilder = struct {
         const entry: *SideTableEntry = table.entries.at(fixup_entry.entry_idx);
         const origin = entry.delta_ip.fixup_origin;
 
-        entry.delta_ip.done = std.math.cast(i32, end_offset - origin) orelse
-            return error.WasmImplementationLimit;
+        entry.delta_ip = .{
+            .done = std.math.cast(i32, end_offset - origin) orelse
+                return error.WasmImplementationLimit,
+        };
 
         entry.delta_stp = std.math.cast(i16, target_side_table_idx - fixup_entry.entry_idx) orelse
             return error.WasmImplementationLimit;
 
-        // std.debug.print(
-        //     "FIXUP targeting 0x{X} originating from 0x{X} (dip = {}, dstp = {})\n",
-        //     .{
-        //         end_offset,
-        //         origin,
-        //         entry.delta_ip.done,
-        //         entry.delta_stp,
-        //     },
-        // );
+        std.debug.print(
+            "FIXUP #{} targeting 0x{X} originating from 0x{X} (dip = {}, dstp = {}, target STP={})\n",
+            .{
+                fixup_entry.entry_idx,
+                end_offset,
+                origin,
+                entry.delta_ip.done,
+                entry.delta_stp,
+                target_side_table_idx,
+            },
+        );
     }
 
     fn resolveFixupList(
@@ -884,10 +914,10 @@ fn doValidation(
                 // TODO: Skip branch fixup processing for unreachable code.
                 const last_label = try Label.read(&reader, &ctrl_stack, module);
 
-                try appendSideTableEntry(scratch, &side_table, instr_offset, last_label);
-
                 const last_label_types = last_label.frame.labelTypes(module);
                 const arity: u32 = @intCast(last_label_types.len);
+
+                std.debug.print("BEGIN BR_TABLE\n", .{});
 
                 for (labels) |n| {
                     const l = try Label.init(n, &ctrl_stack, module);
@@ -900,6 +930,10 @@ fn doValidation(
                     try val_stack.popManyExpecting(&ctrl_stack, l_types);
                     try val_stack.pushMany(undefined, l_types);
                 }
+
+                try appendSideTableEntry(scratch, &side_table, instr_offset, last_label);
+
+                std.debug.print("END BR_TABLE\n", .{});
 
                 try val_stack.popManyExpecting(&ctrl_stack, last_label_types);
                 markUnreachable(&val_stack, &ctrl_stack);
