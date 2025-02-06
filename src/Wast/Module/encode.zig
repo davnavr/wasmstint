@@ -94,6 +94,11 @@ pub const MemIdx = enum(u32) {
     _,
 };
 
+pub const GlobalIdx = enum(u32) {
+    probably_invalid = std.math.maxInt(u32),
+    _,
+};
+
 pub const DataIdx = enum(u32) {
     probably_invalid = std.math.maxInt(u32),
     _,
@@ -239,6 +244,10 @@ const Export = union(enum) {
         field: IndexedArena.Idx(Text.Mem),
         idx: MemIdx,
     },
+    inline_global: struct {
+        field: IndexedArena.Idx(Text.Global),
+        idx: GlobalIdx,
+    },
 
     comptime {
         std.debug.assert(@sizeOf(Export) == 12);
@@ -343,6 +352,9 @@ const Wasm = struct {
     mem_count: IdxCounter(MemIdx) = .{},
     defined_mems: std.SegmentedList(Mem, 1) = .{},
 
+    global_count: IdxCounter(GlobalIdx) = .{},
+    defined_globals: std.SegmentedList(IndexedArena.Idx(Text.Global), 2) = .{},
+
     data_segments: std.SegmentedList(DataSegment, 1) = .{},
 
     type_uses: std.AutoArrayHashMapUnmanaged(*const Text.TypeUse, TypeIdx) = .empty,
@@ -352,6 +364,7 @@ const Wasm = struct {
     func_ids: IdentLookup(FuncIdx) = .empty,
     table_ids: IdentLookup(TableIdx) = .empty,
     mem_ids: IdentLookup(MemIdx) = .empty,
+    global_ids: IdentLookup(GlobalIdx) = .empty,
     data_ids: IdentLookup(DataIdx) = .empty,
 
     fn checkImportOrdering(
@@ -360,7 +373,9 @@ const Wasm = struct {
         import_keyword: sexpr.TokenId,
     ) Allocator.Error!void {
         if (wasm.defined_funcs.len > 0 or
-            wasm.defined_mems.len > 0)
+            wasm.defined_mems.len > 0 or
+            wasm.defined_tables.len > 0 or
+            wasm.defined_globals.len > 0)
             _ = try ctx.errorAtToken(import_keyword, "imports must occur before all non-import definitions");
     }
 
@@ -832,25 +847,24 @@ fn encodeLimits(
 
 fn encodeRefType(
     output: std.ArrayList(u8).Writer,
-    ctx: *TextContext,
+    tree: *const sexpr.Tree,
     ref_type: sexpr.TokenId,
 ) Allocator.Error!void {
-    try output.writeByte(switch (ref_type.tag(ctx.tree)) {
-        .keyword_funcref => @intFromEnum(ValType.funcref),
-        .keyword_externref => @intFromEnum(ValType.externref),
-        else => invalid: {
-            _ = try ctx.errorAtToken(ref_type, "expected 'funcref' or 'externref'");
-            break :invalid 0xFF;
+    try output.writeByte(
+        switch (ref_type.tag(tree)) {
+            .keyword_funcref => @intFromEnum(ValType.funcref),
+            .keyword_externref => @intFromEnum(ValType.externref),
+            else => unreachable,
         },
-    });
+    );
 }
 
 fn encodeTableType(
     output: std.ArrayList(u8).Writer,
-    ctx: *TextContext,
+    tree: *const sexpr.Tree,
     table_type: *const Text.TableType,
 ) Allocator.Error!void {
-    try encodeRefType(output, ctx, table_type.ref_type);
+    try encodeRefType(output, tree, table_type.ref_type);
     try encodeLimits(output, &table_type.limits);
 }
 
@@ -859,6 +873,15 @@ fn encodeMemType(
     mem_type: *const Text.MemType,
 ) Allocator.Error!void {
     try encodeLimits(output, &mem_type.limits);
+}
+
+fn encodeGlobalType(
+    output: std.ArrayList(u8).Writer,
+    tree: *const sexpr.Tree,
+    global_type: *const Text.GlobalType,
+) Allocator.Error!void {
+    try output.writeByte(if (global_type.mut.some) 0x01 else 0x00);
+    try ValType.fromValType(global_type.val_type, tree).encode(output);
 }
 
 fn encodeText(
@@ -997,7 +1020,9 @@ fn encodeText(
                     try wasm.defined_tables.append(alloca.allocator(), table_field);
                 }
 
-                // TODO: Add the inline element segment.
+                if (has_elems) {
+                    // TODO: Add the inline element segment.
+                }
             },
             .keyword_memory => {
                 const mem_field = field.contents.mem;
@@ -1110,7 +1135,41 @@ fn encodeText(
                     ),
                 );
             },
-            // .keyword_global => {},
+            .keyword_global => {
+                const global_field = field.contents.global;
+                const global_field_ptr: *const Text.Global = global_field.getPtr(arena);
+                const global_idx = try wasm.global_count.increment();
+
+                try wasm.global_ids.insert(
+                    text_ctx,
+                    global_field_ptr.id,
+                    global_idx,
+                    alloca,
+                );
+
+                if (!global_field_ptr.inline_exports.isEmpty()) {
+                    wasm.exports_count = try addOrOom(u32, wasm.exports_count, global_field_ptr.inline_exports.len);
+                    try wasm.exports.append(
+                        alloca.allocator(),
+                        Export{
+                            .inline_global = .{
+                                .field = global_field,
+                                .idx = global_idx,
+                            },
+                        },
+                    );
+                }
+
+                if (global_field_ptr.inline_import.get()) |import_keyword| {
+                    try wasm.checkImportOrdering(text_ctx, import_keyword);
+                    try wasm.imports.append(
+                        alloca.allocator(),
+                        Import{ .inline_global = global_field },
+                    );
+                } else {
+                    try wasm.defined_globals.append(alloca.allocator(), global_field);
+                }
+            },
             else => |bad| if (@import("builtin").mode == .Debug)
                 std.debug.panic("TODO: handle module field {s}", .{@tagName(bad)})
             else
@@ -1165,7 +1224,7 @@ fn encodeText(
                     try output.writeByte(0x01);
                     try encodeTableType(
                         output,
-                        text_ctx,
+                        text_ctx.tree,
                         &table_field.getPtr(arena).inner.no_elements.table_type,
                     );
                 },
@@ -1176,7 +1235,14 @@ fn encodeText(
                         &mem_field.getPtr(arena).inner.no_data.mem_type,
                     );
                 },
-                else => unreachable, // TODO
+                .inline_global => |global_field| {
+                    try output.writeByte(0x03);
+                    try encodeGlobalType(
+                        output,
+                        text_ctx.tree,
+                        &global_field.getPtr(arena).global_type,
+                    );
+                },
             }
         }
 
@@ -1210,7 +1276,7 @@ fn encodeText(
         while (iter_tables.next()) |table| {
             const table_field: *const Text.Table = table.getPtr(arena);
             if (table_field.ref_type_keyword.get()) |ref_type| {
-                try encodeRefType(output, text_ctx, ref_type);
+                try encodeRefType(output, text_ctx.tree, ref_type);
 
                 var limit_buf = std.BoundedArray(u8, 5){};
                 writeUleb128(
@@ -1225,7 +1291,7 @@ fn encodeText(
             } else {
                 try encodeTableType(
                     output,
-                    text_ctx,
+                    text_ctx.tree,
                     &table_field.inner.no_elements.table_type,
                 );
             }
@@ -1258,7 +1324,32 @@ fn encodeText(
         try encodeSection(final_output, 5, section_buf.items);
     }
 
-    // global
+    if (wasm.defined_globals.len > 0) {
+        section_buf.clearRetainingCapacity();
+
+        const output = section_buf.writer();
+        try encodeVecLen(output, wasm.defined_globals.len);
+
+        var iter_globals = wasm.defined_globals.constIterator(0);
+        var func_ctx = FuncContext{};
+        while (iter_globals.next()) |global| {
+            _ = scratch.reset(.retain_capacity);
+            const global_field: *const Text.Global = global.getPtr(arena);
+            try encodeGlobalType(output, text_ctx.tree, &global_field.global_type);
+            try encodeExpr(
+                output,
+                &wasm,
+                &global_field.inner.init,
+                &func_ctx,
+                text_ctx,
+                arena,
+                caches,
+                &scratch,
+            );
+        }
+
+        try encodeSection(final_output, 6, section_buf.items);
+    }
 
     std.debug.assert(wasm.exports.len <= wasm.exports_count);
     if (wasm.exports_count > 0) {
@@ -1286,6 +1377,11 @@ fn encodeText(
                     export_desc_buf.appendAssumeCapacity(0x02);
                     encodeIdx(export_desc_buf.writer(), MemIdx, mem.idx) catch unreachable;
                     break :exports mem.field.getPtr(arena).inline_exports;
+                },
+                .inline_global => |global| {
+                    export_desc_buf.appendAssumeCapacity(0x03);
+                    encodeIdx(export_desc_buf.writer(), GlobalIdx, global.idx) catch unreachable;
+                    break :exports global.field.getPtr(arena).inline_exports;
                 },
             };
 
