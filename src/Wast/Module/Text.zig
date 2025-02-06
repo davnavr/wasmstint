@@ -841,7 +841,7 @@ pub const Data = struct {
     pub const Offset = struct {
         /// The `offset` keyword.
         ///
-        /// If omitted, then it is an invariant that `expr.count == 1`.
+        /// If omitted, then it is an invariant that `expr.count == 2`.
         keyword: sexpr.TokenId.Opt,
         expr: Expr,
     };
@@ -965,7 +965,9 @@ pub const ElementSegment = struct {
     /// An *`elemexpr`*.
     pub const Item = struct {
         /// The `item` keyword.
-        keyword: sexpr.TokenId,
+        ///
+        /// If omitted, then it is an invariant that `expr.count == 2`.
+        keyword: sexpr.TokenId.Opt,
         expr: Expr,
 
         pub fn parseList(
@@ -975,14 +977,21 @@ pub const ElementSegment = struct {
             caches: *Caches,
             scratch: *ArenaAllocator,
         ) sexpr.Parser.ParseError!Item {
-            var contents = sexpr.Parser.init(list.contents(ctx.tree).values(ctx.tree));
-            var item_keyword = try contents.parseAtomInList(list, ctx, "'item' keyword");
+            var item_or_expr_parser = sexpr.Parser.init(list.contents(ctx.tree).values(ctx.tree));
+            var expr_parser = item_or_expr_parser;
 
-            if (item_keyword.tag(ctx.tree) != .keyword_item)
-                return (try ctx.errorAtToken(item_keyword, "expected 'item' keyword")).err;
+            var maybe_item_keyword = try item_or_expr_parser.parseAtomInList(list, ctx, "'item' keyword");
+            var item_keyword = sexpr.TokenId.Opt.none;
+
+            if (maybe_item_keyword.tag(ctx.tree) == .keyword_item) {
+                item_keyword = sexpr.TokenId.Opt.init(maybe_item_keyword);
+                expr_parser = item_or_expr_parser;
+            }
+
+            item_or_expr_parser = undefined;
 
             const expr = try Expr.parseContents(
-                &contents,
+                &expr_parser,
                 ctx,
                 list,
                 arena,
@@ -990,7 +999,7 @@ pub const ElementSegment = struct {
                 scratch,
             );
 
-            std.debug.assert(contents.isEmpty());
+            std.debug.assert(expr_parser.isEmpty());
 
             return .{ .keyword = item_keyword, .expr = expr };
         }
