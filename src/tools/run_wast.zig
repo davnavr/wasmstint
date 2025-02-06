@@ -219,10 +219,6 @@ pub fn main() !u8 {
 }
 
 const SpectestImports = struct {
-    last_failure: ?struct {
-        module: []const u8,
-        name: []const u8,
-    } = null,
     lookup: std.StringHashMapUnmanaged(wasmstint.runtime.ExternVal),
 
     const PrintFunction = enum(u8) {
@@ -346,15 +342,7 @@ const SpectestImports = struct {
         if (!std.mem.eql(u8, "spectest", module.bytes))
             return null;
 
-        const result = host.lookup.get(name.bytes);
-        if (result == null) {
-            host.last_failure = .{
-                .module = module.bytes,
-                .name = name.bytes,
-            };
-        }
-
-        return result;
+        return host.lookup.get(name.bytes);
     }
 };
 
@@ -743,20 +731,24 @@ fn runScript(
                 std.debug.assert(validation_finished);
 
                 var imports = try SpectestImports.init(module_arena);
+                var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
                 const module_inst = try module_arena.allocator().create(wasmstint.runtime.ModuleInst);
                 module_inst.* = wasmstint.runtime.ModuleInst.allocate(
                     parsed_module,
                     imports.provider(),
                     module_arena.allocator(),
                     store.allocator(),
+                    &import_error,
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
                     error.ImportFailure => {
-                        const name = imports.last_failure.?;
                         _ = try state.errors.errorFmtAtToken(
                             cmd.keyword,
                             "could not provide import {s} {s}",
-                            .{ name.module, name.name },
+                            .{
+                                import_error.module.bytes,
+                                import_error.name.bytes,
+                            },
                         );
                         return;
                     },

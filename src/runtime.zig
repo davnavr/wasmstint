@@ -221,6 +221,14 @@ pub const ModuleAllocator = struct {
 };
 
 pub const ImportProvider = struct {
+    /// Used to indicate the type of value the module is expecting.
+    pub const Desc = union(std.meta.FieldEnum(Module.Export.Desc)) {
+        func: *const Module.FuncType,
+        table: *const Module.TableType,
+        mem: *const Module.MemType,
+        global: *const Module.GlobalType,
+    };
+
     ctx: *anyopaque,
     resolve: *const fn (
         ctx: *anyopaque,
@@ -229,13 +237,67 @@ pub const ImportProvider = struct {
         desc: Desc,
     ) ?ExternVal,
 
-    /// Used to indicate the type of value the module is expecting.
-    pub const Desc = union(std.meta.FieldEnum(Module.Export.Desc)) {
-        func: *const Module.FuncType,
-        table: *const Module.TableType,
-        mem: *const Module.MemType,
-        global: *const Module.GlobalType,
+    pub const Error = error{
+        /// The host did not provide an import with the given name or one with the expected type.
+        ImportFailure,
     };
+
+    pub const FailedRequest = struct {
+        module: std.unicode.Utf8View,
+        name: std.unicode.Utf8View,
+        desc: Desc,
+    };
+
+    fn resolveTyped(
+        provider: *const ImportProvider,
+        module: std.unicode.Utf8View,
+        name: std.unicode.Utf8View,
+        comptime desc_tag: std.meta.FieldEnum(Module.Export.Desc),
+        desc: std.meta.FieldType(Desc, desc_tag),
+        failed: ?*FailedRequest,
+    ) Error!@FieldType(ExternVal, @tagName(desc_tag)) {
+        const import_desc = @unionInit(
+            Desc,
+            std.meta.fieldInfo(Desc, desc_tag).name,
+            desc,
+        );
+
+        failed_request: {
+            const provided = provider.resolve(
+                provider.ctx,
+                module,
+                name,
+                import_desc,
+            ) orelse break :failed_request;
+
+            switch (desc_tag) {
+                .func => if (provided == .func) {
+                    if (!provided.func.signature().matches(desc)) break :failed_request;
+                    return provided.func;
+                },
+                .table => if (provided == .table) {
+                    if (provided.table.tableType().matches(desc)) break :failed_request;
+                    return provided.table.table;
+                },
+                .mem => if (provided == .mem) {
+                    if (provided.mem.memType().matches(desc)) break :failed_request;
+                    return provided.mem;
+                },
+                .global => if (provided == .global) {
+                    if (provided.global.global_type.matches(desc)) break :failed_request;
+                    return provided.global;
+                },
+            }
+        }
+
+        if (failed) |failed_ptr| failed_ptr.* = FailedRequest{
+            .module = module,
+            .name = name,
+            .desc = import_desc,
+        };
+
+        return Error.ImportFailure;
+    }
 };
 
 pub const ModuleInst = struct {
@@ -253,10 +315,7 @@ pub const ModuleInst = struct {
     globals: [*]*anyopaque,
     data: IndexedArena.Data,
 
-    pub const AllocateError = error{
-        /// The host did not provide an import with the given name or one with the expected type.
-        ImportFailure,
-    } || Allocator.Error;
+    pub const AllocateError = ImportProvider.Error || Allocator.Error;
 
     pub fn allocate(
         module: *const Module,
@@ -264,6 +323,7 @@ pub const ModuleInst = struct {
         gpa: Allocator,
         store: ModuleAllocator,
         // scratch: Allocator,
+        import_failure: ?*ImportProvider.FailedRequest,
     ) AllocateError!ModuleInst {
         var arena_array = IndexedArena.init(gpa);
         defer arena_array.deinit();
@@ -274,20 +334,13 @@ pub const ModuleInst = struct {
             module.funcImportNames(),
             module.funcImportTypes(),
         ) |*import, name, func_type| {
-            const val = import_provider.resolve(
-                import_provider.ctx,
+            import.* = try import_provider.resolveTyped(
                 name.module_name(module),
                 name.desc_name(module),
-                .{ .func = func_type },
-            ) orelse return error.ImportFailure;
-
-            switch (val) {
-                .func => |func| {
-                    if (func.signature().matches(func_type)) return error.ImportFailure;
-                    import.* = func;
-                },
-                else => return error.ImportFailure,
-            }
+                .func,
+                func_type,
+                import_failure,
+            );
         }
 
         const tables = try arena_array.alloc(*TableInst, module.inner.table_count);
