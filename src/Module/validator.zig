@@ -168,21 +168,38 @@ const Val = @Type(std.builtin.Type{
             break :fields &fields;
         },
         .decls = &[0]std.builtin.Type.Declaration{},
-        .is_exhaustive = false,
+        .is_exhaustive = true,
     },
 });
+
+fn isNumVal(val: Val) bool {
+    return switch (val) {
+        .i32, .i64, .f32, .f64, .unknown => true,
+        .funcref,
+        .externref,
+        .v128,
+        => false,
+    };
+}
+
+inline fn isVecVal(val: Val) bool {
+    return val == .unknown or val == .v128;
+}
 
 inline fn valTypeToVal(val_type: ValType) Val {
     comptime {
         for (@typeInfo(ValType).@"enum".fields) |field| {
-            std.debug.assert(@intFromEnum(@field(Val, field.name)) == @intFromEnum(@field(ValType, field.name)));
+            std.debug.assert(
+                @intFromEnum(@field(Val, field.name)) ==
+                    @intFromEnum(@field(ValType, field.name)),
+            );
         }
     }
 
     return @enumFromInt(@intFromEnum(val_type));
 }
 
-const ValTypeBuf = std.SegmentedList(ValType, 128);
+const ValBuf = std.SegmentedList(Val, 128);
 
 const BlockType = union(enum) {
     type: packed struct(u32) {
@@ -279,16 +296,25 @@ const CtrlFrame = struct {
 const CtrlStack = std.SegmentedList(CtrlFrame, 16);
 
 const ValStack = struct {
-    buf: ValTypeBuf,
+    buf: ValBuf,
     max: u16 = 0,
 
     inline fn len(val_stack: *const ValStack) u16 {
         return @intCast(val_stack.buf.len);
     }
 
+    fn pushAny(val_stack: *ValStack, arena: *ArenaAllocator, val: Val) Error!void {
+        try val_stack.buf.append(arena.allocator(), val);
+        // Note, if someone pushes a known value over an unknown, the max will grow anyway
+        // TODO: check that current frame is reachable instead.
+        // if (val != .unknown) {
+        val_stack.max = @max(val_stack.max, std.math.cast(u16, val_stack.buf.len) orelse
+            return Error.WasmImplementationLimit);
+        // }
+    }
+
     fn push(val_stack: *ValStack, arena: *ArenaAllocator, val_type: ValType) Error!void {
-        try val_stack.buf.append(arena.allocator(), val_type);
-        val_stack.max = @max(val_stack.max, std.math.cast(u16, val_stack.buf.len) orelse return Error.WasmImplementationLimit);
+        return val_stack.pushAny(arena, valTypeToVal(val_type));
     }
 
     /// Asserts that `types.len() <= std.math.maxInt(u16)`.
@@ -296,11 +322,15 @@ const ValStack = struct {
         const new_len = std.math.add(u16, val_stack.len(), @intCast(types.len)) catch
             return Error.WasmImplementationLimit;
 
-        if (new_len > ValTypeBuf.prealloc_count) {
+        if (new_len > ValBuf.prealloc_count) {
             try val_stack.buf.growCapacity(arena.allocator(), new_len);
         }
 
-        for (types) |ty| val_stack.buf.append(undefined, ty) catch unreachable;
+        for (types) |ty| {
+            val_stack.buf.append(undefined, valTypeToVal(ty)) catch unreachable;
+        }
+
+        // TODO: check that current frame is reachable instead.
         val_stack.max = @max(new_len, val_stack.max);
     }
 
@@ -310,7 +340,7 @@ const ValStack = struct {
             return if (current_frame.info.@"unreachable") Val.unknown else Error.InvalidWasm;
         }
 
-        return valTypeToVal(val_stack.buf.pop().?);
+        return val_stack.buf.pop().?;
     }
 
     fn popExpecting(val_stack: *ValStack, ctrl_stack: *const CtrlStack, expected: ValType) Error!void {
@@ -328,9 +358,12 @@ const ValStack = struct {
     ) Error!void {
         const current_frame: *const CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
         if (val_stack.len() > current_frame.info.height) {
-            const top: *ValType = val_stack.buf.at(val_stack.len() - 1);
-            if (top.* != expected) return Error.InvalidWasm;
-            top.* = replacement;
+            const top: *Val = val_stack.buf.at(val_stack.len() - 1);
+
+            if (top.* != valTypeToVal(expected) and top.* != .unknown)
+                return Error.InvalidWasm;
+
+            top.* = valTypeToVal(replacement);
         } else if (current_frame.info.@"unreachable") {
             return val_stack.push(arena, replacement);
         } else {
@@ -692,21 +725,24 @@ fn doValidation(
     var val_stack: ValStack = undefined;
     const locals: []const ValType = locals: {
         const local_group_count = try reader.readUleb128(u32);
-        var local_vars = ValTypeBuf{};
+        var local_vars = ValBuf{};
 
         const reserve_count = std.math.add(u32, func_type.param_count, local_group_count) catch
             return error.OutOfMemory;
 
-        // if (local_group_count > ValTypeBuf.prealloc_count) {
+        // if (local_group_count > Valbuf.prealloc_count) {
         try local_vars.setCapacity(scratch.allocator(), reserve_count);
-        //
+        // }
 
         defer {
             local_vars.clearRetainingCapacity();
             val_stack = ValStack{ .buf = local_vars };
         }
 
-        local_vars.appendSlice(undefined, func_type.parameters()) catch unreachable;
+        local_vars.appendSlice(
+            undefined,
+            @ptrCast(func_type.parameters()),
+        ) catch unreachable;
 
         for (0..local_group_count) |_| {
             const local_count = try reader.readUleb128(u32);
@@ -714,19 +750,19 @@ fn doValidation(
             const new_local_len = std.math.add(u32, @intCast(local_vars.len), local_count) catch
                 return error.WasmImplementationLimit;
 
-            if (new_local_len > ValTypeBuf.prealloc_count) {
+            if (new_local_len > ValBuf.prealloc_count) {
                 try local_vars.growCapacity(scratch.allocator(), new_local_len);
             }
 
             for (0..local_count) |_| {
-                local_vars.append(undefined, local_type) catch unreachable;
+                local_vars.append(undefined, valTypeToVal(local_type)) catch unreachable;
             }
         }
 
         state.local_values = @intCast(local_vars.len);
 
         const buf = try scratch.allocator().alloc(ValType, local_vars.len);
-        local_vars.writeToSlice(buf, 0);
+        local_vars.writeToSlice(@ptrCast(buf), 0);
         break :locals buf;
     };
 
@@ -954,6 +990,24 @@ fn doValidation(
             },
 
             .drop => _ = try val_stack.popAny(&ctrl_stack),
+            .select => {
+                try val_stack.popExpecting(&ctrl_stack, .i32);
+                const t_1: Val = try val_stack.popAny(&ctrl_stack);
+                const t_2: Val = try val_stack.popAny(&ctrl_stack);
+
+                const both_num_types = isNumVal(t_1) and isNumVal(t_2);
+                const both_vec_types = isVecVal(t_1) and isVecVal(t_2);
+                if (!(both_num_types or both_vec_types))
+                    return error.InvalidWasm;
+
+                if (t_1 != t_2 and t_1 != .unknown and t_2 != .unknown)
+                    return error.InvalidWasm;
+
+                val_stack.pushAny(
+                    undefined,
+                    if (t_1 == .unknown) t_2 else t_1,
+                ) catch unreachable;
+            },
 
             .@"local.get" => {
                 const local_type = try readLocalIdx(&reader, locals);
