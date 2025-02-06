@@ -818,36 +818,30 @@ fn encodeExpr(
                             try output.writeByte(0x00);
                         }
                     },
-                    .block_type => block_type: {
+                    .block_type => {
                         const block_type: *align(4) const Text.Instr.BlockType = arg;
                         try label_lookup.enter(scratch, block_type.label);
 
-                        const results: []const Text.Result = block_type.type.func.results.items(arena);
-                        if (block_type.type.func.parameters.isEmpty()) inline_idx: {
-                            var result_type: ?ValType = null;
-                            for (results) |*result_list| {
-                                const types: []const Text.ValType = result_list.types.items(arena);
-                                switch (types.len) {
-                                    0 => continue,
-                                    1 => if (result_type == null) {
-                                        result_type = ValType.fromValType(types[0], text.tree);
-                                        continue;
-                                    },
-                                    else => {},
-                                }
+                        if (block_type.hasAtMostOneResult()) {
+                            std.debug.assert(block_type.type.func.parameters_count == 0);
+                            var iter_results = IterResultTypes.init(
+                                block_type.type.func.results.items(arena),
+                            );
 
-                                break :inline_idx;
+                            if (iter_results.next(text.tree, arena)) |result_type| {
+                                try result_type.encode(output);
+                            } else {
+                                try output.writeByte(0x40);
                             }
 
-                            try output.writeByte(if (result_type) |ty| @intFromEnum(ty) else 0x40);
-                            break :block_type;
+                            std.debug.assert(iter_results.next(text.tree, arena) == null);
+                        } else {
+                            try encodeIdx(
+                                output,
+                                TypeIdx,
+                                wasm.type_uses.get(&block_type.type).?,
+                            );
                         }
-
-                        try encodeIdx(
-                            output,
-                            TypeIdx,
-                            wasm.type_uses.get(&block_type.type).?,
-                        );
                     },
                     .br_table => {
                         comptime {
@@ -1008,7 +1002,12 @@ fn encodeText(
                             => unreachable, // TODO: see Instr.argumentTag()
                             // .@"data.drop", .@"memory.init" => code_needs_data_count = true,
                             inline else => |tag| switch (comptime Text.Instr.argumentTag(tag)) {
-                                .block_type => &instr.arguments.block_type.type,
+                                .block_type => if (instr.arguments.block_type.isInline())
+                                    continue
+                                else
+                                    // If the block type would be inlined, but the 'type' keyword is still present,
+                                    // insert a new type anyway.
+                                    &instr.arguments.block_type.type,
                                 .call_indirect => &instr.arguments.call_indirect.type,
                                 .none,
                                 .ident,

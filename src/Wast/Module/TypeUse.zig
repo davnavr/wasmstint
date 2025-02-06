@@ -13,8 +13,7 @@ const Text = @import("Text.zig");
 
 pub const Id = struct {
     header: packed struct(u32) {
-        /// If `true`, `func.results.len <= 1`, and the *type use* is used as a *`blocktype`*, then
-        /// the block type is the special case of a `void` result or a single result.
+        /// If this is `true`, then the `type` keyword is not present.
         is_inline: bool,
         /// Only set when `is_inline == false`.
         keyword: sexpr.TokenId,
