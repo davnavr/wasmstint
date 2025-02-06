@@ -759,8 +759,42 @@ fn encodeExpr(
                             LocalIdx,
                             try ctx.local_lookup.getFromIdent(text, arg.*),
                         ),
-                        else => std.debug.panic("cannot encode id for {}", .{tag}),
+                        .@"global.get",
+                        .@"global.set",
+                        => try encodeIdx(
+                            output,
+                            GlobalIdx,
+                            try wasm.global_ids.getFromIdent(text, arg.*),
+                        ),
+                        .@"ref.func" => try encodeIdx(
+                            output,
+                            FuncIdx,
+                            try wasm.func_ids.getFromIdent(text, arg.*),
+                        ),
+                        .@"data.drop",
+                        .@"elem.drop",
+                        => unreachable, // TODO: set need data count flag
+                        else => |bad| @compileError("encode id for " ++ @tagName(bad)),
                     },
+                    .ident_opt => if (arg.*.get()) |id| {
+                        switch (tag) {
+                            .@"memory.size",
+                            .@"memory.grow",
+                            .@"memory.fill",
+                            => unreachable, // TODO
+                            .@"table.get",
+                            .@"table.set",
+                            .@"table.size",
+                            .@"table.grow",
+                            .@"table.fill",
+                            => try encodeIdx(
+                                output,
+                                TableIdx,
+                                try wasm.table_ids.getFromIdent(text, id),
+                            ),
+                            else => |bad| @compileError("encode optional id for " ++ @tagName(bad)),
+                        }
+                    } else try output.writeByte(0x00),
                     .label => switch (tag) {
                         .end => try label_lookup.exit(text, arg.*, &caches.ids),
                         .@"else" => {
@@ -768,10 +802,13 @@ fn encodeExpr(
                             const if_label = label_lookup.stack.at(label_lookup.stack.len - 1).*;
                             try checkMatchingLabels(text, if_label, arg.*, &caches.ids);
                         },
-                        else => std.debug.panic("cannot encode label for {}", .{tag}),
+                        else => |bad| @compileError("encode label for " ++ @tagName(bad)),
                     },
                     .call_indirect => {
-                        std.debug.assert(tag == .call_indirect);
+                        comptime {
+                            std.debug.assert(tag == .call_indirect);
+                        }
+
                         try encodeIdx(
                             output,
                             TypeIdx,
@@ -819,7 +856,10 @@ fn encodeExpr(
                         );
                     },
                     .br_table => {
-                        std.debug.assert(tag == .br_table);
+                        comptime {
+                            std.debug.assert(tag == .br_table);
+                        }
+
                         const non_default_labels: []align(4) const Ident = arg.*.labels.items(arena);
                         try encodeVecLen(output, non_default_labels.len);
 
@@ -844,9 +884,6 @@ fn encodeExpr(
                     },
                     .f32 => try output.writeInt(u32, arg.*, .little),
                     .f64 => try output.writeInt(u64, arg.*, .little),
-                    else => {
-                        std.debug.panic("TODO: {}", .{arg_tag});
-                    },
                 }
             },
         }
