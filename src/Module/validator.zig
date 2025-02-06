@@ -979,12 +979,49 @@ fn doValidation(
                 markUnreachable(&val_stack, &ctrl_stack);
             },
             .call => {
-                const callee = try reader.readUleb128(u32);
+                const callee = try reader.readUleb128Casted(
+                    u32,
+                    @typeInfo(Module.FuncIdx).@"enum".tag_type,
+                );
+
                 const callee_signature: *const Module.FuncType = if (callee < module.funcTypes().len)
                     module.funcTypes()[callee]
                 else
                     return error.InvalidWasm;
 
+                try val_stack.popManyExpecting(&ctrl_stack, callee_signature.parameters());
+                try val_stack.pushMany(scratch, callee_signature.results());
+            },
+            .call_indirect => {
+                const type_idx = try reader.readUleb128Casted(
+                    u32,
+                    @typeInfo(Module.TypeIdx).@"enum".tag_type,
+                );
+
+                const callee_signature: *const Module.FuncType = if (type_idx < module.types().len)
+                    &module.types()[type_idx]
+                else
+                    return error.InvalidWasm;
+
+                // std.debug.print(
+                //     "CHECK call_indirect ({}) {any} -> {any}\n",
+                //     .{ type_idx, callee_signature.parameters(), callee_signature.results() },
+                // );
+
+                const table_idx = try reader.readUleb128Casted(
+                    u32,
+                    @typeInfo(Module.TableIdx).@"enum".tag_type,
+                );
+
+                const table_type: *const Module.TableType = if (table_idx < module.tableTypes().len)
+                    &module.tableTypes()[table_idx]
+                else
+                    return error.InvalidWasm;
+
+                if (table_type.elem_type != .funcref)
+                    return error.InvalidWasm;
+
+                try val_stack.popExpecting(&ctrl_stack, .i32);
                 try val_stack.popManyExpecting(&ctrl_stack, callee_signature.parameters());
                 try val_stack.pushMany(scratch, callee_signature.results());
             },

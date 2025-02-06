@@ -370,6 +370,7 @@ const Wasm = struct {
     const TypeSec = std.SegmentedList(Type, 8);
 
     fn appendTypeUse(wasm: *Wasm, alloca: *ArenaAllocator, type_use: *const Text.TypeUse) Allocator.Error!void {
+        // std.debug.print(" append type use {*}\n", .{type_use});
         try wasm.type_uses.putNoClobber(alloca.allocator(), type_use, undefined);
     }
 
@@ -431,6 +432,11 @@ const Wasm = struct {
                             error.ReportedParserError => break :type_idx undefined,
                         };
 
+                        // std.debug.print(
+                        //     " found existing type {s} -> {}\n",
+                        //     .{ type_use.id.type.token.contents(ctx.tree), @intFromEnum(idx) },
+                        // );
+
                         if (type_use.func.parameters_count > 0 or type_use.func.results_count > 0) {
                             const actual_signature = &wasm.types.at(@intFromEnum(idx)).getPtr(arena).func;
                             const expected_signature = &type_use.func;
@@ -446,6 +452,11 @@ const Wasm = struct {
                     },
                     .numeric => |numeric| @enumFromInt(numeric),
                 };
+
+                // std.debug.print(
+                //     " fixup type use {*} -> {}\n",
+                //     .{ type_use, @intFromEnum(entry.value_ptr.*) },
+                // );
             }
         }
         return type_sec;
@@ -808,6 +819,7 @@ fn encodeExpr(
                             TypeIdx,
                             wasm.type_uses.get(&arg.type).?,
                         );
+
                         if (arg.table.get()) |table_id| {
                             try encodeIdx(
                                 output,
@@ -1243,6 +1255,8 @@ fn encodeText(
             try encodeTypeSecFunc(section_buf.writer(), text_ctx.tree, arena, func_type.*, &func_type_arena);
             _ = func_type_arena.reset(.retain_capacity);
         }
+
+        // std.debug.dumpHex(section_buf.items);
 
         try encodeSection(final_output, 1, section_buf.items);
     }
