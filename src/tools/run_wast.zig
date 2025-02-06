@@ -104,6 +104,7 @@ pub fn main() !u8 {
         break :rng init;
     };
 
+    var fail = false;
     for (arguments.run) |script_path| {
         const script_buf: []const u8 = buf: {
             const script_file = cwd.openFileZ(script_path, .{}) catch |e| {
@@ -159,9 +160,10 @@ pub fn main() !u8 {
             error.OutOfMemory => return e,
         };
 
+        var pass_count: u32 = 0;
         if (errors.list.len == 0) {
             var rng = initial_rng;
-            try runScript(
+            pass_count = try runScript(
                 &script,
                 rng.random(),
                 &encoding_buffer,
@@ -170,12 +172,18 @@ pub fn main() !u8 {
             );
         }
 
-        if (errors.list.len > 0) {
-            @branchHint(.unlikely);
-            const raw_stderr = std.io.getStdErr();
-            var buf_stderr = std.io.bufferedWriter(raw_stderr.writer());
+        {
+            _ = scratch.reset(.retain_capacity);
+            const buf_writer = try scratch.allocator().create(
+                std.io.BufferedWriter(
+                    4096,
+                    std.fs.File.Writer,
+                ),
+            );
 
-            var w = buf_stderr.writer();
+            const raw_stderr = std.io.getStdErr();
+            buf_writer.* = .{ .unbuffered_writer = raw_stderr.writer() };
+            var w = buf_writer.writer();
 
             var errors_iter = errors.list.constIterator(0);
             while (errors_iter.next()) |err| {
@@ -197,7 +205,7 @@ pub fn main() !u8 {
                 try w.writeByte('\n');
             }
 
-            {
+            if (errors.list.len > 0) {
                 if (color_config == .escape_codes) {
                     try w.writeAll("\x1B[31m");
                 }
@@ -208,14 +216,28 @@ pub fn main() !u8 {
                     try w.writeAll("\x1B[39m");
                 }
 
-                try w.writeByte('\n');
+                try w.writeAll(", ");
             }
 
-            try buf_stderr.flush();
+            if (color_config == .escape_codes) {
+                try w.writeAll("\x1B[32m");
+            }
+
+            try w.print("{} passed", .{pass_count});
+
+            if (color_config == .escape_codes) {
+                try w.writeAll("\x1B[39m");
+            }
+
+            try w.print(" - {s}\n", .{script_path});
+
+            try buf_writer.flush();
         }
+
+        if (errors.list.len > 0) fail = true;
     }
 
-    return 0;
+    return if (fail) 1 else 0;
 }
 
 const SpectestImports = struct {
@@ -652,7 +674,7 @@ fn runScript(
     encoding_buffer: *std.ArrayList(u8),
     run_arena: *ArenaAllocator, // Must not be reset for the lifetime of this function call.
     errors: *Wast.Errors,
-) Allocator.Error!void {
+) Allocator.Error!u32 {
     var store = wasmstint.runtime.ModuleAllocator.WithinArena{ .arena = run_arena };
     var state: State = .{
         .errors = .{ .tree = script.tree, .errors = errors },
@@ -660,7 +682,8 @@ fn runScript(
         .cmd_arena = ArenaAllocator.init(run_arena.allocator()),
     };
 
-    for (script.commands.items(script.arena)) |cmd| {
+    var pass_count: u32 = 0;
+    run_cmds: for (script.commands.items(script.arena)) |cmd| {
         defer _ = state.cmd_arena.reset(.retain_capacity);
 
         var fuel = wasmstint.Interpreter.Fuel{ .remaining = 2_000 };
@@ -684,7 +707,8 @@ fn runScript(
                     &state.cmd_arena,
                 );
 
-                if (before_encode_error_count < errors.list.len) return;
+                if (before_encode_error_count < errors.list.len)
+                    break :run_cmds;
 
                 var module_contents: []const u8 = if (module.name.some)
                     try run_arena.allocator().dupe(u8, encoding_buffer.items)
@@ -707,7 +731,7 @@ fn runScript(
                         }
 
                         _ = try state.errors.errorAtToken(cmd.keyword, "module failed to parse");
-                        return;
+                        break :run_cmds;
                     },
                 };
 
@@ -724,7 +748,7 @@ fn runScript(
                         }
 
                         _ = try state.errors.errorAtToken(cmd.keyword, "module was invalid");
-                        return;
+                        break :run_cmds;
                     },
                 };
 
@@ -750,7 +774,7 @@ fn runScript(
                                 import_error.name.bytes,
                             },
                         );
-                        return;
+                        break :run_cmds;
                     },
                 };
 
@@ -762,7 +786,7 @@ fn runScript(
                             cmd.keyword,
                             "module start function failed",
                         );
-                        return;
+                        break :run_cmds;
                     },
                 };
 
@@ -789,7 +813,7 @@ fn runScript(
                     &fuel,
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
-                    error.ScriptError => return,
+                    error.ScriptError => break :run_cmds,
                 };
 
                 state.expectResultValues(
@@ -798,7 +822,7 @@ fn runScript(
                     assert_return.results.items(script.arena),
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
-                    error.ScriptError => return,
+                    error.ScriptError => break :run_cmds,
                 };
             },
             .keyword_assert_trap => {
@@ -812,7 +836,7 @@ fn runScript(
                     &fuel,
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
-                    error.ScriptError => return,
+                    error.ScriptError => break :run_cmds,
                 };
 
                 state.expectTrap(
@@ -822,7 +846,7 @@ fn runScript(
                     &assert_trap.failure,
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
-                    error.ScriptError => return,
+                    error.ScriptError => break :run_cmds,
                 };
             },
             .keyword_assert_exhaustion => {
@@ -836,7 +860,7 @@ fn runScript(
                     &fuel,
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
-                    error.ScriptError => return,
+                    error.ScriptError => break :run_cmds,
                 };
             },
             .keyword_assert_invalid => {
@@ -888,5 +912,9 @@ fn runScript(
                 // unreachable
             },
         }
+
+        pass_count += 1;
     }
+
+    return pass_count;
 }
