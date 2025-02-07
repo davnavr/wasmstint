@@ -97,11 +97,14 @@ pub const TrapCode = enum(i32) {
     ///
     /// See <https://webassembly.github.io/spec/core/appendix/implementation.html#validation> for more
     /// information.
-    lazy_validation_failed,
+    lazy_validation_failed, // TODO: rename to lazy_validation_failure
     integer_division_by_zero,
     integer_overflow,
     invalid_conversion_to_integer,
     memory_access_out_of_bounds,
+    table_access_out_of_bounds,
+    indirect_call_to_null,
+    indirect_call_signature_mismatch,
     _,
 
     pub fn initHost(code: u31) TrapCode {
@@ -482,6 +485,10 @@ const Instructions = extern struct {
         return std.leb.readUleb128(T, reader);
     }
 
+    inline fn nextIdx(reader: *Instructions, comptime I: type) I {
+        return @enumFromInt(reader.readUleb128(@typeInfo(I).@"enum".tag_type) catch unreachable);
+    }
+
     inline fn readIleb128(reader: *Instructions, comptime T: type) error{ Overflow, EndOfStream }!T {
         return std.leb.readIleb128(T, reader);
     }
@@ -516,6 +523,9 @@ const Instructions = extern struct {
 ///
 /// Execution of the handlers for the `end` (only when it is last opcode of a function)
 /// and `return` instructions ends up here.
+///
+/// To ensure the interpreter cannot overflow the stack, opcode handlers must call this function
+/// via `@call` with either `.always_tail` or `always_inline`.
 fn returnFromWasm(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
     _ = i;
     _ = s;
@@ -554,6 +564,58 @@ fn returnFromWasm(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *F
     const signature = popped.function.signature();
     std.debug.assert(signature.result_count == popped.result_count);
     int.state = .{ .awaiting_host = signature.results() };
+}
+
+/// Continues execution of WASM code up to calling the `target_function`, with arguments expected
+/// to be on top of the value stack.
+///
+/// To ensure the interpreter cannot overflow the stack, opcode handlers must ensure this function is
+/// called inline.
+inline fn invokeWithinWasm(
+    target_function: runtime.FuncAddr,
+    loc: u32,
+    vals: *ValStack,
+    fuel: *Fuel,
+    int: *Interpreter,
+) void {
+    const signature = target_function.signature();
+
+    // Overlap trick to avoid copying arguments.
+    const values_base = @as(u32, @intCast(vals.items.len)) - signature.param_count;
+
+    const entry_point = int.setupStackFrame(
+        no_allocation.allocator,
+        target_function,
+        values_base,
+        signature,
+        &int.dummy_instantiate_flag,
+    ) catch |e| switch (e) {
+        error.OutOfMemory => {
+            // Could set ip back to before the call instruction to allow trying again.
+            // std.debug.print("call stack depth: {}\n", .{int.call_stack.items.len});
+            int.state = .{ .interrupted = .call_stack_exhaustion };
+            return;
+        },
+    };
+
+    switch (entry_point) {
+        .wasm => {
+            std.debug.assert(loc <= values_base);
+
+            const new_frame = int.currentFrame();
+            if (new_frame.instructions.nextOpcodeHandler(fuel, int)) |next| {
+                @call(
+                    .always_tail,
+                    next,
+                    .{ &new_frame.instructions, &new_frame.branch_table, values_base, vals, fuel, int },
+                );
+            }
+        },
+        .host => {
+            int.state = State{ .awaiting_host = signature.parameters() };
+        },
+        .complete => {},
+    }
 }
 
 const MemArg = struct {
@@ -1114,9 +1176,8 @@ fn prefixDispatchTable(comptime prefix: opcodes.ByteOpcode, comptime Opcode: typ
         const entries = dispatchTable(Opcode, invalid);
 
         pub fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-            const n = i.readUleb128(@typeInfo(Opcode).@"enum".tag_type) catch unreachable;
-            _ = @as(Opcode, @enumFromInt(n));
-            const next = entries[n];
+            const n = i.nextIdx(Opcode);
+            const next = entries[@intFromEnum(n)];
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
     };
@@ -1345,47 +1406,41 @@ const opcode_handlers = struct {
     }
 
     pub fn call(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        const func_idx = i.readUleb128(@typeInfo(Module.FuncIdx).@"enum".tag_type) catch unreachable;
-        const target_function = int.currentFrame().function.expanded().wasm.module.funcAddr(@enumFromInt(func_idx));
-        const signature = target_function.signature();
+        _ = s;
+        const func_idx = i.nextIdx(Module.FuncIdx);
+        const callee = int.currentFrame().function.expanded().wasm.module.funcAddr(func_idx);
+        invokeWithinWasm(callee, loc, vals, fuel, int);
+    }
 
-        // Overlap trick to avoid copying arguments.
-        const values_base = @as(u32, @intCast(vals.items.len)) - signature.param_count;
+    pub fn call_indirect(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        _ = s;
+        const current_module = int.currentFrame().function.expanded().wasm.module;
 
-        const entry_point = int.setupStackFrame(
-            no_allocation.allocator,
-            target_function,
-            values_base,
-            signature,
-            &int.dummy_instantiate_flag,
-        ) catch |e| switch (e) {
-            error.OutOfMemory => {
-                // Could set ip back to before the call instruction to allow trying again.
-                // std.debug.print("call stack depth: {}\n", .{int.call_stack.items.len});
-                int.state = .{ .interrupted = .call_stack_exhaustion };
-                return;
-            },
+        const expected_signature = i.nextIdx(Module.TypeIdx).funcType(current_module.module);
+        const table_idx = i.nextIdx(Module.TableIdx);
+
+        const elem_index: u32 = @bitCast(vals.pop().i32);
+
+        const table_addr = current_module.tableAddr(table_idx);
+        std.debug.assert(table_addr.elem_type == .funcref);
+        const table = table_addr.table;
+
+        if (table.len <= elem_index) {
+            int.state = .{ .trapped = .table_access_out_of_bounds };
+            return;
+        }
+
+        const callee = table.base.func_ref[0..table.len][elem_index].funcInst() orelse {
+            int.state = .{ .trapped = .indirect_call_to_null };
+            return;
         };
 
-        switch (entry_point) {
-            .wasm => {
-                _ = s;
-                std.debug.assert(loc <= values_base);
-
-                const new_frame = int.currentFrame();
-                if (new_frame.instructions.nextOpcodeHandler(fuel, int)) |next| {
-                    @call(
-                        .always_tail,
-                        next,
-                        .{ &new_frame.instructions, &new_frame.branch_table, values_base, vals, fuel, int },
-                    );
-                }
-            },
-            .host => {
-                int.state = State{ .awaiting_host = signature.parameters() };
-            },
-            .complete => {},
+        if (!expected_signature.matches(callee.signature())) {
+            int.state = .{ .trapped = .indirect_call_signature_mismatch };
+            return;
         }
+
+        invokeWithinWasm(callee, loc, vals, fuel, int);
     }
 
     pub fn drop(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
