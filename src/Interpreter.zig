@@ -367,7 +367,76 @@ pub fn instantiateModule(
     module_inst: *runtime.ModuleInst,
     fuel: *Fuel,
 ) Error!void {
-    const start_func = module_inst.preInstantiate().funcInst() orelse {
+    const wasm = module_inst.module;
+    const global_types = wasm.globalTypes()[wasm.inner.global_import_count..];
+    for (
+        wasm.inner.global_exprs[0..global_types.len],
+        module_inst.globals[wasm.inner.global_import_count..global_types.len],
+        global_types,
+    ) |*init_expr, global_value, *global_type| {
+        switch (init_expr.*) {
+            .i32_or_f32 => |n32| {
+                std.debug.assert(global_type.val_type == .i32 or global_type.val_type == .f32);
+                @as(*u32, @ptrCast(@alignCast(global_value))).* = n32;
+            },
+            .i64_or_f64 => |n64| {
+                std.debug.assert(global_type.val_type == .i64 or global_type.val_type == .f64);
+                @as(*u64, @ptrCast(@alignCast(global_value))).* = n64.get(wasm.arena_data);
+            },
+            .@"ref.null" => |ref_type| {
+                std.debug.assert(ref_type == global_type.val_type);
+                switch (ref_type) {
+                    .funcref => {
+                        @as(*runtime.FuncAddr.Nullable, @ptrCast(@alignCast(global_value))).* = .null;
+                    },
+                    .externref => {
+                        @as(*runtime.ExternAddr, @ptrCast(@alignCast(global_value))).* = .null;
+                    },
+                    else => unreachable,
+                }
+            },
+            .@"ref.func" => |func_idx| {
+                // Enforced during validation
+                std.debug.assert(@intFromEnum(func_idx) < wasm.inner.func_import_count);
+                @as(*runtime.FuncAddr.Nullable, @ptrCast(@alignCast(global_value))).* =
+                    @bitCast(@as(runtime.FuncAddr, module_inst.funcAddr(func_idx)));
+            },
+            .@"global.get" => |src_global| {
+                const src_addr = module_inst.globalAddr(src_global);
+                std.debug.assert(src_addr.global_type.val_type == global_type.val_type);
+
+                const src: *const anyopaque = module_inst.globalAddr(src_global).value;
+                switch (global_type.val_type) {
+                    .i32, .f32 => {
+                        @as(*u32, @ptrCast(@alignCast(global_value))).* =
+                            @as(*const u32, @ptrCast(@alignCast(src))).*;
+                    },
+                    .i64, .f64 => {
+                        @as(*u64, @ptrCast(@alignCast(global_value))).* =
+                            @as(*const u64, @ptrCast(@alignCast(src))).*;
+                    },
+                    .funcref => {
+                        @as(*runtime.FuncAddr.Nullable, @ptrCast(@alignCast(global_value))).* =
+                            @as(*const runtime.FuncAddr.Nullable, @ptrCast(@alignCast(src))).*;
+                    },
+                    .externref => {
+                        @as(*runtime.ExternAddr, @ptrCast(@alignCast(global_value))).* =
+                            @as(*const runtime.ExternAddr, @ptrCast(@alignCast(src))).*;
+                    },
+                    .v128 => unreachable,
+                }
+            },
+        }
+    }
+
+    // TODO: Initialize, active element segments
+    // TODO: Out of bounds error is possible here! Trap if that happens
+
+    // TODO: Initialize, active data segments
+
+    const start_func = if (wasm.inner.start.get()) |start_idx|
+        module_inst.funcAddr(start_idx)
+    else {
         module_inst.instantiated = true;
         return;
     };
