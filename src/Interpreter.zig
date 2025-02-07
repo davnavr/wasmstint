@@ -367,14 +367,14 @@ pub fn instantiateModule(
     module_inst: *runtime.ModuleInst,
     fuel: *Fuel,
 ) Error!void {
+    const start_func = module_inst.preInstantiate().funcInst() orelse {
+        module_inst.instantiated = true;
+        return;
+    };
+
     const entry_point = try interp.setupStackFrame(
         alloca,
-        module_inst.funcAddr(
-            module_inst.module.inner.start.get() orelse {
-                module_inst.instantiated = true;
-                return;
-            },
-        ),
+        start_func,
         std.math.cast(u32, interp.value_stack.items.len) orelse return Error.OutOfMemory,
         &Module.FuncType.empty,
         &module_inst.instantiated,

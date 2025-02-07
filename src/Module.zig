@@ -294,18 +294,15 @@ pub const Code = struct {
     pub const End = validator.End;
 };
 
-pub const ConstExpr = union {
+pub const ConstExpr = union(enum) {
     i32_or_f32: u32,
     i64_or_f64: IndexedArena.Idx(u64),
-    @"ref.null": void,
+    @"ref.null": ValType,
     @"ref.func": FuncIdx,
     @"global.get": GlobalIdx,
 
     comptime {
-        std.debug.assert(@sizeOf(ConstExpr) == switch (@import("builtin").mode) {
-            .Debug, .ReleaseSafe => 8,
-            .ReleaseFast, .ReleaseSmall => 4,
-        });
+        std.debug.assert(@sizeOf(ConstExpr) == 8);
     }
 };
 
@@ -533,7 +530,7 @@ pub const Reader = struct {
                 n.set(arena, std.mem.readInt(u64, try reader.readArray(8), .little));
                 break :expr .{ .i64_or_f64 = n };
             },
-            .@"ref.null" => .{ .@"ref.null" = {} },
+            .@"ref.null" => .{ .@"ref.null" = expected_type },
             .@"ref.func" => .{ .@"ref.func" = try reader.readIdx(FuncIdx, func_count) },
             .@"global.get" => {
                 const global_idx = try reader.readIdx(GlobalIdx, global_types);

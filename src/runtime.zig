@@ -497,6 +497,89 @@ pub const ModuleInst = struct {
         };
     }
 
+    /// Internal API used to perform the steps of module instantiation *before* calling its *start*
+    /// function.
+    ///
+    /// Returns the *start* function to call to fully instantiate the module, if it exists.
+    ///
+    /// See `Interpreter.instantiateModule()` for more information.
+    pub fn preInstantiate(inst: *ModuleInst) FuncAddr.Nullable {
+        // TODO: interesting error condition, OOM when evaluating complex (really big) offset expression
+        // - could maybe use fix sized val stack, and during module parsing (validation), reject too complex expressions
+        //   - could reuse interpreter valstack to allow larger expressions on a best effort basis
+        //   - wreaks havoc on current code organiztation, move runtime value stuff and valstack to separate file?
+        // - only relevant when support for extended const proposal is added.
+
+        const wasm = inst.module;
+        const global_types = wasm.globalTypes()[wasm.inner.global_import_count..];
+        for (
+            wasm.inner.global_exprs[0..global_types.len],
+            inst.globals[wasm.inner.global_import_count..global_types.len],
+            global_types,
+        ) |*init, global_value, *global_type| {
+            switch (init.*) {
+                .i32_or_f32 => |n32| {
+                    std.debug.assert(global_type.val_type == .i32 or global_type.val_type == .f32);
+                    @as(*u32, @ptrCast(@alignCast(global_value))).* = n32;
+                },
+                .i64_or_f64 => |n64| {
+                    std.debug.assert(global_type.val_type == .i64 or global_type.val_type == .f64);
+                    @as(*u64, @ptrCast(@alignCast(global_value))).* = n64.get(wasm.arena_data);
+                },
+                .@"ref.null" => |ref_type| {
+                    std.debug.assert(ref_type == global_type.val_type);
+                    switch (ref_type) {
+                        .funcref => @as(*FuncAddr.Nullable, @ptrCast(@alignCast(global_value))).* = .null,
+                        .externref => @as(*ExternAddr, @ptrCast(@alignCast(global_value))).* = .null,
+                        else => unreachable,
+                    }
+                },
+                .@"ref.func" => |func_idx| {
+                    // Enforced during validation
+                    std.debug.assert(@intFromEnum(func_idx) < wasm.inner.func_import_count);
+                    @as(*FuncAddr.Nullable, @ptrCast(@alignCast(global_value))).* =
+                        @bitCast(@as(FuncAddr, inst.funcAddr(func_idx)));
+                },
+                .@"global.get" => |src_global| {
+                    const src_addr = inst.globalAddr(src_global);
+                    std.debug.assert(src_addr.global_type.val_type == global_type.val_type);
+
+                    const src: *const anyopaque = inst.globalAddr(src_global).value;
+                    switch (global_type.val_type) {
+                        .i32, .f32 => {
+                            @as(*u32, @ptrCast(@alignCast(global_value))).* =
+                                @as(*const u32, @ptrCast(@alignCast(src))).*;
+                        },
+                        .i64, .f64 => {
+                            @as(*u64, @ptrCast(@alignCast(global_value))).* =
+                                @as(*const u64, @ptrCast(@alignCast(src))).*;
+                        },
+                        .funcref => {
+                            @as(*FuncAddr.Nullable, @ptrCast(@alignCast(global_value))).* =
+                                @as(*const FuncAddr.Nullable, @ptrCast(@alignCast(src))).*;
+                        },
+                        .externref => {
+                            @as(*ExternAddr, @ptrCast(@alignCast(global_value))).* =
+                                @as(*const ExternAddr, @ptrCast(@alignCast(src))).*;
+                        },
+                        .v128 => unreachable,
+                    }
+                },
+            }
+        }
+
+        // TODO: Initialize, active element segments
+
+        // TODO: Initialize, active data segments
+
+        if (true) unreachable;
+
+        return if (inst.module.inner.start.get()) |start_idx|
+            @bitCast(inst.funcAddr(start_idx))
+        else
+            null;
+    }
+
     pub fn funcAddr(inst: *ModuleInst, idx: Module.FuncIdx) FuncAddr {
         const i: usize = @intFromEnum(idx);
         std.debug.assert(i < inst.module.inner.func_count);
@@ -754,6 +837,8 @@ pub const ExternVal = union(enum) {
 pub const ExternAddr = packed union {
     ptr: ?*anyopaque,
     nat: Nat,
+
+    pub const @"null" = ExternAddr{ .ptr = null };
 
     pub const Nat = enum(usize) {
         null = 0,
