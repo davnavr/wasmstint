@@ -627,6 +627,7 @@ fn linearMemoryHandlers(comptime field_name: []const u8) type {
 
             vals.appendAssumeCapacity(@unionInit(Value, field_name, @bitCast(bytes.*)));
 
+            std.debug.assert(loc <= vals.items.len);
             if (i.nextOpcodeHandler(fuel, int)) |next| {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
@@ -640,6 +641,7 @@ fn linearMemoryHandlers(comptime field_name: []const u8) type {
                 return;
             };
 
+            std.debug.assert(loc <= vals.items.len);
             if (i.nextOpcodeHandler(fuel, int)) |next| {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
@@ -669,6 +671,7 @@ fn extendingLinearMemoryLoad(comptime field_name: []const u8, comptime S: type) 
                 ),
             );
 
+            std.debug.assert(loc <= vals.items.len);
             if (i.nextOpcodeHandler(fuel, int)) |next| {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
@@ -693,6 +696,7 @@ fn narrowingLinearMemoryStore(comptime field_name: []const u8, comptime size: u6
                 return;
             };
 
+            std.debug.assert(loc <= vals.items.len);
             if (i.nextOpcodeHandler(fuel, int)) |next| {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
@@ -712,6 +716,7 @@ fn defineBinOp(comptime value_field: []const u8, comptime op: anytype, comptime 
 
             vals.appendAssumeCapacity(@unionInit(Value, value_field, result));
 
+            std.debug.assert(loc <= vals.items.len);
             if (i.nextOpcodeHandler(fuel, int)) |next| {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
@@ -726,6 +731,7 @@ fn defineUnOp(comptime value_field: []const u8, comptime op: anytype) type {
             const result = @call(.always_inline, op, .{c_1});
             vals.appendAssumeCapacity(@unionInit(Value, value_field, result));
 
+            std.debug.assert(loc <= vals.items.len);
             if (i.nextOpcodeHandler(fuel, int)) |next| {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
@@ -740,6 +746,7 @@ fn defineTestOp(comptime value_field: []const u8, comptime op: anytype) type {
             const result = @call(.always_inline, op, .{c_1});
             vals.appendAssumeCapacity(Value{ .i32 = @intFromBool(result) });
 
+            std.debug.assert(loc <= vals.items.len);
             if (i.nextOpcodeHandler(fuel, int)) |next| {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
@@ -755,6 +762,7 @@ fn defineRelOp(comptime value_field: []const u8, comptime op: anytype) type {
             const result = @call(.always_inline, op, .{ c_1, c_2 });
             vals.appendAssumeCapacity(Value{ .i32 = @intFromBool(result) });
 
+            std.debug.assert(loc <= vals.items.len);
             if (i.nextOpcodeHandler(fuel, int)) |next| {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
@@ -778,6 +786,7 @@ fn defineConvOp(
 
             vals.appendAssumeCapacity(@unionInit(Value, dst_field, result));
 
+            std.debug.assert(loc <= vals.items.len);
             if (i.nextOpcodeHandler(fuel, int)) |next| {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
@@ -1257,6 +1266,7 @@ const opcode_handlers = struct {
 
     pub fn @"if"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const c = vals.pop().i32;
+        std.debug.assert(loc <= vals.items.len);
         // std.debug.print(" > (if) {}?\n", .{c != 0});
         if (c == 0) {
             // No need to read LEB128 block type.
@@ -1306,6 +1316,7 @@ const opcode_handlers = struct {
             s.* += 1;
         }
 
+        std.debug.assert(loc <= vals.items.len);
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
@@ -1323,6 +1334,7 @@ const opcode_handlers = struct {
 
         int.takeBranch(base_ip, i, s, vals, @min(n, label_count));
 
+        std.debug.assert(loc <= vals.items.len);
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
@@ -1379,6 +1391,7 @@ const opcode_handlers = struct {
     pub fn drop(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         _ = vals.pop();
 
+        std.debug.assert(loc <= vals.items.len);
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
@@ -1417,6 +1430,7 @@ const opcode_handlers = struct {
         const value = vals.pop();
         vals.items[loc..][n] = value;
 
+        std.debug.assert(loc <= vals.items.len);
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
@@ -1426,6 +1440,7 @@ const opcode_handlers = struct {
         const n = i.readUleb128(u32) catch unreachable;
         vals.items[loc..][n] = vals.items[vals.items.len - 1];
 
+        std.debug.assert(loc <= vals.items.len);
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
