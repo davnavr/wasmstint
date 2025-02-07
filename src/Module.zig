@@ -1079,7 +1079,7 @@ pub fn parse(
             const ty = try global_reader.readGlobalType();
             const expr = try global_reader.readConstExpr(
                 ty.val_type,
-                import_sec.funcs.len,
+                func_types.len,
                 globals.types.slice(0, global_import_len),
                 &arena,
             );
@@ -1240,7 +1240,7 @@ pub fn parse(
 
                 const offset = try elems_reader.readConstExpr(
                     .i32,
-                    import_sec.funcs.len,
+                    func_types.len,
                     global_types_in_const,
                     &arena,
                 );
@@ -1319,7 +1319,7 @@ pub fn parse(
                 for (0..expr_count) |_| {
                     const e = try elems_reader.readConstExpr(
                         ref_type,
-                        import_sec.funcs.len,
+                        func_types.len,
                         global_types_in_const,
                         &arena,
                     );
