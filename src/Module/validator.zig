@@ -1064,6 +1064,35 @@ fn doValidation(
                 const local_type = try readLocalIdx(&reader, locals);
                 try val_stack.popThenPushExpecting(scratch, &ctrl_stack, local_type, local_type);
             },
+            .@"global.get" => {
+                const global_idx = try reader.readUleb128Casted(
+                    u32,
+                    @typeInfo(Module.GlobalIdx).@"enum".tag_type,
+                );
+
+                try val_stack.push(
+                    scratch,
+                    if (global_idx < module.globalTypes().len)
+                        module.globalTypes()[global_idx].val_type
+                    else
+                        return error.InvalidWasm,
+                );
+            },
+            .@"global.set" => {
+                const global_idx = try reader.readUleb128Casted(
+                    u32,
+                    @typeInfo(Module.GlobalIdx).@"enum".tag_type,
+                );
+
+                const global_type: *const Module.GlobalType = if (global_idx < module.globalTypes().len)
+                    &module.globalTypes()[global_idx]
+                else
+                    return error.InvalidWasm;
+
+                if (global_type.mut != .@"var") return error.InvalidWasm;
+
+                try val_stack.popExpecting(&ctrl_stack, global_type.val_type);
+            },
 
             .@"i32.load" => try validateLoadInstr(
                 &reader,
