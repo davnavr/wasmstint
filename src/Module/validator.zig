@@ -387,7 +387,7 @@ fn readMemIdx(reader: *Module.Reader, module: *const Module) Error!void {
 
 fn readMemArg(
     reader: *Module.Reader,
-    natural_alignment: u4,
+    natural_alignment: u3,
     module: *const Module,
 ) Error!void {
     const a = try reader.readUleb128(u32);
@@ -687,7 +687,7 @@ fn validateLoadInstr(
     reader: *Module.Reader,
     val_stack: *ValStack,
     ctrl_stack: *const CtrlStack,
-    natural_alignment: u4,
+    natural_alignment: u3,
     loaded: ValType,
     module: *const Module,
     arena: *ArenaAllocator,
@@ -701,7 +701,7 @@ fn validateStoreInstr(
     reader: *Module.Reader,
     val_stack: *ValStack,
     ctrl_stack: *const CtrlStack,
-    natural_alignment: u4,
+    natural_alignment: u3,
     stored: ValType,
     module: *const Module,
 ) Error!void {

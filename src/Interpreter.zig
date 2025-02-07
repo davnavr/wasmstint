@@ -747,7 +747,7 @@ const MemArg = struct {
 
     // TODO: Should opcode handlers take extra ModuleInst parameter?
     fn read(i: *Instructions, interp: *Interpreter) MemArg {
-        _ = i.readUleb128(u32) catch unreachable; // align
+        _ = i.readUleb128(u3) catch unreachable; // align, maximum is 16 bytes (1 << 4)
         return .{
             .offset = i.readUleb128(u32) catch unreachable,
             .mem = interp.currentFrame().function.expanded().wasm.module.memAddr(.default),
