@@ -1243,6 +1243,9 @@ pub fn parse(
                 else
                     TableIdx.default;
 
+                if (table_types.len <= @intFromEnum(table_idx))
+                    return error.InvalidWasm;
+
                 const offset = try elems_reader.readConstExpr(
                     .i32,
                     func_types.len,
@@ -1362,6 +1365,8 @@ pub fn parse(
         };
     } else .{};
 
+    std.debug.assert(elem_sec.active_elems.len <= elem_sec.elems.len);
+
     // TODO: Check for data count section here
 
     const CodeSec = struct {
@@ -1477,9 +1482,9 @@ pub fn parse(
             .exports = export_sec.descs.items(arena_data).ptr,
             .export_count = export_sec.descs.len,
 
-            .elems = elem_sec.elems.items(&arena).ptr,
+            .elems = elem_sec.elems.items(arena_data).ptr,
             .elems_count = @intCast(elem_sec.elems.len),
-            .active_elems = elem_sec.active_elems.items(&arena).ptr,
+            .active_elems = elem_sec.active_elems.items(arena_data).ptr,
             .active_elems_count = @intCast(elem_sec.active_elems.len),
 
             // TODO
