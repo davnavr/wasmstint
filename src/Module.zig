@@ -1268,23 +1268,43 @@ pub fn parse(
                 // TODO: maybe keep a list of passive segments too?
             }
 
-            // 0 0 0 | active      |
+            // std.debug.dumpHex(elems_reader.bytes.*);
+
+            const ElemTypeParser = enum {
+                none,
+                elemkind,
+                reftype,
+            };
+
+            // 3 0 1 | mode        | type parser
+            // 0 0 0 | active      | none
             // 0 0 1 | passive     | elemkind
             // 0 1 0 | active      | elemkind
             // 0 1 1 | declarative | elemkind
-            // 1 0 0 | active      |
+            // 1 0 0 | active      | none
             // 1 0 1 | passive     | reftype
             // 1 1 0 | active      | reftype
             // 1 1 1 | declarative | reftype
-            const use_ref_type = tag.use_elem_exprs and
-                (tag.kind != .active or tag.bit_1.active_has_table_idx);
+            const elem_type_parser: ElemTypeParser = if (tag.kind == .active)
+                if (!tag.use_elem_exprs and !tag.bit_1.active_has_table_idx)
+                    .none
+                else if (tag.use_elem_exprs and tag.bit_1.active_has_table_idx)
+                    .reftype
+                else
+                    .elemkind
+            else if (tag.use_elem_exprs)
+                .reftype
+            else
+                .elemkind;
 
-            const ref_type = if (use_ref_type)
-                try elems_reader.readValType()
-            else func_type: {
-                const elem_kind = try elems_reader.readByteTag(ElemKind);
-                std.debug.assert(elem_kind == .funcref);
-                break :func_type ValType.funcref;
+            const ref_type = switch (elem_type_parser) {
+                .none => ValType.funcref,
+                .elemkind => func_type: {
+                    const elem_kind = try elems_reader.readByteTag(ElemKind);
+                    std.debug.assert(elem_kind == .funcref);
+                    break :func_type ValType.funcref;
+                },
+                .reftype => try elems_reader.readValType(),
             };
 
             if (!ref_type.isRefType()) return error.InvalidWasm;
