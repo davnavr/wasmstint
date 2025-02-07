@@ -1384,6 +1384,22 @@ const opcode_handlers = struct {
         }
     }
 
+    pub fn select(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const c = vals.pop().i32;
+        if (c == 0) {
+            vals.items[vals.items.len - 2] = vals.items[vals.items.len - 1];
+        }
+
+        _ = vals.pop();
+
+        std.debug.assert(loc <= vals.items.len);
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    // select t
+
     pub fn @"local.get"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const n = i.readUleb128(u32) catch unreachable;
         const value = vals.items[loc..][n];
