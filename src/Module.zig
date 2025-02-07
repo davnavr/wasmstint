@@ -622,7 +622,12 @@ pub const Reader = struct {
                 n.set(arena, std.mem.readInt(u64, try reader.readArray(8), .little));
                 break :expr .{ .i64_or_f64 = n };
             },
-            .@"ref.null" => .{ .@"ref.null" = expected_type },
+            .@"ref.null" => ref_null: {
+                const actual_type = try reader.readValType();
+                if (!actual_type.isRefType()) return error.InvalidWasm;
+                if (actual_type != expected_type) return error.InvalidWasm;
+                break :ref_null .{ .@"ref.null" = expected_type };
+            },
             .@"ref.func" => .{ .@"ref.func" = try reader.readIdx(FuncIdx, func_count) },
             .@"global.get" => {
                 const global_idx = try reader.readIdx(GlobalIdx, global_types);
