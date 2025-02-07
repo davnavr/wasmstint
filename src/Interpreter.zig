@@ -429,6 +429,60 @@ pub fn instantiateModule(
         }
     }
 
+    for (wasm.inner.active_elems[0..wasm.inner.active_elems_count]) |*active_elem| {
+        const table = module_inst.tableAddr(active_elem.header.table);
+
+        const offset: u32 = offset: switch (active_elem.header.offset_tag) {
+            .@"i32.const" => active_elem.offset.@"i32.const",
+            .@"global.get" => {
+                const global = module_inst.globalAddr(active_elem.offset.@"global.get");
+                std.debug.assert(global.global_type.val_type == .i32);
+                break :offset @as(*const u32, @ptrCast(@alignCast(global.value))).*;
+            },
+        };
+
+        const src_elements = &wasm.inner
+            .elems[0..wasm.inner.elems_count][@intFromEnum(active_elem.header.elements)];
+
+        const elem_len = switch (src_elements.*) {
+            .func_indices => |*func_indices| func_indices.len,
+            .expressions => |*expressions| expressions.len,
+        };
+
+        const end_offset = std.math.add(usize, offset, elem_len) catch {
+            interp.state = .{ .trapped = .table_access_out_of_bounds };
+            return;
+        };
+
+        if (table.table.len < offset or table.table.len < end_offset) {
+            interp.state = .{ .trapped = .table_access_out_of_bounds };
+            return;
+        }
+
+        // This follows the semantics of table.init, which appears to allow trapping early
+        switch (table.elem_type) {
+            .funcref => {
+                const dst_indices: []runtime.FuncAddr.Nullable = table.table.base
+                    .func_ref[0..table.table.len][offset..end_offset];
+
+                switch (src_elements.*) {
+                    .func_indices => |*func_indices| {
+                        const src_indices: []const Module.FuncIdx = func_indices.items(wasm.arena_data);
+                        for (src_indices, dst_indices) |i, *dst| {
+                            dst.* = @as(runtime.FuncAddr.Nullable, @bitCast(module_inst.funcAddr(i)));
+                        }
+                    },
+                    .expressions => |*expressions| {
+                        _ = expressions;
+                        unreachable; // TODO
+                    },
+                }
+            },
+            .externref => @panic("TODO: handle tables of externref"),
+            else => unreachable,
+        }
+    }
+
     // TODO: Initialize, active element segments
     // TODO: Out of bounds error is possible here! Trap if that happens
 
