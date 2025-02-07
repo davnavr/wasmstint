@@ -242,15 +242,12 @@ pub const BlockType = struct {
     label: Ident.Symbolic align(4),
     type: TypeUse,
 
-    pub fn hasAtMostOneResult(block_type: *const BlockType) bool {
-        return block_type.type.func.parameters_count == 0 and
-            block_type.type.func.results_count <= 1;
-    }
-
     /// This returns true if the block type is the special case of a `void` result or a single
     /// result instead of a *`typeidx`*.
     pub fn isInline(block_type: *const BlockType) bool {
-        return block_type.type.id.header.is_inline and block_type.hasAtMostOneResult();
+        return block_type.type.id.header.is_inline and
+            block_type.type.func.parameters_count == 0 and
+            block_type.type.func.results_count <= 1;
     }
 
     pub fn parseContents(

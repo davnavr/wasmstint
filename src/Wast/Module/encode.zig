@@ -433,8 +433,12 @@ const Wasm = struct {
                         };
 
                         // std.debug.print(
-                        //     " found existing type {s} -> {}\n",
-                        //     .{ type_use.id.type.token.contents(ctx.tree), @intFromEnum(idx) },
+                        //     " found existing type for {*} {s} -> {}\n",
+                        //     .{
+                        //         type_use,
+                        //         type_use.id.type.token.contents(ctx.tree),
+                        //         @intFromEnum(idx),
+                        //     },
                         // );
 
                         if (type_use.func.parameters_count > 0 or type_use.func.results_count > 0) {
@@ -834,7 +838,12 @@ fn encodeExpr(
                         const block_type: *align(4) const Text.Instr.BlockType = arg;
                         try label_lookup.enter(scratch, block_type.label);
 
-                        if (block_type.hasAtMostOneResult()) {
+                        if (block_type.isInline()) {
+                            // std.debug.print(
+                            //     "forgoing typeidx for blocktype {*}\n",
+                            //     .{&block_type.type},
+                            // );
+
                             std.debug.assert(block_type.type.func.parameters_count == 0);
                             var iter_results = IterResultTypes.init(
                                 block_type.type.func.results.items(arena),
