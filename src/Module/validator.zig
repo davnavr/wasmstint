@@ -1322,6 +1322,26 @@ fn doValidation(
                 try val_stack.popExpecting(&ctrl_stack, .i64);
                 try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i64, .i32);
             },
+            .@"f32.eq",
+            .@"f32.ne",
+            .@"f32.lt",
+            .@"f32.gt",
+            .@"f32.le",
+            .@"f32.ge",
+            => {
+                try val_stack.popExpecting(&ctrl_stack, .f32);
+                try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f32, .i32);
+            },
+            .@"f64.eq",
+            .@"f64.ne",
+            .@"f64.lt",
+            .@"f64.gt",
+            .@"f64.le",
+            .@"f64.ge",
+            => {
+                try val_stack.popExpecting(&ctrl_stack, .f64);
+                try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f64, .i32);
+            },
             .@"i64.clz",
             .@"i64.ctz",
             .@"i64.popcnt",
