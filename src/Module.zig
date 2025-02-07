@@ -32,11 +32,41 @@ pub const FuncIdx = enum(u31) {
 pub const GlobalIdx = enum(u31) { _ };
 
 // A 7-bit index allows parsing a byte instead of a LEB128 index.
-pub const TableIdx = enum(u7) { _ };
+pub const TableIdx = enum(u7) {
+    default = 0,
+    _,
+};
+
 pub const MemIdx = enum(u7) {
     default = 0,
     _,
 };
+
+pub const ElemIdx = enum(u16) { _ };
+pub const DataIdx = enum(u16) { _ };
+
+fn SmallIdx(comptime Int: type, comptime Idx: type) type {
+    return enum(Int) {
+        comptime {
+            std.debug.assert(@bitSizeOf(Int) < @bitSizeOf(Idx));
+        }
+
+        _,
+
+        const Self = @This();
+
+        fn init(idx: Idx) LimitError!Self {
+            return @enumFromInt(
+                std.math.cast(Int, @intFromEnum(idx)) orelse
+                    return error.WasmImplementationLimit,
+            );
+        }
+
+        fn get(idx: Self) Idx {
+            return @enumFromInt(@intFromEnum(idx));
+        }
+    };
+}
 
 const Module = @This();
 
@@ -76,6 +106,14 @@ inner: extern struct {
     table_imports: [*]const ImportName,
     mem_imports: [*]const ImportName,
     global_imports: [*]const ImportName,
+
+    elems: [*]const ElemSegment,
+    active_elems: [*]const ActiveElem,
+    elems_count: u16,
+    active_elems_count: u16,
+
+    // active_data_count: u16,
+    // data_count: u16,
 
     export_section: [*]const u8,
     exports: [*]align(4) const Export,
@@ -285,15 +323,6 @@ pub const GlobalType = extern struct {
     }
 };
 
-pub const Code = struct {
-    contents: WasmSlice,
-    state: validator.State = .{},
-
-    pub const SideTableEntry = validator.SideTableEntry;
-    pub const Ip = validator.Ip;
-    pub const End = validator.End;
-};
-
 pub const ConstExpr = union(enum) {
     i32_or_f32: u32,
     i64_or_f64: IndexedArena.Idx(u64),
@@ -304,6 +333,69 @@ pub const ConstExpr = union(enum) {
     comptime {
         std.debug.assert(@sizeOf(ConstExpr) == 8);
     }
+};
+
+pub const ElemSegment = union(enum) {
+    func_indices: IndexedArena.Slice(FuncIdx),
+    expressions: IndexedArena.Slice(Expr),
+
+    pub const Expr = packed struct(u32) {
+        tag: enum(u2) {
+            @"ref.null",
+            @"ref.func",
+            @"global.get",
+        },
+        inner: packed union {
+            @"ref.func": SmallIdx(u30, FuncIdx),
+            @"global.get": SmallIdx(u30, GlobalIdx),
+        },
+
+        pub fn init(expr: ConstExpr) !Expr {
+            return switch (expr) {
+                .@"ref.null" => |_| .{
+                    .tag = .@"ref.null",
+                    .inner = undefined,
+                },
+                .@"ref.func" => |func_idx| .{
+                    .tag = .@"ref.func",
+                    .inner = .{
+                        .@"ref.func" = try SmallIdx(u30, FuncIdx).init(func_idx),
+                    },
+                },
+                .@"global.get" => |global_idx| .{
+                    .tag = .@"ref.func",
+                    .inner = .{
+                        .@"global.get" = try SmallIdx(u30, GlobalIdx).init(global_idx),
+                    },
+                },
+                else => error.InvalidWasm,
+            };
+        }
+    };
+};
+
+pub const ActiveElem = struct {
+    header: packed struct(u32) {
+        offset_tag: enum(u9) {
+            @"i32.const",
+            @"global.get",
+        },
+        table: TableIdx,
+        elements: ElemIdx,
+    },
+    offset: packed union {
+        @"i32.const": u32,
+        @"global.get": GlobalIdx,
+    },
+};
+
+pub const Code = struct {
+    contents: WasmSlice,
+    state: validator.State = .{},
+
+    pub const SideTableEntry = validator.SideTableEntry;
+    pub const Ip = validator.Ip;
+    pub const End = validator.End;
 };
 
 pub const CustomSection = struct {
@@ -987,7 +1079,7 @@ pub fn parse(
             const ty = try global_reader.readGlobalType();
             const expr = try global_reader.readConstExpr(
                 ty.val_type,
-                func_types.len,
+                import_sec.funcs.len,
                 globals.types.slice(0, global_import_len),
                 &arena,
             );
@@ -1095,6 +1187,157 @@ pub fn parse(
 
         break :start Start.init(func_idx);
     } else .none;
+
+    const ElemSec = struct {
+        elems: IndexedArena.Slice(ElemSegment) = .empty,
+        active_elems: IndexedArena.Slice(ActiveElem) = .empty,
+    };
+
+    const elem_sec: ElemSec = if (known_sections.elem.len > 0) elems: {
+        const elems_reader = Reader.init(&known_sections.elem);
+        errdefer wasm.* = elems_reader.bytes.*;
+
+        const elems_count = try elems_reader.readUleb128(u32);
+
+        if (elems_count > std.math.maxInt(@typeInfo(ElemIdx).@"enum".tag_type))
+            return error.WasmImplementationLimit;
+
+        var elems = try IndexedArena.BoundedArrayList(ElemSegment).initCapacity(
+            &arena,
+            elems_count,
+        );
+
+        _ = scratch.reset(.retain_capacity);
+        var active_elems = std.SegmentedList(ActiveElem, 1){};
+
+        const global_types_in_const = global_sec.types.slice(0, import_sec.globals.len);
+
+        for (0..elems_count) |i| {
+            const elem_idx: ElemIdx = @enumFromInt(@as(@typeInfo(ElemIdx).@"enum".tag_type, @intCast(i)));
+
+            const Tag = packed struct(u3) {
+                kind: enum(u1) {
+                    active = 0,
+                    passive_or_declarative,
+                },
+                bit_1: packed union {
+                    active_has_table_idx: bool,
+                    is_declarative: bool,
+                },
+                use_elem_exprs: bool,
+            };
+
+            const tag_value = try elems_reader.readUleb128(u32);
+            const tag: Tag = @bitCast(std.math.cast(u3, tag_value) orelse return error.MalformedWasm);
+
+            const ElemKind = enum(u8) { funcref = 0x00 };
+
+            if (tag.kind == .active) {
+                const table_idx: TableIdx = if (tag.bit_1.active_has_table_idx)
+                    try elems_reader.readIdx(TableIdx, table_types)
+                else
+                    TableIdx.default;
+
+                const offset = try elems_reader.readConstExpr(
+                    .i32,
+                    import_sec.funcs.len,
+                    global_types_in_const,
+                    &arena,
+                );
+
+                try active_elems.append(
+                    scratch.allocator(),
+                    ActiveElem{
+                        .header = .{
+                            .offset_tag = switch (offset) {
+                                .@"global.get" => .@"global.get",
+                                .i32_or_f32 => .@"i32.const",
+                                else => unreachable,
+                            },
+                            .table = table_idx,
+                            .elements = elem_idx,
+                        },
+                        .offset = switch (offset) {
+                            .@"global.get" => |global_idx| .{ .@"global.get" = global_idx },
+                            .i32_or_f32 => |n| .{ .@"i32.const" = n },
+                            else => unreachable,
+                        },
+                    },
+                );
+            } else {
+                // TODO: maybe keep a list of passive segments too?
+            }
+
+            // 0 0 0 | active      |
+            // 0 0 1 | passive     | elemkind
+            // 0 1 0 | active      | elemkind
+            // 0 1 1 | declarative | elemkind
+            // 1 0 0 | active      |
+            // 1 0 1 | passive     | reftype
+            // 1 1 0 | active      | reftype
+            // 1 1 1 | declarative | reftype
+            const use_ref_type = tag.use_elem_exprs and
+                (tag.kind != .active or tag.bit_1.active_has_table_idx);
+
+            const ref_type = if (use_ref_type)
+                try elems_reader.readValType()
+            else func_type: {
+                const elem_kind = try elems_reader.readByteTag(ElemKind);
+                std.debug.assert(elem_kind == .funcref);
+                break :func_type ValType.funcref;
+            };
+
+            if (!ref_type.isRefType()) return error.InvalidWasm;
+
+            const expr_count = try elems_reader.readUleb128(u32);
+            const expressions: ElemSegment = if (tag.use_elem_exprs) elem_exprs: {
+                var exprs = try IndexedArena.BoundedArrayList(ElemSegment.Expr).initCapacity(
+                    &arena,
+                    expr_count,
+                );
+
+                for (0..expr_count) |_| {
+                    const e = try elems_reader.readConstExpr(
+                        ref_type,
+                        import_sec.funcs.len,
+                        global_types_in_const,
+                        &arena,
+                    );
+
+                    exprs.appendAssumeCapacity(&arena, try ElemSegment.Expr.init(e));
+                }
+
+                break :elem_exprs .{ .expressions = exprs.items };
+            } else idx_exprs: {
+                std.debug.assert(ref_type == .funcref);
+
+                var func_indices = try IndexedArena.BoundedArrayList(FuncIdx).initCapacity(
+                    &arena,
+                    expr_count,
+                );
+
+                for (0..expr_count) |_| {
+                    func_indices.appendAssumeCapacity(
+                        &arena,
+                        try elems_reader.readIdx(FuncIdx, import_sec.funcs),
+                    );
+                }
+
+                break :idx_exprs .{ .func_indices = func_indices.items };
+            };
+
+            elems.appendAssumeCapacity(&arena, expressions);
+        }
+
+        try elems_reader.expectEndOfStream();
+        known_sections.elem = undefined;
+        break :elems .{
+            .elems = elems.items,
+            .active_elems = try arena.dupeSegmentedList(ActiveElem, 1, &active_elems),
+        };
+    } else .{};
+
+    // TODO: Check for data count section here
 
     const CodeSec = struct {
         start: [*]const u8 = undefined,
@@ -1208,6 +1451,11 @@ pub fn parse(
             .export_section = export_sec.start,
             .exports = export_sec.descs.items(arena_data).ptr,
             .export_count = export_sec.descs.len,
+
+            .elems = elem_sec.elems.items(&arena).ptr,
+            .elems_count = @intCast(elem_sec.elems.len),
+            .active_elems = elem_sec.active_elems.items(&arena).ptr,
+            .active_elems_count = @intCast(elem_sec.active_elems.len),
 
             // TODO
             .datas_count = .{ .has_count_section = false, .count = 0 },
