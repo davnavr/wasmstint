@@ -76,6 +76,9 @@ pub fn build(b: *std.Build) void {
             run_spec_tests_cmd.addArg("--run");
             run_spec_tests_cmd.addFileArg(b.path(path));
         }
+
+        if (b.args) |args| run_spec_tests_cmd.addArgs(args);
+
         steps.test_spec.dependOn(&run_spec_tests_cmd.step);
     }
 }
