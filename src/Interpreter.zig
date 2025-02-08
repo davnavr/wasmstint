@@ -1652,6 +1652,37 @@ const opcode_handlers = struct {
     pub const @"i64.store16" = narrowingLinearMemoryStore("i64", 16).handler;
     pub const @"i64.store32" = narrowingLinearMemoryStore("i64", 32).handler;
 
+    pub fn @"memory.size"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const mem_idx = i.nextIdx(Module.MemIdx);
+
+        const size = int.currentFrame().function.expanded().wasm.module.memAddr(mem_idx).size /
+            runtime.MemInst.page_size;
+
+        vals.appendAssumeCapacity(.{ .i32 = @bitCast(@as(u32, @intCast(size))) });
+
+        std.debug.assert(loc <= vals.items.len);
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    pub fn @"memory.grow"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const mem_idx = i.readUleb128(@typeInfo(Module.MemIdx).@"enum".tag_type) catch unreachable;
+
+        const delta: u32 = @bitCast(vals.pop().i32);
+
+        _ = mem_idx;
+        _ = delta;
+
+        // TODO: Add a new interruption kind.
+        vals.appendAssumeCapacity(.{ .i32 = -1 });
+
+        std.debug.assert(loc <= vals.items.len);
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
     pub const @"i32.const" = i32_opcode_handlers.@"const";
     pub const @"i64.const" = i64_opcode_handlers.@"const";
     pub const @"f32.const" = f32_opcode_handlers.@"const";
