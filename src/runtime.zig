@@ -648,6 +648,18 @@ pub const TableAddr = extern struct {
 pub const GlobalAddr = extern struct {
     global_type: Module.GlobalType, // *const GlobalType if it becomes too big
     value: *anyopaque, // TODO: Have it be a pointer to struct containing both value and its size? Need to allow global.get/set to know the operand size
+
+    pub fn Pointee(comptime val_type: Module.ValType) type {
+        return switch (val_type) {
+            .i32 => i32,
+            .f32 => f32,
+            .i64 => i64,
+            .f64 => f64,
+            .funcref => FuncAddr.Nullable,
+            .externref => ExternAddr,
+            .v128 => unreachable,
+        };
+    }
 };
 
 pub const FuncAddr = extern struct {

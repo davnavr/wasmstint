@@ -1624,7 +1624,43 @@ const opcode_handlers = struct {
         }
     }
 
-    // global.get/set
+    pub fn @"global.get"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const global_idx = i.nextIdx(Module.GlobalIdx);
+        const module = int.currentFrame().function.expanded().wasm.module;
+        const global_addr = module.globalAddr(global_idx);
+
+        vals.appendAssumeCapacity(switch (global_addr.global_type.val_type) {
+            .v128 => unreachable, // TODO
+            inline else => |val_type| @unionInit(
+                Value,
+                @tagName(val_type),
+                @as(*const runtime.GlobalAddr.Pointee(val_type), @constCast(@ptrCast(@alignCast(global_addr.value)))).*,
+            ),
+        });
+
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    pub fn @"global.set"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const global_idx = i.nextIdx(Module.GlobalIdx);
+        const module = int.currentFrame().function.expanded().wasm.module;
+        const global_addr = module.globalAddr(global_idx);
+
+        const popped = vals.pop();
+        switch (global_addr.global_type.val_type) {
+            .v128 => unreachable, // TODO
+            inline else => |val_type| {
+                @as(*runtime.GlobalAddr.Pointee(val_type), @ptrCast(@alignCast(global_addr.value))).* =
+                    @field(popped, @tagName(val_type));
+            },
+        }
+
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
 
     // table.get/set
 
