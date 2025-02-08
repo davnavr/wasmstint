@@ -1233,6 +1233,7 @@ fn floatOpcodeHandlers(comptime F: type) type {
                 return @floatFromInt(@as(Unsigned, @bitCast(i)));
             }
 
+            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-feq
             fn eq(z_1: F, z_2: F) bool {
                 return z_1 == z_2;
             }
@@ -1256,6 +1257,80 @@ fn floatOpcodeHandlers(comptime F: type) type {
             fn ge(z_1: F, z_2: F) bool {
                 return z_1 >= z_2;
             }
+
+            // https://webassembly.github.io/spec/core/exec/numerics.html#op-fabs
+            fn abs(z: F) F {
+                return @abs(z);
+            }
+
+            // https://webassembly.github.io/spec/core/exec/numerics.html#op-fneg
+            fn neg(z: F) F {
+                // const Int = std.meta.Int(.unsigned, @bitSizeOf(F));
+                // return @bitCast(@as(Int, @bitCast(z)) ^ std.math.minInt(Int));
+                return -z;
+            }
+
+            // https://webassembly.github.io/spec/core/exec/numerics.html#op-fceil
+            fn ceil(z: F) F {
+                return @ceil(z);
+            }
+
+            // https://webassembly.github.io/spec/core/exec/numerics.html#op-ffloor
+            fn floor(z: F) F {
+                return @floor(z);
+            }
+
+            // https://webassembly.github.io/spec/core/exec/numerics.html#op-ftrunc
+            fn trunc(z: F) F {
+                return if (z <= -0.0) @ceil(z) else @floor(z);
+            }
+
+            // https://webassembly.github.io/spec/core/exec/numerics.html#op-fnearest
+            fn nearest(z: F) F {
+                // TODO: WASM seems to require rounds-to-nearest-ties-even
+                // @round compiles to llvm.round, but what is needed is llvm.roundeven
+                // See also https://github.com/ziglang/zig/issues/767
+
+                // extern fn @"llvm.roundeven.f32"(z: f32) f32;
+
+                return @round(z);
+            }
+
+            // https://webassembly.github.io/spec/core/exec/numerics.html#op-fsqrt
+            fn sqrt(z: F) F {
+                return std.math.sqrt(z);
+            }
+
+            fn add(z_1: F, z_2: F) !F {
+                return z_1 + z_2;
+            }
+
+            fn sub(z_1: F, z_2: F) !F {
+                return z_1 - z_2;
+            }
+
+            fn mul(z_1: F, z_2: F) !F {
+                return z_1 * z_2;
+            }
+
+            fn div(z_1: F, z_2: F) !F {
+                return z_1 / z_2;
+            }
+
+            fn min(z_1: F, z_2: F) !F {
+                // @min(z_1, z_2) // Zig currently generates a call to llvm.minnum
+                return if (z_2 < z_1) z_2 else z_1;
+            }
+
+            fn max(z_1: F, z_2: F) !F {
+                // @max(z_1, z_2) // Zig currently generates a call to llvm.maxnum
+                return if (z_1 < z_2) z_2 else z_1;
+            }
+
+            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-fcopysign
+            fn copysign(z_1: F, z_2: F) !F {
+                return std.math.copysign(z_1, z_2);
+            }
         };
 
         fn @"const"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
@@ -1278,6 +1353,21 @@ fn floatOpcodeHandlers(comptime F: type) type {
         const gt = defineRelOp(value_field, operators.gt).handler;
         const le = defineRelOp(value_field, operators.le).handler;
         const ge = defineRelOp(value_field, operators.ge).handler;
+
+        const abs = defineUnOp(value_field, operators.abs).handler;
+        const neg = defineUnOp(value_field, operators.neg).handler;
+        const ceil = defineUnOp(value_field, operators.ceil).handler;
+        const floor = defineUnOp(value_field, operators.floor).handler;
+        const trunc = defineUnOp(value_field, operators.trunc).handler;
+        const nearest = defineUnOp(value_field, operators.nearest).handler;
+        const sqrt = defineUnOp(value_field, operators.sqrt).handler;
+        const add = defineBinOp(value_field, operators.add, undefined).handler;
+        const sub = defineBinOp(value_field, operators.sub, undefined).handler;
+        const mul = defineBinOp(value_field, operators.mul, undefined).handler;
+        const div = defineBinOp(value_field, operators.div, undefined).handler;
+        const min = defineBinOp(value_field, operators.min, undefined).handler;
+        const max = defineBinOp(value_field, operators.max, undefined).handler;
+        const copysign = defineBinOp(value_field, operators.copysign, undefined).handler;
 
         const convert_i32_s = defineConvOp("i32", value_field, operators.convert_s, undefined).handler;
         const convert_i32_u = defineConvOp("i32", value_field, operators.convert_u, undefined).handler;
@@ -1830,6 +1920,36 @@ const opcode_handlers = struct {
     pub const @"i64.shr_u" = i64_opcode_handlers.shr_u;
     pub const @"i64.rotl" = i64_opcode_handlers.rotl;
     pub const @"i64.rotr" = i64_opcode_handlers.rotr;
+
+    pub const @"f32.abs" = f32_opcode_handlers.abs;
+    pub const @"f32.neg" = f32_opcode_handlers.neg;
+    pub const @"f32.ceil" = f32_opcode_handlers.ceil;
+    pub const @"f32.floor" = f32_opcode_handlers.floor;
+    pub const @"f32.trunc" = f32_opcode_handlers.trunc;
+    pub const @"f32.nearest" = f32_opcode_handlers.nearest;
+    pub const @"f32.sqrt" = f32_opcode_handlers.sqrt;
+    pub const @"f32.add" = f32_opcode_handlers.add;
+    pub const @"f32.sub" = f32_opcode_handlers.sub;
+    pub const @"f32.mul" = f32_opcode_handlers.mul;
+    pub const @"f32.div" = f32_opcode_handlers.div;
+    pub const @"f32.min" = f32_opcode_handlers.min;
+    pub const @"f32.max" = f32_opcode_handlers.max;
+    pub const @"f32.copysign" = f32_opcode_handlers.copysign;
+
+    pub const @"f64.abs" = f64_opcode_handlers.abs;
+    pub const @"f64.neg" = f64_opcode_handlers.neg;
+    pub const @"f64.ceil" = f64_opcode_handlers.ceil;
+    pub const @"f64.floor" = f64_opcode_handlers.floor;
+    pub const @"f64.trunc" = f64_opcode_handlers.trunc;
+    pub const @"f64.nearest" = f64_opcode_handlers.nearest;
+    pub const @"f64.sqrt" = f64_opcode_handlers.sqrt;
+    pub const @"f64.add" = f32_opcode_handlers.add;
+    pub const @"f64.sub" = f32_opcode_handlers.sub;
+    pub const @"f64.mul" = f32_opcode_handlers.mul;
+    pub const @"f64.div" = f32_opcode_handlers.div;
+    pub const @"f64.min" = f64_opcode_handlers.min;
+    pub const @"f64.max" = f64_opcode_handlers.max;
+    pub const @"f64.copysign" = f64_opcode_handlers.copysign;
 
     const conv_ops = struct {
         fn @"i32.wrap_i64"(i: i64) !i32 {
