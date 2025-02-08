@@ -103,8 +103,8 @@ pub const ModuleAllocator = struct {
     }
 
     pub const Free = struct {
-        mems: []*MemInst,
-        tables: []*TableInst,
+        mems: []const *MemInst,
+        tables: []const *TableInst,
     };
 
     pub inline fn free(self: ModuleAllocator, info: Free) void {
@@ -300,33 +300,35 @@ pub const ImportProvider = struct {
     }
 };
 
-pub const ModuleInst = struct {
-    module: *const Module,
-    // /// Used to detect multi-threaded usage of a module instance.
-    // ///
-    // /// Currently, the WASM specification focuses only on single-threaded usage, with
-    // /// *shared* memories currently being the sole exception.
-    // acquired_flag: std.atomic.Value(bool) = .{ .raw = false },
-    instantiated: bool = false,
-    func_import_count: u32,
-    func_imports: [*]FuncAddr,
-    mems: [*]*MemInst, // Could use comptime config to have specialized [1]MemInst
-    tables: [*]*TableInst,
-    globals: [*]*anyopaque,
-    data: IndexedArena.Data,
+/// A `ModuleInst` that has been *allocated*, but not *instantiated*.
+pub const ModuleAlloc = struct {
+    /// Accessing the module instance before instantiation has occurred violates
+    /// the semantics of WebAssembly, even if the module does *not* contain
+    /// a *start* function.
+    requiring_instantiation: ModuleInst,
 
-    pub const AllocateError = ImportProvider.Error || Allocator.Error;
+    // alternative instantiation mechanism could have Interpreter.instantiateModule
+    // take a *ModuleInst parameter, with each stack frame return writing the
+    // module instead of the bool flag, but this requires chasing down the
+    // current ModuleInst pointer.
+
+    instantiated: bool = false,
+
+    pub const Error = ImportProvider.Error || Allocator.Error;
 
     pub fn allocate(
         module: *const Module,
         import_provider: ImportProvider,
         gpa: Allocator,
         store: ModuleAllocator,
-        // scratch: Allocator,
+        // scratch: Allocator, // could be used to avoid arena_array reallocation
         import_failure: ?*ImportProvider.FailedRequest,
-    ) AllocateError!ModuleInst {
+    ) Error!ModuleAlloc {
         var arena_array = IndexedArena.init(gpa);
         defer arena_array.deinit();
+
+        var header = try arena_array.create(ModuleInst.Header);
+        std.debug.assert(header == ModuleInst.Header.index);
 
         const func_imports = try arena_array.alloc(FuncAddr, module.inner.func_import_count);
         for (
@@ -486,86 +488,169 @@ pub const ModuleInst = struct {
 
         arena_array.data.expandToCapacity();
 
-        return .{
+        const module_data = arena_array.data.toOwnedSlice() catch unreachable;
+
+        header.getPtr(module_data).* = ModuleInst.Header{
+            .data_len = module_data.len,
             .module = module,
             .func_import_count = module.inner.func_import_count,
-            .func_imports = func_imports.items(&arena_array).ptr,
-            .mems = mems.items(&arena_array).ptr,
-            .tables = tables.items(&arena_array).ptr,
-            .globals = @ptrCast(globals.items(&arena_array).ptr),
-            .data = arena_array.data.toOwnedSlice() catch unreachable,
+            .func_imports = func_imports.items(module_data).ptr,
+            .mems = mems.items(module_data).ptr,
+            .tables = tables.items(module_data).ptr,
+            .globals = @ptrCast(globals.items(module_data).ptr),
+        };
+
+        return ModuleAlloc{
+            .requiring_instantiation = ModuleInst{
+                .data = module_data.ptr,
+            },
         };
     }
 
+    pub fn expectInstantiated(alloc: ModuleAlloc) ModuleInst {
+        std.debug.assert(alloc.instantiated);
+        return alloc.requiring_instantiation;
+    }
+};
+
+/// "The runtime representation of a *module*."
+///
+/// To obtain a `ModuleInst`, a `Module` must first be passed to `ModuleAlloc.allocate`, which is
+/// then passed to `Interpreter.instantiateModule`.
+pub const ModuleInst = extern struct {
     /// Internal API.
-    pub fn funcAddr(inst: *ModuleInst, idx: Module.FuncIdx) FuncAddr {
-        const i: usize = @intFromEnum(idx);
-        std.debug.assert(i < inst.module.inner.func_count);
-        return if (i < inst.func_import_count)
-            inst.func_imports[i]
-        else
-            FuncAddr.init(.{ .wasm = .{ .module = inst, .idx = idx } });
+    pub const Header = struct {
+        data_len: usize,
+        module: *const Module,
+        // /// Used to detect multi-threaded usage of a module instance.
+        // ///
+        // /// Currently, the WASM specification focuses only on single-threaded usage, with
+        // /// *shared* memories currently being the sole exception.
+        // acquired_flag: std.atomic.Value(bool) = .{ .raw = false },
+        func_import_count: u32,
+        func_imports: [*]const FuncAddr,
+        mems: [*]const *MemInst, // TODO: Could use comptime config to have specialized [1]MemInst (same for TableInst)
+        tables: [*]const *TableInst,
+        globals: [*]const *anyopaque,
+
+        const index = IndexedArena.Idx(Header).fromInt(0);
+
+        pub fn moduleInst(inst: *const Header) ModuleInst {
+            const module = ModuleInst{ .data = @constCast(@ptrCast(@alignCast(inst))) };
+            std.debug.assert(@intFromPtr(inst) == @intFromPtr(module.header()));
+            return module;
+        }
+
+        pub fn funcAddr(inst: *const Header, idx: Module.FuncIdx) FuncAddr {
+            const i: usize = @intFromEnum(idx);
+            std.debug.assert(i < inst.module.inner.func_count);
+            return if (i < inst.func_import_count)
+                inst.func_imports[i]
+            else
+                FuncAddr.init(.{
+                    .wasm = .{
+                        .module = inst.moduleInst(),
+                        .idx = idx,
+                    },
+                });
+        }
+
+        inline fn tableInsts(inst: *const Header) []const *TableInst {
+            return inst.tables[0..inst.module.inner.table_count];
+        }
+
+        inline fn definedTableInsts(inst: *const Header) []const *TableInst {
+            return inst.tableInsts()[inst.module.inner.table_import_count..];
+        }
+
+        pub fn tableAddr(inst: *const Header, idx: Module.TableIdx) TableAddr {
+            const i: usize = @intFromEnum(idx);
+            return TableAddr{
+                .elem_type = inst.module.tableTypes()[i].elem_type,
+                .table = inst.tableInsts()[i],
+            };
+        }
+
+        inline fn memInsts(inst: *const Header) []const *MemInst {
+            return inst.mems[0..inst.module.inner.mem_count];
+        }
+
+        inline fn definedMemInsts(inst: *const Header) []const *MemInst {
+            return inst.memInsts()[inst.module.inner.mem_import_count..];
+        }
+
+        /// Internal API.
+        ///
+        /// TODO: Add a note here about how some `wasm32-wasip1` applications don't export memory.
+        pub fn memAddr(inst: *const Header, idx: Module.MemIdx) *MemInst {
+            return inst.memInsts()[@intFromEnum(idx)];
+        }
+
+        pub inline fn globalValues(inst: *const Header) []const *anyopaque {
+            return inst.globals[0..inst.module.inner.global_count];
+        }
+
+        pub inline fn definedGlobalValues(inst: *const Header) []const *anyopaque {
+            return inst.globalValues()[inst.module.inner.global_import_count..];
+        }
+
+        pub fn globalAddr(inst: *const Header, idx: Module.GlobalIdx) GlobalAddr {
+            const i: usize = @intFromEnum(idx);
+            return GlobalAddr{
+                .global_type = inst.module.globalTypes()[i],
+                .value = inst.globalValues()[i],
+            };
+        }
+    };
+
+    data: [*]align(IndexedArena.max_alignment) IndexedArena.Word,
+
+    /// Internal API used to obtain the functions, tables, memories, globals, etc.
+    /// that are defined or imported by the module.
+    pub fn header(inst: ModuleInst) *const Header {
+        const header_ptr: *Header = @ptrCast(inst.data);
+        std.debug.assert(
+            @intFromPtr(Header.index.getPtr(inst.data[0..header_ptr.data_len])) == @intFromPtr(header_ptr),
+        );
+        return header_ptr;
     }
 
-    /// Internal API.
-    pub fn tableAddr(inst: *const ModuleInst, idx: Module.TableIdx) TableAddr {
-        const i: usize = @intFromEnum(idx);
-        return TableAddr{
-            .elem_type = inst.module.tableTypes()[i].elem_type,
-            .table = inst.tables[i],
-        };
-    }
+    pub const FindExportError = error{
+        /// A function, table, memory, or global with the given name could not be found.
+        ExportNotFound,
+    };
 
-    /// Internal API.
-    ///
-    /// TODO: Add a note here about how some `wasm32-wasip1` applications don't export memory.
-    pub fn memAddr(inst: *const ModuleInst, idx: Module.MemIdx) *MemInst {
-        const i: usize = @intFromEnum(idx);
-        std.debug.assert(i < inst.module.inner.mem_count);
-        return inst.mems[i];
-    }
+    pub fn findExport(inst: ModuleInst, name: []const u8) FindExportError!ExternVal {
+        const instance = inst.header();
 
-    /// Internal API.
-    pub fn globalAddr(inst: *const ModuleInst, idx: Module.GlobalIdx) GlobalAddr {
-        const i: usize = @intFromEnum(idx);
-        return GlobalAddr{
-            .global_type = inst.module.globalTypes()[i],
-            .value = inst.globals[i],
-        };
-    }
-
-    pub const FindExportError = error{ ModuleNotInstantiated, ExportNotFound };
-
-    pub fn findExport(inst: *ModuleInst, name: []const u8) FindExportError!ExternVal {
-        if (!inst.instantiated) return error.ModuleNotInstantiated;
-
-        for (inst.module.exports()) |*exp| {
-            if (!std.mem.eql(u8, name, exp.name(inst.module).bytes)) continue;
+        for (instance.module.exports()) |*exp| {
+            if (!std.mem.eql(u8, name, exp.name(instance.module).bytes)) continue;
 
             return switch (exp.desc_tag) {
-                .func => .{ .func = inst.funcAddr(exp.desc.func) },
-                .table => .{ .table = inst.tableAddr(exp.desc.table) },
-                .mem => .{ .mem = inst.memAddr(exp.desc.mem) },
-                .global => .{ .global = inst.globalAddr(exp.desc.global) },
+                .func => .{ .func = instance.funcAddr(exp.desc.func) },
+                .table => .{ .table = instance.tableAddr(exp.desc.table) },
+                .mem => .{ .mem = instance.memAddr(exp.desc.mem) },
+                .global => .{ .global = instance.globalAddr(exp.desc.global) },
             };
         }
 
         return error.ExportNotFound;
     }
 
-    /// Callers must ensure that there are no dangling references to this module's functions, memories, globals, and
-    /// tables.
+    /// Callers must ensure that there are no dangling references to this module's functions,
+    /// memories, globals, and tables.
     ///
-    /// Additionally, callers are responsible for appropriately freeing any imported functions, memories, globals used
-    /// by this module.
-    pub fn deinit(inst: *ModuleInst, gpa: Allocator, store: ModuleAllocator) void {
+    /// Additionally, callers are responsible for freeing any imported functions, memories, globals
+    /// used by this module.
+    pub fn deinit(inst: ModuleInst, gpa: Allocator, store: ModuleAllocator) void {
+        const instance = inst.header();
         store.free(ModuleAllocator.Free{
-            .mems = inst.mems[inst.module.inner.mem_import_count..inst.module.inner.mem_count],
-            .tables = inst.tables[inst.module.inner.table_import_count..inst.module.inner.table_count],
+            .mems = instance.definedMemInsts(),
+            .tables = instance.definedTableInsts(),
         });
 
-        gpa.free(inst.data);
-        inst.* = undefined;
+        gpa.free(inst.data[0..instance.data_len]);
+        inst.data = undefined;
     }
 };
 
@@ -663,7 +748,7 @@ pub const GlobalAddr = extern struct {
 };
 
 pub const FuncAddr = extern struct {
-    /// If the lowest bit is `0`, then this is a `*const ModuleInst`.
+    /// If the lowest bit is `0`, then this is a `ModuleInst`.
     module_or_host: *anyopaque,
     func: packed union {
         wasm: Module.FuncIdx,
@@ -686,18 +771,18 @@ pub const FuncAddr = extern struct {
         wasm: Wasm,
 
         pub const Wasm = struct {
-            module: *ModuleInst,
+            module: ModuleInst,
             idx: Module.FuncIdx,
 
             pub inline fn code(wasm: *const Wasm) *Module.Code {
-                return wasm.idx.code(wasm.module.module).?;
+                return wasm.idx.code(wasm.module.header().module).?;
             }
         };
 
         pub fn signature(inst: *const Expanded) *const Module.FuncType {
             return switch (inst.*) {
                 .host => |*host| &host.func.signature,
-                .wasm => |*wasm| wasm.module.module.funcTypes()[@intFromEnum(wasm.idx)],
+                .wasm => |*wasm| wasm.module.header().module.funcTypes()[@intFromEnum(wasm.idx)],
             };
         }
     };
@@ -705,7 +790,7 @@ pub const FuncAddr = extern struct {
     pub fn init(inst: Expanded) FuncAddr {
         return FuncAddr{
             .module_or_host = switch (inst) {
-                .wasm => |*wasm| @constCast(@as(*const anyopaque, @ptrCast(wasm.module))),
+                .wasm => |*wasm| @ptrCast(wasm.module.data),
                 .host => |*host| @ptrFromInt(@intFromPtr(host.func) | 1),
             },
             .func = switch (inst) {
@@ -719,7 +804,7 @@ pub const FuncAddr = extern struct {
         const module_or_host = @intFromPtr(inst.module_or_host);
         return if (module_or_host & 1 == 0) Expanded{
             .wasm = .{
-                .module = @ptrFromInt(module_or_host),
+                .module = ModuleInst{ .data = @ptrFromInt(module_or_host) },
                 .idx = inst.func.wasm,
             },
         } else .{
@@ -732,7 +817,7 @@ pub const FuncAddr = extern struct {
 
     comptime {
         std.debug.assert(@sizeOf(FuncAddr) == @sizeOf([2]*anyopaque));
-        std.debug.assert(@alignOf(ModuleInst) >= 2);
+        std.debug.assert(std.meta.alignment(@FieldType(ModuleInst, "data")) >= 2);
         std.debug.assert(@alignOf(Host) >= 2);
     }
 

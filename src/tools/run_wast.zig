@@ -403,12 +403,12 @@ const State = struct {
     errors: Wast.sexpr.Parser.Context,
 
     /// Allocated in the `run_arena`.
-    module_lookups: std.AutoHashMapUnmanaged(Wast.Ident.Interned, *ModuleInst) = .empty,
+    module_lookups: std.AutoHashMapUnmanaged(Wast.Ident.Interned, ModuleInst) = .empty,
 
     /// Live until the next `module` command is executed.
     next_module_arena: ArenaAllocator,
     /// Allocated either in the `next_module_arena` or the `run_arena`.
-    current_module: ?*ModuleInst = null,
+    current_module: ?ModuleInst = null,
 
     /// Live for the execution of a single command.
     cmd_arena: ArenaAllocator,
@@ -424,7 +424,7 @@ const State = struct {
 
     const ErrorContext = Wast.sexpr.Parser.Context;
 
-    fn getModuleInst(state: *State, id: Wast.Ident.Symbolic, parent: Wast.sexpr.TokenId) Error!*ModuleInst {
+    fn getModuleInst(state: *State, id: Wast.Ident.Symbolic, parent: Wast.sexpr.TokenId) Error!ModuleInst {
         return if (id.some)
             if (state.module_lookups.get(id.ident)) |found|
                 found
@@ -756,8 +756,7 @@ fn runScript(
 
                 var imports = try SpectestImports.init(module_arena);
                 var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
-                const module_inst = try module_arena.allocator().create(wasmstint.runtime.ModuleInst);
-                module_inst.* = wasmstint.runtime.ModuleInst.allocate(
+                var module_alloc = wasmstint.runtime.ModuleAlloc.allocate(
                     parsed_module,
                     imports.provider(),
                     module_arena.allocator(),
@@ -778,8 +777,19 @@ fn runScript(
                     },
                 };
 
-                try wrapInterpreterError(interp.instantiateModule(state.cmd_arena.allocator(), module_inst, &fuel));
-                state.expectResultValues(&interp, cmd.keyword, &[0]Wast.Command.Result{}) catch |e| switch (e) {
+                try wrapInterpreterError(
+                    interp.instantiateModule(
+                        state.cmd_arena.allocator(),
+                        &module_alloc,
+                        &fuel,
+                    ),
+                );
+
+                state.expectResultValues(
+                    &interp,
+                    cmd.keyword,
+                    &[0]Wast.Command.Result{},
+                ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
                     error.ScriptError => {
                         _ = try state.errors.errorAtToken(
@@ -790,7 +800,7 @@ fn runScript(
                     },
                 };
 
-                std.debug.assert(module_inst.instantiated);
+                const module_inst = module_alloc.expectInstantiated();
                 state.current_module = module_inst;
 
                 if (module.name.some) {

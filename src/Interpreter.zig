@@ -364,14 +364,15 @@ pub fn beginCall(
 pub fn instantiateModule(
     interp: *Interpreter,
     alloca: Allocator,
-    module_inst: *runtime.ModuleInst,
+    module: *runtime.ModuleAlloc,
     fuel: *Fuel,
 ) Error!void {
+    const module_inst = module.requiring_instantiation.header();
     const wasm = module_inst.module;
     const global_types = wasm.globalTypes()[wasm.inner.global_import_count..];
     for (
         wasm.inner.global_exprs[0..global_types.len],
-        module_inst.globals[wasm.inner.global_import_count..global_types.len],
+        module_inst.definedGlobalValues(),
         global_types,
     ) |*init_expr, global_value, *global_type| {
         switch (init_expr.*) {
@@ -483,15 +484,12 @@ pub fn instantiateModule(
         }
     }
 
-    // TODO: Initialize, active element segments
-    // TODO: Out of bounds error is possible here! Trap if that happens
-
     // TODO: Initialize, active data segments
 
     const start_func = if (wasm.inner.start.get()) |start_idx|
         module_inst.funcAddr(start_idx)
     else {
-        module_inst.instantiated = true;
+        module.instantiated = true;
         return;
     };
 
@@ -500,7 +498,7 @@ pub fn instantiateModule(
         start_func,
         std.math.cast(u32, interp.value_stack.items.len) orelse return Error.OutOfMemory,
         &Module.FuncType.empty,
-        &module_inst.instantiated,
+        &module.instantiated,
     );
 
     switch (entry_point) {
@@ -750,7 +748,8 @@ const MemArg = struct {
         _ = i.readUleb128(u3) catch unreachable; // align, maximum is 16 bytes (1 << 4)
         return .{
             .offset = i.readUleb128(u32) catch unreachable,
-            .mem = interp.currentFrame().function.expanded().wasm.module.memAddr(.default),
+            .mem = interp.currentFrame().function.expanded().wasm
+                .module.header().memAddr(.default),
         };
     }
 };
@@ -1468,7 +1467,8 @@ inline fn takeBranch(
     branch: u32,
 ) void {
     const code = interp.currentFrame().function.expanded().wasm.code();
-    const wasm_base_ptr = @intFromPtr(interp.currentFrame().function.expanded().wasm.module.module.wasm.ptr);
+    const wasm_base_ptr = @intFromPtr(interp.currentFrame().function.expanded().wasm
+        .module.header().module.wasm.ptr);
 
     const side_table_end = @intFromPtr(code.state.side_table_ptr + code.state.side_table_len);
     std.debug.assert(@intFromPtr(s.* + branch) < side_table_end);
@@ -1652,13 +1652,16 @@ const opcode_handlers = struct {
     pub fn call(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         _ = s;
         const func_idx = i.nextIdx(Module.FuncIdx);
-        const callee = int.currentFrame().function.expanded().wasm.module.funcAddr(func_idx);
+        const callee = int.currentFrame().function.expanded().wasm
+            .module.header().funcAddr(func_idx);
+
         invokeWithinWasm(callee, loc, vals, fuel, int);
     }
 
     pub fn call_indirect(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         _ = s;
-        const current_module = int.currentFrame().function.expanded().wasm.module;
+        const current_module = int.currentFrame().function.expanded().wasm
+            .module.header();
 
         const expected_signature = i.nextIdx(Module.TypeIdx).funcType(current_module.module);
         const table_idx = i.nextIdx(Module.TableIdx);
@@ -1747,8 +1750,8 @@ const opcode_handlers = struct {
 
     pub fn @"global.get"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const global_idx = i.nextIdx(Module.GlobalIdx);
-        const module = int.currentFrame().function.expanded().wasm.module;
-        const global_addr = module.globalAddr(global_idx);
+        const global_addr = int.currentFrame().function.expanded().wasm
+            .module.header().globalAddr(global_idx);
 
         vals.appendAssumeCapacity(switch (global_addr.global_type.val_type) {
             .v128 => unreachable, // TODO
@@ -1766,8 +1769,8 @@ const opcode_handlers = struct {
 
     pub fn @"global.set"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const global_idx = i.nextIdx(Module.GlobalIdx);
-        const module = int.currentFrame().function.expanded().wasm.module;
-        const global_addr = module.globalAddr(global_idx);
+        const global_addr = int.currentFrame().function.expanded().wasm
+            .module.header().globalAddr(global_idx);
 
         const popped = vals.pop();
         switch (global_addr.global_type.val_type) {
@@ -1812,8 +1815,8 @@ const opcode_handlers = struct {
     pub fn @"memory.size"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const mem_idx = i.nextIdx(Module.MemIdx);
 
-        const size = int.currentFrame().function.expanded().wasm.module.memAddr(mem_idx).size /
-            runtime.MemInst.page_size;
+        const size = int.currentFrame().function.expanded().wasm
+            .module.header().memAddr(mem_idx).size / runtime.MemInst.page_size;
 
         vals.appendAssumeCapacity(.{ .i32 = @bitCast(@as(u32, @intCast(size))) });
 
