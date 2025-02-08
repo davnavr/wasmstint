@@ -867,7 +867,7 @@ pub const ExternAddr = packed union {
         pub const Size = std.meta.Int(.unsigned, @bitSizeOf(usize) - 1);
 
         pub fn fromInt(n: Size) Nat {
-            return @intFromEnum(@as(usize, n) + 1); // TODO: Prevent overflow?? or is it not possible
+            return @enumFromInt(@as(usize, n) + 1);
         }
 
         pub fn toInt(nat: Nat) ?Size {

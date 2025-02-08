@@ -102,6 +102,7 @@ pub const Token = struct {
         "assert_unlinkable",
         "inf",
         "nan",
+        "ref.extern",
         "nan:canonical",
         "nan:arithmetic",
 

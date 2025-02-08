@@ -385,7 +385,12 @@ fn allocateFunctionArguments(
             .@"keyword_i64.const" => .{ .i64 = src.value.i64.get(script.arena) },
             .@"keyword_f32.const" => .{ .f32 = @bitCast(src.value.f32) },
             .@"keyword_f64.const" => .{ .f64 = @bitCast(src.value.f64.get(script.arena)) },
-            else => unreachable,
+            .@"keyword_ref.extern" => .{
+                .externref = .{
+                    .nat = wasmstint.runtime.ExternAddr.Nat.fromInt(src.value.ref_extern),
+                },
+            },
+            else => |bad| std.debug.panic("TODO: encode argument {s}", .{@tagName(bad)}),
         };
     }
 

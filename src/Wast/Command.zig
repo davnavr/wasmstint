@@ -85,6 +85,26 @@ pub fn parseConstOrResult(
 
             break :value .{ .token = f.token, .value = value };
         },
+        .@"keyword_ref.extern" => {
+            const maybe_int: sexpr.TokenId = list_parser.parseAtom(ctx, "unsigned integer") catch |e| switch (e) {
+                error.EndOfStream => if (@hasField(Value, "ref_extern_unspecified")) {
+                    break :value .{ .token = keyword, .value = .{ .ref_extern_unspecified = {} } };
+                } else {
+                    return (try ctx.errorAtList(list, .end, "expected natural number")).err;
+                },
+                else => |err| return err,
+            };
+
+            if (maybe_int.tag(ctx.tree) != .integer) {
+                return (try ctx.errorAtToken(maybe_int, "expected natural number")).err;
+            }
+
+            const nat = @import("value.zig").unsignedInteger(u31, maybe_int.contents(ctx.tree)) catch {
+                return (try ctx.errorAtToken(maybe_int, "host reference number too large")).err;
+            };
+
+            break :value .{ .token = maybe_int, .value = .{ .ref_extern = nat } };
+        },
         else => return (try ctx.errorAtToken(keyword, "expected " ++ T.expected)).err,
     };
 
@@ -132,7 +152,7 @@ pub const Const = struct {
         f64: IndexedArena.IdxAligned(u64, 4),
         // v128: IndexedArena.IdxAligned([u8; 16], 4),
         // ref_null: enum { func, extern },
-        ref_extern: u32,
+        ref_extern: u31,
     };
 
     comptime {
@@ -151,7 +171,7 @@ pub const Result = struct {
     value_token: sexpr.TokenId,
     value: Value,
 
-    pub const expected = "result value keyword";
+    pub const expected = "result value";
 
     pub const Value = union {
         i32: i32,
@@ -163,9 +183,18 @@ pub const Result = struct {
         f32_nan: NanPattern,
         f64_nan: NanPattern,
         // ref_null: enum { func, extern },
-        ref_extern: ?u32,
+        ref_extern: u31,
+        ref_extern_unspecified: void,
         ref_func: void,
     };
+
+    comptime {
+        std.debug.assert(@alignOf(Result) == @alignOf(u32));
+        std.debug.assert(@sizeOf(Result) == switch (@import("builtin").mode) {
+            .Debug, .ReleaseSafe => 16,
+            .ReleaseFast, .ReleaseSmall => 12,
+        });
+    }
 };
 
 pub const Register = struct {
