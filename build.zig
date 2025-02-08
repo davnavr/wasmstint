@@ -67,8 +67,11 @@ pub fn build(b: *std.Build) void {
             "tests/spec/align.wast",
             "tests/spec/binary-leb128.wast",
             "tests/spec/binary.wast",
+            "tests/spec/block.wast",
+
             "tests/spec/i32.wast",
             "tests/spec/i64.wast",
+
             "tests/spec/fac.wast",
         };
 
