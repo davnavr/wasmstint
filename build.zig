@@ -73,6 +73,9 @@ pub fn build(b: *std.Build) void {
             "tests/spec/i64.wast",
 
             "tests/spec/fac.wast",
+
+            "tests/spec/f32.wast",
+            "tests/spec/f64.wast",
         };
 
         for (tests) |path| {
