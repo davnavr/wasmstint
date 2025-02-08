@@ -284,7 +284,8 @@ const CtrlFrame = struct {
         loop,
         @"if",
         @"else",
-        end,
+        //@"try",
+        //@"catch",
     };
 
     fn labelTypes(frame: *const CtrlFrame, module: *const Module) []const ValType {
@@ -492,25 +493,133 @@ fn markUnreachable(val_stack: *ValStack, ctrl_stack: *CtrlStack) void {
 const BranchFixup = packed struct(u32) {
     entry_idx: u32,
 
-    const List = std.SegmentedList(BranchFixup, 2);
+    const List = extern struct {
+        const Header = extern struct {
+            prev: List,
+            /// The number of entries in this list.
+            len: u32,
+            capacity: u32,
+
+            const empty = Header{
+                // Zig doesn't like `List.empty` here, "dependency loop detected"
+                .prev = undefined,
+                .len = 0,
+                .capacity = 0,
+            };
+        };
+
+        header: *Header,
+
+        const header_size_in_elems = @divExact(@sizeOf(Header), @sizeOf(BranchFixup));
+
+        const empty = List{ .header = @constCast(&Header.empty) };
+
+        fn allocatedHeaderAndEntries(list: List) []align(@alignOf(Header)) BranchFixup {
+            const base: [*]align(@alignOf(Header)) BranchFixup = @ptrCast(list.header);
+            return base[0 .. header_size_in_elems + list.header.capacity];
+        }
+
+        inline fn allocatedEntries(list: List) []BranchFixup {
+            std.debug.assert(list.header.len <= list.header.capacity);
+            return list.allocatedHeaderAndEntries()[header_size_in_elems..];
+        }
+
+        inline fn entries(list: List) []BranchFixup {
+            return list.allocatedEntries()[0..list.header.len];
+        }
+
+        fn append(list: *List, arena: *ArenaAllocator, fixup: BranchFixup) Allocator.Error!void {
+            if (list.header.len == list.header.capacity) {
+                @branchHint(.unlikely);
+
+                const new_capacity: u32 = if (list.header.capacity == 0)
+                    4
+                else
+                    std.math.mul(u32, @intCast(list.header.capacity), 2) catch
+                        return error.OutOfMemory;
+
+                const new_alloc_len = std.math.add(
+                    usize,
+                    header_size_in_elems,
+                    new_capacity,
+                ) catch return error.OutOfMemory;
+
+                const old_alloc = list.allocatedHeaderAndEntries();
+                std.debug.assert(old_alloc.len < new_alloc_len);
+                if (arena.allocator().resize(old_alloc, new_alloc_len)) {
+                    list.header.capacity = new_capacity;
+                } else {
+                    @branchHint(.likely);
+                    const new_alloc: []align(@alignOf(Header)) BranchFixup = try arena.allocator().alignedAlloc(
+                        BranchFixup,
+                        @alignOf(Header),
+                        std.math.add(
+                            usize,
+                            header_size_in_elems,
+                            new_capacity,
+                        ) catch return error.OutOfMemory,
+                    );
+
+                    errdefer comptime unreachable;
+
+                    const old_list: List = list.*;
+                    const new_header: *Header = @ptrCast(new_alloc[0..header_size_in_elems]);
+                    new_header.* = Header{
+                        .prev = old_list,
+                        .len = 0,
+                        .capacity = new_capacity,
+                    };
+
+                    list.* = List{ .header = new_header };
+                }
+
+                @memset(list.allocatedEntries()[list.header.len..], undefined);
+            }
+
+            std.debug.assert(list.header.len <= list.header.capacity);
+
+            const i = list.header.len;
+            list.header.len = std.math.add(u32, i, 1) catch return error.OutOfMemory;
+            list.entries()[i] = fixup;
+
+            std.debug.assert(list.header.len <= list.header.capacity);
+        }
+    };
 };
 
 const SideTableBuilder = struct {
     const Entries = std.SegmentedList(SideTableEntry, 4);
 
+    /// The contents of the side table, which contain branch targets inserted in increasing
+    /// origin offset order.
     entries: Entries = .{},
+    /// Maps pending fixups to each frame in the WebAssembly validation control stack.
+    ///
+    /// Since `loop`s never need fixups, they only push empty lists.
     active: std.SegmentedList(BranchFixup.List, 4) = .{},
+    /// Separate stack used to fixup branches in `if`/`else` blocks.
     alternate: std.SegmentedList(BranchFixup, 4) = .{},
-    free: std.SegmentedList(BranchFixup.List, 4) = .{},
+    free: BranchFixup.List = BranchFixup.List.empty,
 
     fn nextEntryIdx(table: *const SideTableBuilder) Module.LimitError!u32 {
         return std.math.cast(u32, table.entries.len) orelse return error.WasmImplementationLimit;
     }
 
-    fn pushFixupList(table: *SideTableBuilder, arena: *ArenaAllocator) Allocator.Error!void {
+    fn pushFixupList(
+        table: *SideTableBuilder,
+        arena: *ArenaAllocator,
+        allocation: enum { reuse, empty },
+    ) Allocator.Error!void {
         const pushed = try table.active.addOne(arena.allocator());
-        pushed.* = table.free.pop() orelse BranchFixup.List{};
-        std.debug.assert(pushed.len == 0);
+
+        pushed.* = if (allocation == .reuse and table.free.header.capacity > 0) reused: {
+            const used = table.free;
+            table.free = used.header.prev;
+            used.header.prev = BranchFixup.List.empty;
+            break :reused used;
+        } else BranchFixup.List.empty;
+
+        std.debug.assert(pushed.header.len == 0);
     }
 
     fn appendAlternate(
@@ -573,7 +682,7 @@ const SideTableBuilder = struct {
             entry.delta_stp = undefined;
 
             const current_list: *BranchFixup.List = table.active.at(table.active.len - 1 - target_depth);
-            try current_list.append(arena.allocator(), BranchFixup{ .entry_idx = idx });
+            try current_list.append(arena, .{ .entry_idx = idx });
         }
 
         return idx;
@@ -609,35 +718,33 @@ const SideTableBuilder = struct {
         // );
     }
 
-    fn resolveFixupList(
+    /// Asserts that all of the branch fixup entries correspond to branches
+    /// that are placed before `end_offset`.
+    fn popAndResolveFixups(
         table: *SideTableBuilder,
-        fixups: *const BranchFixup.List,
         end_offset: u32,
     ) Module.LimitError!void {
         const target_side_table_idx = try table.nextEntryIdx();
 
         // std.debug.print("RESOLVING FIXUPS targeting 0x{X}\n", .{end_offset});
 
-        var iter_fixups = fixups.constIterator(0);
-        while (iter_fixups.next()) |fixup_entry| {
-            try table.resolveFixupEntry(fixup_entry, target_side_table_idx, end_offset);
-        }
-    }
+        var remaining: BranchFixup.List = table.active.pop().?;
+        while (remaining.header.len > 0) {
+            for (remaining.entries()) |*fixup_entry| {
+                try table.resolveFixupEntry(
+                    fixup_entry,
+                    target_side_table_idx,
+                    end_offset,
+                );
+            }
 
-    /// Asserts that `active.len > 0`, and that all of the branch fixup entries correspond to branches
-    /// that are placed before `end_offset`.
-    fn popAndResolveFixups(
-        table: *SideTableBuilder,
-        arena: *ArenaAllocator,
-        end_offset: u32,
-    ) Module.LimitError!void {
-        var to_fixup: BranchFixup.List = table.active.pop().?;
-        defer {
-            to_fixup.clearRetainingCapacity();
-            table.free.append(arena.allocator(), to_fixup) catch {};
-        }
+            table.free = remaining;
+            remaining = remaining.header.prev;
 
-        try table.resolveFixupList(&to_fixup, end_offset);
+            table.free.header.len = 0;
+            table.free.header.prev = table.free;
+            @memset(table.free.allocatedEntries(), undefined);
+        }
     }
 
     fn popAndResolveAlternate(
@@ -789,7 +896,7 @@ fn doValidation(
         },
     ) catch unreachable;
 
-    side_table.pushFixupList(scratch) catch unreachable;
+    side_table.pushFixupList(scratch, .reuse) catch unreachable;
 
     state.instructions = @ptrCast(reader.bytes.ptr);
 
@@ -822,7 +929,7 @@ fn doValidation(
                 );
 
                 // TODO: Skip branch fixup processing for unreachable code.
-                try side_table.pushFixupList(scratch);
+                try side_table.pushFixupList(scratch, .reuse);
             },
             .loop => {
                 const block_type = try BlockType.read(reader, module);
@@ -838,7 +945,9 @@ fn doValidation(
                     module,
                 );
 
-                // No need to push a fixup list, since destination of a branch to a loop is already known
+                // Destination of a branch to a loop is already known, so an empty fixup list is appended.
+                // An entry is required anyway to keep the mapping from WASM label depths to fixup lists.
+                try side_table.pushFixupList(scratch, .empty);
             },
             .@"if" => {
                 const block_type = try BlockType.read(reader, module);
@@ -863,7 +972,7 @@ fn doValidation(
                     0,
                 );
 
-                try side_table.pushFixupList(scratch); // going to 'end'
+                try side_table.pushFixupList(scratch, .reuse); // going to 'end'
             },
             .@"else" => {
                 const frame = try popCtrlFrame(&ctrl_stack, &val_stack, module);
@@ -900,12 +1009,19 @@ fn doValidation(
                 const frame = try popCtrlFrame(&ctrl_stack, &val_stack, module);
 
                 // TODO: Skip branch fixup processing for unreachable code.
-                if (frame.info.opcode != .loop) {
-                    // TODO: Possible optimization, target the instruction after the branch only if this is not the last `end` instruction.
-                    try side_table.popAndResolveFixups(scratch, instr_offset);
 
-                    if (frame.info.opcode == .@"if")
-                        try side_table.popAndResolveAlternate(instr_offset);
+                if (frame.info.opcode == .loop) {
+                    std.debug.assert(
+                        side_table.active.at(side_table.active.len - 1).header.capacity == 0,
+                    );
+                }
+
+                // Possible optimization, target the instruction after the branch only if this is not the last `end` instruction
+                // - This would mess up the Interpreter's fuel counting.
+                try side_table.popAndResolveFixups(instr_offset);
+
+                if (frame.info.opcode == .@"if") {
+                    try side_table.popAndResolveAlternate(instr_offset);
                 }
 
                 try val_stack.pushMany(scratch, frame.types.funcType(module).results());
@@ -1481,19 +1597,23 @@ fn doValidation(
 
     errdefer comptime unreachable;
 
-    // for (0..state.side_table_len) |i| {
-    //     const entry = &state.side_table_ptr[i];
-    //     std.debug.print(
-    //         "#{}: delta_ip = {}, delta_stp = {}, copied = {}, popped = {}\n",
-    //         .{
-    //             i,
-    //             entry.delta_ip.done,
-    //             entry.delta_stp,
-    //             entry.copy_count,
-    //             entry.pop_count,
-    //         },
-    //     );
-    // }
+    for (0..state.side_table_len) |i| {
+        const entry: *const SideTableEntry = &state.side_table_ptr[i];
+
+        // catch any entries that were not fixed up when safety checks are enabled.
+        _ = entry.delta_ip.done;
+
+        //std.debug.print(
+        //    "#{}: delta_ip = {}, delta_stp = {}, copied = {}, popped = {}\n",
+        //    .{
+        //        i,
+        //        entry.delta_ip.done,
+        //        entry.delta_stp,
+        //        entry.copy_count,
+        //        entry.pop_count,
+        //    },
+        //);
+    }
 
     std.debug.assert(state.@"error" == null);
     state.flag.store(State.Flag.successful, .release);
