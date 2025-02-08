@@ -1232,6 +1232,30 @@ fn floatOpcodeHandlers(comptime F: type) type {
                 const Unsigned = std.meta.Int(.unsigned, @typeInfo(@TypeOf(i)).int.bits);
                 return @floatFromInt(@as(Unsigned, @bitCast(i)));
             }
+
+            fn eq(z_1: F, z_2: F) bool {
+                return z_1 == z_2;
+            }
+
+            fn ne(z_1: F, z_2: F) bool {
+                return z_1 != z_2;
+            }
+
+            fn lt(z_1: F, z_2: F) bool {
+                return z_1 < z_2;
+            }
+
+            fn gt(z_1: F, z_2: F) bool {
+                return z_1 > z_2;
+            }
+
+            fn le(z_1: F, z_2: F) bool {
+                return z_1 <= z_2;
+            }
+
+            fn ge(z_1: F, z_2: F) bool {
+                return z_1 >= z_2;
+            }
         };
 
         fn @"const"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
@@ -1247,6 +1271,13 @@ fn floatOpcodeHandlers(comptime F: type) type {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
         }
+
+        const eq = defineRelOp(value_field, operators.eq).handler;
+        const ne = defineRelOp(value_field, operators.ne).handler;
+        const lt = defineRelOp(value_field, operators.lt).handler;
+        const gt = defineRelOp(value_field, operators.gt).handler;
+        const le = defineRelOp(value_field, operators.le).handler;
+        const ge = defineRelOp(value_field, operators.ge).handler;
 
         const convert_i32_s = defineConvOp("i32", value_field, operators.convert_s, undefined).handler;
         const convert_i32_u = defineConvOp("i32", value_field, operators.convert_u, undefined).handler;
@@ -1747,6 +1778,20 @@ const opcode_handlers = struct {
     pub const @"i64.le_u" = i64_opcode_handlers.le_u;
     pub const @"i64.ge_s" = i64_opcode_handlers.ge_s;
     pub const @"i64.ge_u" = i64_opcode_handlers.ge_u;
+
+    pub const @"f32.eq" = f32_opcode_handlers.eq;
+    pub const @"f32.ne" = f32_opcode_handlers.ne;
+    pub const @"f32.lt" = f32_opcode_handlers.lt;
+    pub const @"f32.gt" = f32_opcode_handlers.gt;
+    pub const @"f32.le" = f32_opcode_handlers.le;
+    pub const @"f32.ge" = f32_opcode_handlers.ge;
+
+    pub const @"f64.eq" = f64_opcode_handlers.eq;
+    pub const @"f64.ne" = f64_opcode_handlers.ne;
+    pub const @"f64.lt" = f64_opcode_handlers.lt;
+    pub const @"f64.gt" = f64_opcode_handlers.gt;
+    pub const @"f64.le" = f64_opcode_handlers.le;
+    pub const @"f64.ge" = f64_opcode_handlers.ge;
 
     pub const @"i32.clz" = i32_opcode_handlers.clz;
     pub const @"i32.ctz" = i32_opcode_handlers.ctz;
