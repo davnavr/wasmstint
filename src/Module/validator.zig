@@ -1308,6 +1308,9 @@ fn doValidation(
                 try val_stack.popExpecting(&ctrl_stack, .i32);
                 try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i32, .i32);
             },
+            .@"i64.eqz",
+            .@"i32.wrap_i64",
+            => try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i64, .i32),
             .@"i64.eq",
             .@"i64.ne",
             .@"i64.lt_s",
@@ -1368,9 +1371,44 @@ fn doValidation(
                 try val_stack.popExpecting(&ctrl_stack, .i64);
                 try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i64, .i64);
             },
-            .@"i64.eqz",
-            .@"i32.wrap_i64",
-            => try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i64, .i32),
+            .@"f32.abs",
+            .@"f32.neg",
+            .@"f32.ceil",
+            .@"f32.floor",
+            .@"f32.trunc",
+            .@"f32.nearest",
+            .@"f32.sqrt",
+            => try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f32, .f32),
+            .@"f32.add",
+            .@"f32.sub",
+            .@"f32.mul",
+            .@"f32.div",
+            .@"f32.min",
+            .@"f32.max",
+            .@"f32.copysign",
+            => {
+                try val_stack.popExpecting(&ctrl_stack, .f32);
+                try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f32, .f32);
+            },
+            .@"f64.abs",
+            .@"f64.neg",
+            .@"f64.ceil",
+            .@"f64.floor",
+            .@"f64.trunc",
+            .@"f64.nearest",
+            .@"f64.sqrt",
+            => try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f64, .f64),
+            .@"f64.add",
+            .@"f64.sub",
+            .@"f64.mul",
+            .@"f64.div",
+            .@"f64.min",
+            .@"f64.max",
+            .@"f64.copysign",
+            => {
+                try val_stack.popExpecting(&ctrl_stack, .f64);
+                try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f64, .f64);
+            },
             .@"i32.trunc_f32_s",
             .@"i32.trunc_f32_u",
             .@"i32.reinterpret_f32",
