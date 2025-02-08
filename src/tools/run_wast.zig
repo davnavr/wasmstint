@@ -373,11 +373,10 @@ fn allocateFunctionArguments(
     script: *const Wast,
     arguments: Wast.Command.Arguments,
     arena: *ArenaAllocator,
-) Allocator.Error![]const wasmstint.Interpreter.TaggedValue {
+    errors: *Wast.sexpr.Parser.Context,
+) Wast.sexpr.Parser.ParseError![]const wasmstint.Interpreter.TaggedValue {
     const src_arguments: []const Wast.Command.Const = arguments.items(script.arena);
     const dst_values = try arena.allocator().alloc(wasmstint.Interpreter.TaggedValue, src_arguments.len);
-
-    errdefer comptime unreachable;
 
     for (src_arguments, dst_values) |*src, *dst| {
         dst.* = switch (src.keyword.tag(script.tree)) {
@@ -390,7 +389,11 @@ fn allocateFunctionArguments(
                     .nat = wasmstint.runtime.ExternAddr.Nat.fromInt(src.value.ref_extern),
                 },
             },
-            else => |bad| std.debug.panic("TODO: encode argument {s}", .{@tagName(bad)}),
+            else => |bad| return (try errors.errorFmtAtToken(
+                src.keyword,
+                "TODO: encode argument {s}",
+                .{@tagName(bad)},
+            )).err,
         };
     }
 
@@ -405,6 +408,9 @@ inline fn wrapInterpreterError(result: anytype) Allocator.Error!@typeInfo(@TypeO
 }
 
 const State = struct {
+    const ModuleInst = wasmstint.runtime.ModuleInst;
+    const Interpreter = wasmstint.Interpreter;
+
     errors: Wast.sexpr.Parser.Context,
 
     /// Allocated in the `run_arena`.
@@ -417,8 +423,6 @@ const State = struct {
 
     /// Live for the execution of a single command.
     cmd_arena: ArenaAllocator,
-
-    const ModuleInst = wasmstint.runtime.ModuleInst;
 
     const Error = error{ScriptError} || Allocator.Error;
 
@@ -441,7 +445,7 @@ const State = struct {
             scriptError(state.errors.errorAtToken(parent, "no module has been instantiated at this point"));
     }
 
-    fn runToCompletion(state: *State, interpreter: *wasmstint.Interpreter) Allocator.Error!void {
+    fn runToCompletion(state: *State, interpreter: *Interpreter) Allocator.Error!void {
         // state_label:
         switch (interpreter.state) {
             .awaiting_lazy_validation => unreachable,
@@ -461,14 +465,14 @@ const State = struct {
         comptime unreachable;
     }
 
-    fn errorInterpreterTrap(state: *State, parent: Wast.sexpr.TokenId, trap_code: wasmstint.Interpreter.TrapCode) Error {
+    fn errorInterpreterTrap(state: *State, parent: Wast.sexpr.TokenId, trap_code: Interpreter.TrapCode) Error {
         return scriptError(state.errors.errorFmtAtToken(parent, "unexpected trap, {any}", .{trap_code}));
     }
 
     fn errorInterpreterInterrupted(
         state: *State,
         parent: Wast.sexpr.TokenId,
-        cause: wasmstint.Interpreter.InterruptionCause,
+        cause: Interpreter.InterruptionCause,
     ) Error {
         const msg = switch (cause) {
             .validation_finished => unreachable,
@@ -482,7 +486,7 @@ const State = struct {
     fn errorInterpreterResults(
         state: *State,
         parent: Wast.sexpr.TokenId,
-        interpreter: *const wasmstint.Interpreter,
+        interpreter: *const Interpreter,
     ) Error {
         const results = interpreter.copyResultValues(&state.cmd_arena) catch |e| switch (e) {
             error.OutOfMemory => |oom| return oom,
@@ -535,10 +539,124 @@ const State = struct {
         ));
     }
 
+    fn expectTypedValue(
+        state: *State,
+        parent: Wast.sexpr.TokenId,
+        value: *const Interpreter.TaggedValue,
+        pos: u32,
+        comptime tag: std.meta.Tag(Interpreter.TaggedValue),
+    ) Error!@FieldType(Interpreter.TaggedValue, @tagName(tag)) {
+        return if (value.* != tag)
+            scriptError(state.errors.errorFmtAtToken(
+                parent,
+                "expected result #{} to be a " ++ @tagName(tag) ++ ", but got a {s}",
+                .{ pos, @tagName(value.*) },
+            ))
+        else
+            @field(value, @tagName(tag));
+    }
+
+    fn checkIntegerResult(
+        state: *State,
+        expected_token: Wast.sexpr.TokenId,
+        expected: anytype,
+        actual: @TypeOf(expected),
+    ) Error!void {
+        const Unsigned = std.meta.Int(.unsigned, @typeInfo(@TypeOf(expected)).int.bits);
+
+        if (expected != actual) {
+            return scriptError(state.errors.errorFmtAtToken(
+                expected_token,
+                "expected 0x{[expected_u]X:0>[width]} " ++
+                    "({[expected_s]} signed, {[expected_u]} unsigned)" ++
+                    ", but got 0x{[actual_u]X:0>[width]} " ++
+                    "({[actual_s]} signed, {[actual_u]} unsigned)",
+                .{
+                    .expected_s = expected,
+                    .expected_u = @as(Unsigned, @bitCast(expected)),
+                    .actual_s = actual,
+                    .actual_u = @as(Unsigned, @bitCast(actual)),
+                    .width = @sizeOf(@TypeOf(expected_token)) * 2,
+                },
+            ));
+        }
+    }
+
+    fn checkFloatResult(
+        state: *State,
+        expected: *const Wast.Command.Result,
+        accessor: anytype,
+        actual: anytype,
+    ) Error!void {
+        const print_width = @sizeOf(@TypeOf(actual)) * 2;
+        const PayloadInt = std.meta.Int(.unsigned, std.math.floatMantissaBits(@TypeOf(actual)));
+        const Bits = std.meta.Int(.unsigned, @typeInfo(@TypeOf(actual)).float.bits);
+
+        const actual_bits: Bits = @bitCast(actual);
+
+        const actual_nan_payload: PayloadInt = @intCast(actual_bits & std.math.maxInt(PayloadInt));
+        const canonical_nan_payload: PayloadInt = 1 << (@bitSizeOf(PayloadInt) - 1);
+
+        switch (expected.value_token.tag(state.errors.tree)) {
+            .integer, .float, .keyword_nan, .keyword_inf => {
+                const expected_bits: Bits = @call(
+                    .always_inline,
+                    @TypeOf(accessor).bits,
+                    .{ accessor, expected },
+                );
+
+                if (actual_bits != expected_bits)
+                    return scriptError(state.errors.errorFmtAtToken(
+                        expected.value_token,
+                        "expected 0x{[expected_b]X:0>[width]} ({[expected_f]}), " ++
+                            "but got 0x{[actual_b]X:0>[width]} ({[actual_f]})",
+                        .{
+                            .expected_b = expected_bits,
+                            .expected_f = @as(@TypeOf(actual), @bitCast(expected_bits)),
+                            .actual_b = actual_bits,
+                            .actual_f = actual,
+                            .width = print_width,
+                        },
+                    ));
+            },
+            .@"keyword_nan:canonical" => {
+                // https://webassembly.github.io/spec/core/syntax/values.html#canonical-nan
+                if (!std.math.isNan(actual) or actual_nan_payload != canonical_nan_payload)
+                    return scriptError(state.errors.errorFmtAtToken(
+                        expected.value_token,
+                        "expected canonical NaN, but got 0x{[bits]X:0>[width]} ({[float]})",
+                        .{
+                            .bits = actual_bits,
+                            .width = print_width,
+                            .float = actual,
+                        },
+                    ));
+            },
+            .@"keyword_nan:arithmetic" => {
+                if (!std.math.isNan(actual) or (actual_nan_payload & canonical_nan_payload) == 0)
+                    return scriptError(state.errors.errorFmtAtToken(
+                        expected.value_token,
+                        "expected arithmetic NaN, but got 0x{[bits]X:0>[width]} ({[float]})",
+                        .{
+                            .bits = actual_bits,
+                            .width = print_width,
+                            .float = actual,
+                        },
+                    ));
+            },
+            else => |bad| return scriptError(state.errors.errorFmtAtToken(
+                expected.keyword,
+                "TODO: handle " ++ @typeName(@TypeOf(expected)) ++ " result {s}",
+                .{@tagName(bad)},
+            )),
+        }
+    }
+
     fn expectResultValues(
         state: *State,
-        interpreter: *wasmstint.Interpreter,
+        interpreter: *Interpreter,
         parent: Wast.sexpr.TokenId,
+        script: *const Wast,
         results: []const Wast.Command.Result,
     ) Error!void {
         try state.runToCompletion(interpreter);
@@ -549,7 +667,10 @@ const State = struct {
             .awaiting_host => std.debug.assert(interpreter.call_stack.items.len == 0),
         }
 
-        const actual_results = try wrapInterpreterError(interpreter.copyResultValues(&state.cmd_arena));
+        const actual_results: []const Interpreter.TaggedValue = try wrapInterpreterError(
+            interpreter.copyResultValues(&state.cmd_arena),
+        );
+
         if (actual_results.len != results.len) {
             return scriptError(state.errors.errorFmtAtToken(
                 parent,
@@ -557,9 +678,78 @@ const State = struct {
                 .{ results.len, actual_results.len },
             ));
         }
+
+        for (actual_results, results, 0..) |*actual, *expected, index| {
+            const pos: u32 = @intCast(index);
+            switch (expected.keyword.tag(state.errors.tree)) {
+                .@"keyword_i32.const" => try state.checkIntegerResult(
+                    expected.value_token,
+                    expected.value.i32,
+                    try state.expectTypedValue(
+                        expected.value_token,
+                        actual,
+                        pos,
+                        .i32,
+                    ),
+                ),
+                .@"keyword_i64.const" => try state.checkIntegerResult(
+                    expected.value_token,
+                    expected.value.i64.get(script.arena),
+                    try state.expectTypedValue(
+                        expected.value_token,
+                        actual,
+                        pos,
+                        .i64,
+                    ),
+                ),
+                .@"keyword_f32.const" => {
+                    const GetF32 = struct {
+                        fn bits(_: @This(), result: *const Wast.Command.Result) u32 {
+                            return result.value.f32;
+                        }
+                    };
+
+                    try state.checkFloatResult(
+                        expected,
+                        GetF32{},
+                        try state.expectTypedValue(
+                            expected.value_token,
+                            actual,
+                            pos,
+                            .f32,
+                        ),
+                    );
+                },
+                .@"keyword_f64.const" => {
+                    const GetF64 = struct {
+                        arena: *const Wast.Arena,
+
+                        fn bits(ctx: @This(), result: *const Wast.Command.Result) u64 {
+                            return result.value.f64.get(ctx.arena);
+                        }
+                    };
+
+                    try state.checkFloatResult(
+                        expected,
+                        GetF64{ .arena = script.arena },
+                        try state.expectTypedValue(
+                            expected.value_token,
+                            actual,
+                            pos,
+                            .f64,
+                        ),
+                    );
+                },
+                else => |bad| return scriptError(state.errors.errorFmtAtToken(
+                    expected.keyword,
+                    "TODO: handle result {s}",
+                    .{@tagName(bad)},
+                )),
+            }
+        }
     }
 
-    const trap_code_lookup = std.StaticStringMap(wasmstint.Interpreter.TrapCode).initComptime(.{
+    const trap_code_lookup = std.StaticStringMap(Interpreter.TrapCode).initComptime(.{
         .{ "unreachable", .unreachable_code_reached },
         .{ "integer divide by zero", .integer_division_by_zero },
         .{ "integer overflow", .integer_overflow },
@@ -570,12 +760,12 @@ const State = struct {
     fn expectTrap(
         state: *State,
         script: *const Wast,
-        interpreter: *wasmstint.Interpreter,
+        interpreter: *Interpreter,
         parent: Wast.sexpr.TokenId,
         failure: *const Wast.Command.Failure,
     ) Error!void {
         try state.runToCompletion(interpreter);
-        const trap_code: wasmstint.Interpreter.TrapCode = switch (interpreter.state) {
+        const trap_code: Interpreter.TrapCode = switch (interpreter.state) {
             .awaiting_lazy_validation => unreachable,
             .trapped => |code| code,
             .interrupted => |cause| return state.errorInterpreterInterrupted(parent, cause),
@@ -602,12 +792,12 @@ const State = struct {
     fn expectExhaustion(
         state: *State,
         script: *const Wast,
-        interpreter: *wasmstint.Interpreter,
+        interpreter: *Interpreter,
         parent: Wast.sexpr.TokenId,
         failure: *const Wast.Command.Failure,
     ) Error!void {
         try state.runToCompletion(interpreter);
-        const interruption_cause: wasmstint.Interpreter.InterruptionCause = switch (interpreter.state) {
+        const interruption_cause: Interpreter.InterruptionCause = switch (interpreter.state) {
             .awaiting_lazy_validation => unreachable,
             .trapped => |code| return state.errorInterpreterTrap(parent, code),
             .interrupted => |cause| cause,
@@ -630,8 +820,8 @@ const State = struct {
         script: *const Wast,
         keyword: Wast.sexpr.TokenId,
         action: *const Wast.Command.Action,
-        interpreter: *wasmstint.Interpreter,
-        fuel: *wasmstint.Interpreter.Fuel,
+        interpreter: *Interpreter,
+        fuel: *Interpreter.Fuel,
     ) Error!void {
         const module = try state.getModuleInst(action.module, keyword);
         switch (action.keyword.tag(state.errors.tree)) {
@@ -646,11 +836,15 @@ const State = struct {
                 );
 
                 const callee = target_export.func;
-                const arguments = try allocateFunctionArguments(
+                const arguments = allocateFunctionArguments(
                     script,
                     action.target.invoke.arguments,
                     &state.cmd_arena,
-                );
+                    &state.errors,
+                ) catch |e| return switch (e) {
+                    error.OutOfMemory => |oom| oom,
+                    error.ReportedParserError => error.ScriptError,
+                };
 
                 interpreter.beginCall(
                     state.cmd_arena.allocator(),
@@ -793,6 +987,7 @@ fn runScript(
                 state.expectResultValues(
                     &interp,
                     cmd.keyword,
+                    script,
                     &[0]Wast.Command.Result{},
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
@@ -834,6 +1029,7 @@ fn runScript(
                 state.expectResultValues(
                     &interp,
                     cmd.keyword,
+                    script,
                     assert_return.results.items(script.arena),
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,

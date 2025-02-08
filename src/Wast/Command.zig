@@ -48,11 +48,11 @@ pub fn parseConstOrResult(
             const value: Value = switch (f.value(ctx.tree)) {
                 .bits => |bits| .{ .f32 = bits },
                 .nan_canonical => if (@hasField(Value, "f32_nan"))
-                    .{ .f32_nan = NanPattern.canonical }
+                    .{ .f32_nan = {} }
                 else
                     return (try ctx.errorAtToken(f.token, "invalid f32 literal")).err,
                 .nan_arithmetic => if (@hasField(Value, "f32_nan"))
-                    .{ .f32_nan = NanPattern.arithmetic }
+                    .{ .f32_nan = {} }
                 else
                     return (try ctx.errorAtToken(f.token, "invalid f32 literal")).err,
             };
@@ -74,11 +74,11 @@ pub fn parseConstOrResult(
                     break :bits .{ .f64 = alloc };
                 },
                 .nan_canonical => if (@hasField(Value, "f64_nan"))
-                    .{ .f64_nan = NanPattern.canonical }
+                    .{ .f64_nan = {} }
                 else
                     return (try ctx.errorAtToken(f.token, "invalid f64 literal")).err,
                 .nan_arithmetic => if (@hasField(Value, "f64_nan"))
-                    .{ .f64_nan = NanPattern.arithmetic }
+                    .{ .f64_nan = {} }
                 else
                     return (try ctx.errorAtToken(f.token, "invalid f64 literal")).err,
             };
@@ -164,8 +164,6 @@ pub const Const = struct {
     }
 };
 
-pub const NanPattern = enum { canonical, arithmetic };
-
 pub const Result = struct {
     keyword: sexpr.TokenId,
     value_token: sexpr.TokenId,
@@ -179,9 +177,10 @@ pub const Result = struct {
         i64: IndexedArena.IdxAligned(i64, 4),
         f64: IndexedArena.IdxAligned(u64, 4),
         // v128: IndexedArena.IdxAligned([u8; 16], 4),
-        /// `keyword.tag == .@"keyword_f32.const" and value_token.tag == .@"keyword_nan:canonical"`
-        f32_nan: NanPattern,
-        f64_nan: NanPattern,
+        /// `keyword.tag == .@"keyword_f32.const" and
+        /// (value_token.tag == .@"keyword_nan:canonical" or value_token.tag == .@"keyword_nan:arithmetic")`
+        f32_nan: void,
+        f64_nan: void,
         // ref_null: enum { func, extern },
         ref_extern: u31,
         ref_extern_unspecified: void,
