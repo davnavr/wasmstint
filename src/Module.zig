@@ -1294,9 +1294,9 @@ pub fn parse(
             // 1 1 0 | active      | reftype
             // 1 1 1 | declarative | reftype
             const elem_type_parser: ElemTypeParser = if (tag.kind == .active)
-                if (!tag.use_elem_exprs and !tag.bit_1.active_has_table_idx)
+                if (!tag.bit_1.active_has_table_idx)
                     .none
-                else if (tag.use_elem_exprs and tag.bit_1.active_has_table_idx)
+                else if (tag.use_elem_exprs)
                     .reftype
                 else
                     .elemkind

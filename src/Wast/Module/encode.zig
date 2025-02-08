@@ -85,6 +85,7 @@ pub const FuncIdx = enum(u32) {
 };
 
 pub const TableIdx = enum(u32) {
+    default = 0,
     probably_invalid = std.math.maxInt(u32),
     _,
 };
@@ -95,6 +96,11 @@ pub const MemIdx = enum(u32) {
 };
 
 pub const GlobalIdx = enum(u32) {
+    probably_invalid = std.math.maxInt(u32),
+    _,
+};
+
+pub const ElemIdx = enum(u32) {
     probably_invalid = std.math.maxInt(u32),
     _,
 };
@@ -268,6 +274,61 @@ const Mem = struct {
     inferred_limit: u32,
 };
 
+const ElemSegment = struct {
+    source: packed struct(u32) {
+        tag: Tag,
+        inner: Inner,
+    },
+    /// Set only when `.tag == .module_field`.
+    idx: TableIdx,
+
+    const Tag = enum(u1) { module_field, inline_table };
+
+    const Expanded = union(Tag) {
+        module_field: IndexedArena.Idx(Text.Elem),
+        inline_table: struct {
+            field: IndexedArena.Idx(Text.Table),
+            idx: TableIdx,
+        },
+    };
+
+    const Inner = packed union {
+        module_field: IndexedArena.Idx(Text.Elem),
+        inline_table: IndexedArena.Idx(Text.Table),
+    };
+
+    fn init(
+        comptime tag: Tag,
+        payload: @FieldType(Expanded, @tagName(tag)),
+    ) ElemSegment {
+        return .{
+            .source = .{
+                .tag = tag,
+                .inner = switch (tag) {
+                    .inline_table => .{ .inline_table = payload.field },
+                    .module_field => .{ .module_field = payload },
+                },
+            },
+            .idx = switch (tag) {
+                .inline_table => payload.idx,
+                .module_field => undefined,
+            },
+        };
+    }
+
+    fn expanded(elem: ElemSegment) Expanded {
+        return switch (elem.source.tag) {
+            .inline_table => .{
+                .inline_table = .{
+                    .field = elem.source.inner.inline_table,
+                    .idx = elem.idx,
+                },
+            },
+            .module_field => .{ .module_field = elem.source.inner.module_field },
+        };
+    }
+};
+
 const DataSegment = struct {
     source: packed struct(u32) {
         tag: Tag,
@@ -343,6 +404,7 @@ const Wasm = struct {
     global_count: IdxCounter(GlobalIdx) = .{},
     defined_globals: std.SegmentedList(IndexedArena.Idx(Text.Global), 2) = .{},
 
+    elem_segments: std.SegmentedList(ElemSegment, 1) = .{},
     data_segments: std.SegmentedList(DataSegment, 1) = .{},
 
     type_uses: std.AutoArrayHashMapUnmanaged(*const Text.TypeUse, TypeIdx) = .empty,
@@ -353,6 +415,7 @@ const Wasm = struct {
     table_ids: IdentLookup(TableIdx) = .empty,
     mem_ids: IdentLookup(MemIdx) = .empty,
     global_ids: IdentLookup(GlobalIdx) = .empty,
+    elem_ids: IdentLookup(ElemIdx) = .empty,
     data_ids: IdentLookup(DataIdx) = .empty,
 
     fn checkImportOrdering(
@@ -557,6 +620,7 @@ pub const LocalIdx = enum(u32) {
     _,
 };
 
+/// Stores local variable information.
 pub const FuncContext = struct {
     local_lookup: IdentLookup(LocalIdx) = .empty,
     local_counter: IdxCounter(LocalIdx) = .{},
@@ -1089,7 +1153,13 @@ fn encodeText(
                 }
 
                 if (has_elems) {
-                    // TODO: Add the inline element segment.
+                    try wasm.elem_segments.append(
+                        alloca.allocator(),
+                        ElemSegment.init(
+                            .inline_table,
+                            .{ .field = table_field, .idx = table_idx },
+                        ),
+                    );
                 }
             },
             .keyword_memory => {
@@ -1172,6 +1242,25 @@ fn encodeText(
                         ),
                     );
                 }
+            },
+            .keyword_elem => {
+                const elem_field = field.contents.elem;
+                const elem_field_ptr: *const Text.Elem = elem_field.getPtr(arena);
+                const elem_idx: ElemIdx = @enumFromInt(
+                    std.math.cast(u32, wasm.elem_segments.len) orelse return error.OutOfMemory,
+                );
+
+                try wasm.elem_ids.insert(
+                    text_ctx,
+                    elem_field_ptr.id,
+                    elem_idx,
+                    alloca,
+                );
+
+                try wasm.elem_segments.append(
+                    alloca.allocator(),
+                    ElemSegment.init(.module_field, elem_field),
+                );
             },
             .keyword_data => {
                 const data_field = field.contents.data;
@@ -1465,6 +1554,167 @@ fn encodeText(
         }
 
         try encodeSection(final_output, 7, section_buf.items);
+    }
+
+    // start function
+
+    if (wasm.elem_segments.len > 0) {
+        section_buf.clearRetainingCapacity();
+
+        const output = section_buf.writer();
+        try encodeVecLen(output, wasm.elem_segments.len);
+
+        const offset_zero = &[_]u8{
+            @intFromEnum(opcodes.ByteOpcode.@"i32.const"),
+            0,
+            @intFromEnum(opcodes.ByteOpcode.end),
+        };
+
+        var func_ctx = FuncContext{};
+
+        var iter_elems = wasm.elem_segments.constIterator(0);
+        while (iter_elems.next()) |elem_segment| {
+            const ElemKind = enum(u8) { funcref = 0x00 };
+
+            const elements: Text.Table.InlineElements = elements: switch (elem_segment.expanded()) {
+                .inline_table => |inline_table| {
+                    const table_field: *const Text.Table = inline_table.field.getPtr(arena);
+                    const elements = &table_field.inner.ref_type.elements;
+
+                    const Flags = packed struct(u3) {
+                        is_not_active: bool = false,
+                        has_table_idx: bool,
+                        use_elem_exprs: bool,
+                    };
+
+                    const flags: Flags = Flags{
+                        .has_table_idx = inline_table.idx != TableIdx.default,
+                        .use_elem_exprs = elements.* == .expressions,
+                    };
+
+                    try writeUleb128(output, @as(u32, @as(u3, @bitCast(flags))));
+
+                    if (flags.has_table_idx) {
+                        try writeUleb128(output, @intFromEnum(inline_table.idx));
+                    }
+
+                    try output.writeAll(offset_zero);
+
+                    if (flags.has_table_idx) {
+                        if (flags.use_elem_exprs) {
+                            try ValType.funcref.encode(output);
+                        } else {
+                            try output.writeByte(@intFromEnum(ElemKind.funcref));
+                        }
+                    }
+
+                    break :elements elements.*;
+                },
+                .module_field => |elem_field_idx| {
+                    const elem_field: *const Text.Elem = elem_field_idx.getPtr(arena);
+
+                    const table: TableIdx = if (elem_field.table.get()) |table_id|
+                        try wasm.table_ids.getFromIdent(text_ctx, table_id)
+                    else
+                        .default;
+
+                    const Flags = packed struct(u3) {
+                        is_not_active: bool,
+                        bit_1: packed union {
+                            active_has_table_idx: bool,
+                            is_declarative: bool,
+                        },
+                        use_elem_exprs: bool,
+                    };
+
+                    const is_not_active = (!elem_field.table.some) and
+                        (!elem_field.keyword.some or elem_field.keyword.inner_id.tag(text_ctx.tree) != .keyword_table) and
+                        elem_field.offset.isOmitted();
+
+                    const flags = Flags{
+                        .is_not_active = is_not_active,
+                        .bit_1 = if (is_not_active)
+                            .{
+                                .is_declarative = elem_field.keyword.some and
+                                    elem_field.keyword.inner_id.tag(text_ctx.tree) == .keyword_declare,
+                            }
+                        else
+                            .{ .active_has_table_idx = table != .default },
+                        .use_elem_exprs = elem_field.elements.itemsTag(text_ctx.tree) == .expressions,
+                    };
+
+                    try writeUleb128(output, @as(u32, @as(u3, @bitCast(flags))));
+
+                    const is_active = !is_not_active;
+                    if (is_active and flags.bit_1.active_has_table_idx) {
+                        std.debug.assert(is_active);
+                        try encodeIdx(output, TableIdx, table);
+                    }
+
+                    if (elem_field.offset.get()) |offset| {
+                        std.debug.assert(is_active);
+                        try encodeExpr(
+                            output,
+                            &wasm,
+                            &offset.expr,
+                            &func_ctx,
+                            text_ctx,
+                            arena,
+                            caches,
+                            &scratch,
+                        );
+                    } else if (is_active) {
+                        try output.writeAll(offset_zero);
+                    }
+
+                    const elem_reftype = if (elem_field.elements.ref_type.asValType(text_ctx.tree)) |ref_type|
+                        ValType.fromValType(ref_type, text_ctx.tree)
+                    else
+                        ValType.funcref;
+
+                    if (is_active and !flags.bit_1.active_has_table_idx) {
+                        std.debug.assert(elem_reftype == .funcref);
+                    } else if (flags.use_elem_exprs) {
+                        try elem_reftype.encode(output);
+                    } else {
+                        std.debug.assert(elem_reftype == .funcref);
+                        try output.writeByte(@intFromEnum(ElemKind.funcref));
+                    }
+
+                    break :elements elem_field.elements.itemsExpanded(text_ctx.tree);
+                },
+            };
+
+            switch (elements) {
+                .expressions => |exprs| {
+                    try writeUleb128(output, exprs.len);
+                    for (@as([]const Text.Elem.Item, exprs.items(arena))) |elem_item| {
+                        try encodeExpr(
+                            output,
+                            &wasm,
+                            &elem_item.expr,
+                            &func_ctx,
+                            text_ctx,
+                            arena,
+                            caches,
+                            &scratch,
+                        );
+                    }
+                },
+                .indices => |indices| {
+                    try writeUleb128(output, indices.len);
+                    for (@as([]align(4) const Ident, indices.items(arena))) |func_idx| {
+                        try encodeIdx(
+                            output,
+                            FuncIdx,
+                            try wasm.func_ids.getFromIdent(text_ctx, func_idx),
+                        );
+                    }
+                },
+            }
+        }
+
+        try encodeSection(final_output, 9, section_buf.items);
     }
 
     if (code_needs_data_count) {

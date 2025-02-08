@@ -841,8 +841,6 @@ pub const Data = struct {
 
     pub const Offset = struct {
         /// The `offset` keyword.
-        ///
-        /// If omitted, then it is an invariant that `expr.count == 2`.
         keyword: sexpr.TokenId.Opt,
         expr: Expr,
     };
@@ -994,8 +992,12 @@ pub const Elem = struct {
             },
         };
 
+        pub fn isOmitted(offset: *const Offset) bool {
+            return offset.inner.expr.count == 0;
+        }
+
         pub fn get(offset: *const Offset) ?*const Data.Offset {
-            return if (offset.inner.expr.count == 0) null else &offset.inner;
+            return if (offset.isOmitted()) null else &offset.inner;
         }
     };
 
@@ -1030,6 +1032,16 @@ pub const Elem = struct {
                 .indices
             else
                 .expressions;
+        }
+
+        pub fn itemsExpanded(list: *const List, tree: *const sexpr.Tree) Table.InlineElements {
+            return switch (list.itemsTag(tree)) {
+                inline else => |tag| @unionInit(
+                    Table.InlineElements,
+                    @tagName(tag),
+                    @field(list.items, @tagName(tag)),
+                ),
+            };
         }
     };
 
