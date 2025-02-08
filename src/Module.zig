@@ -1347,7 +1347,7 @@ pub fn parse(
                 for (0..expr_count) |_| {
                     func_indices.appendAssumeCapacity(
                         &arena,
-                        try elems_reader.readIdx(FuncIdx, import_sec.funcs),
+                        try elems_reader.readIdx(FuncIdx, func_types),
                     );
                 }
 

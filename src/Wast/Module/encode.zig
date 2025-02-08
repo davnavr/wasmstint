@@ -1714,6 +1714,8 @@ fn encodeText(
             }
         }
 
+        // std.debug.dumpHex(section_buf.items);
+
         try encodeSection(final_output, 9, section_buf.items);
     }
 
