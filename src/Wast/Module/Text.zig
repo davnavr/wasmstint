@@ -45,6 +45,7 @@ pub const Contents = union {
     mem: IndexedArena.Idx(Mem),
     global: IndexedArena.Idx(Global),
     data: IndexedArena.Idx(Data),
+    elem: IndexedArena.Idx(Elem),
 };
 
 pub const ValType = struct {
@@ -556,7 +557,7 @@ pub const Table = struct {
     },
 
     pub const InlineElements = union(enum) {
-        expressions: IndexedArena.Slice(ElementSegment.Item),
+        expressions: IndexedArena.Slice(Elem.Item),
         indices: IndexedArena.SliceAligned(Ident, 4),
     };
 
@@ -663,7 +664,7 @@ pub const Table = struct {
                         break :elements InlineElements{ .indices = indices.items };
                     },
                     .list => |first_elem_list| {
-                        var items = try IndexedArena.BoundedArrayList(ElementSegment.Item).initCapacity(
+                        var items = try IndexedArena.BoundedArrayList(Elem.Item).initCapacity(
                             arena,
                             1 + elem_contents.remaining.len,
                         );
@@ -671,7 +672,7 @@ pub const Table = struct {
                         _ = scratch.reset(.retain_capacity);
                         items.appendAssumeCapacity(
                             arena,
-                            try ElementSegment.Item.parseList(
+                            try Elem.Item.parseList(
                                 first_elem_list,
                                 ctx,
                                 arena,
@@ -682,7 +683,7 @@ pub const Table = struct {
 
                         while (!elem_contents.isEmpty()) {
                             _ = scratch.reset(.retain_capacity);
-                            const parsed_item = try ElementSegment.Item.parse(
+                            const parsed_item = try Elem.Item.parse(
                                 &elem_contents,
                                 ctx,
                                 elem_list,
@@ -961,7 +962,77 @@ pub const Data = struct {
     }
 };
 
-pub const ElementSegment = struct {
+/// <https://webassembly.github.io/spec/core/text/modules.html#element-segments>
+pub const Elem = struct {
+    id: Ident.Symbolic align(4),
+    /// The *table* that an *active* element segment copies its contents to. If omitted,
+    /// this implicitly refers to table `0`.
+    ///
+    /// Always set to `.none` in the case of *passive* and *declarative* element segments.
+    table: Ident.Opt align(4),
+    /// If `table.some`, then this refers to the `table` keyword in the *tableuse*.
+    ///
+    /// Otherwise, this is a *passive* element segment when `.none`, or refers to the
+    /// `declare` keyword in the case of a *declarative* element segment.
+    keyword: sexpr.TokenId.Opt,
+    /// Only set for *active* element segments.
+    ///
+    /// If `.omitted`, then a default offset of `0` is used.
+    offset: Offset,
+    elements: List,
+
+    pub const Offset = struct {
+        inner: Data.Offset,
+
+        pub const omitted = Offset{
+            .inner = .{
+                .keyword = .none,
+                .expr = .{
+                    .contents = .empty,
+                    .count = 0,
+                },
+            },
+        };
+
+        pub fn get(offset: *const Offset) ?*const Data.Offset {
+            return if (offset.inner.expr.count == 0) null else &offset.inner;
+        }
+    };
+
+    pub const ElemType = struct {
+        /// If this is not a *reftype*, but instead the `func` keyword or `.none`, then the
+        /// elements are a sequence of function indices.
+        keyword: sexpr.TokenId.Opt,
+
+        pub fn asValType(elem_type: ElemType, tree: *const sexpr.Tree) ?ValType {
+            const keyword = elem_type.keyword.get() orelse
+                return null;
+
+            return if (keyword.tag(tree) == .keyword_func)
+                null
+            else
+                ValType{ .keyword = keyword, .type = .{ .simple = {} } };
+        }
+    };
+
+    pub const List = struct {
+        ref_type: ElemType,
+        items: Items,
+
+        pub const Items = union {
+            expressions: IndexedArena.Slice(Item),
+            /// Only when `ref_type.token` is the `func` keyword.
+            indices: IndexedArena.SliceAligned(Ident, 4),
+        };
+
+        pub fn itemsTag(list: *const List, tree: *const sexpr.Tree) std.meta.FieldEnum(Items) {
+            return if (!list.ref_type.keyword.some or list.ref_type.keyword.inner_id.tag(tree) == .keyword_func)
+                .indices
+            else
+                .expressions;
+        }
+    };
+
     /// An *`elemexpr`*.
     pub const Item = struct {
         /// The `item` keyword.
@@ -1017,7 +1088,232 @@ pub const ElementSegment = struct {
         }
     };
 
-    // TODO: parser for standalone element segment module field
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        ctx: *ParseContext,
+        parent: sexpr.List.Id,
+        arena: *IndexedArena,
+        caches: *Caches,
+        scratch: *ArenaAllocator,
+    ) sexpr.Parser.ParseError!IndexedArena.Idx(Elem) {
+        const elem_idx = try arena.create(Elem);
+        var elem = Elem{
+            .id = try Ident.Symbolic.parse(
+                contents,
+                ctx.tree,
+                caches.allocator,
+                &caches.ids,
+            ),
+            .table = .none,
+            .keyword = .none,
+            .offset = .omitted,
+            .elements = undefined,
+        };
+
+        const State = union(enum) {
+            start: void,
+            ref_type: sexpr.TokenId.Opt,
+            offset: struct {
+                parser: sexpr.Parser,
+                list: sexpr.List.Id,
+            },
+        };
+
+        state: switch (State{ .start = {} }) {
+            .start => {
+                const declare_reftype_tableuse_or_offset = contents.parseValue() catch {
+                    break :state; // active, but offset and table is 0
+                };
+
+                switch (declare_reftype_tableuse_or_offset.unpacked()) {
+                    .atom => |declare_or_reftype_keyword| continue :state State{
+                        .ref_type = if (declare_or_reftype_keyword.tag(ctx.tree) == .keyword_declare) declare: {
+                            elem.keyword = sexpr.TokenId.Opt.init(declare_or_reftype_keyword);
+                            break :declare .none;
+                        } else sexpr.TokenId.Opt.init(declare_or_reftype_keyword),
+                    },
+                    .list => |table_or_offset| {
+                        const table_or_offset_parser_init = sexpr.Parser.init(
+                            table_or_offset.contents(ctx.tree).values(ctx.tree),
+                        );
+
+                        var table_or_offset_parser = table_or_offset_parser_init;
+
+                        const table_or_offset_keyword = try table_or_offset_parser.parseAtomInList(
+                            table_or_offset,
+                            ctx,
+                            "'table', 'offset', or an instruction",
+                        );
+
+                        switch (table_or_offset_keyword.tag(ctx.tree)) {
+                            .keyword_table => {
+                                const table_id = try Ident.parse(
+                                    &table_or_offset_parser,
+                                    ctx,
+                                    table_or_offset,
+                                    caches.allocator,
+                                    &caches.ids,
+                                );
+
+                                elem.table = Ident.Opt.init(table_id);
+                                elem.keyword = sexpr.TokenId.Opt.init(table_or_offset_keyword);
+                                try table_or_offset_parser.expectEmpty(ctx);
+
+                                const offset_list = try contents.parseListInList(parent, ctx);
+                                const offset_parser_init = sexpr.Parser.init(
+                                    offset_list.contents(ctx.tree).values(ctx.tree),
+                                );
+
+                                var offset_parser = offset_parser_init;
+                                const maybe_offset_keyword = try offset_parser.parseAtomInList(
+                                    offset_list,
+                                    ctx,
+                                    "'offset' or instruction",
+                                );
+
+                                continue :state State{
+                                    .offset = .{
+                                        .parser = if (maybe_offset_keyword.tag(ctx.tree) == .keyword_offset) has_offset: {
+                                            elem.offset.inner.keyword = sexpr.TokenId.Opt.init(maybe_offset_keyword);
+                                            break :has_offset offset_parser;
+                                        } else offset_parser_init,
+                                        .list = offset_list,
+                                    },
+                                };
+                            },
+                            // table is omitted, defaults to 0.
+                            .keyword_offset => {
+                                elem.offset.inner.keyword = sexpr.TokenId.Opt.init(table_or_offset_keyword);
+                                continue :state State{
+                                    .offset = .{
+                                        .parser = table_or_offset_parser,
+                                        .list = table_or_offset,
+                                    },
+                                };
+                            },
+                            else => continue :state State{
+                                .offset = .{
+                                    .parser = table_or_offset_parser_init,
+                                    .list = table_or_offset,
+                                },
+                            },
+                        }
+                    },
+                }
+            },
+            .offset => |offset| {
+                var offset_parser = offset.parser;
+                elem.offset.inner.expr = try Expr.parseContents(
+                    &offset_parser,
+                    ctx,
+                    offset.list,
+                    arena,
+                    caches,
+                    scratch,
+                );
+
+                std.debug.assert(offset_parser.isEmpty());
+                continue :state .{ .ref_type = .none };
+            },
+            .ref_type => |ref_type| {
+                const ref_type_token = ref_type.get() orelse contents.parseAtom(
+                    ctx,
+                    "reftype or 'func' keyword",
+                ) catch |e| {
+                    // omitted tableuse means func keyword can be inferred.
+                    if (!elem.table.some and !elem.keyword.some) {
+                        elem.elements.ref_type = .{ .keyword = .none };
+                        break :state;
+                    }
+
+                    return switch (e) {
+                        error.EndOfStream => (try ctx.errorAtList(
+                            parent,
+                            .end,
+                            "expected reftype or 'func' keyword",
+                        )).err,
+                        else => |err| err,
+                    };
+                };
+
+                switch (ref_type_token.tag(ctx.tree)) {
+                    .keyword_func,
+                    .keyword_funcref,
+                    .keyword_externref,
+                    => {
+                        elem.elements.ref_type = .{
+                            .keyword = sexpr.TokenId.Opt.init(ref_type_token),
+                        };
+                        break :state;
+                    },
+                    else => return (try ctx.errorAtToken(
+                        ref_type_token,
+                        "expected reftype or 'func' keyword",
+                    )).err,
+                }
+            },
+        }
+
+        const elem_count = std.math.cast(u32, contents.remaining.len) orelse
+            return error.OutOfMemory;
+
+        elem.elements.items = items: switch (elem.elements.itemsTag(ctx.tree)) {
+            .indices => {
+                var indices = try IndexedArena.BoundedArrayListAligned(Ident, 4).initCapacity(
+                    arena,
+                    elem_count,
+                );
+
+                for (0..elem_count) |_| {
+                    const ident_token = contents.parseAtom(
+                        ctx,
+                        "function identifier or closing parentehsis",
+                    ) catch |e| switch (e) {
+                        error.EndOfStream => unreachable,
+                        else => |err| return err,
+                    };
+
+                    indices.appendAssumeCapacity(
+                        arena,
+                        try Ident.parseAtom(
+                            ident_token,
+                            ctx,
+                            caches.allocator,
+                            &caches.ids,
+                        ),
+                    );
+                }
+
+                break :items List.Items{ .indices = indices.items };
+            },
+            .expressions => {
+                var expressions = try IndexedArena.BoundedArrayList(Item).initCapacity(
+                    arena,
+                    elem_count,
+                );
+
+                for (0..elem_count) |_| {
+                    _ = scratch.reset(.retain_capacity);
+
+                    const item_list = contents.parseList(ctx) catch |e| switch (e) {
+                        error.EndOfStream => unreachable,
+                        else => |err| return err,
+                    };
+
+                    expressions.appendAssumeCapacity(
+                        arena,
+                        try Item.parseList(item_list, ctx, arena, caches, scratch),
+                    );
+                }
+
+                break :items List.Items{ .expressions = expressions.items };
+            },
+        };
+
+        std.debug.assert(contents.isEmpty());
+        elem_idx.set(arena, elem);
+        return elem_idx;
+    }
 };
 
 pub fn parseFields(
@@ -1127,6 +1423,21 @@ pub fn parseFields(
                 };
 
                 break :field .{ .global = parsed_global };
+            },
+            .keyword_elem => {
+                const parsed_elem = Elem.parseContents(
+                    &field_contents,
+                    ctx,
+                    field_list,
+                    arena,
+                    caches,
+                    scratch,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
+                };
+
+                break :field .{ .elem = parsed_elem };
             },
             .keyword_data => {
                 const parsed_data = Data.parseContents(
