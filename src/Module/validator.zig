@@ -75,13 +75,6 @@ pub const State = struct {
     /// For example, `0` means the first byte of the LEB128-encoded count of the locals vector.
     error_offset: u32 = undefined,
 
-    pub const Sizes = extern struct {
-        /// The maximum amount of space needed in the value stack for executing this function.
-        max_values: u32,
-        /// The number of local variables, excluding parameters.
-        local_values: u32,
-    };
-
     /// 32-bit integer allows using `std.Thread.Futex` to wait for another thread that is currently
     /// validating the same code.
     pub const Flag = enum(u32) {
@@ -877,7 +870,7 @@ fn doValidation(
             }
         }
 
-        state.local_values = @intCast(local_vars.len);
+        state.local_values = @intCast(local_vars.len - func_type.param_count);
 
         const buf = try scratch.allocator().alloc(ValType, local_vars.len);
         local_vars.writeToSlice(@ptrCast(buf), 0);
