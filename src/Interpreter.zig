@@ -1827,15 +1827,33 @@ const opcode_handlers = struct {
     }
 
     pub fn @"memory.grow"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        const mem_idx = i.readUleb128(@typeInfo(Module.MemIdx).@"enum".tag_type) catch unreachable;
+        const mem_idx = i.nextIdx(Module.MemIdx);
+        const mem = int.currentFrame().function.expanded().wasm.module.header().memAddr(mem_idx);
 
         const delta: u32 = @bitCast(vals.pop().i32);
 
-        _ = mem_idx;
-        _ = delta;
+        const grow_failed: i32 = -1;
+
+        const result: i32 = result: {
+            const delta_bytes = std.math.mul(u32, runtime.MemInst.page_size, delta) catch
+                break :result grow_failed;
+
+            if (mem.limit - mem.size < delta_bytes) {
+                break :result grow_failed;
+            } else if (mem.capacity - mem.size >= delta_bytes) {
+                const new_size: u32 = @as(u32, @intCast(mem.size)) + delta_bytes;
+                @memset(mem.bytes()[mem.size..new_size], 0);
+                const old_size: u32 = @intCast(mem.size);
+                mem.size = new_size;
+                break :result @bitCast(@as(u32, @intCast(old_size)));
+            } else {
+                // TODO: Add a new interruption kind.
+                break :result grow_failed;
+            }
+        };
 
         // TODO: Add a new interruption kind.
-        vals.appendAssumeCapacity(.{ .i32 = -1 });
+        vals.appendAssumeCapacity(.{ .i32 = result });
 
         std.debug.assert(loc <= vals.items.len);
         if (i.nextOpcodeHandler(fuel, int)) |next| {
