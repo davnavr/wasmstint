@@ -200,10 +200,17 @@ pub fn copyResultValues(interp: *const Interpreter, arena: *std.heap.ArenaAlloca
 }
 
 fn allocateValueStackSpace(interp: *Interpreter, alloca: Allocator, code: *const Module.Code) Allocator.Error!u16 {
-    const total = std.math.add(u16, code.state.local_values, code.state.max_values) catch return error.OutOfMemory;
+    const total = std.math.add(u16, code.state.local_values, code.state.max_values) catch
+        return error.OutOfMemory;
+
     try interp.value_stack.ensureUnusedCapacity(alloca, total);
+
     // In WebAssembly, locals are set to zero on entrance to a function.
     interp.value_stack.appendNTimes(undefined, std.mem.zeroes(Value), code.state.local_values) catch unreachable;
+
+    const value_stack_base = interp.value_stack.items.len;
+    @memset(interp.value_stack.items[value_stack_base..], undefined);
+
     return total;
 }
 
