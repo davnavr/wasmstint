@@ -604,13 +604,14 @@ const State = struct {
         actual: anytype,
     ) Error!void {
         const print_width = @sizeOf(@TypeOf(actual)) * 2;
-        const PayloadInt = std.meta.Int(.unsigned, std.math.floatMantissaBits(@TypeOf(actual)));
         const Bits = std.meta.Int(.unsigned, @typeInfo(@TypeOf(actual)).float.bits);
 
-        const actual_bits: Bits = @bitCast(actual);
-
-        const actual_nan_payload: PayloadInt = @intCast(actual_bits & std.math.maxInt(PayloadInt));
+        const PayloadInt = std.meta.Int(.unsigned, std.math.floatMantissaBits(@TypeOf(actual)));
+        const nan_payload_mask = std.math.maxInt(PayloadInt);
         const canonical_nan_payload: PayloadInt = 1 << (@bitSizeOf(PayloadInt) - 1);
+
+        const actual_bits: Bits = @bitCast(actual);
+        const actual_nan_payload: PayloadInt = @intCast(actual_bits & nan_payload_mask);
 
         switch (expected.value_token.tag(state.errors.tree)) {
             .integer, .float, .keyword_nan, .keyword_inf => {
@@ -659,10 +660,37 @@ const State = struct {
                         },
                     ));
             },
+            .keyword_unknown => {
+                const expected_nan_pattern: PayloadInt = @intCast(@as(Bits, @call(
+                    .always_inline,
+                    @TypeOf(accessor).bits,
+                    .{ accessor, expected },
+                )) & nan_payload_mask);
+
+                if (!std.math.isNan(actual) or actual_nan_payload != expected_nan_pattern)
+                    return scriptError(state.errors.errorFmtAtToken(
+                        expected.value_token,
+                        "expected NaN with payload 0x{[expected]X:0>[payload_width]}, " ++
+                            "but got 0x{[bits]X:0>[width]} ({[float]})",
+                        .{
+                            .expected = expected_nan_pattern,
+                            .payload_width = @sizeOf(PayloadInt) * 2,
+                            .bits = actual_bits,
+                            .width = print_width,
+                            .float = actual,
+                        },
+                    ));
+            },
             else => |bad| return scriptError(state.errors.errorFmtAtToken(
-                expected.keyword,
-                "TODO: handle " ++ @typeName(@TypeOf(expected)) ++ " result {s}",
-                .{@tagName(bad)},
+                expected.value_token,
+                "TODO: handle " ++ @typeName(@TypeOf(actual)) ++ " result {[tag]s} " ++
+                    "(result was 0x{[bits]X:0>[width]} ({[float]}))",
+                .{
+                    .tag = @tagName(bad),
+                    .bits = actual_bits,
+                    .width = print_width,
+                    .float = actual,
+                },
             )),
         }
     }
