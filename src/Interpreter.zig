@@ -462,7 +462,7 @@ pub fn instantiateModule(
             return;
         };
 
-        if (table.table.len < offset or table.table.len < end_offset) {
+        if (table.table.len < end_offset) {
             interp.state = .{ .trapped = .table_access_out_of_bounds };
             return;
         }
@@ -491,7 +491,37 @@ pub fn instantiateModule(
         }
     }
 
-    // TODO: Initialize, active data segments
+    for (wasm.inner.active_datas[0..wasm.inner.active_datas_count]) |*active_data| {
+        const mem = module_inst.memAddr(active_data.header.memory);
+
+        const offset: u32 = switch (active_data.header.offset_tag) {
+            .@"i32.const" => active_data.offset.@"i32.const",
+            .@"global.get" => get: {
+                const global = module_inst.globalAddr(active_data.offset.@"global.get");
+                std.debug.assert(global.global_type.val_type == .i32);
+                break :get @as(*const u32, @ptrCast(@alignCast(global.value))).*;
+            },
+        };
+
+        const src: []const u8 = wasm.dataSegmentContents(active_data.data);
+        std.debug.assert(src.len <= std.math.maxInt(u32));
+
+        // This is intended to follow the semantics of memory.init
+
+        const end_idx = std.math.add(usize, offset, src.len) catch {
+            interp.state = .{ .trapped = .memory_access_out_of_bounds };
+            return;
+        };
+
+        if (mem.size < end_idx) {
+            interp.state = .{ .trapped = .memory_access_out_of_bounds };
+            return;
+        }
+
+        const dst: []u8 = mem.bytes()[offset..end_idx];
+        std.debug.assert(src.len == dst.len);
+        @memcpy(dst, src);
+    }
 
     const start_func = if (wasm.inner.start.get()) |start_idx|
         module_inst.funcAddr(start_idx)
