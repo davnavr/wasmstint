@@ -1353,14 +1353,28 @@ fn floatOpcodeHandlers(comptime F: type) type {
                 return z_1 / z_2;
             }
 
+            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-fmin
             fn min(z_1: F, z_2: F) !F {
-                // @min(z_1, z_2) // Zig currently generates a call to llvm.minnum
-                return if (z_2 < z_1) z_2 else z_1;
+                return if (std.math.isNan(z_1) or std.math.isNan(z_2))
+                    z_1 + z_2 // Pick a NaN
+                else if ((std.math.isNegativeZero(z_1) and std.math.isPositiveZero(z_2)) or
+                    (std.math.isPositiveZero(z_1) and std.math.isNegativeZero(z_2)))
+                    -0.0
+                else
+                    // Zig currently maps `@min` to a call to `llvm.minnum`
+                    @min(z_1, z_2);
             }
 
+            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-fmax
             fn max(z_1: F, z_2: F) !F {
-                // @max(z_1, z_2) // Zig currently generates a call to llvm.maxnum
-                return if (z_1 < z_2) z_2 else z_1;
+                return if (std.math.isNan(z_1) or std.math.isNan(z_2))
+                    z_1 + z_2 // Pick a NaN
+                else if ((std.math.isNegativeZero(z_1) and std.math.isPositiveZero(z_2)) or
+                    (std.math.isPositiveZero(z_1) and std.math.isNegativeZero(z_2)))
+                    0.0 // positive zero
+                else
+                    // Zig currently maps `@max` to a call to `llvm.maxnum`
+                    @max(z_1, z_2);
             }
 
             /// https://webassembly.github.io/spec/core/exec/numerics.html#op-fcopysign
