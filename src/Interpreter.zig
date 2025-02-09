@@ -199,6 +199,7 @@ pub fn copyResultValues(interp: *const Interpreter, arena: *std.heap.ArenaAlloca
     return dst;
 }
 
+/// Reserves space for the value stack and local variables (that aren't parameters).
 fn allocateValueStackSpace(interp: *Interpreter, alloca: Allocator, code: *const Module.Code) Allocator.Error!u16 {
     const total = std.math.add(u16, code.state.local_values, code.state.max_values) catch
         return error.OutOfMemory;
@@ -210,6 +211,11 @@ fn allocateValueStackSpace(interp: *Interpreter, alloca: Allocator, code: *const
 
     const value_stack_base = interp.value_stack.items.len;
     @memset(interp.value_stack.items[value_stack_base..], undefined);
+
+    // std.debug.print(
+    //     "allocated {} entries: {} locals, {} for value stack (base height = {})\n",
+    //     .{ total, code.state.local_values, code.state.max_values, value_stack_base },
+    // );
 
     return total;
 }
@@ -644,6 +650,7 @@ const Instructions = extern struct {
     }
 
     inline fn nextIdx(reader: *Instructions, comptime I: type) I {
+        // TODO: Fix, should always parse a u32, spec w/o multi-memory only allows parsing single byte for MemIdxs
         return @enumFromInt(reader.readUleb128(@typeInfo(I).@"enum".tag_type) catch unreachable);
     }
 
@@ -658,14 +665,15 @@ const Instructions = extern struct {
         } else {
             fuel.remaining -= 1;
 
-            // const saved_ip = @intFromPtr(reader.p) -
-            //     @intFromPtr(interp.currentFrame().function.expanded().wasm.module.module.wasm.ptr);
-
             const next_opcode = reader.readByte() catch unreachable;
 
             // std.debug.print(
             //     "TRACE[{X:0>6}]: {s}\n",
-            //     .{ saved_ip, @tagName(@as(opcodes.ByteOpcode, @enumFromInt(next_opcode))) },
+            //     .{
+            //         @intFromPtr(reader.p) -
+            //             @intFromPtr(interp.currentFrame().function.expanded().wasm.module.header().module.wasm.ptr),
+            //         @tagName(@as(opcodes.ByteOpcode, @enumFromInt(next_opcode))),
+            //     },
             // );
 
             return byte_dispatch_table[next_opcode];
@@ -1200,7 +1208,11 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
         fn @"const"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
             const n = i.readIleb128(Signed) catch unreachable;
             vals.appendAssumeCapacity(@unionInit(Value, value_field, n));
-            // std.debug.print(" > (" ++ @typeName(Signed) ++ ".const) {[0]} (0x{[0]X})\n", .{n});
+
+            // std.debug.print(
+            //     " > (" ++ @typeName(Signed) ++ ".const) {[0]} (0x{[0]X}) ;; height = {[1]}\n",
+            //     .{ n, vals.items.len },
+            // );
 
             if (i.nextOpcodeHandler(fuel, int)) |next| {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
@@ -1554,8 +1566,9 @@ inline fn takeBranch(
     vals: *ValStack,
     branch: u32,
 ) void {
-    const code = interp.currentFrame().function.expanded().wasm.code();
-    const wasm_base_ptr = @intFromPtr(interp.currentFrame().function.expanded().wasm
+    const current_frame = interp.currentFrame();
+    const code = current_frame.function.expanded().wasm.code();
+    const wasm_base_ptr = @intFromPtr(current_frame.function.expanded().wasm
         .module.header().module.wasm.ptr);
 
     const side_table_end = @intFromPtr(code.state.side_table_ptr + code.state.side_table_len);
@@ -1571,12 +1584,14 @@ inline fn takeBranch(
     }
 
     // std.debug.print(
-    //     " ? TGT BRANCH #{} (current is #{}): delta_ip={}, delta_stp={}\n",
+    //     " ? TGT BRANCH #{} (current is #{}): delta_ip={}, delta_stp={}, copy={}, pop={}\n",
     //     .{
     //         (@intFromPtr(target) - @intFromPtr(code.state.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry),
     //         (@intFromPtr(s.*) - @intFromPtr(code.state.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry),
     //         target.delta_ip.done,
     //         target.delta_stp,
+    //         target.copy_count,
+    //         target.pop_count,
     //     },
     // );
 
@@ -1602,14 +1617,32 @@ inline fn takeBranch(
     //     .{(@intFromPtr(s.*) - @intFromPtr(code.state.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry)},
     // );
 
+    // std.debug.print(" ? value stack height was {}\n", .{vals.items.len});
+
     const vals_base = vals.items.len;
-    const src = vals.items[vals_base - target.copy_count ..];
-    if (target.copy_count > target.pop_count) {
+    const src: []const Value = vals.items[vals_base - target.copy_count ..];
+    const dst_base = vals_base - target.pop_count;
+
+    if (target.pop_count < target.copy_count) {
         vals.appendNTimesAssumeCapacity(undefined, target.copy_count - target.pop_count);
+        std.mem.copyForwards(
+            Value,
+            vals.items[dst_base .. dst_base + target.copy_count],
+            src,
+        );
+    } else if (target.copy_count < target.pop_count) {
+        std.mem.copyBackwards(
+            Value,
+            vals.items[dst_base .. dst_base + target.copy_count],
+            src,
+        );
+        vals.shrinkRetainingCapacity(vals.items.len - target.pop_count + target.copy_count);
     }
 
-    const dest = vals.items[vals_base - target.pop_count ..];
-    std.mem.copyBackwards(Value, dest[0..target.copy_count], src);
+    // std.debug.print(" ? value stack height is {}\n", .{vals.items.len});
+
+    std.debug.assert(vals.items.len == vals_base + target.copy_count - target.pop_count);
+    std.debug.assert(current_frame.values_base <= vals.items.len);
 }
 
 const opcode_handlers = struct {
@@ -1781,6 +1814,8 @@ const opcode_handlers = struct {
     pub fn drop(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         _ = vals.pop();
 
+        // std.debug.print(" height after drop: {}\n", .{vals.items.len});
+
         std.debug.assert(loc <= vals.items.len);
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
@@ -1804,11 +1839,11 @@ const opcode_handlers = struct {
     // select t
 
     pub fn @"local.get"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        const n = i.readUleb128(u32) catch unreachable;
+        const n: u16 = @intCast(i.readUleb128(u32) catch unreachable);
         const value = vals.items[loc..][n];
         vals.appendAssumeCapacity(value);
 
-        // std.debug.print(" > (local.get {}) (i64.const {})\n", .{ n, value.i64 });
+        // std.debug.print(" > (local.get {}) (i32.const {})\n", .{ n, value.i32 });
 
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
@@ -1816,7 +1851,7 @@ const opcode_handlers = struct {
     }
 
     pub fn @"local.set"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        const n = i.readUleb128(u32) catch unreachable;
+        const n: u16 = @intCast(i.readUleb128(u32) catch unreachable);
         const value = vals.pop();
         vals.items[loc..][n] = value;
 
