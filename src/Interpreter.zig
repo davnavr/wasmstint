@@ -1256,6 +1256,9 @@ const i64_opcode_handlers = integerOpcodeHandlers(i64);
 fn floatOpcodeHandlers(comptime F: type) type {
     return struct {
         const value_field = @typeName(F);
+        const Bits = std.meta.Int(.unsigned, @typeInfo(F).float.bits);
+
+        const canonical_nan_bit: Bits = 1 << (std.math.floatMantissaBits(F) - 1);
 
         const operators = struct {
             fn convert_s(i: anytype) !F {
@@ -1324,12 +1327,46 @@ fn floatOpcodeHandlers(comptime F: type) type {
             // https://webassembly.github.io/spec/core/exec/numerics.html#op-fnearest
             fn nearest(z: F) F {
                 // TODO: WASM seems to require rounds-to-nearest-ties-even
-                // @round compiles to llvm.round, but what is needed is llvm.roundeven
-                // See also https://github.com/ziglang/zig/issues/767
+                // '@round' compiles to 'llvm.round.*', but what is needed is 'llvm.roundeven.*'
 
-                // extern fn @"llvm.roundeven.f32"(z: f32) f32;
+                // See also:
+                // - https://github.com/ziglang/zig/issues/767
+                // - https://github.com/ziglang/zig/issues/2535
 
-                return @round(z);
+                // Caution, might get error: "Invalid user of intrinsic instruction!"
+                // extern fn @"llvm.roundeven.f32"(z: f32) callconv(.c) f32;
+                // extern fn @"llvm.roundeven.f64"(z: f64) callconv(.c) f64;
+
+                // Also seems to be available in C23, but that's too new:
+                // extern "c" fn roundevenf(arg: f32);
+                // extern "c" fn roundevenf(arg: f32);
+
+                if (std.math.isNan(z)) {
+                    return @bitCast(@as(Bits, @bitCast(z)) | canonical_nan_bit);
+                } else if (std.math.isInf(z) or
+                    std.math.isPositiveZero(z) or
+                    std.math.isNegativeZero(z))
+                {
+                    return z;
+                }
+
+                // Zig rounds away from zero, so this tries to catch that.
+                const rounded = @round(z);
+                const rounded_towards_zero = @round(if (std.math.signbit(z)) z + 1.0 else z - 1.0);
+
+                const dist_to_rounded = @abs(rounded - z);
+                const dist_to_rounded_towards_zero = @abs(rounded_towards_zero - z);
+
+                // Does this pick the even one if the distance is the "same"?
+
+                return if ((std.math.signbit(rounded) != std.math.signbit(rounded_towards_zero)) and
+                    !(std.math.isPositiveZero(rounded) or std.math.isNegativeZero(rounded)) and
+                    !(std.math.isPositiveZero(rounded_towards_zero) or std.math.isNegativeZero(rounded_towards_zero)))
+                    if (std.math.signbit(z)) -0.0 else 0.0
+                else if (dist_to_rounded < dist_to_rounded_towards_zero)
+                    rounded
+                else
+                    rounded_towards_zero;
             }
 
             // https://webassembly.github.io/spec/core/exec/numerics.html#op-fsqrt
