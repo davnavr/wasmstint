@@ -219,6 +219,21 @@ pub fn main() !u8 {
                 try w.writeAll(", ");
             }
 
+            const skipped_count = script.commands.len - pass_count;
+            if (skipped_count > 0) {
+                if (color_config == .escape_codes) {
+                    try w.writeAll("\x1B[33m");
+                }
+
+                try w.print("{} skipped", .{skipped_count});
+
+                if (color_config == .escape_codes) {
+                    try w.writeAll("\x1B[39m");
+                }
+
+                try w.writeAll(", ");
+            }
+
             if (color_config == .escape_codes) {
                 try w.writeAll("\x1B[32m");
             }
