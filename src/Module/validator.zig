@@ -268,7 +268,7 @@ const BlockType = union(enum) {
 const CtrlFrame = struct {
     types: BlockType,
     info: packed struct(u32) {
-        height: Height,
+        height: u16,
         opcode: Opcode,
         @"unreachable": bool = false,
     },
@@ -277,9 +277,7 @@ const CtrlFrame = struct {
     /// The length of the side table when the block was entered.
     side_table_idx: u32,
 
-    const Height = u28;
-
-    const Opcode = enum(u3) {
+    const Opcode = enum(u15) {
         block,
         loop,
         @"if",
@@ -411,15 +409,14 @@ const Label = struct {
     pop_count: u8,
 
     fn calculatePopCount(
-        ctrl_stack: *const CtrlStack,
-        target_frame_height: u28,
+        current_height: u16,
+        target_frame_height: u16,
     ) Module.LimitError!u8 {
-        const current_frame_height = ctrl_stack.at(ctrl_stack.len - 1).info.height;
-        return std.math.cast(u8, current_frame_height - target_frame_height) orelse
+        return std.math.cast(u8, current_height - target_frame_height) orelse
             Error.WasmImplementationLimit;
     }
 
-    fn init(depth: u32, ctrl_stack: *const CtrlStack, module: *const Module) Error!Label {
+    fn init(depth: u32, ctrl_stack: *const CtrlStack, current_height: u16, module: *const Module) Error!Label {
         const frame: *const CtrlFrame = if (depth < ctrl_stack.len)
             ctrl_stack.at(ctrl_stack.len - 1 - depth)
         else
@@ -430,13 +427,18 @@ const Label = struct {
             .depth = depth,
             .copy_count = std.math.cast(u8, frame.labelTypes(module).len) orelse
                 return Error.WasmImplementationLimit,
-            .pop_count = try calculatePopCount(ctrl_stack, frame.info.height),
+            .pop_count = try calculatePopCount(current_height, frame.info.height),
         };
     }
 
-    fn read(reader: *Module.Reader, ctrl_stack: *const CtrlStack, module: *const Module) Error!Label {
+    fn read(
+        reader: *Module.Reader,
+        ctrl_stack: *const CtrlStack,
+        current_height: u16,
+        module: *const Module,
+    ) Error!Label {
         const depth = try reader.readUleb128(u32);
-        return Label.init(depth, ctrl_stack, module);
+        return Label.init(depth, ctrl_stack, current_height, module);
     }
 };
 
@@ -458,8 +460,7 @@ fn pushCtrlFrame(
             .types = block_type,
             .info = .{
                 .opcode = opcode,
-                .height = std.math.cast(CtrlFrame.Height, val_stack.len()) orelse
-                    return Error.WasmImplementationLimit,
+                .height = val_stack.len(),
             },
             .offset = offset,
             .side_table_idx = try side_table.nextEntryIdx(),
@@ -677,7 +678,11 @@ const SideTableBuilder = struct {
             entry.delta_stp = std.math.cast(i16, delta_stp) orelse
                 return Error.WasmImplementationLimit;
         } else {
-            // std.debug.print(" PLACED FIXUP #{} originating from 0x{X}\n", .{ idx, origin });
+            // std.debug.print(
+            //     " PLACED FIXUP #{} originating from 0x{X} (copy={}, pop={})\n",
+            //     .{ idx, origin, copy_count, pop_count },
+            // );
+
             entry.delta_ip = .{ .fixup_origin = origin };
             entry.delta_stp = undefined;
 
@@ -965,7 +970,7 @@ fn doValidation(
                 );
 
                 // TODO: Skip branch fixup processing for unreachable code.
-                try side_table.appendAlternate(
+                try side_table.appendAlternate( // going to `else` or `end`
                     scratch,
                     instr_offset,
                     0,
@@ -975,6 +980,8 @@ fn doValidation(
                 try side_table.pushFixupList(scratch, .reuse); // going to 'end'
             },
             .@"else" => {
+                const current_height = val_stack.len();
+
                 const frame = try popCtrlFrame(&ctrl_stack, &val_stack, module);
                 if (frame.info.opcode != .@"if")
                     return error.InvalidWasm;
@@ -998,7 +1005,7 @@ fn doValidation(
                     null,
                     std.math.cast(u8, block_type.result_count) orelse
                         return error.WasmImplementationLimit,
-                    try Label.calculatePopCount(&ctrl_stack, frame.info.height),
+                    try Label.calculatePopCount(current_height, frame.info.height),
                     0,
                 );
 
@@ -1027,7 +1034,12 @@ fn doValidation(
                 try val_stack.pushMany(scratch, frame.types.funcType(module).results());
             },
             .br => {
-                const label = try Label.read(&reader, &ctrl_stack, module);
+                const label = try Label.read(
+                    &reader,
+                    &ctrl_stack,
+                    val_stack.len(),
+                    module,
+                );
 
                 // TODO: Skip branch fixup processing for unreachable code.
                 try appendSideTableEntry(scratch, &side_table, instr_offset, label);
@@ -1036,7 +1048,12 @@ fn doValidation(
                 markUnreachable(&val_stack, &ctrl_stack);
             },
             .br_if => {
-                const label = try Label.read(&reader, &ctrl_stack, module);
+                const label = try Label.read(
+                    &reader,
+                    &ctrl_stack,
+                    val_stack.len(),
+                    module,
+                );
 
                 // TODO: Skip branch fixup processing for unreachable code.
                 try appendSideTableEntry(scratch, &side_table, instr_offset, label);
@@ -1048,6 +1065,8 @@ fn doValidation(
             },
             .br_table => {
                 try val_stack.popExpecting(&ctrl_stack, .i32);
+
+                const current_height = val_stack.len();
 
                 const label_count = try reader.readUleb128(u32);
                 const labels = try per_instr_arena.allocator().alloc(u32, label_count);
@@ -1070,7 +1089,12 @@ fn doValidation(
                 for (labels) |*n| n.* = try reader.readUleb128(u32);
 
                 // TODO: Skip branch fixup processing for unreachable code.
-                const last_label = try Label.read(&reader, &ctrl_stack, module);
+                const last_label = try Label.read(
+                    &reader,
+                    &ctrl_stack,
+                    current_height,
+                    module,
+                );
 
                 const last_label_types = last_label.frame.labelTypes(module);
                 const arity: u32 = @intCast(last_label_types.len);
@@ -1078,7 +1102,12 @@ fn doValidation(
                 // std.debug.print("BEGIN BR_TABLE\n", .{});
 
                 for (labels) |n| {
-                    const l = try Label.init(n, &ctrl_stack, module);
+                    const l = try Label.init(
+                        n,
+                        &ctrl_stack,
+                        current_height,
+                        module,
+                    );
 
                     try appendSideTableEntry(scratch, &side_table, instr_offset, l);
 
