@@ -1041,6 +1041,8 @@ fn doValidation(
                 markUnreachable(&val_stack, &ctrl_stack);
             },
             .br_if => {
+                try val_stack.popExpecting(&ctrl_stack, .i32);
+
                 const label = try Label.read(
                     &reader,
                     &ctrl_stack,
@@ -1051,7 +1053,6 @@ fn doValidation(
                 // TODO: Skip branch fixup processing for unreachable code.
                 try appendSideTableEntry(scratch, &side_table, instr_offset, label);
 
-                try val_stack.popExpecting(&ctrl_stack, .i32);
                 const label_types = label.frame.labelTypes(module);
                 try val_stack.popManyExpecting(&ctrl_stack, label_types);
                 try val_stack.pushMany(scratch, label_types);
