@@ -95,10 +95,6 @@ inner: extern struct {
     mem_import_count: u8,
     global_count: u32,
     global_import_count: u32,
-    datas_count: packed struct(u32) {
-        count: u31,
-        has_count_section: bool,
-    },
 
     /// Not set if the total # of imports is zero.
     import_section: [*]const u8,
@@ -107,22 +103,27 @@ inner: extern struct {
     mem_imports: [*]const ImportName,
     global_imports: [*]const ImportName,
 
+    export_section: [*]const u8,
+    exports: [*]align(4) const Export,
+    export_count: u32,
+    has_data_count_section: bool,
+    // padding: [3]u8,
+
     elems: [*]const ElemSegment,
     active_elems: [*]const ActiveElem,
     elems_count: u16,
     active_elems_count: u16,
 
-    // active_data_count: u16,
-    // data_count: u16,
-
-    export_section: [*]const u8,
-    exports: [*]align(4) const Export,
-    export_count: u32,
+    active_datas_count: u16,
+    datas_count: u16,
+    datas_ptrs: [*]const [*]const u8,
+    datas_lens: [*]const u32,
+    active_datas: [*]const ActiveData,
 
     start: Start,
 },
 custom_sections: []const CustomSection,
-arena_data: IndexedArena.ConstData,
+arena_data: IndexedArena.ConstData, // TODO: Should Module be pointer sized just like ModuleInst
 
 pub inline fn customSections(module: *const Module) []const CustomSection {
     return module.custom_sections.items(module.data);
@@ -191,6 +192,12 @@ pub inline fn globalImportTypes(module: *const Module) []const GlobalType {
 
 pub inline fn code(module: *const Module) []Code {
     return module.inner.code_entries[0..module.inner.code_count];
+}
+
+pub inline fn dataSegmentContents(module: *const Module, idx: DataIdx) []const u8 {
+    const i = @intFromEnum(idx);
+    std.debug.assert(i < module.inner.datas_count);
+    return module.inner.datas_ptrs[i][0..module.inner.datas_lens[i]];
 }
 
 pub inline fn exports(module: *const Module) []align(4) const Export {
@@ -396,6 +403,21 @@ pub const Code = struct {
     pub const SideTableEntry = validator.SideTableEntry;
     pub const Ip = validator.Ip;
     pub const End = validator.End;
+};
+
+pub const ActiveData = extern struct {
+    header: packed struct(u32) {
+        memory: MemIdx,
+        offset_tag: enum(u25) {
+            @"i32.const",
+            @"global.get",
+        },
+    },
+    data: DataIdx,
+    offset: packed union {
+        @"i32.const": u32,
+        @"global.get": GlobalIdx,
+    },
 };
 
 pub const CustomSection = struct {
@@ -1193,6 +1215,8 @@ pub fn parse(
         break :start Start.init(func_idx);
     } else .none;
 
+    const global_types_in_const = global_sec.types.slice(0, import_sec.globals.len);
+
     const ElemSec = struct {
         elems: IndexedArena.Slice(ElemSegment) = .empty,
         active_elems: IndexedArena.Slice(ActiveElem) = .empty,
@@ -1214,8 +1238,6 @@ pub fn parse(
 
         _ = scratch.reset(.retain_capacity);
         var active_elems = std.SegmentedList(ActiveElem, 1){};
-
-        const global_types_in_const = global_sec.types.slice(0, import_sec.globals.len);
 
         for (0..elems_count) |i| {
             const elem_idx: ElemIdx = @enumFromInt(@as(@typeInfo(ElemIdx).@"enum".tag_type, @intCast(i)));
@@ -1367,7 +1389,17 @@ pub fn parse(
 
     std.debug.assert(elem_sec.active_elems.len <= elem_sec.elems.len);
 
-    // TODO: Check for data count section here
+    const data_count: ?u16 = if (known_sections.data_count.len > 0) present: {
+        const data_count_reader = Reader.init(&known_sections.data_count);
+        errdefer wasm.* = data_count_reader.bytes.*;
+
+        const count = try data_count_reader.readUleb128Casted(u32, u16);
+
+        try data_count_reader.expectEndOfStream();
+        known_sections.data_count = undefined;
+
+        break :present count;
+    } else null;
 
     const CodeSec = struct {
         start: [*]const u8 = undefined,
@@ -1403,7 +1435,106 @@ pub fn parse(
         try code_reader.expectEndOfStream();
         known_sections.code = undefined;
         break :code code_sec;
-    } else if (defined_func_count > 0) return error.MalformedWasm else .{};
+    } else if (defined_func_count > 0)
+        return error.MalformedWasm
+    else
+        .{};
+
+    const DataSec = struct {
+        datas_ptrs: IndexedArena.Slice([*]const u8) = .empty,
+        datas_lens: IndexedArena.Slice(u32) = .empty,
+        active_datas: IndexedArena.Slice(ActiveData) = .empty,
+    };
+
+    const data_sec: DataSec = if (known_sections.data.len > 0) data: {
+        const datas_reader = Reader.init(&known_sections.data);
+        errdefer wasm.* = datas_reader.bytes.*;
+
+        const parsed_datas_count = try datas_reader.readUleb128(u32);
+
+        if (parsed_datas_count > data_count orelse std.math.maxInt(@typeInfo(ElemIdx).@"enum".tag_type))
+            return if (data_count != null) error.MalformedWasm else error.WasmImplementationLimit;
+
+        var datas_ptrs = try IndexedArena.BoundedArrayList([*]const u8).initCapacity(
+            &arena,
+            parsed_datas_count,
+        );
+
+        var datas_lens = try IndexedArena.BoundedArrayList(u32).initCapacity(
+            &arena,
+            parsed_datas_count,
+        );
+
+        _ = scratch.reset(.retain_capacity);
+        var active_datas = std.SegmentedList(ActiveData, 1){};
+
+        for (0..parsed_datas_count) |i| {
+            const data_idx: DataIdx = @enumFromInt(@as(@typeInfo(DataIdx).@"enum".tag_type, @intCast(i)));
+
+            const Flags = packed struct(u2) {
+                is_passive: bool,
+                has_mem_idx: bool,
+            };
+
+            const flags_int = try datas_reader.readUleb128Casted(u32, u2);
+            if (flags_int > 2) return error.MalformedWasm;
+
+            const flags: Flags = @bitCast(flags_int);
+            if (!flags.is_passive) {
+                const memory: MemIdx = if (flags.has_mem_idx)
+                    try datas_reader.readIdx(MemIdx, mem_types)
+                else
+                    MemIdx.default;
+
+                const offset = try datas_reader.readConstExpr(
+                    .i32,
+                    func_types.len,
+                    global_types_in_const,
+                    &arena,
+                );
+
+                try active_datas.append(
+                    scratch.allocator(),
+                    ActiveData{
+                        .header = .{
+                            .memory = memory,
+                            .offset_tag = switch (offset) {
+                                .i32_or_f32 => .@"i32.const",
+                                .@"global.get" => .@"global.get",
+                                else => unreachable,
+                            },
+                        },
+                        .data = data_idx,
+                        .offset = switch (offset) {
+                            .i32_or_f32 => |n| .{ .@"i32.const" = n },
+                            .@"global.get" => |global| .{ .@"global.get" = global },
+                            else => unreachable,
+                        },
+                    },
+                );
+            }
+
+            const contents = try datas_reader.readByteVec();
+
+            datas_ptrs.appendAssumeCapacity(&arena, contents.ptr);
+            datas_lens.appendAssumeCapacity(&arena, @intCast(contents.len));
+        }
+
+        try datas_reader.expectEndOfStream();
+        known_sections.data = undefined;
+        break :data .{
+            .datas_ptrs = datas_ptrs.items,
+            .datas_lens = datas_lens.items,
+            .active_datas = try arena.dupeSegmentedList(ActiveData, 1, &active_datas),
+        };
+    } else if (data_count != null and data_count.? > 0)
+        return error.MalformedWasm
+    else
+        .{};
+
+    std.debug.assert(data_sec.datas_lens.len == data_sec.datas_ptrs.len);
+
+    // Parsing is done at this point
 
     const arena_data = if (options.realloc_contents) realloc: {
         const src = arena.data.items;
@@ -1487,8 +1618,13 @@ pub fn parse(
             .active_elems = elem_sec.active_elems.items(arena_data).ptr,
             .active_elems_count = @intCast(elem_sec.active_elems.len),
 
-            // TODO
-            .datas_count = .{ .has_count_section = false, .count = 0 },
+            .datas_count = @intCast(data_sec.datas_lens.len),
+            .datas_ptrs = data_sec.datas_ptrs.items(arena_data).ptr,
+            .datas_lens = data_sec.datas_lens.items(arena_data).ptr,
+            .active_datas = data_sec.active_datas.items(arena_data).ptr,
+            .active_datas_count = @intCast(data_sec.active_datas.len),
+
+            .has_data_count_section = data_count != null,
 
             .start = start,
         },
