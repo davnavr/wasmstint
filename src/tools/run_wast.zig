@@ -783,10 +783,39 @@ const State = struct {
                         ),
                     );
                 },
+                .@"keyword_ref.extern" => ref_extern: {
+                    const actual_extern: wasmstint.runtime.ExternAddr = try state.expectTypedValue(
+                        expected.value_token,
+                        actual,
+                        pos,
+                        .externref,
+                    );
+
+                    if (expected.keyword == expected.value_token) {
+                        _ = expected.value.ref_extern_unspecified;
+                        break :ref_extern;
+                    }
+
+                    const expected_nat = expected.value.ref_extern;
+                    const actual_nat = actual_extern.nat.toInt() orelse {
+                        return scriptError(state.errors.errorFmtAtToken(
+                            parent,
+                            "expected result #{} to be (ref.extern {}), but got null",
+                            .{ pos, expected_nat },
+                        ));
+                    };
+
+                    if (expected_nat != actual_nat)
+                        return scriptError(state.errors.errorFmtAtToken(
+                            parent,
+                            "expected result #{} to be (ref.extern {}), but got (ref.extern {})",
+                            .{ pos, expected_nat, actual_nat },
+                        ));
+                },
                 else => |bad| return scriptError(state.errors.errorFmtAtToken(
                     expected.keyword,
-                    "TODO: handle result {s}",
-                    .{@tagName(bad)},
+                    "TODO: handle result {s} (got {any})",
+                    .{ @tagName(bad), actual },
                 )),
             }
         }
