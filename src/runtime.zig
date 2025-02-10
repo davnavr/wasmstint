@@ -172,6 +172,17 @@ pub const ModuleAllocator = struct {
 
     pub const WithinArena = struct {
         arena: *std.heap.ArenaAllocator,
+        mem_limit: MemLimit = .allocate_minimum,
+
+        pub const MemLimit = union(enum) {
+            /// Only ever allocate the minimum number of pages.
+            allocate_minimum,
+            /// Always allocate the given number of bytes, rounded down to the nearest multiple of
+            /// the page size, limited by the linear memory's maximum limit.
+            ///
+            /// Allocation fails if this limit is less than a linear memory's minimum limit.
+            up_to_amount: usize,
+        };
 
         const vtable = VTable{
             .allocate = WithinArena.allocate,
@@ -179,14 +190,24 @@ pub const ModuleAllocator = struct {
         };
 
         fn allocate(ctx: *anyopaque, request: *Request) Allocator.Error!void {
-            const into_arena = @as(*std.heap.ArenaAllocator, @ptrCast(@alignCast(ctx))).allocator();
+            const self: *WithinArena = @ptrCast(@alignCast(ctx));
+            const into_arena = self.arena.allocator();
 
             // TODO: Duplicate code, maybe make a common wraper over an `std.mem.Allocator`?
             while (request.nextMemType()) |mem_type| {
+                const minimum_len = mem_type.limits.min * MemInst.page_size;
+
                 const buf = try into_arena.alignedAlloc(
                     u8,
                     MemInst.buffer_align,
-                    mem_type.limits.min * MemInst.page_size,
+                    request: switch (self.mem_limit) {
+                        .allocate_minimum => minimum_len,
+                        .up_to_amount => |limit| {
+                            const actual_limit = (limit / MemInst.page_size) * MemInst.page_size;
+                            if (actual_limit < minimum_len) return error.OutOfMemory;
+                            break :request @min(actual_limit, mem_type.limits.max * MemInst.page_size);
+                        },
+                    },
                 );
 
                 @memset(buf, 0);
@@ -213,7 +234,7 @@ pub const ModuleAllocator = struct {
 
         pub fn allocator(self: *WithinArena) ModuleAllocator {
             return .{
-                .ctx = self.arena,
+                .ctx = self,
                 .vtable = &vtable,
             };
         }

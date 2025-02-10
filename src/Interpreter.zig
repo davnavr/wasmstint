@@ -1965,9 +1965,9 @@ const opcode_handlers = struct {
                 break :result grow_failed;
             } else if (mem.capacity - mem.size >= delta_bytes) {
                 const new_size: u32 = @as(u32, @intCast(mem.size)) + delta_bytes;
-                @memset(mem.bytes()[mem.size..new_size], 0);
                 const old_size: u32 = @intCast(mem.size);
                 mem.size = new_size;
+                @memset(mem.bytes()[old_size..new_size], 0);
                 break :result @bitCast(@as(u32, @intCast(old_size)));
             } else {
                 // TODO: Add a new interruption kind.

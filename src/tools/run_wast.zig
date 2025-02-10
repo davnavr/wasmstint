@@ -946,7 +946,11 @@ fn runScript(
     run_arena: *ArenaAllocator, // Must not be reset for the lifetime of this function call.
     errors: *Wast.Errors,
 ) Allocator.Error!u32 {
-    var store = wasmstint.runtime.ModuleAllocator.WithinArena{ .arena = run_arena };
+    var store = wasmstint.runtime.ModuleAllocator.WithinArena{
+        .arena = run_arena,
+        .mem_limit = .{ .up_to_amount = 2 * wasmstint.runtime.MemInst.page_size },
+    };
+
     var state: State = .{
         .errors = .{ .tree = script.tree, .errors = errors },
         .next_module_arena = ArenaAllocator.init(run_arena.allocator()),
