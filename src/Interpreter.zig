@@ -2281,6 +2281,34 @@ const opcode_handlers = struct {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
     }
+
+    /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-copy
+    pub fn @"table.copy"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const dst_idx = i.nextIdx(Module.TableIdx);
+        const src_idx = i.nextIdx(Module.TableIdx);
+        const module = int.currentFrame().function.expanded().wasm.module.header();
+        const dst_table = module.tableAddr(dst_idx);
+        const src_table = module.tableAddr(src_idx);
+
+        const n: u32 = @bitCast(vals.pop().i32);
+        const src_addr: u32 = @bitCast(vals.pop().i32);
+        const d: u32 = @bitCast(vals.pop().i32);
+
+        dst_table.table.copy(
+            src_table.table,
+            n,
+            src_addr,
+            d,
+        ) catch {
+            int.state = .{ .trapped = Trap.init(.table_access_out_of_bounds, {}) };
+            return;
+        };
+
+        std.debug.assert(loc <= vals.items.len);
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
 };
 
 /// If the handler is not appearing in this table, make sure it is public first.

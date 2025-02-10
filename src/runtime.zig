@@ -1026,6 +1026,57 @@ pub const TableInst = extern struct {
             else => unreachable,
         }
     }
+
+    fn bytes(table: *const TableInst) []u8 {
+        return table.base.ptr[0..(@as(usize, table.len) * table.stride)];
+    }
+
+    /// Implements the [`table.copy`] instruction.
+    ///
+    /// Asserts that the `src` and `dst` tables have the same element types.
+    ///
+    /// [`table.copy`]: https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-copy
+    pub fn copy(
+        dst: *const TableInst,
+        src: *const TableInst,
+        len: u32,
+        src_idx: u32,
+        dst_idx: u32,
+    ) OobError!void {
+        std.debug.assert(dst.stride == src.stride);
+        const src_end_idx = std.math.add(usize, src_idx, len) catch
+            return error.TableAccessOutOfBounds;
+
+        if (src_end_idx > src.len)
+            return error.TableAccessOutOfBounds;
+
+        const dst_end_idx = std.math.add(usize, dst_idx, len) catch
+            return error.TableAccessOutOfBounds;
+
+        if (dst_end_idx > dst.len)
+            return error.TableAccessOutOfBounds;
+
+        if (len == 0) return;
+
+        const src_slice: []const u8 = src.bytes()[src_idx * src.stride .. src_end_idx * src.stride];
+        std.debug.assert(@intFromPtr(src_slice.ptr) % src.stride == 0);
+
+        const dst_slice = dst.bytes()[dst_idx * dst.stride .. dst_end_idx * dst.stride];
+        std.debug.assert(@intFromPtr(dst_slice.ptr) % dst.stride == 0);
+
+        // This is duplicate code from the `memory.copy` helper
+        if (@intFromPtr(src) == @intFromPtr(dst) and (dst_idx < src_end_idx or src_idx < dst_end_idx)) {
+            if (src_idx < dst_idx) {
+                std.mem.copyBackwards(u8, dst_slice, src_slice);
+            } else if (dst_idx < src_idx) {
+                std.mem.copyForwards(u8, dst_slice, src_slice);
+            } else {
+                unreachable;
+            }
+        } else {
+            @memcpy(dst_slice, src_slice);
+        }
+    }
 };
 
 pub const TableAddr = extern struct {
