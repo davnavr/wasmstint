@@ -838,9 +838,14 @@ fn encodeExpr(
                             FuncIdx,
                             try wasm.func_ids.getFromIdent(text, arg.*),
                         ),
-                        .@"data.drop",
-                        .@"elem.drop",
-                        => unreachable, // TODO: set need data count flag
+                        .@"data.drop" => try encodeIdx(output, DataIdx, try wasm.data_ids.getFromIdent(
+                            text,
+                            arg.*,
+                        )),
+                        .@"elem.drop" => try encodeIdx(output, ElemIdx, try wasm.elem_ids.getFromIdent(
+                            text,
+                            arg.*,
+                        )),
                         else => |bad| @compileError("encode id for " ++ @tagName(bad)),
                     },
                     .ident_opt => if (arg.*.get()) |id| {
