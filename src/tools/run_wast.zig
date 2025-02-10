@@ -832,6 +832,7 @@ const State = struct {
         .{ "invalid conversion to integer", .invalid_conversion_to_integer },
         .{ "out of bounds memory access", .memory_access_out_of_bounds },
         .{ "out of bounds table access", .table_access_out_of_bounds },
+        .{ "uninitialized element", .indirect_call_to_null },
     });
 
     fn checkMatchingTrapCode(
