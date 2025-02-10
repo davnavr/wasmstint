@@ -979,7 +979,7 @@ pub const TableInst = extern struct {
                 switch (src_elems.tag) {
                     .func_indices => {
                         const src_indices = src_elems.contents.func_indices
-                            .items(module_inst.module.arena_data);
+                            .items(module_inst.module.arena_data)[src_idx..src_end_idx];
 
                         for (
                             @as([]const Module.FuncIdx, src_indices),
@@ -992,7 +992,32 @@ pub const TableInst = extern struct {
                         }
                     },
                     .func_expressions => {
-                        unreachable; // TODO
+                        const src_exprs = src_elems.contents.expressions
+                            .items(module_inst.module.arena_data)[src_idx..src_end_idx];
+
+                        for (
+                            @as([]const Module.ElemSegment.Expr, src_exprs),
+                            dst_elems,
+                        ) |*src_expr, *dst| {
+                            dst.* = switch (src_expr.tag) {
+                                .@"ref.null" => FuncAddr.Nullable.null,
+                                .@"ref.func" => @bitCast(
+                                    module_inst.funcAddr(src_expr.inner.@"ref.func".get()),
+                                ),
+                                .@"global.get" => get: {
+                                    const global = module_inst.globalAddr(
+                                        src_expr.inner.@"global.get".get(),
+                                    );
+
+                                    std.debug.assert(global.global_type.val_type == .funcref);
+
+                                    break :get @as(
+                                        *const FuncAddr.Nullable,
+                                        @ptrCast(@alignCast(global.value)),
+                                    ).*;
+                                },
+                            };
+                        }
                     },
                     .extern_expressions => unreachable,
                 }

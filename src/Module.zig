@@ -55,14 +55,14 @@ fn SmallIdx(comptime Int: type, comptime Idx: type) type {
 
         const Self = @This();
 
-        fn init(idx: Idx) LimitError!Self {
+        pub fn init(idx: Idx) LimitError!Self {
             return @enumFromInt(
                 std.math.cast(Int, @intFromEnum(idx)) orelse
                     return error.WasmImplementationLimit,
             );
         }
 
-        fn get(idx: Self) Idx {
+        pub fn get(idx: Self) Idx {
             return @enumFromInt(@intFromEnum(idx));
         }
     };
