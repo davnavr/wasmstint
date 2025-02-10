@@ -1099,7 +1099,7 @@ fn encodeText(
 
                 try wasm.type_ids.insert(text_ctx, type_field_ptr.id, type_idx, alloca);
                 try wasm.types.append(alloca.allocator(), field.contents.type);
-                try wasm.type_dedup.lookup.putNoClobberContext(
+                try wasm.type_dedup.lookup.putContext(
                     alloca.allocator(),
                     &type_field_ptr.func,
                     type_idx,
