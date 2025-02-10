@@ -731,10 +731,10 @@ pub const MemInst = extern struct {
     ) OobError!void {
         std.debug.assert(src.len <= std.math.maxInt(u32));
 
-        std.debug.print(
-            "memory.init: memory len={}, segment len={}, len={}, src_idx={}, dst_idx={}\n",
-            .{ inst.size, src.len, len, src_idx, dst_idx },
-        );
+        // std.debug.print(
+        //     "memory.init: memory len={}, segment len={}, len={}, src_idx={}, dst_idx={}\n",
+        //     .{ inst.size, src.len, len, src_idx, dst_idx },
+        // );
 
         const src_end_idx = std.math.add(usize, src_idx, len) catch
             return error.MemoryAccessOutOfBounds;
@@ -749,6 +749,54 @@ pub const MemInst = extern struct {
             return error.MemoryAccessOutOfBounds;
 
         @memcpy(inst.bytes()[dst_idx..dst_end_idx], src[src_idx..src_end_idx]);
+    }
+
+    /// Implements the [`memory.copy`] instruction.
+    ///
+    /// [`memory.copy`]: https://webassembly.github.io/spec/core/exec/instructions.html#exec-memory-copy
+    pub fn copy(
+        dst: *const MemInst,
+        src: *const MemInst,
+        len: u32,
+        src_idx: u32,
+        dst_idx: u32,
+    ) OobError!void {
+        // std.debug.print(
+        //     "memory.copy: src len={}, dst len={}, len={}, src_idx={}, dst_idx={}\n",
+        //     .{ src.size, dst.size, len, src_idx, dst_idx },
+        // );
+
+        const src_end_idx = std.math.add(usize, src_idx, len) catch
+            return error.MemoryAccessOutOfBounds;
+
+        if (src_end_idx > src.size)
+            return error.MemoryAccessOutOfBounds;
+
+        const dst_end_idx = std.math.add(usize, dst_idx, len) catch
+            return error.MemoryAccessOutOfBounds;
+
+        if (dst_end_idx > dst.size)
+            return error.MemoryAccessOutOfBounds;
+
+        if (len == 0) return;
+
+        const src_slice: []const u8 = src.bytes()[src_idx..src_end_idx];
+        // std.debug.dumpHex(src_slice);
+        const dst_slice = dst.bytes()[dst_idx..dst_end_idx];
+        // std.debug.dumpHex(dst_slice);
+        if (@intFromPtr(src) == @intFromPtr(dst) and (dst_idx < src_end_idx or src_idx < dst_end_idx)) {
+            if (src_idx < dst_idx) {
+                std.mem.copyBackwards(u8, dst_slice, src_slice);
+            } else if (dst_idx < src_idx) {
+                std.mem.copyForwards(u8, dst_slice, src_slice);
+            } else {
+                unreachable;
+            }
+        } else {
+            @memcpy(dst_slice, src_slice);
+        }
+
+        // std.debug.dumpHex(dst_slice);
     }
 
     /// Implements the [`memory.fill`] instruction.
