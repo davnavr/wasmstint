@@ -1272,7 +1272,7 @@ fn encodeText(
                         .{
                             .idx = mem_field,
                             .inferred_limit = if (has_data)
-                                std.math.divFloor(
+                                std.math.divCeil(
                                     u32,
                                     @intCast(data_bytes.len),
                                     page_size,
