@@ -200,6 +200,10 @@ pub inline fn dataSegmentContents(module: *const Module, idx: DataIdx) []const u
     return module.inner.datas_ptrs[i][0..module.inner.datas_lens[i]];
 }
 
+pub inline fn elementSegments(module: *const Module) []const ElemSegment {
+    return module.inner.elems[0..module.inner.elems_count];
+}
+
 pub inline fn exports(module: *const Module) []align(4) const Export {
     return module.inner.exports[0..module.inner.export_count];
 }
@@ -342,9 +346,34 @@ pub const ConstExpr = union(enum) {
     }
 };
 
-pub const ElemSegment = union(enum) {
-    func_indices: IndexedArena.Slice(FuncIdx),
-    expressions: IndexedArena.Slice(Expr),
+pub const ElemSegment = struct {
+    tag: Tag,
+    contents: Contents,
+
+    pub const Tag = enum {
+        func_indices,
+        func_expressions,
+        extern_expressions,
+    };
+
+    pub inline fn elementType(elem: *const ElemSegment) ValType {
+        return switch (elem.tag) {
+            .func_indices, .func_expressions => .funcref,
+            .extern_expressions => .externref,
+        };
+    }
+
+    pub inline fn len(elem: *const ElemSegment) u32 {
+        return switch (elem.tag) {
+            .func_indices => elem.contents.func_indices.len,
+            .func_expressions, .extern_expressions => elem.contents.expressions.len,
+        };
+    }
+
+    pub const Contents = union {
+        func_indices: IndexedArena.Slice(FuncIdx),
+        expressions: IndexedArena.Slice(Expr),
+    };
 
     pub const Expr = packed struct(u32) {
         tag: enum(u2) {
@@ -1340,7 +1369,7 @@ pub fn parse(
             if (!ref_type.isRefType()) return error.InvalidWasm;
 
             const expr_count = try elems_reader.readUleb128(u32);
-            const expressions: ElemSegment = if (tag.use_elem_exprs) elem_exprs: {
+            const elem_segment: ElemSegment = if (tag.use_elem_exprs) elem_exprs: {
                 var exprs = try IndexedArena.BoundedArrayList(ElemSegment.Expr).initCapacity(
                     &arena,
                     expr_count,
@@ -1357,7 +1386,14 @@ pub fn parse(
                     exprs.appendAssumeCapacity(&arena, try ElemSegment.Expr.init(e));
                 }
 
-                break :elem_exprs .{ .expressions = exprs.items };
+                break :elem_exprs ElemSegment{
+                    .tag = switch (ref_type) {
+                        .funcref => .func_expressions,
+                        .externref => .extern_expressions,
+                        else => unreachable,
+                    },
+                    .contents = .{ .expressions = exprs.items },
+                };
             } else idx_exprs: {
                 std.debug.assert(ref_type == .funcref);
 
@@ -1373,10 +1409,13 @@ pub fn parse(
                     );
                 }
 
-                break :idx_exprs .{ .func_indices = func_indices.items };
+                break :idx_exprs ElemSegment{
+                    .tag = .func_indices,
+                    .contents = .{ .func_indices = func_indices.items },
+                };
             };
 
-            elems.appendAssumeCapacity(&arena, expressions);
+            elems.appendAssumeCapacity(&arena, elem_segment);
         }
 
         try elems_reader.expectEndOfStream();
