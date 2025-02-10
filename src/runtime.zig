@@ -714,6 +714,24 @@ pub const MemInst = extern struct {
     pub inline fn bytes(inst: *const MemInst) []u8 {
         return inst.base[0..inst.size];
     }
+
+    /// Implements the [`memory.fill`] instruction.
+    ///
+    /// [`memory.fill`]: https://webassembly.github.io/spec/core/exec/instructions.html#exec-memory-fill
+    pub fn fill(
+        inst: *const MemInst,
+        num: u32,
+        val: u8,
+        start_idx: u32,
+    ) error{MemoryAccessOutOfBounds}!void {
+        const end_idx = std.math.add(usize, num, start_idx) catch
+            return error.MemoryAccessOutOfBounds;
+
+        if (end_idx > inst.size)
+            return error.MemoryAccessOutOfBounds;
+
+        @memset(inst.bytes()[start_idx..end_idx], val);
+    }
 };
 
 pub const TableInst = extern struct {
