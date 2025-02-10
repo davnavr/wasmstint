@@ -2164,15 +2164,27 @@ const opcode_handlers = struct {
     pub const @"i64.trunc_sat_f64_s" = i64_opcode_handlers.trunc_sat_f64_s;
     pub const @"i64.trunc_sat_f64_u" = i64_opcode_handlers.trunc_sat_f64_u;
 
-    // /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-memory-init
-    // pub fn @"memory.init"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-    //     const mem_idx = i.nextIdx(Module.MemIdx);
-    //     const mem = int.currentFrame().function.expanded().wasm.module.header().memAddr(mem_idx);
-    //     std.debug.assert(loc <= vals.items.len);
-    //     if (i.nextOpcodeHandler(fuel, int)) |next| {
-    //         @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
-    //     }
-    // }
+    /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-memory-init
+    pub fn @"memory.init"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const data_idx = i.nextIdx(Module.DataIdx);
+        const mem_idx = i.nextIdx(Module.MemIdx);
+        const module = int.currentFrame().function.expanded().wasm.module.header();
+        const mem = module.memAddr(mem_idx);
+
+        const n: u32 = @bitCast(vals.pop().i32);
+        const src_addr: u32 = @bitCast(vals.pop().i32);
+        const d: u32 = @bitCast(vals.pop().i32);
+
+        mem.init(module.dataSegment(data_idx), n, src_addr, d) catch {
+            int.state = .{ .trapped = .memory_access_out_of_bounds };
+            return;
+        };
+
+        std.debug.assert(loc <= vals.items.len);
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
 
     //pub fn @"data.drop"
 
