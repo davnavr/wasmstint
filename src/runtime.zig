@@ -708,14 +708,14 @@ pub const ModuleInst = extern struct {
             return DropFlag.init(inst.elems_drop_mask[0..drop_mask_len], @intFromEnum(idx));
         }
 
-        pub fn elemSegment(inst: *const Header, idx: Module.DataIdx) Module.ElemSegment {
+        pub fn elemSegment(inst: *const Header, idx: Module.ElemIdx) Module.ElemSegment {
             var elem = inst.module.elementSegments()[@intFromEnum(idx)];
             const len: *u32 = switch (elem.tag) {
                 .func_indices => &elem.contents.func_indices.len,
                 .func_expressions, .extern_expressions => &elem.contents.expressions.len,
             };
 
-            len.* &= inst.elemSegmentDropFlag(idx).lengthMask();
+            len.* &= @truncate(inst.elemSegmentDropFlag(idx).lengthMask());
             return elem;
         }
     };
@@ -938,17 +938,69 @@ pub const TableInst = extern struct {
 
     pub const OobError = error{TableAccessOutOfBounds};
 
-    // /// Implements the [`table.init`] instruction, which is also used in module instantiation.
-    // ///
-    // /// [`table.init`]: https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-init
-    // pub fn init(
-    //     inst: *const MemInst,
-    //     src: Module.ElemIdx,
-    //     len: u32,
-    //     src_idx: u32,
-    //     dst_idx: u32,
-    // ) OobError!void {
-    // }
+    /// Implements the [`table.init`] instruction, which is also used in module instantiation.
+    ///
+    /// [`table.init`]: https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-init
+    pub fn init(
+        table: Module.TableIdx,
+        module: ModuleInst,
+        src: Module.ElemIdx,
+        len: ?u32,
+        src_idx: u32,
+        dst_idx: u32,
+    ) OobError!void {
+        const module_inst = module.header();
+        const table_addr = module_inst.tableAddr(table);
+        const table_inst = table_addr.table;
+        const src_elems = module_inst.elemSegment(src);
+        const actual_len = len orelse src_elems.len();
+
+        const src_end_idx = std.math.add(usize, src_idx, actual_len) catch
+            return error.TableAccessOutOfBounds;
+
+        if (src_end_idx > src_elems.len())
+            return error.TableAccessOutOfBounds;
+
+        const dst_end_idx = std.math.add(usize, dst_idx, actual_len) catch
+            return error.TableAccessOutOfBounds;
+
+        if (dst_end_idx > table_inst.len)
+            return error.TableAccessOutOfBounds;
+
+        std.debug.assert(src_elems.elementType() == table_addr.elem_type);
+
+        if (actual_len == 0) return;
+
+        switch (table_addr.elem_type) {
+            .funcref => {
+                const dst_elems: []FuncAddr.Nullable = table_inst.base
+                    .func_ref[0..table_inst.len][dst_idx..dst_end_idx];
+
+                switch (src_elems.tag) {
+                    .func_indices => {
+                        const src_indices = src_elems.contents.func_indices
+                            .items(module_inst.module.arena_data);
+
+                        for (
+                            @as([]const Module.FuncIdx, src_indices),
+                            dst_elems,
+                        ) |i, *dst| {
+                            dst.* = @as(
+                                FuncAddr.Nullable,
+                                @bitCast(module_inst.funcAddr(i)),
+                            );
+                        }
+                    },
+                    .func_expressions => {
+                        unreachable; // TODO
+                    },
+                    .extern_expressions => unreachable,
+                }
+            },
+            .externref => @panic("TODO: handle tables of externref"),
+            else => unreachable,
+        }
+    }
 };
 
 pub const TableAddr = extern struct {

@@ -444,8 +444,6 @@ pub fn instantiateModule(
     }
 
     for (wasm.inner.active_elems[0..wasm.inner.active_elems_count]) |*active_elem| {
-        const table = module_inst.tableAddr(active_elem.header.table);
-
         const offset: u32 = offset: switch (active_elem.header.offset_tag) {
             .@"i32.const" => active_elem.offset.@"i32.const",
             .@"global.get" => {
@@ -455,42 +453,19 @@ pub fn instantiateModule(
             },
         };
 
-        const src_elements = &wasm.elementSegments()[@intFromEnum(active_elem.header.elements)];
-        const elem_len = src_elements.len();
-
-        const end_offset = std.math.add(usize, offset, elem_len) catch {
+        runtime.TableInst.init(
+            active_elem.header.table,
+            module.requiring_instantiation,
+            active_elem.header.elements,
+            null,
+            0,
+            offset,
+        ) catch {
             interp.state = .{ .trapped = .table_access_out_of_bounds };
             return;
         };
 
-        if (table.table.len < end_offset) {
-            interp.state = .{ .trapped = .table_access_out_of_bounds };
-            return;
-        }
-
-        // This follows the semantics of table.init, which appears to allow trapping early
-        std.debug.assert(table.elem_type == src_elements.elementType());
-        switch (table.elem_type) {
-            .funcref => {
-                const dst_indices: []runtime.FuncAddr.Nullable = table.table.base
-                    .func_ref[0..table.table.len][offset..end_offset];
-
-                switch (src_elements.tag) {
-                    .func_indices => {
-                        const src_indices = src_elements.contents.func_indices.items(wasm.arena_data);
-                        for (@as([]const Module.FuncIdx, src_indices), dst_indices) |i, *dst| {
-                            dst.* = @as(runtime.FuncAddr.Nullable, @bitCast(module_inst.funcAddr(i)));
-                        }
-                    },
-                    .func_expressions => {
-                        unreachable; // TODO
-                    },
-                    .extern_expressions => unreachable,
-                }
-            },
-            .externref => @panic("TODO: handle tables of externref"),
-            else => unreachable,
-        }
+        module_inst.elemSegmentDropFlag(active_elem.header.elements).drop();
     }
 
     for (wasm.inner.active_datas[0..wasm.inner.active_datas_count]) |*active_data| {
@@ -2235,6 +2210,34 @@ const opcode_handlers = struct {
 
         mem.fill(n, dupe, d) catch {
             int.state = .{ .trapped = .memory_access_out_of_bounds };
+            return;
+        };
+
+        std.debug.assert(loc <= vals.items.len);
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-init
+    pub fn @"table.init"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const elem_idx = i.nextIdx(Module.ElemIdx);
+        const table_idx = i.nextIdx(Module.TableIdx);
+        const module = int.currentFrame().function.expanded().wasm.module;
+
+        const n: u32 = @bitCast(vals.pop().i32);
+        const src_idx: u32 = @bitCast(vals.pop().i32);
+        const d: u32 = @bitCast(vals.pop().i32);
+
+        runtime.TableInst.init(
+            table_idx,
+            module,
+            elem_idx,
+            n,
+            src_idx,
+            d,
+        ) catch {
+            int.state = .{ .trapped = .table_access_out_of_bounds };
             return;
         };
 
