@@ -496,6 +496,16 @@ pub const ModuleAlloc = struct {
         );
         @memset(datas_drop_mask.items(&arena_array), std.math.maxInt(u32));
 
+        const elems_drop_mask_len = std.math.divCeil(
+            u32,
+            module.inner.elems_count,
+            32,
+        ) catch unreachable;
+        const elems_drop_mask = try arena_array.dupe(
+            u32,
+            module.inner.non_declarative_elems_mask[0..elems_drop_mask_len],
+        );
+
         errdefer comptime unreachable;
 
         for (
@@ -530,6 +540,7 @@ pub const ModuleAlloc = struct {
             .tables = tables.items(module_data).ptr,
             .globals = @ptrCast(globals.items(module_data).ptr),
             .datas_drop_mask = datas_drop_mask.items(module_data).ptr,
+            .elems_drop_mask = elems_drop_mask.items(module_data).ptr,
         };
 
         return ModuleAlloc{
@@ -567,9 +578,11 @@ pub const ModuleInst = extern struct {
         /// Indicates which data segments have not been dropped.
         ///
         /// After instantiation, only passive data segments have not been dropped.
-        ///
-        /// To zero-out the length of dropped data segments, AND its length with the corresponding bit.
         datas_drop_mask: [*]u32,
+        /// Indicates which element segments have not been dropped.
+        ///
+        /// Before instantiation, both active and passive element segments have not yet been dropped.
+        elems_drop_mask: [*]u32,
 
         const index = IndexedArena.Idx(Header).fromInt(0);
 
@@ -644,6 +657,13 @@ pub const ModuleInst = extern struct {
             word: *u32,
             bit: u5,
 
+            inline fn init(drop_mask: []u32, i: u16) DropFlag {
+                return .{
+                    .word = &drop_mask[i / 32],
+                    .bit = @intCast(i % 32),
+                };
+            }
+
             pub inline fn get(flag: DropFlag) u1 {
                 return @truncate(flag.word.* >> flag.bit);
             }
@@ -651,26 +671,52 @@ pub const ModuleInst = extern struct {
             pub inline fn drop(flag: DropFlag) void {
                 flag.word.* &= (~(@as(u32, 1) << flag.bit));
             }
+
+            /// Used to perform a bitwise-AND with the length of a data or element segment.
+            pub fn lengthMask(flag: DropFlag) usize {
+                // This has the effect of making the length zero when the data/element segment is "dropped"
+                const len_move = @bitSizeOf(usize) - 1;
+                const len_mask: usize = @bitCast(@as(isize, @bitCast(@as(usize, flag.get()) << len_move)) >> len_move);
+                std.debug.assert(@popCount(len_mask) == 0 or @popCount(len_mask) == @bitSizeOf(usize));
+                return len_mask;
+            }
         };
 
         pub fn dataSegmentDropFlag(inst: *const Header, idx: Module.DataIdx) DropFlag {
-            const i = @intFromEnum(idx);
-            return DropFlag{
-                .word = &inst.datas_drop_mask[i / 32],
-                .bit = @intCast(i % 32),
-            };
+            const drop_mask_len = std.math.divCeil(
+                u32,
+                inst.module.inner.datas_count,
+                32,
+            ) catch unreachable;
+
+            return DropFlag.init(inst.datas_drop_mask[0..drop_mask_len], @intFromEnum(idx));
         }
 
         pub fn dataSegment(inst: *const Header, idx: Module.DataIdx) []const u8 {
             var data = inst.module.dataSegmentContents(idx);
-            const drop_flag: usize = inst.dataSegmentDropFlag(idx).get();
-
-            // This has the effect of making the length zero when the data segment is "dropped"
-            const len_move = @bitSizeOf(usize) - 1;
-            const len_mask: usize = @bitCast(@as(isize, @bitCast(drop_flag << len_move)) >> len_move);
-            std.debug.assert(@popCount(len_mask) == 0 or @popCount(len_mask) == @bitSizeOf(usize));
-            data.len &= len_mask;
+            data.len &= inst.dataSegmentDropFlag(idx).lengthMask();
             return data;
+        }
+
+        pub fn elemSegmentDropFlag(inst: *const Header, idx: Module.ElemIdx) DropFlag {
+            const drop_mask_len = std.math.divCeil(
+                u32,
+                inst.module.inner.elems_count,
+                32,
+            ) catch unreachable;
+
+            return DropFlag.init(inst.elems_drop_mask[0..drop_mask_len], @intFromEnum(idx));
+        }
+
+        pub fn elemSegment(inst: *const Header, idx: Module.DataIdx) Module.ElemSegment {
+            var elem = inst.module.elementSegments()[@intFromEnum(idx)];
+            const len: *u32 = switch (elem.tag) {
+                .func_indices => &elem.contents.func_indices.len,
+                .func_expressions, .extern_expressions => &elem.contents.expressions.len,
+            };
+
+            len.* &= inst.elemSegmentDropFlag(idx).lengthMask();
+            return elem;
         }
     };
 

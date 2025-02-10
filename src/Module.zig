@@ -111,8 +111,11 @@ inner: extern struct {
 
     elems: [*]const ElemSegment,
     active_elems: [*]const ActiveElem,
-    // /// A bitmask indicating which data segments are passive or active.
-    // non_declarative_elems_mask: [*]const u32,
+    /// A bitmask indicating which data segments are passive or active.
+    ///
+    /// This mask is used during module instantiation, as declarative element segments
+    /// are "dropped" (their length is set to zero).
+    non_declarative_elems_mask: [*]const u32,
     elems_count: u16,
     active_elems_count: u16,
 
@@ -1251,6 +1254,7 @@ pub fn parse(
     const ElemSec = struct {
         elems: IndexedArena.Slice(ElemSegment) = .empty,
         active_elems: IndexedArena.Slice(ActiveElem) = .empty,
+        non_declarative_mask: IndexedArena.Slice(u32) = .empty,
     };
 
     const elem_sec: ElemSec = if (known_sections.elem.len > 0) elems: {
@@ -1266,6 +1270,12 @@ pub fn parse(
             &arena,
             elems_count,
         );
+
+        var non_declarative_mask = try arena.alloc(
+            u32,
+            std.math.divCeil(u32, elems_count, 32) catch unreachable,
+        );
+        @memset(non_declarative_mask.items(&arena), 0);
 
         _ = scratch.reset(.retain_capacity);
         var active_elems = std.SegmentedList(ActiveElem, 1){};
@@ -1418,6 +1428,9 @@ pub fn parse(
             };
 
             elems.appendAssumeCapacity(&arena, elem_segment);
+
+            non_declarative_mask.ptrAt(i / 32, &arena).* |=
+                @as(u32, @intFromBool(tag.kind == .active or !tag.bit_1.is_declarative)) << @as(u5, @intCast(i % 32));
         }
 
         try elems_reader.expectEndOfStream();
@@ -1425,6 +1438,7 @@ pub fn parse(
         break :elems .{
             .elems = elems.items,
             .active_elems = try arena.dupeSegmentedList(ActiveElem, 1, &active_elems),
+            .non_declarative_mask = non_declarative_mask,
         };
     } else .{};
 
@@ -1658,6 +1672,7 @@ pub fn parse(
             .elems_count = @intCast(elem_sec.elems.len),
             .active_elems = elem_sec.active_elems.items(arena_data).ptr,
             .active_elems_count = @intCast(elem_sec.active_elems.len),
+            .non_declarative_elems_mask = elem_sec.non_declarative_mask.items(arena_data).ptr,
 
             .datas_count = @intCast(data_sec.datas_lens.len),
             .datas_ptrs = data_sec.datas_ptrs.items(arena_data).ptr,
