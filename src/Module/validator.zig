@@ -415,6 +415,11 @@ const Label = struct {
         else
             return Error.InvalidWasm;
 
+        // std.debug.print(
+        //     " ? label at depth {} targets 0x{X} ({s})\n",
+        //     .{ depth, frame.offset, @tagName(frame.info.opcode) },
+        // );
+
         return Label{
             .frame = frame,
             .depth = depth,
@@ -496,6 +501,12 @@ const BranchFixup = packed struct(u32) {
 
             const empty = Header{
                 // Zig doesn't like `List.empty` here, "dependency loop detected"
+                .prev = List{ .header = @constCast(&empty_fallback) },
+                .len = 0,
+                .capacity = 0,
+            };
+
+            const empty_fallback = Header{
                 .prev = undefined,
                 .len = 0,
                 .capacity = 0,
@@ -540,9 +551,11 @@ const BranchFixup = packed struct(u32) {
 
                 const old_alloc = list.allocatedHeaderAndEntries();
                 std.debug.assert(old_alloc.len < new_alloc_len);
-                if (arena.allocator().resize(old_alloc, new_alloc_len)) {
+                if (list.header.capacity > 0 and arena.allocator().resize(old_alloc, new_alloc_len)) {
+                    std.debug.assert(@intFromPtr(list.header) != @intFromPtr(List.empty.header));
                     list.header.capacity = new_capacity;
                 } else {
+                    // TODO: Reuse freed lists
                     @branchHint(.likely);
                     const new_alloc: []align(@alignOf(Header)) BranchFixup = try arena.allocator().alignedAlloc(
                         BranchFixup,
@@ -584,13 +597,20 @@ const BranchFixup = packed struct(u32) {
 const SideTableBuilder = struct {
     const Entries = std.SegmentedList(SideTableEntry, 4);
 
+    const ActiveList = struct {
+        block_offset: BlockOffset,
+        fixups: BranchFixup.List,
+
+        const BlockOffset = if (builtin.mode == .Debug) u32 else void;
+    };
+
     /// The contents of the side table, which contain branch targets inserted in increasing
     /// origin offset order.
     entries: Entries = .{},
     /// Maps pending fixups to each frame in the WebAssembly validation control stack.
     ///
     /// Since `loop`s never need fixups, they only push empty lists.
-    active: std.SegmentedList(BranchFixup.List, 4) = .{},
+    active: std.SegmentedList(ActiveList, 4) = .{},
     /// Separate stack used to fixup branches in `if`/`else` blocks.
     alternate: std.SegmentedList(BranchFixup, 4) = .{},
     free: BranchFixup.List = BranchFixup.List.empty,
@@ -602,18 +622,29 @@ const SideTableBuilder = struct {
     fn pushFixupList(
         table: *SideTableBuilder,
         arena: *ArenaAllocator,
+        block_offset: ActiveList.BlockOffset,
         allocation: enum { reuse, empty },
     ) Allocator.Error!void {
-        const pushed = try table.active.addOne(arena.allocator());
-
-        pushed.* = if (allocation == .reuse and table.free.header.capacity > 0) reused: {
+        const fixups = if (allocation == .reuse and table.free.header.capacity > 0) reused: {
             const used = table.free;
+            std.debug.assert(used.header.capacity > 0);
             table.free = used.header.prev;
+            std.debug.assert(@intFromPtr(used.header) != @intFromPtr(table.free.header));
             used.header.prev = BranchFixup.List.empty;
             break :reused used;
         } else BranchFixup.List.empty;
 
-        std.debug.assert(pushed.header.len == 0);
+        std.debug.assert(fixups.header.len == 0);
+        std.debug.assert(fixups.header.prev.header.capacity == 0);
+        std.debug.assert(@intFromPtr(fixups.header) != @intFromPtr(&BranchFixup.List.Header.empty_fallback));
+
+        try table.active.append(
+            arena.allocator(),
+            ActiveList{
+                .block_offset = block_offset,
+                .fixups = fixups,
+            },
+        );
     }
 
     fn appendAlternate(
@@ -651,6 +682,7 @@ const SideTableBuilder = struct {
         known_target: ?KnownTarget,
         copy_count: u8,
         pop_count: u8,
+        block_offset: ActiveList.BlockOffset,
         target_depth: u32,
     ) (Module.LimitError || Allocator.Error)!u32 {
         const idx = try table.nextEntryIdx();
@@ -672,15 +704,16 @@ const SideTableBuilder = struct {
                 return Error.WasmImplementationLimit;
         } else {
             // std.debug.print(
-            //     " PLACED FIXUP #{} originating from 0x{X} (copy={}, pop={})\n",
-            //     .{ idx, origin, copy_count, pop_count },
+            //     " PLACED FIXUP #{} originating from 0x{X} corresponding to block 0x{X} (copy={}, pop={})\n",
+            //     .{ idx, origin, block_offset, copy_count, pop_count },
             // );
 
             entry.delta_ip = .{ .fixup_origin = origin };
             entry.delta_stp = undefined;
 
-            const current_list: *BranchFixup.List = table.active.at(table.active.len - 1 - target_depth);
-            try current_list.append(arena, .{ .entry_idx = idx });
+            const current_list: *ActiveList = table.active.at(table.active.len - 1 - target_depth);
+            std.debug.assert(current_list.block_offset == block_offset);
+            try current_list.fixups.append(arena, .{ .entry_idx = idx });
         }
 
         return idx;
@@ -721,12 +754,33 @@ const SideTableBuilder = struct {
     fn popAndResolveFixups(
         table: *SideTableBuilder,
         end_offset: u32,
+        block_offset: ActiveList.BlockOffset,
     ) Module.LimitError!void {
         const target_side_table_idx = try table.nextEntryIdx();
 
-        // std.debug.print("RESOLVING FIXUPS targeting 0x{X}\n", .{end_offset});
+        // std.debug.print(
+        //     "RESOLVING FIXUPS targeting 0x{X} (introduced by 0x{X})\n",
+        //     .{ end_offset, block_offset },
+        // );
 
-        var remaining: BranchFixup.List = table.active.pop().?;
+        const popped: ActiveList = table.active.pop().?;
+        std.debug.assert(block_offset == popped.block_offset);
+
+        const popped_header = popped.fixups.header;
+        if (table.active.len > 0 and popped_header.capacity > 0) {
+            const other: *ActiveList = table.active.at(table.active.len - 1);
+            const other_header = other.fixups.header;
+            if (@intFromPtr(popped_header) == @intFromPtr(other_header)) std.debug.panic(
+                "fixup list targeting 0x{X} {*} (len={}, cap={}) mustn't be the same " ++
+                    "as list targeting 0x{X} {*} (len={}, cap={})",
+                .{
+                    block_offset,       popped_header, popped_header.len, popped_header.capacity,
+                    other.block_offset, other_header,  other_header.len,  other_header.capacity,
+                },
+            );
+        }
+
+        var remaining = popped.fixups;
         while (remaining.header.len > 0) {
             for (remaining.entries()) |*fixup_entry| {
                 try table.resolveFixupEntry(
@@ -736,11 +790,12 @@ const SideTableBuilder = struct {
                 );
             }
 
+            const old_free = table.free;
             table.free = remaining;
             remaining = remaining.header.prev;
 
             table.free.header.len = 0;
-            table.free.header.prev = table.free;
+            table.free.header.prev = old_free;
             @memset(table.free.allocatedEntries(), undefined);
         }
     }
@@ -784,6 +839,7 @@ fn appendSideTableEntry(
             null,
         target.copy_count,
         target.pop_count,
+        target.frame.offset,
         target.depth,
     );
 }
@@ -894,7 +950,7 @@ fn doValidation(
         },
     ) catch unreachable;
 
-    side_table.pushFixupList(scratch, .reuse) catch unreachable;
+    side_table.pushFixupList(scratch, 0, .reuse) catch unreachable;
 
     state.instructions = @ptrCast(reader.bytes.ptr);
 
@@ -927,7 +983,11 @@ fn doValidation(
                 );
 
                 // TODO: Skip branch fixup processing for unreachable code.
-                try side_table.pushFixupList(scratch, .reuse);
+                try side_table.pushFixupList(
+                    scratch,
+                    if (builtin.mode == .Debug) instr_offset,
+                    .reuse,
+                );
             },
             .loop => {
                 const block_type = try BlockType.read(reader, module);
@@ -945,7 +1005,11 @@ fn doValidation(
 
                 // Destination of a branch to a loop is already known, so an empty fixup list is appended.
                 // An entry is required anyway to keep the mapping from WASM label depths to fixup lists.
-                try side_table.pushFixupList(scratch, .empty);
+                try side_table.pushFixupList(
+                    scratch,
+                    if (builtin.mode == .Debug) instr_offset,
+                    .empty,
+                );
             },
             .@"if" => {
                 const block_type = try BlockType.read(reader, module);
@@ -970,7 +1034,11 @@ fn doValidation(
                     0,
                 );
 
-                try side_table.pushFixupList(scratch, .reuse); // going to 'end'
+                try side_table.pushFixupList(
+                    scratch,
+                    if (builtin.mode == .Debug) instr_offset,
+                    .reuse,
+                ); // going to 'end'
             },
             .@"else" => {
                 const current_height = val_stack.len();
@@ -999,26 +1067,34 @@ fn doValidation(
                     std.math.cast(u8, block_type.result_count) orelse
                         return error.WasmImplementationLimit,
                     try Label.calculatePopCount(current_height, frame.info.height),
+                    if (builtin.mode == .Debug) frame.offset,
                     0,
                 );
 
                 // Interpreter's `else` handler jumps to the `end`, so failing branch in `if` should be redirected to `else` body.
                 try side_table.popAndResolveAlternate(instr_offset + 1);
+
+                if (builtin.mode == .Debug)
+                    side_table.active.at(side_table.active.len - 1).block_offset = instr_offset;
             },
             .end => {
                 const frame = try popCtrlFrame(&ctrl_stack, &val_stack, module);
 
                 // TODO: Skip branch fixup processing for unreachable code.
 
+                const current_list = side_table.active.at(side_table.active.len - 1);
+                std.debug.assert(frame.offset == current_list.block_offset);
+
                 if (frame.info.opcode == .loop) {
-                    std.debug.assert(
-                        side_table.active.at(side_table.active.len - 1).header.capacity == 0,
-                    );
+                    std.debug.assert(current_list.fixups.header.capacity == 0);
                 }
 
                 // Possible optimization, target the instruction after the branch only if this is not the last `end` instruction
                 // - This would mess up the Interpreter's fuel counting.
-                try side_table.popAndResolveFixups(instr_offset);
+                try side_table.popAndResolveFixups(
+                    instr_offset,
+                    if (builtin.mode == .Debug) frame.offset,
+                );
 
                 if (frame.info.opcode == .@"if") {
                     try side_table.popAndResolveAlternate(instr_offset);

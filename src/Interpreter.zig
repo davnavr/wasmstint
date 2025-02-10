@@ -670,7 +670,7 @@ const Instructions = extern struct {
             // std.debug.print(
             //     "TRACE[{X:0>6}]: {s}\n",
             //     .{
-            //         @intFromPtr(reader.p) -
+            //         @intFromPtr(reader.p) - 1 -
             //             @intFromPtr(interp.currentFrame().function.expanded().wasm.module.header().module.wasm.ptr),
             //         @tagName(@as(opcodes.ByteOpcode, @enumFromInt(next_opcode))),
             //     },
