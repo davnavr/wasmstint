@@ -506,23 +506,10 @@ pub fn instantiateModule(
         };
 
         const src: []const u8 = wasm.dataSegmentContents(active_data.data);
-        std.debug.assert(src.len <= std.math.maxInt(u32));
-
-        // This is intended to follow the semantics of memory.init
-
-        const end_idx = std.math.add(usize, offset, src.len) catch {
+        mem.init(src, @intCast(src.len), 0, offset) catch {
             interp.state = .{ .trapped = .memory_access_out_of_bounds };
             return;
         };
-
-        if (mem.size < end_idx) {
-            interp.state = .{ .trapped = .memory_access_out_of_bounds };
-            return;
-        }
-
-        const dst: []u8 = mem.bytes()[offset..end_idx];
-        std.debug.assert(src.len == dst.len);
-        @memcpy(dst, src);
     }
 
     const start_func = if (wasm.inner.start.get()) |start_idx|
