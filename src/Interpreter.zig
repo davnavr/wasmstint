@@ -2268,6 +2268,19 @@ const opcode_handlers = struct {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
     }
+
+    pub fn @"elem.drop"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const elem_idx = i.nextIdx(Module.ElemIdx);
+
+        int.currentFrame().function.expanded().wasm.module.header()
+            .elemSegmentDropFlag(elem_idx)
+            .drop();
+
+        std.debug.assert(loc <= vals.items.len);
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
 };
 
 /// If the handler is not appearing in this table, make sure it is public first.
