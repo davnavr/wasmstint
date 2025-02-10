@@ -1135,9 +1135,11 @@ fn encodeText(
                     const body: *const Text.Expr = &func_field_ptr.body.defined;
                     var instr_iter = body.iterator(text_ctx.tree, arena);
                     while (instr_iter.next()) |instr| {
-                        _ = &code_needs_data_count;
                         const type_use: *const Text.TypeUse = switch (instr.tag(text_ctx.tree) orelse continue) {
-                            // .@"data.drop", .@"memory.init" => code_needs_data_count = true, // TODO: need data count detection!
+                            .@"data.drop", .@"memory.init" => {
+                                code_needs_data_count = true;
+                                continue;
+                            },
                             inline else => |tag| switch (comptime Text.Instr.argumentTag(tag)) {
                                 .block_type => if (instr.arguments.block_type.isInline())
                                     continue
