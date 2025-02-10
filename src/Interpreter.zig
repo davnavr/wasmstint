@@ -2186,7 +2186,18 @@ const opcode_handlers = struct {
         }
     }
 
-    //pub fn @"data.drop"
+    pub fn @"data.drop"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const data_idx = i.nextIdx(Module.DataIdx);
+
+        int.currentFrame().function.expanded().wasm.module.header()
+            .dataSegmentDropFlag(data_idx)
+            .drop();
+
+        std.debug.assert(loc <= vals.items.len);
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-memory-copy
     pub fn @"memory.copy"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {

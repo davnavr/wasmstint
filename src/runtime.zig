@@ -570,7 +570,7 @@ pub const ModuleInst = extern struct {
         /// After instantiation, only passive data segments have not been dropped.
         ///
         /// To zero-out the length of dropped data segments, AND its length with the corresponding bit.
-        data_segment_mask: [*]const u32,
+        data_segment_mask: [*]u32,
 
         const index = IndexedArena.Idx(Header).fromInt(0);
 
@@ -641,14 +641,34 @@ pub const ModuleInst = extern struct {
             };
         }
 
+        pub const DataDropFlag = struct {
+            word: *u32,
+            bit: u5,
+
+            pub inline fn get(flag: DataDropFlag) u1 {
+                return @truncate(flag.word.* >> flag.bit);
+            }
+
+            pub inline fn drop(flag: DataDropFlag) void {
+                flag.word.* &= (~(@as(u32, 1) << flag.bit));
+            }
+        };
+
+        pub fn dataSegmentDropFlag(inst: *const Header, idx: Module.DataIdx) DataDropFlag {
+            const i = @intFromEnum(idx);
+            return DataDropFlag{
+                .word = &inst.data_segment_mask[i / 32],
+                .bit = @intCast(i % 32),
+            };
+        }
+
         pub fn dataSegment(inst: *const Header, idx: Module.DataIdx) []const u8 {
             var data = inst.module.dataSegmentContents(idx);
-            const i = @intFromEnum(idx);
-            const drop_flag: u1 = @intCast(inst.data_segment_mask[i / 32] >> @as(u5, @intCast(i % 32)));
+            const drop_flag: usize = inst.dataSegmentDropFlag(idx).get();
 
             // This has the effect of making the length zero when the data segment is "dropped"
             const len_move = @bitSizeOf(usize) - 1;
-            const len_mask: usize = @bitCast(@as(isize, @bitCast(@as(usize, drop_flag) << len_move)) >> len_move);
+            const len_mask: usize = @bitCast(@as(isize, @bitCast(drop_flag << len_move)) >> len_move);
             std.debug.assert(@popCount(len_mask) == 0 or @popCount(len_mask) == @bitSizeOf(usize));
             data.len &= len_mask;
             return data;
