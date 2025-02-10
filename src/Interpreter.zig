@@ -1968,7 +1968,7 @@ const opcode_handlers = struct {
                 const old_size: u32 = @intCast(mem.size);
                 mem.size = new_size;
                 @memset(mem.bytes()[old_size..new_size], 0);
-                break :result @bitCast(@as(u32, @intCast(old_size)));
+                break :result @bitCast(@divExact(@as(u32, @intCast(old_size)), runtime.MemInst.page_size));
             } else {
                 // TODO: Add a new interruption kind.
                 break :result grow_failed;
