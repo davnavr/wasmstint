@@ -1103,7 +1103,6 @@ pub const Elem = struct {
     pub fn parseContents(
         contents: *sexpr.Parser,
         ctx: *ParseContext,
-        parent: sexpr.List.Id,
         arena: *IndexedArena,
         caches: *Caches,
         scratch: *ArenaAllocator,
@@ -1119,102 +1118,110 @@ pub const Elem = struct {
             .table = .none,
             .keyword = .none,
             .offset = .omitted,
-            .elements = undefined,
+            .elements = List{
+                .ref_type = .{ .keyword = .none },
+                .items = .{ .indices = .empty },
+            },
         };
 
         const State = union(enum) {
-            start: void,
-            ref_type: sexpr.TokenId.Opt,
+            start,
+            elem_list,
             offset: struct {
-                parser: sexpr.Parser,
                 list: sexpr.List.Id,
+                parser: sexpr.Parser,
             },
+            offset_or_elem_list,
         };
 
         state: switch (State{ .start = {} }) {
             .start => {
-                const declare_reftype_tableuse_or_offset = contents.parseValue() catch {
-                    break :state; // active, but offset and table is 0
-                };
-
-                switch (declare_reftype_tableuse_or_offset.unpacked()) {
-                    .atom => |declare_or_reftype_keyword| continue :state State{
-                        .ref_type = if (declare_or_reftype_keyword.tag(ctx.tree) == .keyword_declare) declare: {
-                            elem.keyword = sexpr.TokenId.Opt.init(declare_or_reftype_keyword);
-                            break :declare .none;
-                        } else sexpr.TokenId.Opt.init(declare_or_reftype_keyword),
+                var lookahead: sexpr.Parser = contents.*;
+                switch ((lookahead.parseValue() catch break :state).unpacked()) {
+                    .atom => |token| switch (token.tag(ctx.tree)) {
+                        .keyword_declare => {
+                            contents.* = lookahead;
+                            continue :state .elem_list;
+                        },
+                        .id, .integer => break :state,
+                        else => continue :state .elem_list,
                     },
-                    .list => |table_or_offset| {
-                        const table_or_offset_parser_init = sexpr.Parser.init(
-                            table_or_offset.contents(ctx.tree).values(ctx.tree),
-                        );
-
-                        var table_or_offset_parser = table_or_offset_parser_init;
-
-                        const table_or_offset_keyword = try table_or_offset_parser.parseAtomInList(
-                            table_or_offset,
+                    .list => |list| {
+                        var list_parser = sexpr.Parser.init(list.contents(ctx.tree).values(ctx.tree));
+                        const offset_instr_parser = list_parser;
+                        const token = try list_parser.parseAtomInList(
+                            list,
                             ctx,
-                            "'table', 'offset', or an instruction",
+                            "'offset', 'table' or an instruction",
                         );
 
-                        switch (table_or_offset_keyword.tag(ctx.tree)) {
+                        switch (token.tag(ctx.tree)) {
                             .keyword_table => {
                                 const table_id = try Ident.parse(
-                                    &table_or_offset_parser,
+                                    &list_parser,
                                     ctx,
-                                    table_or_offset,
+                                    list,
                                     caches.allocator,
                                     &caches.ids,
                                 );
 
                                 elem.table = Ident.Opt.init(table_id);
-                                elem.keyword = sexpr.TokenId.Opt.init(table_or_offset_keyword);
-                                try table_or_offset_parser.expectEmpty(ctx);
+                                elem.keyword = sexpr.TokenId.Opt.init(token);
+                                try list_parser.expectEmpty(ctx);
 
-                                const offset_list = try contents.parseListInList(parent, ctx);
-                                const offset_parser_init = sexpr.Parser.init(
-                                    offset_list.contents(ctx.tree).values(ctx.tree),
-                                );
-
-                                var offset_parser = offset_parser_init;
-                                const maybe_offset_keyword = try offset_parser.parseAtomInList(
-                                    offset_list,
-                                    ctx,
-                                    "'offset' or instruction",
-                                );
-
-                                continue :state State{
-                                    .offset = .{
-                                        .parser = if (maybe_offset_keyword.tag(ctx.tree) == .keyword_offset) has_offset: {
-                                            elem.offset.inner.keyword = sexpr.TokenId.Opt.init(maybe_offset_keyword);
-                                            break :has_offset offset_parser;
-                                        } else offset_parser_init,
-                                        .list = offset_list,
-                                    },
-                                };
+                                contents.* = lookahead;
+                                continue :state .offset_or_elem_list;
                             },
-                            // table is omitted, defaults to 0.
                             .keyword_offset => {
-                                elem.offset.inner.keyword = sexpr.TokenId.Opt.init(table_or_offset_keyword);
+                                contents.* = lookahead;
                                 continue :state State{
-                                    .offset = .{
-                                        .parser = table_or_offset_parser,
-                                        .list = table_or_offset,
-                                    },
+                                    .offset = .{ .parser = list_parser, .list = list },
                                 };
                             },
-                            else => continue :state State{
-                                .offset = .{
-                                    .parser = table_or_offset_parser_init,
-                                    .list = table_or_offset,
-                                },
+                            .keyword_item => break :state,
+                            else => {
+                                contents.* = lookahead;
+                                continue :state State{
+                                    .offset = .{ .parser = offset_instr_parser, .list = list },
+                                };
+                            },
+                        }
+                    },
+                }
+            },
+            .offset_or_elem_list => {
+                var lookahead: sexpr.Parser = contents.*;
+                switch ((lookahead.parseValue() catch break :state).unpacked()) {
+                    .atom => continue :state .elem_list,
+                    .list => |list| {
+                        var list_parser = sexpr.Parser.init(list.contents(ctx.tree).values(ctx.tree));
+                        const offset_instr_parser = list_parser;
+                        const token = try list_parser.parseAtomInList(
+                            list,
+                            ctx,
+                            "'offset' or an instruction",
+                        );
+
+                        switch (token.tag(ctx.tree)) {
+                            .keyword_offset => {
+                                contents.* = lookahead;
+                                continue :state State{
+                                    .offset = .{ .parser = list_parser, .list = list },
+                                };
+                            },
+                            .keyword_item => break :state,
+                            else => {
+                                contents.* = lookahead;
+                                continue :state State{
+                                    .offset = .{ .parser = offset_instr_parser, .list = list },
+                                };
                             },
                         }
                     },
                 }
             },
             .offset => |offset| {
-                var offset_parser = offset.parser;
+                var offset_parser: sexpr.Parser = offset.parser;
                 elem.offset.inner.expr = try Expr.parseContents(
                     &offset_parser,
                     ctx,
@@ -1225,42 +1232,32 @@ pub const Elem = struct {
                 );
 
                 std.debug.assert(offset_parser.isEmpty());
-                continue :state .{ .ref_type = .none };
-            },
-            .ref_type => |ref_type| {
-                const ref_type_token = ref_type.get() orelse contents.parseAtom(
-                    ctx,
-                    "reftype or 'func' keyword",
-                ) catch |e| {
-                    // omitted tableuse means func keyword can be inferred.
-                    if (!elem.table.some and !elem.keyword.some) {
-                        elem.elements.ref_type = .{ .keyword = .none };
-                        break :state;
-                    }
 
-                    return switch (e) {
-                        error.EndOfStream => (try ctx.errorAtList(
-                            parent,
-                            .end,
-                            "expected reftype or 'func' keyword",
-                        )).err,
-                        else => |err| err,
-                    };
+                continue :state .elem_list;
+            },
+            .elem_list => {
+                var lookahead: sexpr.Parser = contents.*;
+                const maybe_elem_type = lookahead.parseAtom(
+                    ctx,
+                    "reftype, 'func' keyword, or element list",
+                ) catch |e| switch (e) {
+                    error.EndOfStream => break :state,
+                    else => |err| return err,
                 };
 
-                switch (ref_type_token.tag(ctx.tree)) {
+                switch (maybe_elem_type.tag(ctx.tree)) {
                     .keyword_func,
                     .keyword_funcref,
                     .keyword_externref,
                     => {
-                        elem.elements.ref_type = .{
-                            .keyword = sexpr.TokenId.Opt.init(ref_type_token),
-                        };
+                        elem.elements.ref_type = .{ .keyword = sexpr.TokenId.Opt.init(maybe_elem_type) };
+                        contents.* = lookahead;
                         break :state;
                     },
+                    .id, .integer => break :state,
                     else => return (try ctx.errorAtToken(
-                        ref_type_token,
-                        "expected reftype or 'func' keyword",
+                        maybe_elem_type,
+                        "expected reftype, 'func' keyword, or element list",
                     )).err,
                 }
             },
@@ -1440,7 +1437,6 @@ pub fn parseFields(
                 const parsed_elem = Elem.parseContents(
                     &field_contents,
                     ctx,
-                    field_list,
                     arena,
                     caches,
                     scratch,
