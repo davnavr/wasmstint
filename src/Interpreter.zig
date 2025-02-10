@@ -505,11 +505,13 @@ pub fn instantiateModule(
             },
         };
 
-        const src: []const u8 = wasm.dataSegmentContents(active_data.data);
+        const src: []const u8 = module_inst.dataSegment(active_data.data);
         mem.init(src, @intCast(src.len), 0, offset) catch {
             interp.state = .{ .trapped = .memory_access_out_of_bounds };
             return;
         };
+
+        module_inst.dataSegmentDropFlag(active_data.data).drop();
     }
 
     const start_func = if (wasm.inner.start.get()) |start_idx|

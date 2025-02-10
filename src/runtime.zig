@@ -486,16 +486,15 @@ pub const ModuleAlloc = struct {
             );
         }
 
-        const passive_datas_mask_len = std.math.divCeil(
+        const datas_drop_mask = try arena_array.alloc(
             u32,
-            module.inner.datas_count,
-            32,
-        ) catch unreachable;
-
-        const passive_datas_mask = try arena_array.dupe(
-            u32,
-            module.inner.passive_datas_mask[0..passive_datas_mask_len],
+            std.math.divCeil(
+                u32,
+                module.inner.datas_count,
+                32,
+            ) catch unreachable,
         );
+        @memset(datas_drop_mask.items(&arena_array), std.math.maxInt(u32));
 
         errdefer comptime unreachable;
 
@@ -530,7 +529,7 @@ pub const ModuleAlloc = struct {
             .mems = mems.items(module_data).ptr,
             .tables = tables.items(module_data).ptr,
             .globals = @ptrCast(globals.items(module_data).ptr),
-            .data_segment_mask = passive_datas_mask.items(module_data).ptr,
+            .datas_drop_mask = datas_drop_mask.items(module_data).ptr,
         };
 
         return ModuleAlloc{
@@ -570,7 +569,7 @@ pub const ModuleInst = extern struct {
         /// After instantiation, only passive data segments have not been dropped.
         ///
         /// To zero-out the length of dropped data segments, AND its length with the corresponding bit.
-        data_segment_mask: [*]u32,
+        datas_drop_mask: [*]u32,
 
         const index = IndexedArena.Idx(Header).fromInt(0);
 
@@ -641,23 +640,23 @@ pub const ModuleInst = extern struct {
             };
         }
 
-        pub const DataDropFlag = struct {
+        pub const DropFlag = struct {
             word: *u32,
             bit: u5,
 
-            pub inline fn get(flag: DataDropFlag) u1 {
+            pub inline fn get(flag: DropFlag) u1 {
                 return @truncate(flag.word.* >> flag.bit);
             }
 
-            pub inline fn drop(flag: DataDropFlag) void {
+            pub inline fn drop(flag: DropFlag) void {
                 flag.word.* &= (~(@as(u32, 1) << flag.bit));
             }
         };
 
-        pub fn dataSegmentDropFlag(inst: *const Header, idx: Module.DataIdx) DataDropFlag {
+        pub fn dataSegmentDropFlag(inst: *const Header, idx: Module.DataIdx) DropFlag {
             const i = @intFromEnum(idx);
-            return DataDropFlag{
-                .word = &inst.data_segment_mask[i / 32],
+            return DropFlag{
+                .word = &inst.datas_drop_mask[i / 32],
                 .bit = @intCast(i % 32),
             };
         }
@@ -890,6 +889,20 @@ pub const TableInst = extern struct {
             std.debug.assert(@sizeOf(Base) == @sizeOf([*]const u8));
         }
     };
+
+    pub const OobError = error{TableAccessOutOfBounds};
+
+    // /// Implements the [`table.init`] instruction, which is also used in module instantiation.
+    // ///
+    // /// [`table.init`]: https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-init
+    // pub fn init(
+    //     inst: *const MemInst,
+    //     src: Module.ElemIdx,
+    //     len: u32,
+    //     src_idx: u32,
+    //     dst_idx: u32,
+    // ) OobError!void {
+    // }
 };
 
 pub const TableAddr = extern struct {
