@@ -646,8 +646,12 @@ const Instructions = extern struct {
     }
 
     inline fn nextIdx(reader: *Instructions, comptime I: type) I {
-        // TODO: Fix, should always parse a u32, spec w/o multi-memory only allows parsing single byte for MemIdxs
-        return @enumFromInt(reader.readUleb128(@typeInfo(I).@"enum".tag_type) catch unreachable);
+        const IdxInt = @typeInfo(I).@"enum".tag_type;
+        return switch (I) {
+            // spec w/o multi-memory allows only parsing single byte for memory indices
+            Module.MemIdx => @enumFromInt(reader.readUleb128(IdxInt) catch unreachable),
+            else => @enumFromInt(@as(IdxInt, @intCast(reader.readUleb128(u32) catch unreachable))),
+        };
     }
 
     inline fn readIleb128(reader: *Instructions, comptime T: type) error{ Overflow, EndOfStream }!T {
