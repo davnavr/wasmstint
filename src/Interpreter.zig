@@ -88,56 +88,84 @@ pub fn init(alloca: Allocator, options: InitOptions) Allocator.Error!Interpreter
     };
 }
 
-/// Describes the kind of trap that occurred.
-///
-/// Hosts can specify their own codes in the negative range.
-pub const TrapCode = enum(i32) {
-    unreachable_code_reached = 0,
-    /// The function did not contain valid WebAssembly.
+pub const Trap = struct {
+    /// Describes the kind of trap that occurred.
     ///
-    /// See <https://webassembly.github.io/spec/core/appendix/implementation.html#validation> for more
-    /// information.
-    lazy_validation_failed, // TODO: rename to lazy_validation_failure
-    integer_division_by_zero,
-    integer_overflow,
-    invalid_conversion_to_integer,
-    memory_access_out_of_bounds,
-    table_access_out_of_bounds,
-    indirect_call_to_null,
-    indirect_call_signature_mismatch,
-    _,
+    /// Hosts can specify their own codes in the negative range.
+    pub const Code = enum(i32) {
+        unreachable_code_reached = 0,
+        /// The function did not contain valid WebAssembly.
+        ///
+        /// See <https://webassembly.github.io/spec/core/appendix/implementation.html#validation> for more
+        /// information.
+        lazy_validation_failed, // TODO: rename to lazy_validation_failure
+        integer_division_by_zero,
+        integer_overflow,
+        invalid_conversion_to_integer,
+        memory_access_out_of_bounds,
+        table_access_out_of_bounds,
+        indirect_call_to_null,
+        indirect_call_signature_mismatch,
+        _,
 
-    pub fn initHost(code: u31) TrapCode {
-        return @enumFromInt(-@as(i31, code) - 1);
+        pub fn initHost(code: u31) Code {
+            return @enumFromInt(-@as(i31, code) - 1);
+        }
+
+        pub fn host(code: Code) ?u31 {
+            return if (code < 0) @intCast(-(@intFromEnum(code) + 1)) else null;
+        }
+    };
+
+    code: Code,
+    information: Information,
+
+    pub const Information = union {
+        indirect_call_to_null: struct {
+            index: usize,
+        },
+    };
+
+    fn InformationType(comptime code: Code) type {
+        return if (@hasField(Information, @tagName(code)))
+            @FieldType(Information, @tagName(code))
+        else
+            void;
     }
 
-    pub fn host(code: TrapCode) ?u31 {
-        return if (code < 0) @intCast(-(@intFromEnum(code) + 1)) else null;
-    }
-
-    fn initIntegerOverflow(e: error{Overflow}) TrapCode {
-        return switch (e) {
-            error.Overflow => .integer_overflow,
+    fn init(comptime code: Code, information: InformationType(code)) Trap {
+        return Trap{
+            .code = code,
+            .information = if (@hasField(Information, @tagName(code)))
+                @unionInit(Information, @tagName(code), information)
+            else
+                undefined,
         };
     }
 
-    fn initIntegerDivisionByZero(e: error{DivisionByZero}) TrapCode {
+    fn initIntegerOverflow(e: error{Overflow}) Trap {
         return switch (e) {
-            error.DivisionByZero => .integer_division_by_zero,
+            error.Overflow => Trap.init(.integer_overflow, {}),
         };
     }
 
-    fn initSignedIntegerDivision(e: error{ Overflow, DivisionByZero }) TrapCode {
+    fn initIntegerDivisionByZero(e: error{DivisionByZero}) Trap {
         return switch (e) {
-            error.Overflow => .integer_overflow,
-            error.DivisionByZero => .integer_division_by_zero,
+            error.DivisionByZero => Trap.init(.integer_division_by_zero, {}),
         };
     }
 
-    fn initTrunc(e: error{ Overflow, NotANumber }) TrapCode {
+    fn initSignedIntegerDivision(e: error{ Overflow, DivisionByZero }) Trap {
         return switch (e) {
-            error.Overflow => .integer_overflow,
-            error.NotANumber => .invalid_conversion_to_integer,
+            error.Overflow => Trap.init(.integer_overflow, {}),
+            error.DivisionByZero => Trap.init(.integer_division_by_zero, {}),
+        };
+    }
+
+    fn initTrunc(e: error{ Overflow, NotANumber }) Trap {
+        return switch (e) {
+            error.Overflow => Trap.init(.integer_overflow, {}),
+            error.NotANumber => Trap.init(.invalid_conversion_to_integer, {}),
         };
     }
 };
@@ -167,7 +195,7 @@ pub const State = union(enum) {
     // memory_grow,
     /// The computation was aborted due to a *trap*. The call stack of the interpreter can be
     /// inspected to determine where and when the trap occurred.
-    trapped: TrapCode,
+    trapped: Trap,
     // unhandled_exception: Exception,
 };
 
@@ -248,7 +276,7 @@ pub fn resumeExecution(interp: *Interpreter, alloca: Allocator, fuel: *Fuel) Err
 
             if (code.state.@"error") {
                 @branchHint(.cold);
-                interp.state = .{ .trapped = TrapCode.lazy_validation_failed };
+                interp.state = .{ .trapped = Trap.init(.lazy_validation_failed, {}) };
                 return;
             }
 
@@ -294,7 +322,7 @@ pub fn finishLazyValidation(
 
         // Trap occurs even if OOM error is reported, since currently `state.flag` is set to `.failed` if OOM occurs
         // during validation.
-        interp.state = .{ .trapped = TrapCode.lazy_validation_failed };
+        interp.state = .{ .trapped = Trap.init(.lazy_validation_failed, {}) };
 
         return switch (e) {
             error.OutOfMemory => |oom| return oom,
@@ -461,7 +489,7 @@ pub fn instantiateModule(
             0,
             offset,
         ) catch {
-            interp.state = .{ .trapped = .table_access_out_of_bounds };
+            interp.state = .{ .trapped = Trap.init(.table_access_out_of_bounds, {}) };
             return;
         };
 
@@ -482,7 +510,7 @@ pub fn instantiateModule(
 
         const src: []const u8 = module_inst.dataSegment(active_data.data);
         mem.init(src, @intCast(src.len), 0, offset) catch {
-            interp.state = .{ .trapped = .memory_access_out_of_bounds };
+            interp.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
             return;
         };
 
@@ -537,7 +565,7 @@ fn setupStackFrame(
 
             if (code.state.@"error") |_| {
                 @branchHint(.cold);
-                interp.state = .{ .trapped = TrapCode.lazy_validation_failed };
+                interp.state = .{ .trapped = Trap.init(.lazy_validation_failed, {}) };
                 return .complete;
             }
 
@@ -814,7 +842,7 @@ fn linearMemoryHandlers(comptime field_name: []const u8) type {
 
         fn load(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
             const bytes = accessors.performLoad(i, vals, int) orelse {
-                int.state = .{ .trapped = .memory_access_out_of_bounds };
+                int.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
                 return;
             };
 
@@ -830,7 +858,7 @@ fn linearMemoryHandlers(comptime field_name: []const u8) type {
             const c: accessors.Bytes = @bitCast(@field(vals.pop(), field_name));
             accessors.performStore(i, vals, int, c) catch |e| {
                 comptime std.debug.assert(@TypeOf(e) == error{OutOfBounds});
-                int.state = .{ .trapped = .memory_access_out_of_bounds };
+                int.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
                 return;
             };
 
@@ -852,7 +880,7 @@ fn extendingLinearMemoryLoad(comptime field_name: []const u8, comptime S: type) 
 
         fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
             const bytes = linearMemoryAccessors(@sizeOf(S)).performLoad(i, vals, int) orelse {
-                int.state = .{ .trapped = .memory_access_out_of_bounds };
+                int.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
                 return;
             };
 
@@ -885,7 +913,7 @@ fn narrowingLinearMemoryStore(comptime field_name: []const u8, comptime size: u6
             const narrowed: S = @truncate(@field(vals.pop(), field_name));
             linearMemoryAccessors(size / 8).performStore(i, vals, int, @bitCast(narrowed)) catch |e| {
                 comptime std.debug.assert(@TypeOf(e) == error{OutOfBounds});
-                int.state = .{ .trapped = .memory_access_out_of_bounds };
+                int.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
                 return;
             };
 
@@ -984,19 +1012,6 @@ fn defineConvOp(
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
         }
-    };
-}
-
-fn trapIntegerOverflow(e: error{Overflow}) TrapCode {
-    return switch (e) {
-        error.Overflow => .integer_overflow,
-    };
-}
-
-fn trapSignedIntegerDivision(e: error{ Overflow, DivisionByZero }) TrapCode {
-    return switch (e) {
-        error.Overflow => .integer_overflow,
-        error.DivisionByZero => .integer_division_by_zero,
     };
 }
 
@@ -1201,10 +1216,10 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
         const add = defineBinOp(value_field, operators.add, undefined).handler;
         const sub = defineBinOp(value_field, operators.sub, undefined).handler;
         const mul = defineBinOp(value_field, operators.mul, undefined).handler;
-        const div_s = defineBinOp(value_field, operators.div_s, TrapCode.initSignedIntegerDivision).handler;
-        const div_u = defineBinOp(value_field, operators.div_u, TrapCode.initIntegerDivisionByZero).handler;
-        const rem_s = defineBinOp(value_field, operators.rem_s, TrapCode.initIntegerDivisionByZero).handler;
-        const rem_u = defineBinOp(value_field, operators.rem_u, TrapCode.initIntegerDivisionByZero).handler;
+        const div_s = defineBinOp(value_field, operators.div_s, Trap.initSignedIntegerDivision).handler;
+        const div_u = defineBinOp(value_field, operators.div_u, Trap.initIntegerDivisionByZero).handler;
+        const rem_s = defineBinOp(value_field, operators.rem_s, Trap.initIntegerDivisionByZero).handler;
+        const rem_u = defineBinOp(value_field, operators.rem_u, Trap.initIntegerDivisionByZero).handler;
         const @"and" = defineBinOp(value_field, operators.@"and", undefined).handler;
         const @"or" = defineBinOp(value_field, operators.@"or", undefined).handler;
         const xor = defineBinOp(value_field, operators.xor, undefined).handler;
@@ -1214,15 +1229,15 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
         const rotl = defineBinOp(value_field, operators.rotl, undefined).handler;
         const rotr = defineBinOp(value_field, operators.rotr, undefined).handler;
 
-        const trunc_f32_s = defineConvOp("f32", value_field, operators.trunc_s, TrapCode.initTrunc).handler;
-        const trunc_f32_u = defineConvOp("f32", value_field, operators.trunc_u, TrapCode.initTrunc).handler;
-        const trunc_f64_s = defineConvOp("f64", value_field, operators.trunc_s, TrapCode.initTrunc).handler;
-        const trunc_f64_u = defineConvOp("f64", value_field, operators.trunc_u, TrapCode.initTrunc).handler;
+        const trunc_f32_s = defineConvOp("f32", value_field, operators.trunc_s, Trap.initTrunc).handler;
+        const trunc_f32_u = defineConvOp("f32", value_field, operators.trunc_u, Trap.initTrunc).handler;
+        const trunc_f64_s = defineConvOp("f64", value_field, operators.trunc_s, Trap.initTrunc).handler;
+        const trunc_f64_u = defineConvOp("f64", value_field, operators.trunc_u, Trap.initTrunc).handler;
 
-        const trunc_sat_f32_s = defineConvOp("f32", value_field, operators.trunc_sat_s, TrapCode.initTrunc).handler;
-        const trunc_sat_f32_u = defineConvOp("f32", value_field, operators.trunc_sat_u, TrapCode.initTrunc).handler;
-        const trunc_sat_f64_s = defineConvOp("f64", value_field, operators.trunc_sat_s, TrapCode.initTrunc).handler;
-        const trunc_sat_f64_u = defineConvOp("f64", value_field, operators.trunc_sat_u, TrapCode.initTrunc).handler;
+        const trunc_sat_f32_s = defineConvOp("f32", value_field, operators.trunc_sat_s, Trap.initTrunc).handler;
+        const trunc_sat_f32_u = defineConvOp("f32", value_field, operators.trunc_sat_u, Trap.initTrunc).handler;
+        const trunc_sat_f64_s = defineConvOp("f64", value_field, operators.trunc_sat_s, Trap.initTrunc).handler;
+        const trunc_sat_f64_u = defineConvOp("f64", value_field, operators.trunc_sat_u, Trap.initTrunc).handler;
     };
 }
 
@@ -1636,7 +1651,7 @@ const opcode_handlers = struct {
         _ = loc;
         _ = vals;
         _ = fuel;
-        int.state = .{ .trapped = .unreachable_code_reached };
+        int.state = .{ .trapped = Trap.init(.unreachable_code_reached, {}) };
     }
 
     pub fn nop(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
@@ -1758,17 +1773,24 @@ const opcode_handlers = struct {
         const table = table_addr.table;
 
         if (table.len <= elem_index) {
-            int.state = .{ .trapped = .table_access_out_of_bounds };
+            int.state = .{ .trapped = Trap.init(.table_access_out_of_bounds, {}) };
             return;
         }
 
         const callee = table.base.func_ref[0..table.len][elem_index].funcInst() orelse {
-            int.state = .{ .trapped = .indirect_call_to_null };
+            int.state = .{
+                .trapped = Trap.init(
+                    .indirect_call_to_null,
+                    .{ .index = elem_index },
+                ),
+            };
             return;
         };
 
         if (!expected_signature.matches(callee.signature())) {
-            int.state = .{ .trapped = .indirect_call_signature_mismatch };
+            int.state = .{
+                .trapped = Trap.init(.indirect_call_signature_mismatch, {}),
+            };
             return;
         }
 
@@ -2153,7 +2175,7 @@ const opcode_handlers = struct {
         const d: u32 = @bitCast(vals.pop().i32);
 
         mem.init(module.dataSegment(data_idx), n, src_addr, d) catch {
-            int.state = .{ .trapped = .memory_access_out_of_bounds };
+            int.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
             return;
         };
 
@@ -2189,7 +2211,7 @@ const opcode_handlers = struct {
         const d: u32 = @bitCast(vals.pop().i32);
 
         dst_mem.copy(src_mem, n, src_addr, d) catch {
-            int.state = .{ .trapped = .memory_access_out_of_bounds };
+            int.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
             return;
         };
 
@@ -2209,7 +2231,7 @@ const opcode_handlers = struct {
         const d: u32 = @bitCast(vals.pop().i32);
 
         mem.fill(n, dupe, d) catch {
-            int.state = .{ .trapped = .memory_access_out_of_bounds };
+            int.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
             return;
         };
 
@@ -2237,7 +2259,7 @@ const opcode_handlers = struct {
             src_idx,
             d,
         ) catch {
-            int.state = .{ .trapped = .table_access_out_of_bounds };
+            int.state = .{ .trapped = Trap.init(.table_access_out_of_bounds, {}) };
             return;
         };
 

@@ -480,8 +480,12 @@ const State = struct {
         comptime unreachable;
     }
 
-    fn errorInterpreterTrap(state: *State, parent: Wast.sexpr.TokenId, trap_code: Interpreter.TrapCode) Error {
-        return scriptError(state.errors.errorFmtAtToken(parent, "unexpected trap, {any}", .{trap_code}));
+    fn errorInterpreterTrap(state: *State, parent: Wast.sexpr.TokenId, trap_code: Interpreter.Trap.Code) Error {
+        return scriptError(state.errors.errorFmtAtToken(
+            parent,
+            "unexpected trap, {any}",
+            .{trap_code},
+        ));
     }
 
     fn errorInterpreterInterrupted(
@@ -705,7 +709,7 @@ const State = struct {
         try state.runToCompletion(interpreter);
         switch (interpreter.state) {
             .awaiting_lazy_validation => unreachable,
-            .trapped => |code| return state.errorInterpreterTrap(parent, code),
+            .trapped => |trap| return state.errorInterpreterTrap(parent, trap.code),
             .interrupted => |cause| return state.errorInterpreterInterrupted(parent, cause),
             .awaiting_host => std.debug.assert(interpreter.call_stack.items.len == 0),
         }
@@ -821,13 +825,29 @@ const State = struct {
         }
     }
 
-    const trap_code_lookup = std.StaticStringMap(Interpreter.TrapCode).initComptime(.{
+    const trap_code_lookup = std.StaticStringMap(Interpreter.Trap.Code).initComptime(.{
         .{ "unreachable", .unreachable_code_reached },
         .{ "integer divide by zero", .integer_division_by_zero },
         .{ "integer overflow", .integer_overflow },
         .{ "invalid conversion to integer", .invalid_conversion_to_integer },
         .{ "out of bounds memory access", .memory_access_out_of_bounds },
+        .{ "out of bounds table access", .table_access_out_of_bounds },
     });
+
+    fn checkMatchingTrapCode(
+        state: *State,
+        parent: Wast.sexpr.TokenId,
+        expected: Interpreter.Trap.Code,
+        actual: Interpreter.Trap.Code,
+    ) Error!void {
+        if (actual != expected) return scriptError(
+            state.errors.errorFmtAtToken(
+                parent,
+                "expected call to fail with trap code {s}, but got {s}",
+                .{ @tagName(expected), @tagName(actual) },
+            ),
+        );
+    }
 
     fn expectTrap(
         state: *State,
@@ -837,26 +857,38 @@ const State = struct {
         failure: *const Wast.Command.Failure,
     ) Error!void {
         try state.runToCompletion(interpreter);
-        const trap_code: Interpreter.TrapCode = switch (interpreter.state) {
+        const trap: *const Interpreter.Trap = switch (interpreter.state) {
             .awaiting_lazy_validation => unreachable,
-            .trapped => |code| code,
+            .trapped => |*trap| trap,
             .interrupted => |cause| return state.errorInterpreterInterrupted(parent, cause),
             .awaiting_host => return state.errorInterpreterResults(parent, interpreter),
         };
 
-        const expected_code = trap_code_lookup.get(failure.msg.slice(script.arena)) orelse return scriptError(
-            state.errors.errorFmtAtToken(
-                parent,
-                "call failed with wrong trap code ({})",
-                .{trap_code},
-            ),
-        );
+        const expected_msg = failure.msg.slice(script.arena);
 
-        if (trap_code != expected_code) return scriptError(
+        if (trap_code_lookup.get(expected_msg)) |expected_code|
+            return state.checkMatchingTrapCode(parent, expected_code, trap.code);
+
+        const uninit_elem = "uninitialized element ";
+        if (std.mem.startsWith(u8, expected_msg, uninit_elem)) unknown: {
+            const expected_idx = std.fmt.parseUnsigned(usize, expected_msg[uninit_elem.len..], 10) catch
+                break :unknown;
+
+            try state.checkMatchingTrapCode(parent, .indirect_call_to_null, trap.code);
+
+            const actual_idx = trap.information.indirect_call_to_null.index;
+            if (expected_idx != actual_idx) return scriptError(
+                state.errors.errorFmtAtToken(
+                    parent,
+                    "expected index {}, but got {}",
+                    .{ expected_idx, actual_idx },
+                ),
+            );
+        } else return scriptError(
             state.errors.errorFmtAtToken(
                 parent,
-                "expected call to fail with trap code {}, but got {}",
-                .{ expected_code, trap_code },
+                "call failed with wrong or unrecognized trap ({s})",
+                .{@tagName(trap.code)},
             ),
         );
     }
@@ -871,7 +903,7 @@ const State = struct {
         try state.runToCompletion(interpreter);
         const interruption_cause: Interpreter.InterruptionCause = switch (interpreter.state) {
             .awaiting_lazy_validation => unreachable,
-            .trapped => |code| return state.errorInterpreterTrap(parent, code),
+            .trapped => |trap| return state.errorInterpreterTrap(parent, trap.code),
             .interrupted => |cause| cause,
             .awaiting_host => return state.errorInterpreterResults(parent, interpreter),
         };
@@ -963,7 +995,7 @@ fn runScript(
 
         var fuel = wasmstint.Interpreter.Fuel{ .remaining = 2_000 };
         var interp = try wasmstint.Interpreter.init(state.cmd_arena.allocator(), .{});
-        defer interp.reset();
+        // defer interp.reset();
 
         switch (cmd.keyword.tag(script.tree)) {
             .keyword_module => {
@@ -1070,7 +1102,7 @@ fn runScript(
                     error.ScriptError => {
                         _ = try state.errors.errorAtToken(
                             cmd.keyword,
-                            "module start function failed",
+                            "module instantiation or start function invocation failed",
                         );
                         break :run_cmds;
                     },
