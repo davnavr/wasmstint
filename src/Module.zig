@@ -119,6 +119,8 @@ inner: extern struct {
     datas_ptrs: [*]const [*]const u8,
     datas_lens: [*]const u32,
     active_datas: [*]const ActiveData,
+    /// A bitmask indicating which data segments are passive.
+    passive_datas_mask: [*]const u32,
 
     start: Start,
 },
@@ -1483,6 +1485,7 @@ pub fn parse(
         datas_ptrs: IndexedArena.Slice([*]const u8) = .empty,
         datas_lens: IndexedArena.Slice(u32) = .empty,
         active_datas: IndexedArena.Slice(ActiveData) = .empty,
+        passive_datas: IndexedArena.Slice(u32) = .empty,
     };
 
     const data_sec: DataSec = if (known_sections.data.len > 0) data: {
@@ -1503,6 +1506,12 @@ pub fn parse(
             &arena,
             parsed_datas_count,
         );
+
+        var passive_datas = try arena.alloc(
+            u32,
+            std.math.divCeil(u32, parsed_datas_count, 32) catch unreachable,
+        );
+        @memset(passive_datas.items(&arena), 0);
 
         _ = scratch.reset(.retain_capacity);
         var active_datas = std.SegmentedList(ActiveData, 1){};
@@ -1557,6 +1566,9 @@ pub fn parse(
 
             datas_ptrs.appendAssumeCapacity(&arena, contents.ptr);
             datas_lens.appendAssumeCapacity(&arena, @intCast(contents.len));
+
+            passive_datas.ptrAt(i / 32, &arena).* |=
+                @as(u32, @intFromBool(flags.is_passive)) << @as(u5, @intCast(i % 32));
         }
 
         try datas_reader.expectEndOfStream();
@@ -1565,6 +1577,7 @@ pub fn parse(
             .datas_ptrs = datas_ptrs.items,
             .datas_lens = datas_lens.items,
             .active_datas = try arena.dupeSegmentedList(ActiveData, 1, &active_datas),
+            .passive_datas = passive_datas,
         };
     } else if (data_count != null and data_count.? > 0)
         return error.MalformedWasm
@@ -1662,6 +1675,7 @@ pub fn parse(
             .datas_lens = data_sec.datas_lens.items(arena_data).ptr,
             .active_datas = data_sec.active_datas.items(arena_data).ptr,
             .active_datas_count = @intCast(data_sec.active_datas.len),
+            .passive_datas_mask = data_sec.passive_datas.items(arena_data).ptr,
 
             .has_data_count_section = data_count != null,
 

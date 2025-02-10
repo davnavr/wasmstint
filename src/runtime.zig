@@ -486,6 +486,17 @@ pub const ModuleAlloc = struct {
             );
         }
 
+        const passive_datas_mask_len = std.math.divCeil(
+            u32,
+            module.inner.datas_count,
+            32,
+        ) catch unreachable;
+
+        const passive_datas_mask = try arena_array.dupe(
+            u32,
+            module.inner.passive_datas_mask[0..passive_datas_mask_len],
+        );
+
         errdefer comptime unreachable;
 
         for (
@@ -519,6 +530,7 @@ pub const ModuleAlloc = struct {
             .mems = mems.items(module_data).ptr,
             .tables = tables.items(module_data).ptr,
             .globals = @ptrCast(globals.items(module_data).ptr),
+            .data_segment_mask = passive_datas_mask.items(module_data).ptr,
         };
 
         return ModuleAlloc{
@@ -553,6 +565,12 @@ pub const ModuleInst = extern struct {
         mems: [*]const *MemInst, // TODO: Could use comptime config to have specialized [1]MemInst (same for TableInst)
         tables: [*]const *TableInst,
         globals: [*]const *anyopaque,
+        /// Indicates which data segments have not been dropped.
+        ///
+        /// After instantiation, only passive data segments have not been dropped.
+        ///
+        /// To zero-out the length of dropped data segments, AND its length with the corresponding bit.
+        data_segment_mask: [*]const u32,
 
         const index = IndexedArena.Idx(Header).fromInt(0);
 
@@ -621,6 +639,19 @@ pub const ModuleInst = extern struct {
                 .global_type = inst.module.globalTypes()[i],
                 .value = inst.globalValues()[i],
             };
+        }
+
+        pub fn dataSegment(inst: *const Header, idx: Module.DataIdx) []const u8 {
+            var data = inst.module.dataSegmentContents(idx);
+            const i = @intFromEnum(idx);
+            const drop_flag: u1 = @intCast(inst.data_segment_mask[i / 32] >> @as(u5, @intCast(i % 32)));
+
+            // This has the effect of making the length zero when the data segment is "dropped"
+            const len_move = @bitSizeOf(usize) - 1;
+            const len_mask: usize = @bitCast(@as(isize, @bitCast(@as(usize, drop_flag) << len_move)) >> len_move);
+            std.debug.assert(@popCount(len_mask) == 0 or @popCount(len_mask) == @bitSizeOf(usize));
+            data.len &= len_mask;
+            return data;
         }
     };
 
