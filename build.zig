@@ -71,6 +71,7 @@ pub fn build(b: *std.Build) void {
             "tests/spec/br_if.wast",
             "tests/spec/br_table.wast",
             "tests/spec/br.wast",
+            "tests/spec/bulk.wast",
 
             "tests/spec/i32.wast",
             "tests/spec/i64.wast",
