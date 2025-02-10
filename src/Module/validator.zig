@@ -390,6 +390,28 @@ fn readMemArg(
     _ = try reader.readUleb128(u32); // offset
 }
 
+fn readTableIdx(reader: *Module.Reader, module: *const Module) Error!ValType {
+    const idx = try reader.readUleb128(u32);
+    return if (idx < module.tableTypes().len)
+        module.tableTypes()[idx].elem_type
+    else
+        Error.InvalidWasm;
+}
+
+fn readDataIdx(reader: *Module.Reader, module: *const Module) Error!void {
+    if (!module.inner.has_data_count_section) return Error.InvalidWasm;
+    const idx = try reader.readUleb128(u32);
+    if (idx >= module.inner.datas_count) return Error.InvalidWasm;
+}
+
+fn readElemIdx(reader: *Module.Reader, module: *const Module) Error!ValType {
+    const idx = try reader.readUleb128(u32);
+    return if (idx < module.elementSegments().len)
+        module.elementSegments()[idx].elementType()
+    else
+        Error.InvalidWasm;
+}
+
 fn readLocalIdx(reader: *Module.Reader, locals: []const ValType) Error!ValType {
     const idx = try reader.readUleb128(u32);
     return if (idx < locals.len) locals[idx] else Error.InvalidWasm;
@@ -1657,6 +1679,7 @@ fn doValidation(
             .@"f64.reinterpret_i64",
             => try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i64, .f64),
             .@"f64.promote_f32" => try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f32, .f64),
+
             .@"0xFC" => switch (try reader.readUleb128Enum(u32, opcodes.FCPrefixOpcode)) {
                 .@"i32.trunc_sat_f32_s",
                 .@"i32.trunc_sat_f32_u",
@@ -1670,8 +1693,61 @@ fn doValidation(
                 .@"i64.trunc_sat_f64_s",
                 .@"i64.trunc_sat_f64_u",
                 => try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f64, .i64),
-                else => |bad| std.debug.panic("TODO: handle 0xFC {s}\n", .{@tagName(bad)}),
+
+                .@"memory.init" => {
+                    try readDataIdx(&reader, module);
+                    try readMemIdx(&reader, module);
+                    try val_stack.popManyExpecting(&ctrl_stack, &[_]ValType{.i32} ** 3);
+                },
+                .@"data.drop" => try readDataIdx(&reader, module),
+                .@"memory.copy" => {
+                    try readMemIdx(&reader, module);
+                    try readMemIdx(&reader, module);
+                    try val_stack.popManyExpecting(&ctrl_stack, &[_]ValType{.i32} ** 3);
+                },
+                .@"memory.fill" => {
+                    try readMemIdx(&reader, module);
+                    try val_stack.popManyExpecting(&ctrl_stack, &[_]ValType{.i32} ** 3);
+                },
+
+                .@"table.init" => {
+                    const elem_type = try readElemIdx(&reader, module);
+                    const table_type = try readTableIdx(&reader, module);
+                    if (elem_type != table_type) return error.InvalidWasm;
+                    try val_stack.popManyExpecting(&ctrl_stack, &[_]ValType{.i32} ** 3);
+                },
+                .@"elem.drop" => _ = try readElemIdx(&reader, module),
+                .@"table.copy" => {
+                    const dst_type = try readTableIdx(&reader, module);
+                    const src_type = try readTableIdx(&reader, module);
+                    if (dst_type != src_type) return error.InvalidWasm;
+                    try val_stack.popManyExpecting(&ctrl_stack, &[_]ValType{.i32} ** 3);
+                },
+                .@"table.grow" => {
+                    const elem_type = try readTableIdx(&reader, module);
+                    try val_stack.popExpecting(&ctrl_stack, .i32);
+                    try val_stack.popThenPushExpecting(
+                        scratch,
+                        &ctrl_stack,
+                        elem_type,
+                        .i32,
+                    );
+                },
+                .@"table.size" => {
+                    _ = try readTableIdx(&reader, module);
+                    try val_stack.push(scratch, .i32);
+                },
+                .@"table.fill" => {
+                    const elem_type = try readTableIdx(&reader, module);
+                    try val_stack.popManyExpecting(
+                        &ctrl_stack,
+                        &[3]ValType{ .i32, elem_type, .i32 },
+                    );
+                },
+
+                // else => |bad| std.debug.panic("TODO: handle 0xFC {s}\n", .{@tagName(bad)}),
             },
+
             else => |bad| std.debug.panic("TODO: handle {s} (0x{X:0>2})\n", .{ @tagName(bad), @intFromEnum(bad) }),
         }
     }
