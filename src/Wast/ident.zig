@@ -90,8 +90,8 @@ pub const Ident = packed struct(u63) {
     };
 
     pub const Opt = packed struct(u64) {
-        some: bool,
         inner_ident: Ident,
+        some: bool,
 
         comptime {
             std.debug.assert(@sizeOf(Opt) == 8);

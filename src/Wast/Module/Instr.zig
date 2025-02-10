@@ -297,12 +297,12 @@ pub const CopyOperation = struct {
     src_unchecked: Ident align(4),
 
     pub fn identifiers(self: *const CopyOperation) ?struct {
-        dst: *align(4) const Ident,
-        src: *align(4) const Ident,
+        dst: Ident,
+        src: Ident,
     } {
-        return if (self.dst_opt.some) .{
-            .dst = &self.dst_opt.inner_ident,
-            .src = &self.src_unchecked,
+        return if (self.dst_opt.get()) |dst| .{
+            .dst = dst,
+            .src = self.src_unchecked,
         } else null;
     }
 };

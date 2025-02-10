@@ -387,12 +387,6 @@ pub const Iterator = struct {
         };
 
         switch (Lexer.Token.tagToInstrTag(atom.tag(iter.tree))) {
-            .@"memory.init",
-            .@"memory.copy",
-            .@"table.init",
-            .@"table.copy",
-            .@"ref.null",
-            => unreachable, // TODO: see Instr.argumentTag()
             inline else => |tag| {
                 const argument_name = @tagName(comptime Instr.argumentTag(tag));
                 const Args = @typeInfo(@FieldType(Instr.Arguments, argument_name)).pointer.child;

@@ -764,12 +764,6 @@ fn encodeExpr(
         };
 
         switch (instr_tag) {
-            .@"memory.init",
-            .@"memory.copy",
-            .@"table.init",
-            .@"table.copy",
-            .@"ref.null",
-            => unreachable, // TODO: see Instr.argumentTag()
             .select => {
                 const select = instr.arguments.select;
                 var chosen_type: ?ValType = null;
@@ -967,24 +961,24 @@ fn encodeExpr(
                                 try encodeIdx(
                                     output,
                                     MemIdx,
-                                    try wasm.mem_ids.getFromIdent(text, identifiers.dst.*),
+                                    try wasm.mem_ids.getFromIdent(text, identifiers.dst),
                                 );
                                 try encodeIdx(
                                     output,
                                     MemIdx,
-                                    try wasm.mem_ids.getFromIdent(text, identifiers.src.*),
+                                    try wasm.mem_ids.getFromIdent(text, identifiers.src),
                                 );
                             },
                             .@"table.copy" => {
                                 try encodeIdx(
                                     output,
                                     TableIdx,
-                                    try wasm.table_ids.getFromIdent(text, identifiers.dst.*),
+                                    try wasm.table_ids.getFromIdent(text, identifiers.dst),
                                 );
                                 try encodeIdx(
                                     output,
                                     TableIdx,
-                                    try wasm.table_ids.getFromIdent(text, identifiers.src.*),
+                                    try wasm.table_ids.getFromIdent(text, identifiers.src),
                                 );
                             },
                             else => |bad| @compileError(@tagName(bad) ++ " is not a copy instruction"),
@@ -995,27 +989,27 @@ fn encodeExpr(
                             .@"memory.init" => try encodeIdx(
                                 output,
                                 DataIdx,
-                                try wasm.data_ids.getFromIdent(text, arg.dst),
+                                try wasm.data_ids.getFromIdent(text, arg.src),
                             ),
                             .@"table.init" => try encodeIdx(
                                 output,
                                 ElemIdx,
-                                try wasm.elem_ids.getFromIdent(text, arg.dst),
+                                try wasm.elem_ids.getFromIdent(text, arg.src),
                             ),
                             else => |bad| @compileError(@tagName(bad) ++ " is not an init instruction"),
                         }
 
-                        if (arg.src.get()) |src| {
+                        if (arg.dst.get()) |dst| {
                             switch (tag) {
                                 .@"memory.init" => try encodeIdx(
                                     output,
                                     MemIdx,
-                                    try wasm.mem_ids.getFromIdent(text, src),
+                                    try wasm.mem_ids.getFromIdent(text, dst),
                                 ),
                                 .@"table.init" => try encodeIdx(
                                     output,
                                     TableIdx,
-                                    try wasm.table_ids.getFromIdent(text, src),
+                                    try wasm.table_ids.getFromIdent(text, dst),
                                 ),
                                 else => comptime unreachable,
                             }
