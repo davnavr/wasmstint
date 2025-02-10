@@ -957,6 +957,70 @@ fn encodeExpr(
                     },
                     .f32 => try output.writeInt(u32, arg.*, .little),
                     .f64 => try output.writeInt(u64, arg.*, .little),
+                    .heap_type => try (switch (arg.tag) {
+                        .func => ValType.funcref,
+                        .@"extern" => ValType.externref,
+                    }).encode(output),
+                    .copy_operation => if (arg.identifiers()) |identifiers| {
+                        switch (tag) {
+                            .@"memory.copy" => {
+                                try encodeIdx(
+                                    output,
+                                    MemIdx,
+                                    try wasm.mem_ids.getFromIdent(text, identifiers.dst.*),
+                                );
+                                try encodeIdx(
+                                    output,
+                                    MemIdx,
+                                    try wasm.mem_ids.getFromIdent(text, identifiers.src.*),
+                                );
+                            },
+                            .@"table.copy" => {
+                                try encodeIdx(
+                                    output,
+                                    TableIdx,
+                                    try wasm.table_ids.getFromIdent(text, identifiers.dst.*),
+                                );
+                                try encodeIdx(
+                                    output,
+                                    TableIdx,
+                                    try wasm.table_ids.getFromIdent(text, identifiers.src.*),
+                                );
+                            },
+                            else => |bad| @compileError(@tagName(bad) ++ " is not a copy instruction"),
+                        }
+                    } else try output.writeAll(&[_]u8{ 0, 0 }),
+                    .init_operation => {
+                        switch (tag) {
+                            .@"memory.init" => try encodeIdx(
+                                output,
+                                DataIdx,
+                                try wasm.data_ids.getFromIdent(text, arg.dst),
+                            ),
+                            .@"table.init" => try encodeIdx(
+                                output,
+                                ElemIdx,
+                                try wasm.elem_ids.getFromIdent(text, arg.dst),
+                            ),
+                            else => |bad| @compileError(@tagName(bad) ++ " is not an init instruction"),
+                        }
+
+                        if (arg.src.get()) |src| {
+                            switch (tag) {
+                                .@"memory.init" => try encodeIdx(
+                                    output,
+                                    MemIdx,
+                                    try wasm.mem_ids.getFromIdent(text, src),
+                                ),
+                                .@"table.init" => try encodeIdx(
+                                    output,
+                                    TableIdx,
+                                    try wasm.table_ids.getFromIdent(text, src),
+                                ),
+                                else => comptime unreachable,
+                            }
+                        } else try output.writeByte(0);
+                    },
                 }
             },
         }
@@ -1079,13 +1143,7 @@ fn encodeText(
                     while (instr_iter.next()) |instr| {
                         _ = &code_needs_data_count;
                         const type_use: *const Text.TypeUse = switch (instr.tag(text_ctx.tree) orelse continue) {
-                            .@"memory.init",
-                            .@"memory.copy",
-                            .@"table.init",
-                            .@"table.copy",
-                            .@"ref.null",
-                            => unreachable, // TODO: see Instr.argumentTag()
-                            // .@"data.drop", .@"memory.init" => code_needs_data_count = true,
+                            // .@"data.drop", .@"memory.init" => code_needs_data_count = true, // TODO: need data count detection!
                             inline else => |tag| switch (comptime Text.Instr.argumentTag(tag)) {
                                 .block_type => if (instr.arguments.block_type.isInline())
                                     continue
@@ -1105,6 +1163,9 @@ fn encodeText(
                                 .f32,
                                 .i64,
                                 .f64,
+                                .heap_type,
+                                .copy_operation,
+                                .init_operation,
                                 => continue,
                             },
                         };

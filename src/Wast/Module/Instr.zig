@@ -41,6 +41,9 @@ pub const Arguments = union {
     br_table: *align(4) const BrTable,
     select: *align(4) const Select,
     mem_arg: *align(4) const MemArg,
+    heap_type: *align(4) const HeapType,
+    copy_operation: *align(4) const CopyOperation,
+    init_operation: *align(4) const InitOperation,
     i32: *align(4) const i32,
     f32: *align(4) const u32,
     i64: *align(4) const i64,
@@ -264,6 +267,53 @@ pub const BlockType = struct {
     }
 };
 
+pub const HeapType = packed struct(u32) {
+    tag: enum(u1) { func, @"extern" },
+    token: sexpr.TokenId,
+
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        parent: sexpr.List.Id,
+        ctx: *ParseContext,
+    ) sexpr.Parser.ParseError!HeapType {
+        const token = try contents.parseAtomInList(
+            parent,
+            ctx,
+            "'func' or 'extern'",
+        );
+        return .{
+            .tag = switch (token.tag(ctx.tree)) {
+                .keyword_func => .func,
+                .keyword_extern => .@"extern",
+                else => return (try ctx.errorAtToken(token, "expected 'func' or 'extern'")).err,
+            },
+            .token = token,
+        };
+    }
+};
+
+pub const CopyOperation = struct {
+    dst_opt: Ident.Opt align(4),
+    src_unchecked: Ident align(4),
+
+    pub fn identifiers(self: *const CopyOperation) ?struct {
+        dst: *align(4) const Ident,
+        src: *align(4) const Ident,
+    } {
+        return if (self.dst_opt.some) .{
+            .dst = &self.dst_opt.inner_ident,
+            .src = &self.src_unchecked,
+        } else null;
+    }
+};
+
+pub const InitOperation = struct {
+    /// The destination memory or table.
+    dst: Ident.Opt align(4),
+    /// The source element or data segment.
+    src: Ident align(4),
+};
+
 pub fn argumentTag(instr: Lexer.Token.InstrTag) std.meta.FieldEnum(Arguments) {
     return switch (instr) {
         .nop,
@@ -460,12 +510,13 @@ pub fn argumentTag(instr: Lexer.Token.InstrTag) std.meta.FieldEnum(Arguments) {
         .@"i64.store16",
         .@"i64.store32",
         => .mem_arg,
-        .@"memory.init",
         .@"memory.copy",
-        .@"table.init",
         .@"table.copy",
-        => unreachable, // TODO: two optional indices
-        .@"ref.null" => unreachable, // TODO: .heap_type
+        => .copy_operation,
+        .@"memory.init",
+        .@"table.init",
+        => .init_operation,
+        .@"ref.null" => .heap_type,
         .@"i32.const" => .i32,
         .@"i64.const" => .i64,
         .@"f32.const" => .f32,
@@ -652,6 +703,61 @@ pub fn parseArgs(
         .f64 => {
             const literal = try contents.parseFloatInList(f64, parent, ctx);
             try list.append(list_arena, keyword, try literal.expectBits(ctx), ctx.tree);
+        },
+        .heap_type => try list.append(
+            list_arena,
+            keyword,
+            try HeapType.parseContents(contents, parent, ctx),
+            ctx.tree,
+        ),
+        .copy_operation => {
+            const x = try Ident.Opt.parse(
+                contents,
+                ctx,
+                caches.allocator,
+                &caches.ids,
+            );
+
+            const y = if (x.some) try Ident.parse(
+                contents,
+                ctx,
+                parent,
+                caches.allocator,
+                &caches.ids,
+            ) else undefined;
+
+            try list.append(
+                list_arena,
+                keyword,
+                CopyOperation{ .dst_opt = x, .src_unchecked = y },
+                ctx.tree,
+            );
+        },
+        .init_operation => {
+            const first = try Ident.parse(
+                contents,
+                ctx,
+                parent,
+                caches.allocator,
+                &caches.ids,
+            );
+
+            const second = try Ident.Opt.parse(
+                contents,
+                ctx,
+                caches.allocator,
+                &caches.ids,
+            );
+
+            try list.append(
+                list_arena,
+                keyword,
+                InitOperation{
+                    .dst = if (second.some) Ident.Opt.init(first) else .none,
+                    .src = if (second.get()) |src| src else first,
+                },
+                ctx.tree,
+            );
         },
     }
 }
