@@ -1191,12 +1191,27 @@ fn runScript(
 
                 unreachable; // TODO: Process 'assert_malformed'
             },
-            else => {
-                _ = try state.errors.errorAtToken(
+            .keyword_invoke => {
+                const invoke: *const Wast.Command.Action = cmd.inner.action.getPtr(script.arena);
+
+                state.beginAction(
+                    script,
                     cmd.keyword,
-                    "TODO: process command",
-                );
-                // unreachable
+                    invoke,
+                    &interp,
+                    &fuel,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ScriptError => break :run_cmds,
+                };
+
+                try state.runToCompletion(&interp);
+
+                // TODO: Does invoke error-out if its action results in a trap?
+            },
+            else => {
+                _ = try state.errors.errorAtToken(cmd.keyword, "unrecognized command");
+                break :run_cmds;
             },
         }
 
