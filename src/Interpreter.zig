@@ -1655,12 +1655,14 @@ inline fn takeBranch(
     std.debug.assert(@intFromPtr(s.* + branch) < side_table_end);
     const target: *const Module.Code.SideTableEntry = &s.*[branch];
 
-    const origin_ip = code.state.instructions + target.origin;
-    if (builtin.mode == .Debug and @intFromPtr(base_ip) != @intFromPtr(origin_ip)) {
-        std.debug.panic(
-            "expected this branch to originate from {X:0>6}, but got {X:0>6}",
-            .{ @intFromPtr(origin_ip) - wasm_base_ptr, @intFromPtr(base_ip) - wasm_base_ptr },
-        );
+    if (builtin.mode == .Debug) {
+        const origin_ip = code.state.instructions + target.origin;
+        if (@intFromPtr(base_ip) != @intFromPtr(origin_ip)) {
+            std.debug.panic(
+                "expected this branch to originate from {X:0>6}, but got {X:0>6}",
+                .{ @intFromPtr(origin_ip) - wasm_base_ptr, @intFromPtr(base_ip) - wasm_base_ptr },
+            );
+        }
     }
 
     // std.debug.print(

@@ -792,14 +792,18 @@ const SideTableBuilder = struct {
         if (table.active.len > 0 and popped_header.capacity > 0) {
             const other: *ActiveList = table.active.at(table.active.len - 1);
             const other_header = other.fixups.header;
-            if (@intFromPtr(popped_header) == @intFromPtr(other_header)) std.debug.panic(
-                "fixup list targeting 0x{X} {*} (len={}, cap={}) mustn't be the same " ++
-                    "as list targeting 0x{X} {*} (len={}, cap={})",
-                .{
-                    block_offset,       popped_header, popped_header.len, popped_header.capacity,
-                    other.block_offset, other_header,  other_header.len,  other_header.capacity,
-                },
-            );
+            if (@intFromPtr(popped_header) == @intFromPtr(other_header)) {
+                if (builtin.mode != .Debug) unreachable;
+
+                std.debug.panic(
+                    "fixup list targeting 0x{X} {*} (len={}, cap={}) mustn't be the same " ++
+                        "as list targeting 0x{X} {*} (len={}, cap={})",
+                    .{
+                        block_offset,       popped_header, popped_header.len, popped_header.capacity,
+                        other.block_offset, other_header,  other_header.len,  other_header.capacity,
+                    },
+                );
+            }
         }
 
         var remaining = popped.fixups;
@@ -861,7 +865,7 @@ fn appendSideTableEntry(
             null,
         target.copy_count,
         target.pop_count,
-        target.frame.offset,
+        if (builtin.mode == .Debug) target.frame.offset,
         target.depth,
     );
 }
@@ -972,7 +976,11 @@ fn doValidation(
         },
     ) catch unreachable;
 
-    side_table.pushFixupList(scratch, 0, .reuse) catch unreachable;
+    side_table.pushFixupList(
+        scratch,
+        if (builtin.mode == .Debug) 0,
+        .reuse,
+    ) catch unreachable;
 
     state.instructions = @ptrCast(reader.bytes.ptr);
 
@@ -1105,7 +1113,9 @@ fn doValidation(
                 // TODO: Skip branch fixup processing for unreachable code.
 
                 const current_list = side_table.active.at(side_table.active.len - 1);
-                std.debug.assert(frame.offset == current_list.block_offset);
+                if (builtin.mode == .Debug) {
+                    std.debug.assert(frame.offset == current_list.block_offset);
+                }
 
                 if (frame.info.opcode == .loop) {
                     std.debug.assert(current_list.fixups.header.capacity == 0);
