@@ -636,7 +636,7 @@ pub const Reader = struct {
         };
     }
 
-    pub fn readIdx(reader: Reader, comptime I: type, bounds: anytype) ParseError!I {
+    pub fn readIdx(reader: Reader, comptime I: type, bounds: anytype) !I {
         const idx = try reader.readUleb128(u32);
         const len = switch (@typeInfo(@TypeOf(bounds))) {
             .@"struct" => bounds.len,

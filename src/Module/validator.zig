@@ -168,15 +168,19 @@ const Val = @Type(std.builtin.Type{
 fn isNumVal(val: Val) bool {
     return switch (val) {
         .i32, .i64, .f32, .f64, .unknown => true,
-        .funcref,
-        .externref,
-        .v128,
-        => false,
+        .funcref, .externref, .v128 => false,
     };
 }
 
 inline fn isVecVal(val: Val) bool {
     return val == .unknown or val == .v128;
+}
+
+inline fn isRefVal(val: Val) bool {
+    return switch (val) {
+        .funcref, .externref, .unknown => true,
+        .i32, .i64, .f32, .f64, .v128 => false,
+    };
 }
 
 inline fn valTypeToVal(val_type: ValType) Val {
@@ -1232,15 +1236,8 @@ fn doValidation(
                 markUnreachable(&val_stack, &ctrl_stack);
             },
             .call => {
-                const callee = try reader.readUleb128Casted(
-                    u32,
-                    @typeInfo(Module.FuncIdx).@"enum".tag_type,
-                );
-
-                const callee_signature: *const Module.FuncType = if (callee < module.funcTypes().len)
-                    module.funcTypes()[callee]
-                else
-                    return error.InvalidWasm;
+                const callee = try reader.readIdx(Module.FuncIdx, module.funcTypes());
+                const callee_signature = module.funcTypes()[@intFromEnum(callee)];
 
                 try val_stack.popManyExpecting(&ctrl_stack, callee_signature.parameters());
                 try val_stack.pushMany(scratch, callee_signature.results());
@@ -1689,6 +1686,21 @@ fn doValidation(
             .@"f64.reinterpret_i64",
             => try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i64, .f64),
             .@"f64.promote_f32" => try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f32, .f64),
+
+            .@"ref.null" => {
+                const ref_type = try reader.readValType();
+                if (!ref_type.isRefType()) return error.InvalidWasm;
+                try val_stack.push(scratch, ref_type);
+            },
+            .@"ref.is_null" => {
+                const ref_type = try val_stack.popAny(&ctrl_stack);
+                if (!isRefVal(ref_type)) return error.InvalidWasm;
+                try val_stack.pushAny(scratch, ref_type);
+            },
+            .@"ref.func" => {
+                _ = try reader.readIdx(Module.FuncIdx, module.funcTypes());
+                try val_stack.push(scratch, ValType.funcref);
+            },
 
             .@"0xFC" => switch (try reader.readUleb128Enum(u32, opcodes.FCPrefixOpcode)) {
                 .@"i32.trunc_sat_f32_s",
