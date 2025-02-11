@@ -2266,6 +2266,39 @@ const opcode_handlers = struct {
     pub const @"i64.extend16_s" = defineUnOp("i64", intSignExtend(i64, i16).op).handler;
     pub const @"i64.extend32_s" = defineUnOp("i64", intSignExtend(i64, i32).op).handler;
 
+    pub fn @"ref.null"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        _ = i.readByte() catch unreachable;
+        vals.appendAssumeCapacity(std.mem.zeroes(Value));
+
+        std.debug.assert(loc <= vals.items.len);
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    pub fn @"ref.is_null"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const top = &vals.items[vals.items.len - 1];
+        const is_null = std.mem.allEqual(u8, std.mem.asBytes(top), 0);
+
+        top.* = .{ .i32 = @intFromBool(is_null) };
+
+        std.debug.assert(loc <= vals.items.len);
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    pub fn @"ref.func"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const func_idx = i.nextIdx(Module.FuncIdx);
+        const module = int.currentFrame().function.expanded().wasm.module.header();
+        vals.appendAssumeCapacity(.{ .funcref = @bitCast(module.funcAddr(func_idx)) });
+
+        std.debug.assert(loc <= vals.items.len);
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
     pub const @"0xFC" = fc_prefixed_dispatch.handler;
     pub const @"i32.trunc_sat_f32_s" = i32_opcode_handlers.trunc_sat_f32_s;
     pub const @"i32.trunc_sat_f32_u" = i32_opcode_handlers.trunc_sat_f32_u;
