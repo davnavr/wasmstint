@@ -72,6 +72,9 @@ pub fn build(b: *std.Build) void {
             "tests/spec/br_table.wast",
             "tests/spec/br.wast",
             "tests/spec/bulk.wast",
+            "tests/spec/call_indirect.wast",
+            "tests/spec/call.wast",
+            // "tests/spec/comment.wast", // TODO: pending support for module fields as abbreviation for module
 
             "tests/spec/i32.wast",
             "tests/spec/i64.wast",
