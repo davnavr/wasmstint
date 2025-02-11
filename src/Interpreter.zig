@@ -189,6 +189,37 @@ pub const InterruptionCause = union(enum) {
         values_base: u32,
         callee: runtime.FuncAddr,
     },
+    memory_grow: MemoryGrow,
+
+    pub const MemoryGrow = struct {
+        memory: *runtime.MemInst,
+        module: runtime.ModuleInst,
+        /// The amount to increase the size of the memory by, in bytes.
+        delta: usize,
+        old_size: usize,
+
+        /// Returns the old memory, or `null` if the same base address was passed.
+        pub fn resize(
+            grow: *const MemoryGrow,
+            new: []align(runtime.MemInst.buffer_align) u8,
+        ) ?[]align(runtime.MemInst.buffer_align) u8 {
+            std.debug.assert(new.len <= grow.memory.limit);
+            std.debug.assert(new.len % runtime.MemInst.buffer_align == 0);
+            std.debug.assert(grow.memory.capacity <= new.len);
+
+            const prev_mem = if (@intFromPtr(grow.memory.base) != @intFromPtr(new.ptr)) moved: {
+                @memcpy(new[0..grow.memory.size], grow.memory.bytes());
+                const old_mem = grow.memory.base[0..grow.memory.capacity];
+                grow.memory.base = new.ptr;
+                break :moved old_mem;
+            } else null;
+
+            @memset(grow.memory.base[grow.memory.size..new.len], 0);
+
+            grow.memory.capacity = new.len;
+            return prev_mem;
+        }
+    };
 };
 
 pub const State = union(enum) {
@@ -319,6 +350,34 @@ pub fn resumeExecution(interp: *Interpreter, alloca: Allocator, fuel: *Fuel) Err
             };
 
             if (entry_point != .wasm) return;
+        },
+        .memory_grow => |info| {
+            interp.value_stack.appendAssumeCapacity(
+                Value{
+                    .i32 = result: {
+                        const new_len = std.math.add(
+                            usize,
+                            info.old_size,
+                            info.delta,
+                        ) catch break :result -1;
+
+                        std.debug.assert(info.memory.size == info.old_size);
+
+                        if (@min(info.memory.limit, info.memory.capacity) < new_len)
+                            break :result -1;
+
+                        info.memory.size = new_len;
+                        break :result @bitCast(
+                            @as(
+                                u32,
+                                @intCast(info.old_size / runtime.MemInst.page_size),
+                            ),
+                        );
+                    },
+                },
+            );
+
+            interp.state = State{ .awaiting_host = &[0]Module.ValType{} };
         },
     }
 
@@ -1979,7 +2038,8 @@ const opcode_handlers = struct {
 
     pub fn @"memory.grow"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const mem_idx = i.nextIdx(Module.MemIdx);
-        const mem = int.currentFrame().function.expanded().wasm.module.header().memAddr(mem_idx);
+        const module = int.currentFrame().function.expanded().wasm.module;
+        const mem = module.header().memAddr(mem_idx);
 
         const delta: u32 = @bitCast(vals.pop().i32);
 
@@ -1998,8 +2058,17 @@ const opcode_handlers = struct {
                 @memset(mem.bytes()[old_size..new_size], 0);
                 break :result @bitCast(@divExact(@as(u32, @intCast(old_size)), runtime.MemInst.page_size));
             } else {
-                // TODO: Add a new interruption kind.
-                break :result grow_failed;
+                int.state = .{
+                    .interrupted = .{
+                        .memory_grow = .{
+                            .delta = delta_bytes,
+                            .memory = mem,
+                            .module = module,
+                            .old_size = mem.size,
+                        },
+                    },
+                };
+                return;
             }
         };
 

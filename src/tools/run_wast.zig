@@ -458,6 +458,8 @@ const State = struct {
     /// Live for the execution of a single command.
     cmd_arena: ArenaAllocator,
 
+    store: *wasmstint.runtime.ModuleAllocator.WithinArena,
+
     const Error = error{ScriptError} || Allocator.Error;
 
     inline fn scriptError(report: Allocator.Error!Wast.Errors.Report) Error {
@@ -484,28 +486,51 @@ const State = struct {
         interpreter: *Interpreter,
         fuel: *Interpreter.Fuel,
     ) Allocator.Error!void {
-        while (true) switch (interpreter.state) {
-            .awaiting_lazy_validation => unreachable,
-            .interrupted => |cause| switch (cause) {
-                .out_of_fuel => return,
-                .validation_finished => unreachable,
-                .call_stack_exhaustion => {
-                    interpreter.resumeExecution(
-                        state.cmd_arena.allocator(),
-                        fuel,
-                    ) catch |e| switch (e) {
-                        error.OutOfMemory => |oom| return oom,
-                        else => unreachable,
-                    };
+        while (true) {
+            switch (interpreter.state) {
+                .awaiting_lazy_validation => unreachable,
+                .interrupted => |cause| switch (cause) {
+                    .out_of_fuel => return,
+                    .validation_finished => unreachable,
+                    .call_stack_exhaustion => {},
+                    .memory_grow => |info| {
+                        const new_size = info.delta + info.memory.size;
+                        std.debug.assert(info.memory.size == info.old_size);
+
+                        const resized_in_place = state.store.arena.allocator().resize(
+                            info.memory.base[0..info.memory.capacity],
+                            new_size,
+                        );
+
+                        if (resized_in_place) {
+                            _ = info.resize(info.memory.base[0..new_size]);
+                        } else resize_failed: {
+                            _ = info.resize(
+                                state.store.arena.allocator().alignedAlloc(
+                                    u8,
+                                    wasmstint.runtime.MemInst.buffer_align,
+                                    @max(new_size, info.memory.capacity *| 2),
+                                ) catch break :resize_failed,
+                            );
+                        }
+                    },
                 },
-            },
-            .trapped => return,
-            .awaiting_host => if (interpreter.call_stack.items.len == 0) {
-                return;
-            } else {
-                std.debug.panic("TODO: Handle host call", .{});
-            },
-        };
+                .trapped => return,
+                .awaiting_host => if (interpreter.call_stack.items.len == 0) {
+                    return;
+                } else {
+                    std.debug.panic("TODO: Handle host call", .{});
+                },
+            }
+
+            interpreter.resumeExecution(
+                state.cmd_arena.allocator(),
+                fuel,
+            ) catch |e| switch (e) {
+                error.OutOfMemory => |oom| return oom,
+                else => unreachable,
+            };
+        }
 
         comptime unreachable;
     }
@@ -524,9 +549,11 @@ const State = struct {
         cause: Interpreter.InterruptionCause,
     ) Error {
         const msg = switch (cause) {
-            .validation_finished => unreachable,
             .out_of_fuel => "unexpected error, execution ran out of fuel",
             .call_stack_exhaustion => "unexpected error, call stack exhausted",
+            .validation_finished,
+            .memory_grow,
+            => unreachable,
         };
 
         return scriptError(state.errors.errorAtToken(parent, msg));
@@ -1025,6 +1052,7 @@ fn runScript(
         .errors = .{ .tree = script.tree, .errors = errors },
         .next_module_arena = ArenaAllocator.init(run_arena.allocator()),
         .cmd_arena = ArenaAllocator.init(run_arena.allocator()),
+        .store = &store,
     };
 
     var pass_count: u32 = 0;
