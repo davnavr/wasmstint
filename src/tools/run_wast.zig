@@ -8,7 +8,7 @@ const Wast = wasmstint.Wast;
 const Arguments = struct {
     run: []const [:0]const u8 = &[0][:0]const u8{},
     rng_seed: u256 = 42,
-    fuel: u64 = 1_000_000,
+    fuel: u64 = 2_000_000,
     call_stack_reserve: u32 = 100,
 
     const Flag = enum {
