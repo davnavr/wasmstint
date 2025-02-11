@@ -75,7 +75,10 @@ pub const ValType = enum(u8) {
 
 pub const Type = *const Text.Type.Func;
 
-pub const TypeIdx = enum(u32) { _ };
+pub const TypeIdx = enum(u32) {
+    probably_invalid = std.math.maxInt(u32),
+    _,
+};
 
 // If a helper type function to define these index types is used, will it return different types per invocation?
 
@@ -1811,7 +1814,6 @@ fn encodeText(
 
             const func: *const Text.Func = func_field.getPtr(arena);
 
-            // Assign local indices to parameters with ids.
             for (@as([]const Text.Param, func.type_use.func.parameters.items(arena))) |param| {
                 if (param.id.some) {
                     const local_idx = try func_context.local_counter.increment();
@@ -1819,6 +1821,23 @@ fn encodeText(
                     try func_context.local_lookup.insert(text_ctx, param.id, local_idx, &scratch);
                 } else {
                     try func_context.local_counter.incrementBy(param.types.len);
+                }
+            }
+
+            if (!func.type_use.id.header.is_inline) {
+                const type_idx = @intFromEnum(
+                    try wasm.type_ids.getFromIdent(
+                        text_ctx,
+                        func.type_use.id.type,
+                    ),
+                );
+
+                // Check the typeuse to see if some parameters have not yet been assigned local ids.
+                if (type_idx < wasm.types.len) {
+                    const signature: *const Text.Type = wasm.types.at(type_idx).getPtr(arena);
+                    try func_context.local_counter.incrementBy(
+                        signature.func.parameters_count -% func.type_use.func.parameters_count,
+                    );
                 }
             }
 
