@@ -95,7 +95,7 @@ pub fn build(b: *std.Build) void {
             // "tests/spec/float_misc.wast", // TODO: rounding error in f32.nearest implementation caused by not picking the even when tied
             "tests/spec/forward.wast",
             // "tests/spec/func_ptrs.wast", // TODO: blocked on non-inline import parsing
-            // "tests/spec/func.wast", // TODO: encoder should skip empty local groups instead of crashing.
+            "tests/spec/func.wast", // TODO: encoder should take into account parameters when assigning local indices, even when the typeuse of the function has no explicit params
             // "tests/spec/global.wast", // TODO: blocked on non-inline import parsing
             "tests/spec/i32.wast",
             "tests/spec/i64.wast",
