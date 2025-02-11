@@ -67,7 +67,11 @@ pub fn parseContents(
         const keyword = (list_contents.parseValue() catch break).getAtom() orelse break;
         switch (keyword.tag(ctx.tree)) {
             .keyword_type => {
-                if (param_buf.len > 0 or result_buf.len > 0 or !type_use.id.header.is_inline)
+                if (param_count > 0 or
+                    param_buf.len > 0 or
+                    result_count > 0 or
+                    result_buf.len > 0 or
+                    !type_use.id.header.is_inline)
                     return (try ctx.errorAtToken(keyword, "expected 'param' or 'result' keyword")).err;
 
                 std.debug.assert(type_use.func.parameters.isEmpty());
@@ -87,7 +91,7 @@ pub fn parseContents(
                 };
             },
             .keyword_param => {
-                if (result_buf.len > 0)
+                if (result_count > 0 or result_buf.len > 0)
                     return (try ctx.errorAtToken(keyword, "expected 'result' keyword")).err;
 
                 const parsed_param = try Text.Param.parseContents(

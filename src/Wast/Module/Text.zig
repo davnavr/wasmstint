@@ -124,7 +124,7 @@ pub const ParamOrLocal = struct {
         keyword: sexpr.TokenId,
         parent: sexpr.List.Id,
     ) error{OutOfMemory}!ParamOrLocal {
-        const ident = try Ident.Symbolic.parse(
+        var ident = try Ident.Symbolic.parse(
             contents,
             ctx.tree,
             caches.allocator,
@@ -136,13 +136,26 @@ pub const ParamOrLocal = struct {
             contents.remaining.len,
         );
 
-        while (!contents.isEmpty()) {
+        if (ident.some) err: {
             const val_type = ValType.parse(contents, ctx, parent) catch |e| switch (e) {
                 error.OutOfMemory => |oom| return oom,
-                error.ReportedParserError => continue,
+                error.ReportedParserError => {
+                    ident = Ident.Symbolic.none;
+                    break :err;
+                },
             };
 
             types.appendAssumeCapacity(arena, val_type);
+            try contents.expectEmpty(ctx);
+        } else {
+            for (0..types.capacity) |_| {
+                const val_type = ValType.parse(contents, ctx, parent) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
+                };
+
+                types.appendAssumeCapacity(arena, val_type);
+            }
         }
 
         return .{ .keyword = keyword, .id = ident, .types = types.items };

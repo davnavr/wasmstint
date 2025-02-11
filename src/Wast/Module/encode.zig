@@ -120,7 +120,7 @@ fn IterParamOrResultTypes(comptime T: type) type {
         }
 
         fn next(iter: *@This(), tree: *const sexpr.Tree, arena: IndexedArena.ConstData) ?ValType {
-            if (iter.types.len == 0 and iter.lists.len > 0) {
+            while (iter.types.len == 0 and iter.lists.len > 0) {
                 iter.types = iter.lists[0].types.items(arena);
                 iter.lists = iter.lists[1..];
             }
