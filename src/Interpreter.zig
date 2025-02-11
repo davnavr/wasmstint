@@ -53,6 +53,16 @@ pub const StackFrame = extern struct {
     /// The length of the value stack to restore when returning from this function is equal to .
     values_base: u32,
     instantiate_flag: *bool,
+
+    // TODO: What if call stack was an "unrolled linked list" or something like std.SegmentedList?
+    // - to ensure quick access to top, store ptr to current top of call stack
+    // - allows allocator to reuse space instead of having a big block that needs resizing
+
+    // TODO: Determine impact of StackFrame size on performance.
+    // comptime {
+    //     // Something about cache lines?
+    //     std.debug.assert(std.math.isPowerOfTwo(@sizeOf(StackFrame)));
+    // }
 };
 
 const ValStack = std.ArrayListUnmanaged(Value);
@@ -175,7 +185,10 @@ pub const InterruptionCause = union(enum) {
     validation_finished,
     out_of_fuel,
     /// A call instruction required pushing a new stack frame, which required a reallocation of the `call_stack`.
-    call_stack_exhaustion,
+    call_stack_exhaustion: struct {
+        values_base: u32,
+        callee: runtime.FuncAddr,
+    },
 };
 
 pub const State = union(enum) {
@@ -187,7 +200,7 @@ pub const State = union(enum) {
     awaiting_host: []const Module.ValType,
     /// The current function is awaiting the results of lazy validation, with arguments already written to a buffer.
     awaiting_lazy_validation,
-    /// Execution of WASM bytecode was interrupted due to one of the following:
+    /// Execution of WASM bytecode was interrupted.
     ///
     /// The host can stop using the interpreter further, resume execution with more fuel by calling
     /// `.resumeExecution()`, or reuse the interpreter for a new computation after calling `.reset()`.
@@ -274,17 +287,39 @@ pub fn resumeExecution(interp: *Interpreter, alloca: Allocator, fuel: *Fuel) Err
                 .successful, .failed => {},
             }
 
-            if (code.state.@"error") {
+            if (code.state.@"error") |_| {
                 @branchHint(.cold);
                 interp.state = .{ .trapped = Trap.init(.lazy_validation_failed, {}) };
                 return;
             }
 
-            try interp.allocateValueStackSpace(alloca, code);
+            const total_values = try interp.allocateValueStackSpace(alloca, code);
             current_frame.instructions = Instructions.init(code.state.instructions, code.state.instructions_end);
             current_frame.branch_table = code.state.side_table_ptr;
+            current_frame.values_count = total_values;
+
+            @panic("TODO: update stack frame after lazy validation");
         },
         .out_of_fuel => {},
+        .call_stack_exhaustion => |info| {
+            const signature = info.callee.signature();
+            const entry_point = try interp.setupStackFrame(
+                alloca,
+                info.callee,
+                info.values_base,
+                signature,
+                &interp.dummy_instantiate_flag,
+            );
+
+            interp.state = State{
+                .awaiting_host = if (entry_point == .host)
+                    signature.parameters()
+                else
+                    &[0]Module.ValType{},
+            };
+
+            if (entry_point != .wasm) return;
+        },
     }
 
     errdefer comptime unreachable;
@@ -751,7 +786,14 @@ inline fn invokeWithinWasm(
         error.OutOfMemory => {
             // Could set ip back to before the call instruction to allow trying again.
             // std.debug.print("call stack depth: {}\n", .{int.call_stack.items.len});
-            int.state = .{ .interrupted = .call_stack_exhaustion };
+            int.state = .{
+                .interrupted = InterruptionCause{
+                    .call_stack_exhaustion = .{
+                        .values_base = values_base,
+                        .callee = target_function,
+                    },
+                },
+            };
             return;
         },
     };

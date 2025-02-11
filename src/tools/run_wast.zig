@@ -479,22 +479,33 @@ const State = struct {
             scriptError(state.errors.errorAtToken(parent, "no module has been instantiated at this point"));
     }
 
-    fn runToCompletion(state: *State, interpreter: *Interpreter) Allocator.Error!void {
-        // state_label:
-        switch (interpreter.state) {
+    fn runToCompletion(
+        state: *State,
+        interpreter: *Interpreter,
+        fuel: *Interpreter.Fuel,
+    ) Allocator.Error!void {
+        while (true) switch (interpreter.state) {
             .awaiting_lazy_validation => unreachable,
             .interrupted => |cause| switch (cause) {
-                .out_of_fuel, .call_stack_exhaustion => return,
+                .out_of_fuel => return,
                 .validation_finished => unreachable,
+                .call_stack_exhaustion => {
+                    interpreter.resumeExecution(
+                        state.cmd_arena.allocator(),
+                        fuel,
+                    ) catch |e| switch (e) {
+                        error.OutOfMemory => |oom| return oom,
+                        else => unreachable,
+                    };
+                },
             },
             .trapped => return,
             .awaiting_host => if (interpreter.call_stack.items.len == 0) {
                 return;
             } else {
-                _ = state;
                 std.debug.panic("TODO: Handle host call", .{});
             },
-        }
+        };
 
         comptime unreachable;
     }
@@ -721,11 +732,12 @@ const State = struct {
     fn expectResultValues(
         state: *State,
         interpreter: *Interpreter,
+        fuel: *Interpreter.Fuel,
         parent: Wast.sexpr.TokenId,
         script: *const Wast,
         results: []const Wast.Command.Result,
     ) Error!void {
-        try state.runToCompletion(interpreter);
+        try state.runToCompletion(interpreter, fuel);
         switch (interpreter.state) {
             .awaiting_lazy_validation => unreachable,
             .trapped => |trap| return state.errorInterpreterTrap(parent, trap.code),
@@ -876,10 +888,11 @@ const State = struct {
         state: *State,
         script: *const Wast,
         interpreter: *Interpreter,
+        fuel: *Interpreter.Fuel,
         parent: Wast.sexpr.TokenId,
         failure: *const Wast.Command.Failure,
     ) Error!void {
-        try state.runToCompletion(interpreter);
+        try state.runToCompletion(interpreter, fuel);
         const trap: *const Interpreter.Trap = switch (interpreter.state) {
             .awaiting_lazy_validation => unreachable,
             .trapped => |*trap| trap,
@@ -1119,6 +1132,7 @@ fn runScript(
 
                 state.expectResultValues(
                     &interp,
+                    &fuel,
                     cmd.keyword,
                     script,
                     &[0]Wast.Command.Result{},
@@ -1161,6 +1175,7 @@ fn runScript(
 
                 state.expectResultValues(
                     &interp,
+                    &fuel,
                     cmd.keyword,
                     script,
                     assert_return.results.items(script.arena),
@@ -1186,6 +1201,7 @@ fn runScript(
                 state.expectTrap(
                     script,
                     &interp,
+                    &fuel,
                     cmd.keyword,
                     &assert_trap.failure,
                 ) catch |e| switch (e) {
@@ -1262,7 +1278,7 @@ fn runScript(
                     error.ScriptError => break :run_cmds,
                 };
 
-                try state.runToCompletion(&interp);
+                try state.runToCompletion(&interp, &fuel);
 
                 // TODO: Does invoke error-out if its action results in a trap?
             },
