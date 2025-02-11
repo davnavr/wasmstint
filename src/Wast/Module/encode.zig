@@ -1836,7 +1836,7 @@ fn encodeText(
 
                 for (locals) |local_group| {
                     const local_types: []const Text.ValType = local_group.types.items(arena);
-                    std.debug.assert(local_types.len >= 1);
+                    if (local_types.len == 0) continue;
 
                     if (local_group.id.some) {
                         const local_idx = try func_context.local_counter.increment();
