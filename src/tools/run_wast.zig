@@ -6,25 +6,28 @@ const wasmstint = @import("wasmstint");
 const Wast = wasmstint.Wast;
 
 const Arguments = struct {
-    run: []const [:0]const u8,
+    run: []const [:0]const u8 = &[0][:0]const u8{},
     rng_seed: u256 = 42,
+    fuel: u64 = 1_000_000,
+    call_stack_reserve: u32 = 100,
 
     const Flag = enum {
         run,
         wait_for_debugger,
+        fuel,
+        call_stack_reserve,
 
         const lookup = std.StaticStringMap(Flag).initComptime(.{
             .{ "--run", .run },
             .{ "-r", .run },
             .{ "--wait-for-debugger", .wait_for_debugger },
+            .{ "--fuel", .fuel },
+            .{ "--call-stack-reserve", .call_stack_reserve },
         });
     };
 
     fn parse(arena: *ArenaAllocator, scratch: *ArenaAllocator) !Arguments {
-        var arguments = Arguments{
-            .run = &[0][:0]const u8{},
-        };
-
+        var arguments = Arguments{};
         var run_paths = std.SegmentedList([:0]const u8, 4){};
 
         var iter = try std.process.argsWithAllocator(scratch.allocator());
@@ -63,6 +66,20 @@ const Arguments = struct {
                     while (dbg_ptr.* == 0) {
                         std.Thread.sleep(100);
                     }
+                },
+                .fuel => {
+                    const amt_arg = iter.next() orelse
+                        return error.InvalidCommandLineArgument;
+
+                    arguments.fuel = std.fmt.parseUnsigned(u64, amt_arg, 0) catch
+                        return error.InvalidCommandLineArgument;
+                },
+                .call_stack_reserve => {
+                    const amt_arg = iter.next() orelse
+                        return error.InvalidCommandLineArgument;
+
+                    arguments.call_stack_reserve = std.fmt.parseUnsigned(u32, amt_arg, 0) catch
+                        return error.InvalidCommandLineArgument;
                 },
             }
         }
@@ -165,6 +182,8 @@ pub fn main() !u8 {
             var rng = initial_rng;
             pass_count = try runScript(
                 &script,
+                arguments.fuel,
+                .{ .call_stack_capacity = arguments.call_stack_reserve },
                 rng.random(),
                 &encoding_buffer,
                 &parse_arena,
@@ -977,6 +996,8 @@ const State = struct {
 
 fn runScript(
     script: *const Wast,
+    starting_fuel: u64,
+    options: wasmstint.Interpreter.InitOptions,
     rng: std.Random,
     encoding_buffer: *std.ArrayList(u8),
     run_arena: *ArenaAllocator, // Must not be reset for the lifetime of this function call.
@@ -997,8 +1018,8 @@ fn runScript(
     run_cmds: for (script.commands.items(script.arena)) |cmd| {
         defer _ = state.cmd_arena.reset(.retain_capacity);
 
-        var fuel = wasmstint.Interpreter.Fuel{ .remaining = 2_000 };
-        var interp = try wasmstint.Interpreter.init(state.cmd_arena.allocator(), .{});
+        var fuel = wasmstint.Interpreter.Fuel{ .remaining = starting_fuel };
+        var interp = try wasmstint.Interpreter.init(state.cmd_arena.allocator(), options);
         // defer interp.reset();
 
         switch (cmd.keyword.tag(script.tree)) {
