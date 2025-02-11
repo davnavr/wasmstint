@@ -833,6 +833,9 @@ const State = struct {
         .{ "out of bounds memory access", .memory_access_out_of_bounds },
         .{ "out of bounds table access", .table_access_out_of_bounds },
         .{ "uninitialized element", .indirect_call_to_null },
+        .{ "indirect call type mismatch element", .indirect_call_signature_mismatch },
+        .{ "indirect call type mismatch", .indirect_call_signature_mismatch },
+        .{ "undefined element", .table_access_out_of_bounds },
     });
 
     fn checkMatchingTrapCode(
