@@ -641,7 +641,7 @@ pub const Reader = struct {
         const len = switch (@typeInfo(@TypeOf(bounds))) {
             .@"struct" => bounds.len,
             .int => bounds,
-            else => unreachable,
+            else => comptime unreachable,
         };
 
         return if (idx < len)

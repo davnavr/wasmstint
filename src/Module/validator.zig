@@ -373,6 +373,29 @@ const ValStack = struct {
             try val_stack.popExpecting(ctrl_stack, expected[expected.len - 1 - i]);
         }
     }
+
+    /// Used to preserve `.unknown` stack values when popping and pushing the same types.
+    fn popThenPushManyExpecting(
+        val_stack: *ValStack,
+        ctrl_stack: *const CtrlStack,
+        expected: []const ValType,
+    ) Error!void {
+        const current_frame: *const CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
+        for (0..expected.len) |i| {
+            const expected_type = valTypeToVal(expected[expected.len - 1 - i]);
+            const current_height = val_stack.len() - i;
+            const actual_type: Val = if (current_height == current_frame.info.height)
+                if (current_frame.info.@"unreachable")
+                    Val.unknown
+                else
+                    return Error.InvalidWasm
+            else
+                val_stack.buf.at(current_height - 1).*;
+
+            if (actual_type != expected_type and actual_type != .unknown)
+                return Error.InvalidWasm;
+        }
+    }
 };
 
 fn readMemIdx(reader: *Module.Reader, module: *const Module) Error!void {
@@ -1165,9 +1188,10 @@ fn doValidation(
                 // TODO: Skip branch fixup processing for unreachable code.
                 try appendSideTableEntry(scratch, &side_table, instr_offset, label);
 
-                const label_types = label.frame.labelTypes(module);
-                try val_stack.popManyExpecting(&ctrl_stack, label_types);
-                try val_stack.pushMany(scratch, label_types);
+                try val_stack.popThenPushManyExpecting(
+                    &ctrl_stack,
+                    label.frame.labelTypes(module),
+                );
             },
             .br_table => {
                 try val_stack.popExpecting(&ctrl_stack, .i32);
@@ -1220,8 +1244,7 @@ fn doValidation(
                     const l_types = l.frame.labelTypes(module);
                     if (l_types.len != arity) return error.InvalidWasm;
 
-                    try val_stack.popManyExpecting(&ctrl_stack, l_types);
-                    try val_stack.pushMany(undefined, l_types);
+                    try val_stack.popThenPushManyExpecting(&ctrl_stack, l_types);
                 }
 
                 try appendSideTableEntry(scratch, &side_table, instr_offset, last_label);
@@ -1236,7 +1259,7 @@ fn doValidation(
                 markUnreachable(&val_stack, &ctrl_stack);
             },
             .call => {
-                const callee = try reader.readIdx(Module.FuncIdx, module.funcTypes());
+                const callee = try reader.readIdx(Module.FuncIdx, module.funcTypes().len);
                 const callee_signature = module.funcTypes()[@intFromEnum(callee)];
 
                 try val_stack.popManyExpecting(&ctrl_stack, callee_signature.parameters());
@@ -1698,7 +1721,7 @@ fn doValidation(
                 try val_stack.pushAny(scratch, ref_type);
             },
             .@"ref.func" => {
-                _ = try reader.readIdx(Module.FuncIdx, module.funcTypes());
+                _ = try reader.readIdx(Module.FuncIdx, module.funcTypes().len);
                 try val_stack.push(scratch, ValType.funcref);
             },
 
