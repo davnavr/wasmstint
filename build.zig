@@ -124,7 +124,7 @@ pub fn build(b: *std.Build) void {
             "tests/spec/nop.wast",
             "tests/spec/obsolete-keywords.wast", // Currently skipped
             // "tests/spec/ref_func.wast", // TODO: export and start field parsing
-            // "tests/spec/ref_is_null.wast", // TODO: unknown validation error
+            "tests/spec/ref_is_null.wast",
             "tests/spec/ref_null.wast",
             "tests/spec/return.wast",
             // "tests/spec/select.wast", // TODO: interpreter handling of typed select
@@ -138,8 +138,8 @@ pub fn build(b: *std.Build) void {
             "tests/spec/switch.wast",
             // "tests/spec/table_copy.wast", // TODO: parsing non-inline imports
             // "tests/spec/table_fill.wast", // TODO: Interpreter table operations
-            // "tests/spec/table_get.wast", // TODO: Interpreter table operations
-            // "tests/spec/table_set.wast", // TODO: Interpreter table operations
+            "tests/spec/table_get.wast", // TODO: Interpreter table operations
+            "tests/spec/table_set.wast", // TODO: Interpreter table operations
             // "tests/spec/table_size.wast", // TODO: Interpreter does not support ref.null and other table instructions
             "tests/spec/table-sub.wast", // Currently skipped
             // "tests/spec/table.wast", // TODO: memory safety issue (OOB) in error message printer
