@@ -105,6 +105,15 @@ pub fn parseConstOrResult(
 
             break :value .{ .token = maybe_int, .value = .{ .ref_extern = nat } };
         },
+        .@"keyword_ref.null" => {
+            const heap_type = try list_parser.parseAtom(ctx, "heap type");
+            switch (heap_type.tag(ctx.tree)) {
+                .keyword_func, .keyword_extern => {},
+                else => return (try ctx.errorAtToken(heap_type, "invalid heap type")).err,
+            }
+
+            break :value .{ .token = heap_type, .value = .{ .ref_null = {} } };
+        },
         else => return (try ctx.errorAtToken(keyword, "expected " ++ T.expected)).err,
     };
 
@@ -151,7 +160,7 @@ pub const Const = struct {
         i64: IndexedArena.IdxAligned(i64, 4),
         f64: IndexedArena.IdxAligned(u64, 4),
         // v128: IndexedArena.IdxAligned([u8; 16], 4),
-        // ref_null: enum { func, extern },
+        ref_null: void,
         ref_extern: u31,
     };
 
@@ -181,7 +190,7 @@ pub const Result = struct {
         /// (value_token.tag == .@"keyword_nan:canonical" or value_token.tag == .@"keyword_nan:arithmetic")`
         f32_nan: void,
         f64_nan: void,
-        // ref_null: enum { func, extern },
+        ref_null: void,
         ref_extern: u31,
         ref_extern_unspecified: void,
         ref_func: void,

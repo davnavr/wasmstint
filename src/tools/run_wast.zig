@@ -423,6 +423,16 @@ fn allocateFunctionArguments(
                     .nat = wasmstint.runtime.ExternAddr.Nat.fromInt(src.value.ref_extern),
                 },
             },
+            .@"keyword_ref.null" => switch (src.value_token.tag(script.tree)) {
+                .keyword_func => .{
+                    .funcref = &wasmstint.runtime.FuncAddr.Nullable.null,
+                },
+                .keyword_extern => .{ .externref = wasmstint.runtime.ExternAddr.null },
+                else => return (try errors.errorAtToken(
+                    src.value_token,
+                    "unrecognized heap type",
+                )).err,
+            },
             else => |bad| return (try errors.errorFmtAtToken(
                 src.keyword,
                 "TODO: encode argument {s}",
@@ -861,7 +871,7 @@ const State = struct {
                     const expected_nat = expected.value.ref_extern;
                     const actual_nat = actual_extern.nat.toInt() orelse {
                         return scriptError(state.errors.errorFmtAtToken(
-                            parent,
+                            expected.value_token,
                             "expected result #{} to be (ref.extern {}), but got null",
                             .{ pos, expected_nat },
                         ));
@@ -869,10 +879,45 @@ const State = struct {
 
                     if (expected_nat != actual_nat)
                         return scriptError(state.errors.errorFmtAtToken(
-                            parent,
+                            expected.value_token,
                             "expected result #{} to be (ref.extern {}), but got (ref.extern {})",
                             .{ pos, expected_nat, actual_nat },
                         ));
+                },
+                .@"keyword_ref.null" => switch (expected.value_token.tag(script.tree)) {
+                    .keyword_func => {
+                        const actual_func = try state.expectTypedValue(
+                            expected.value_token,
+                            actual,
+                            pos,
+                            .funcref,
+                        );
+
+                        if (actual_func.funcInst()) |_|
+                            return scriptError(state.errors.errorAtToken(
+                                expected.value_token,
+                                "expected result #{} to be (ref.null func)",
+                            ));
+                    },
+                    .keyword_extern => {
+                        const actual_extern: wasmstint.runtime.ExternAddr = try state.expectTypedValue(
+                            expected.value_token,
+                            actual,
+                            pos,
+                            .externref,
+                        );
+
+                        if (actual_extern.nat.toInt()) |nat|
+                            return scriptError(state.errors.errorFmtAtToken(
+                                expected.value_token,
+                                "expected result #{} to be (ref.null extern), but got (ref.extern {})",
+                                .{ pos, nat },
+                            ));
+                    },
+                    else => return scriptError(state.errors.errorAtToken(
+                        expected.value_token,
+                        "unrecognized heap type",
+                    )),
                 },
                 else => |bad| return scriptError(state.errors.errorFmtAtToken(
                     expected.keyword,
