@@ -341,6 +341,7 @@ const ValStack = struct {
 
     fn popExpecting(val_stack: *ValStack, ctrl_stack: *const CtrlStack, expected: ValType) Error!void {
         const popped = try val_stack.popAny(ctrl_stack);
+        // std.debug.print("wanted {}, got {}\n", .{ expected, popped });
         if (popped != valTypeToVal(expected) and popped != .unknown)
             return Error.InvalidWasm;
     }
@@ -1718,7 +1719,7 @@ fn doValidation(
             .@"ref.is_null" => {
                 const ref_type = try val_stack.popAny(&ctrl_stack);
                 if (!isRefVal(ref_type)) return error.InvalidWasm;
-                try val_stack.pushAny(scratch, ref_type);
+                try val_stack.push(scratch, .i32);
             },
             .@"ref.func" => {
                 _ = try reader.readIdx(Module.FuncIdx, module.funcTypes().len);
