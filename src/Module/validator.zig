@@ -1362,6 +1362,23 @@ fn doValidation(
                 try val_stack.popExpecting(&ctrl_stack, global_type.val_type);
             },
 
+            .@"table.get" => {
+                const table_type = try readTableIdx(&reader, module);
+                try val_stack.popThenPushExpecting(
+                    scratch,
+                    &ctrl_stack,
+                    .i32,
+                    table_type,
+                );
+            },
+            .@"table.set" => {
+                const table_type = try readTableIdx(&reader, module);
+                try val_stack.popManyExpecting(
+                    &ctrl_stack,
+                    &[_]ValType{ .i32, table_type },
+                );
+            },
+
             .@"i32.load" => try validateLoadInstr(
                 &reader,
                 &val_stack,
