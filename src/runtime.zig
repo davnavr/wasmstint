@@ -1027,8 +1027,17 @@ pub const TableInst = extern struct {
         }
     }
 
-    fn bytes(table: *const TableInst) []u8 {
+    pub fn bytes(table: *const TableInst) []align(buffer_align) u8 {
         return table.base.ptr[0..(@as(usize, table.len) * table.stride)];
+    }
+
+    pub fn elementSlice(
+        table: *const TableInst,
+        idx: usize,
+    ) OobError![]align(@alignOf(usize)) u8 {
+        if (table.len <= idx) return error.TableAccessOutOfBounds;
+        const base_addr = idx * table.stride;
+        return @alignCast(table.bytes()[base_addr .. base_addr + table.stride]);
     }
 
     /// Implements the [`table.copy`] instruction.

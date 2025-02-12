@@ -2038,7 +2038,63 @@ const opcode_handlers = struct {
         }
     }
 
-    // table.get/set
+    /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-get
+    pub fn @"table.get"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const table_idx = i.nextIdx(Module.TableIdx);
+        const table = int.currentFrame().function.expanded().wasm
+            .module.header().tableAddr(table_idx).table;
+
+        const value = &vals.items[vals.items.len - 1];
+        const idx: u32 = @bitCast(value.i32);
+        const dst = std.mem.asBytes(value);
+
+        @memcpy(
+            dst[0..table.stride],
+            table.elementSlice(idx) catch {
+                int.state = .{
+                    .trapped = Trap.init(
+                        .table_access_out_of_bounds,
+                        {},
+                    ),
+                };
+                return;
+            },
+        );
+
+        // Fill ExternRef padding
+        @memset(dst[table.stride..], 0);
+
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-set
+    pub fn @"table.set"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const table_idx = i.nextIdx(Module.TableIdx);
+        const table = int.currentFrame().function.expanded().wasm
+            .module.header().tableAddr(table_idx).table;
+
+        const ref = vals.pop();
+        const idx: u32 = @bitCast(vals.pop().i32);
+
+        @memcpy(
+            table.elementSlice(idx) catch {
+                int.state = .{
+                    .trapped = Trap.init(
+                        .table_access_out_of_bounds,
+                        {},
+                    ),
+                };
+                return;
+            },
+            std.mem.asBytes(&ref)[0..table.stride],
+        );
+
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
 
     pub const @"i32.load" = linearMemoryHandlers("i32").load;
     pub const @"i64.load" = linearMemoryHandlers("i64").load;
