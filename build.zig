@@ -124,10 +124,10 @@ pub fn build(b: *std.Build) void {
             "tests/spec/nop.wast",
             "tests/spec/obsolete-keywords.wast", // Currently skipped
             // "tests/spec/ref_func.wast", // TODO: export and start field parsing
-            // "tests/spec/ref_is_null.wast", // TODO: ref.null result parser
-            // "tests/spec/ref_null.wast", // TODO: ref.null result parser
+            // "tests/spec/ref_is_null.wast", // TODO: unknown validation error
+            "tests/spec/ref_null.wast",
             "tests/spec/return.wast",
-            // "tests/spec/select.wast", // TODO: ref.null result parser
+            // "tests/spec/select.wast", // TODO: interpreter handling of typed select
 
             // simd_*.wast tests are skipped as 128-bit SIMD is not yet supported
 
@@ -137,9 +137,9 @@ pub fn build(b: *std.Build) void {
             "tests/spec/store.wast",
             "tests/spec/switch.wast",
             // "tests/spec/table_copy.wast", // TODO: parsing non-inline imports
-            // "tests/spec/table_fill.wast", // TODO: ref.null result parser
-            // "tests/spec/table_get.wast", // TODO: ref.null result parser
-            // "tests/spec/table_set.wast", // TODO: ref.null result parser
+            // "tests/spec/table_fill.wast", // TODO: Interpreter table operations
+            // "tests/spec/table_get.wast", // TODO: Interpreter table operations
+            // "tests/spec/table_set.wast", // TODO: Interpreter table operations
             // "tests/spec/table_size.wast", // TODO: Interpreter does not support ref.null and other table instructions
             "tests/spec/table-sub.wast", // Currently skipped
             // "tests/spec/table.wast", // TODO: memory safety issue (OOB) in error message printer
@@ -148,7 +148,7 @@ pub fn build(b: *std.Build) void {
             "tests/spec/type.wast",
             "tests/spec/unreachable.wast",
             "tests/spec/unreached-invalid.wast", // Currently skipped
-            // "tests/spec/unreached-valid.wast", // TODO: Interpreter support for ref.is_null and maybe more
+            "tests/spec/unreached-valid.wast",
             "tests/spec/unwind.wast",
             "tests/spec/utf8-custom-section-id.wast", // Currently skipped
             "tests/spec/utf8-import-field.wast", // Currently skipped
