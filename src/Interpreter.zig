@@ -11,12 +11,19 @@ const opcodes = @import("opcodes.zig");
 
 const FuncRef = runtime.FuncAddr.Nullable;
 
+const ExternRef = extern struct {
+    addr: runtime.ExternAddr,
+    padding: enum(usize) {
+        zero = 0,
+    } = .zero,
+};
+
 const Value = extern union {
     i32: i32,
     f32: f32,
     i64: i64,
     f64: f64,
-    externref: runtime.ExternAddr,
+    externref: ExternRef,
     funcref: FuncRef,
 };
 
@@ -252,7 +259,11 @@ pub fn copyResultValues(interp: *const Interpreter, arena: *std.heap.ArenaAlloca
     };
 
     const dst = try arena.allocator().alloc(TaggedValue, types.len);
-    for (dst, types, interp.value_stack.items[interp.value_stack.items.len - types.len ..]) |*tagged, result_type, *result| {
+    for (
+        dst,
+        types,
+        interp.value_stack.items[interp.value_stack.items.len - types.len ..],
+    ) |*tagged, result_type, *result| {
         tagged.* = switch (result_type) {
             .v128 => unreachable, // Not implemented
             .funcref => func: {
@@ -260,6 +271,7 @@ pub fn copyResultValues(interp: *const Interpreter, arena: *std.heap.ArenaAlloca
                 dup.* = result.funcref;
                 break :func TaggedValue{ .funcref = dup };
             },
+            .externref => TaggedValue{ .externref = result.externref.addr },
             inline else => |tag| @unionInit(
                 TaggedValue,
                 @tagName(tag),
@@ -467,6 +479,12 @@ pub fn beginCall(
                         return error.ArgumentTypeOrCountMismatch;
 
                     break :value Value{ .funcref = arg.funcref.* };
+                },
+                .externref => {
+                    if (param_type != .externref)
+                        return error.ArgumentTypeOrCountMismatch;
+
+                    break :value .{ .externref = .{ .addr = arg.externref } };
                 },
                 inline else => |tag| {
                     if (param_type != @field(Module.ValType, @tagName(tag)))
@@ -1929,8 +1947,9 @@ const opcode_handlers = struct {
 
     pub fn @"local.get"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const n: u16 = @intCast(i.readUleb128(u32) catch unreachable);
-        const value = vals.items[loc..][n];
-        vals.appendAssumeCapacity(value);
+        const src: *const Value = &vals.items[loc..][n];
+        const dst = vals.addOneAssumeCapacity();
+        dst.* = src.*;
 
         // std.debug.print(" > (local.get {}) (i32.const {})\n", .{ n, value.i32 });
 
@@ -1941,8 +1960,10 @@ const opcode_handlers = struct {
 
     pub fn @"local.set"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const n: u16 = @intCast(i.readUleb128(u32) catch unreachable);
-        const value = vals.pop();
-        vals.items[loc..][n] = value;
+        const dst = &vals.items[loc..][n];
+        const src: *const Value = &vals.items[vals.items.len - 1];
+        dst.* = src.*;
+        vals.items.len -= 1;
 
         std.debug.assert(loc <= vals.items.len);
         if (i.nextOpcodeHandler(fuel, int)) |next| {
@@ -1967,10 +1988,21 @@ const opcode_handlers = struct {
 
         vals.appendAssumeCapacity(switch (global_addr.global_type.val_type) {
             .v128 => unreachable, // TODO
+            .externref => .{
+                .externref = ExternRef{
+                    .addr = @as(
+                        *const runtime.ExternAddr,
+                        @constCast(@ptrCast(@alignCast(global_addr.value))),
+                    ).*,
+                },
+            },
             inline else => |val_type| @unionInit(
                 Value,
                 @tagName(val_type),
-                @as(*const runtime.GlobalAddr.Pointee(val_type), @constCast(@ptrCast(@alignCast(global_addr.value)))).*,
+                @as(
+                    *const runtime.GlobalAddr.Pointee(val_type),
+                    @constCast(@ptrCast(@alignCast(global_addr.value))),
+                ).*,
             ),
         });
 
@@ -1987,9 +2019,17 @@ const opcode_handlers = struct {
         const popped = vals.pop();
         switch (global_addr.global_type.val_type) {
             .v128 => unreachable, // TODO
+            .externref => {
+                @as(
+                    *runtime.ExternAddr,
+                    @ptrCast(@alignCast(global_addr.value)),
+                ).* = popped.externref.addr;
+            },
             inline else => |val_type| {
-                @as(*runtime.GlobalAddr.Pointee(val_type), @ptrCast(@alignCast(global_addr.value))).* =
-                    @field(popped, @tagName(val_type));
+                @as(
+                    *runtime.GlobalAddr.Pointee(val_type),
+                    @ptrCast(@alignCast(global_addr.value)),
+                ).* = @field(popped, @tagName(val_type));
             },
         }
 
@@ -2279,6 +2319,11 @@ const opcode_handlers = struct {
     pub fn @"ref.is_null"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const top = &vals.items[vals.items.len - 1];
         const is_null = std.mem.allEqual(u8, std.mem.asBytes(top), 0);
+        // std.debug.dumpHex(std.mem.asBytes(top));
+        // std.debug.print(
+        //     "> ref.is_null (ref.extern {?}) -> {}\n",
+        //     .{ top.externref.addr.nat.toInt(), is_null },
+        // );
 
         top.* = .{ .i32 = @intFromBool(is_null) };
 

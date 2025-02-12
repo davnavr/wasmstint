@@ -1228,7 +1228,9 @@ pub const ExternAddr = packed union {
         pub const Size = std.meta.Int(.unsigned, @bitSizeOf(usize) - 1);
 
         pub fn fromInt(n: Size) Nat {
-            return @enumFromInt(@as(usize, n) + 1);
+            const int = @as(usize, n) + 1;
+            std.debug.assert(int > 0);
+            return @enumFromInt(int);
         }
 
         pub fn toInt(nat: Nat) ?Size {
@@ -1238,5 +1240,12 @@ pub const ExternAddr = packed union {
 
     comptime {
         std.debug.assert(@sizeOf(ExternAddr) == @sizeOf(?*anyopaque));
+        std.debug.assert(
+            std.mem.allEqual(
+                u8,
+                std.mem.asBytes(&ExternAddr.null),
+                0,
+            ),
+        );
     }
 };
