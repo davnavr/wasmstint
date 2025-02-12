@@ -3,6 +3,7 @@
 //! [WebAssembly Text]: https://webassembly.github.io/spec/core/index.html
 
 const std = @import("std");
+const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const IndexedArena = @import("../../IndexedArena.zig");
 
@@ -30,7 +31,7 @@ pub const Field = struct {
     contents: Contents,
 
     comptime {
-        std.debug.assert(@sizeOf(Field) == switch (@import("builtin").mode) {
+        std.debug.assert(@sizeOf(Field) == switch (builtin.mode) {
             .Debug, .ReleaseSafe => 12,
             .ReleaseFast, .ReleaseSmall => 8,
         });
@@ -39,7 +40,8 @@ pub const Field = struct {
 
 pub const Contents = union {
     type: IndexedArena.Idx(Type),
-    // import: IndexedArena.Idx(Import),
+    import: IndexedArena.Idx(Import),
+    // export: IndexedArena.Idx(Export),
     func: IndexedArena.Idx(Func),
     table: IndexedArena.Idx(Table),
     mem: IndexedArena.Idx(Mem),
@@ -77,6 +79,138 @@ pub const ValType = struct {
     pub fn parse(parser: *sexpr.Parser, ctx: *ParseContext, parent: sexpr.List.Id) sexpr.Parser.ParseError!ValType {
         const atom = try parser.parseAtomInList(parent, ctx, "valtype");
         return parseAtom(atom, parser, ctx, parent);
+    }
+};
+
+pub const Import = struct {
+    module: Name,
+    name: Name,
+    desc_keyword: sexpr.TokenId,
+    desc_id: Ident.Symbolic,
+    desc: Desc,
+
+    pub const Desc = union {
+        func: IndexedArena.Idx(TypeUse),
+        table: IndexedArena.Idx(TableType),
+        memory: IndexedArena.Idx(MemType),
+        global: IndexedArena.Idx(GlobalType),
+
+        comptime {
+            std.debug.assert(@sizeOf(Desc) == switch (builtin.mode) {
+                .Debug, .ReleaseSafe => 8,
+                .ReleaseFast, .ReleaseSmall => 4,
+            });
+        }
+    };
+
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        ctx: *ParseContext,
+        parent: sexpr.List.Id,
+        arena: *IndexedArena,
+        caches: *Caches,
+        scratch: *ArenaAllocator,
+    ) sexpr.Parser.ParseError!IndexedArena.Idx(Import) {
+        const import = try arena.create(Import);
+
+        const module = try Name.parse(
+            contents,
+            ctx,
+            caches.allocator,
+            &caches.names,
+            arena,
+            parent,
+            scratch,
+        );
+
+        _ = scratch.reset(.retain_capacity);
+
+        const name = try Name.parse(
+            contents,
+            ctx,
+            caches.allocator,
+            &caches.names,
+            arena,
+            parent,
+            scratch,
+        );
+
+        const desc_list = try contents.parseListInList(parent, ctx);
+        var desc_parser = sexpr.Parser.init(desc_list.contents(ctx.tree).values(ctx.tree));
+
+        const desc_keyword = try desc_parser.parseAtomInList(
+            desc_list,
+            ctx,
+            "import kind",
+        );
+
+        const desc_id = try Ident.Symbolic.parse(
+            &desc_parser,
+            ctx.tree,
+            caches.allocator,
+            &caches.ids,
+        );
+
+        const desc: Desc = desc: switch (desc_keyword.tag(ctx.tree)) {
+            .keyword_func => {
+                const type_use = try arena.create(TypeUse);
+                _ = scratch.reset(.retain_capacity);
+                type_use.set(
+                    arena,
+                    try TypeUse.parseContents(
+                        &desc_parser,
+                        ctx,
+                        arena,
+                        caches,
+                        scratch,
+                    ),
+                );
+
+                break :desc .{ .func = type_use };
+            },
+            .keyword_table => {
+                const table_type = try arena.create(TableType);
+                table_type.set(
+                    arena,
+                    try TableType.parseContents(&desc_parser, ctx, desc_list),
+                );
+
+                break :desc .{ .table = table_type };
+            },
+            .keyword_memory => {
+                const mem_type = try arena.create(MemType);
+                mem_type.set(
+                    arena,
+                    try MemType.parseContents(&desc_parser, ctx, desc_list),
+                );
+
+                break :desc .{ .memory = mem_type };
+            },
+            .keyword_global => {
+                const global_type = try arena.create(GlobalType);
+                global_type.set(
+                    arena,
+                    try GlobalType.parse(&desc_parser, ctx, desc_list),
+                );
+
+                break :desc .{ .global = global_type };
+            },
+            else => return (try ctx.errorAtToken(desc_keyword, "unknown import kind")).err,
+        };
+
+        try desc_parser.expectEmpty(ctx);
+
+        import.set(
+            arena,
+            Import{
+                .module = module,
+                .name = name,
+                .desc_keyword = desc_keyword,
+                .desc_id = desc_id,
+                .desc = desc,
+            },
+        );
+        return import;
     }
 };
 
@@ -1381,6 +1515,21 @@ pub fn parseFields(
 
                 type_def.set(arena, parsed_type);
                 break :field .{ .type = type_def };
+            },
+            .keyword_import => {
+                const parsed_import = Import.parseContents(
+                    &field_contents,
+                    ctx,
+                    field_list,
+                    arena,
+                    caches,
+                    scratch,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
+                };
+
+                break :field .{ .import = parsed_import };
             },
             .keyword_func => {
                 const func = try arena.create(Func);
