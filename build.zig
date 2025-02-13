@@ -78,7 +78,7 @@ pub fn build(b: *std.Build) void {
             // "tests/spec/const.wast", // TODO: need to fix float literal parsing
             // "tests/spec/conversions.wast",  // TODO: need to detect when @intFromFloat would cause a panic
             "tests/spec/custom.wast",
-            // "tests/spec/data.wast", // TODO: some keyword is incorrectly parsed as an instruction
+            // "tests/spec/data.wast", // TODO: some keyword is incorrectly parsed as an instruction (revamp data segment parsing?)
             // "tests/spec/elem.wast", // TODO: parser needs support for non-inline imports and assert_trap on modules
             "tests/spec/endianness.wast",
             // "tests/spec/exports.wast", // TODO: parser needs support for non-inline exports
@@ -94,9 +94,9 @@ pub fn build(b: *std.Build) void {
             "tests/spec/float_memory.wast",
             // "tests/spec/float_misc.wast", // TODO: rounding error in f32.nearest implementation caused by not picking the even when tied
             "tests/spec/forward.wast",
-            // "tests/spec/func_ptrs.wast", // TODO: blocked on non-inline import parsing
+            // "tests/spec/func_ptrs.wast", // TODO: blocked on spec interpreter host call support
             "tests/spec/func.wast", // TODO: encoder should take into account parameters when assigning local indices, even when the typeuse of the function has no explicit params
-            // "tests/spec/global.wast", // TODO: blocked on non-inline import parsing
+            // "tests/spec/global.wast", // TODO: blocked on non-inline export parsing
             "tests/spec/i32.wast",
             "tests/spec/i64.wast",
             "tests/spec/if.wast",
@@ -143,7 +143,7 @@ pub fn build(b: *std.Build) void {
             // "tests/spec/table_size.wast", // TODO: Interpreter does not support ref.null and other table instructions
             "tests/spec/table-sub.wast", // Currently skipped
             // "tests/spec/table.wast", // TODO: memory safety issue (OOB) in error message printer
-            // "tests/spec/token.wast", // TODO: parsing non-inline imports
+            "tests/spec/token.wast",
             "tests/spec/traps.wast",
             "tests/spec/type.wast",
             "tests/spec/unreachable.wast",
