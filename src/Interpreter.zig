@@ -922,7 +922,7 @@ fn linearMemoryAccessors(comptime access_size: u5) type {
 
         fn performLoad(i: *Instructions, vals: *ValStack, interp: *Interpreter) ?*const Bytes {
             const mem_arg = MemArg.read(i, interp);
-            const base_addr: u32 = @bitCast(vals.pop().i32);
+            const base_addr: u32 = @bitCast(vals.pop().?.i32);
             // std.debug.print(" > load of size {} @ 0x{X} + {} into memory size={}\n", .{ access_size, base_addr, mem_arg.offset, mem_arg.mem.size });
             const effective_addr = std.math.add(u32, base_addr, mem_arg.offset) catch return null;
             const end_addr = std.math.add(u32, effective_addr, access_size - 1) catch return null;
@@ -937,7 +937,7 @@ fn linearMemoryAccessors(comptime access_size: u5) type {
             value: Bytes,
         ) error{OutOfBounds}!void {
             const mem_arg = MemArg.read(i, interp);
-            const base_addr: u32 = @bitCast(vals.pop().i32);
+            const base_addr: u32 = @bitCast(vals.pop().?.i32);
             const effective_addr = std.math.add(u32, base_addr, mem_arg.offset) catch
                 return error.OutOfBounds;
             const end_addr = std.math.add(u32, effective_addr, access_size - 1) catch
@@ -974,7 +974,7 @@ fn linearMemoryHandlers(comptime field_name: []const u8) type {
         }
 
         fn store(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-            const c: accessors.Bytes = @bitCast(@field(vals.pop(), field_name));
+            const c: accessors.Bytes = @bitCast(@field(vals.pop().?, field_name));
             accessors.performStore(i, vals, int, c) catch |e| {
                 comptime std.debug.assert(@TypeOf(e) == error{OutOfBounds});
                 int.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
@@ -1029,7 +1029,7 @@ fn narrowingLinearMemoryStore(comptime field_name: []const u8, comptime size: u6
         }
 
         fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-            const narrowed: S = @truncate(@field(vals.pop(), field_name));
+            const narrowed: S = @truncate(@field(vals.pop().?, field_name));
             linearMemoryAccessors(size / 8).performStore(i, vals, int, @bitCast(narrowed)) catch |e| {
                 comptime std.debug.assert(@TypeOf(e) == error{OutOfBounds});
                 int.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
@@ -1047,8 +1047,8 @@ fn narrowingLinearMemoryStore(comptime field_name: []const u8, comptime size: u6
 fn defineBinOp(comptime value_field: []const u8, comptime op: anytype, comptime trap: anytype) type {
     return struct {
         fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-            const c_2 = @field(vals.pop(), value_field);
-            const c_1 = @field(vals.pop(), value_field);
+            const c_2 = @field(vals.pop().?, value_field);
+            const c_1 = @field(vals.pop().?, value_field);
             const result = @call(.always_inline, op, .{ c_1, c_2 }) catch |e| {
                 int.state = .{ .trapped = @call(.always_inline, trap, .{e}) };
                 return;
@@ -1067,7 +1067,7 @@ fn defineBinOp(comptime value_field: []const u8, comptime op: anytype, comptime 
 fn defineUnOp(comptime value_field: []const u8, comptime op: anytype) type {
     return struct {
         fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-            const c_1 = @field(vals.pop(), value_field);
+            const c_1 = @field(vals.pop().?, value_field);
             const result = @call(.always_inline, op, .{c_1});
             vals.appendAssumeCapacity(@unionInit(Value, value_field, result));
 
@@ -1082,7 +1082,7 @@ fn defineUnOp(comptime value_field: []const u8, comptime op: anytype) type {
 fn defineTestOp(comptime value_field: []const u8, comptime op: anytype) type {
     return struct {
         fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-            const c_1 = @field(vals.pop(), value_field);
+            const c_1 = @field(vals.pop().?, value_field);
             const result = @call(.always_inline, op, .{c_1});
             vals.appendAssumeCapacity(Value{ .i32 = @intFromBool(result) });
 
@@ -1097,8 +1097,8 @@ fn defineTestOp(comptime value_field: []const u8, comptime op: anytype) type {
 fn defineRelOp(comptime value_field: []const u8, comptime op: anytype) type {
     return struct {
         fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-            const c_2 = @field(vals.pop(), value_field);
-            const c_1 = @field(vals.pop(), value_field);
+            const c_2 = @field(vals.pop().?, value_field);
+            const c_1 = @field(vals.pop().?, value_field);
             const result = @call(.always_inline, op, .{ c_1, c_2 });
             vals.appendAssumeCapacity(Value{ .i32 = @intFromBool(result) });
 
@@ -1118,7 +1118,7 @@ fn defineConvOp(
 ) type {
     return struct {
         fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-            const t_1 = @field(vals.pop(), src_field);
+            const t_1 = @field(vals.pop().?, src_field);
             const result = @call(.always_inline, op, .{t_1}) catch |e| {
                 int.state = .{ .trapped = @call(.always_inline, trap, .{e}) };
                 return;
@@ -1630,20 +1630,21 @@ const no_allocation = struct {
     const vtable = Allocator.VTable{
         .alloc = noAlloc,
         .resize = Allocator.noResize,
+        .remap = Allocator.noRemap,
         .free = neverFree,
     };
 
-    fn noAlloc(_: *anyopaque, _: usize, _: u8, _: usize) ?[*]u8 {
+    fn noAlloc(_: *anyopaque, _: usize, _: std.mem.Alignment, _: usize) ?[*]u8 {
         @branchHint(.cold);
         return null;
     }
 
-    fn noResize(_: *anyopaque, _: []u8, _: u8, _: usize, _: usize) bool {
+    fn noResize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
         @branchHint(.cold);
         return false;
     }
 
-    fn neverFree(_: *anyopaque, _: []u8, _: u8, _: usize) void {
+    fn neverFree(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize) void {
         unreachable;
     }
 
@@ -1791,7 +1792,7 @@ const opcode_handlers = struct {
     pub const loop = block;
 
     pub fn @"if"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        const c = vals.pop().i32;
+        const c = vals.pop().?.i32;
         std.debug.assert(loc <= vals.items.len);
         // std.debug.print(" > (if) {}?\n", .{c != 0});
         if (c == 0) {
@@ -1832,7 +1833,7 @@ const opcode_handlers = struct {
     }
 
     pub fn br_if(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        const c = vals.pop().i32;
+        const c = vals.pop().?.i32;
         // std.debug.print(" > (br_if) {}?\n", .{c != 0});
         if (c != 0) {
             // No need to read LEB128 branch target
@@ -1854,7 +1855,7 @@ const opcode_handlers = struct {
 
         // No need to read LEB128 labels
 
-        const n: u32 = @bitCast(vals.pop().i32);
+        const n: u32 = @bitCast(vals.pop().?.i32);
 
         // std.debug.print(" > br_table [{}]\n", .{n});
 
@@ -1887,7 +1888,7 @@ const opcode_handlers = struct {
         const expected_signature = i.nextIdx(Module.TypeIdx).funcType(current_module.module);
         const table_idx = i.nextIdx(Module.TableIdx);
 
-        const elem_index: u32 = @bitCast(vals.pop().i32);
+        const elem_index: u32 = @bitCast(vals.pop().?.i32);
 
         const table_addr = current_module.tableAddr(table_idx);
         std.debug.assert(table_addr.elem_type == .funcref);
@@ -1919,7 +1920,7 @@ const opcode_handlers = struct {
     }
 
     pub fn drop(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        _ = vals.pop();
+        _ = vals.pop().?;
 
         // std.debug.print(" height after drop: {}\n", .{vals.items.len});
 
@@ -1930,7 +1931,7 @@ const opcode_handlers = struct {
     }
 
     pub fn select(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-        const c = vals.pop().i32;
+        const c = vals.pop().?.i32;
         if (c == 0) {
             vals.items[vals.items.len - 2] = vals.items[vals.items.len - 1];
         }
@@ -2016,7 +2017,7 @@ const opcode_handlers = struct {
         const global_addr = int.currentFrame().function.expanded().wasm
             .module.header().globalAddr(global_idx);
 
-        const popped = vals.pop();
+        const popped = vals.pop().?;
         switch (global_addr.global_type.val_type) {
             .v128 => unreachable, // TODO
             .externref => {
@@ -2076,7 +2077,7 @@ const opcode_handlers = struct {
             .module.header().tableAddr(table_idx).table;
 
         const ref = vals.pop();
-        const idx: u32 = @bitCast(vals.pop().i32);
+        const idx: u32 = @bitCast(vals.pop().?.i32);
 
         @memcpy(
             table.elementSlice(idx) catch {
@@ -2139,7 +2140,7 @@ const opcode_handlers = struct {
         const module = int.currentFrame().function.expanded().wasm.module;
         const mem = module.header().memAddr(mem_idx);
 
-        const delta: u32 = @bitCast(vals.pop().i32);
+        const delta: u32 = @bitCast(vals.pop().?.i32);
 
         const grow_failed: i32 = -1;
 
@@ -2417,9 +2418,9 @@ const opcode_handlers = struct {
         const module = int.currentFrame().function.expanded().wasm.module.header();
         const mem = module.memAddr(mem_idx);
 
-        const n: u32 = @bitCast(vals.pop().i32);
-        const src_addr: u32 = @bitCast(vals.pop().i32);
-        const d: u32 = @bitCast(vals.pop().i32);
+        const n: u32 = @bitCast(vals.pop().?.i32);
+        const src_addr: u32 = @bitCast(vals.pop().?.i32);
+        const d: u32 = @bitCast(vals.pop().?.i32);
 
         mem.init(module.dataSegment(data_idx), n, src_addr, d) catch {
             int.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
@@ -2453,9 +2454,9 @@ const opcode_handlers = struct {
         const dst_mem = module.memAddr(dst_idx);
         const src_mem = module.memAddr(src_idx);
 
-        const n: u32 = @bitCast(vals.pop().i32);
-        const src_addr: u32 = @bitCast(vals.pop().i32);
-        const d: u32 = @bitCast(vals.pop().i32);
+        const n: u32 = @bitCast(vals.pop().?.i32);
+        const src_addr: u32 = @bitCast(vals.pop().?.i32);
+        const d: u32 = @bitCast(vals.pop().?.i32);
 
         dst_mem.copy(src_mem, n, src_addr, d) catch {
             int.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
@@ -2473,9 +2474,9 @@ const opcode_handlers = struct {
         const mem_idx = i.nextIdx(Module.MemIdx);
         const mem = int.currentFrame().function.expanded().wasm.module.header().memAddr(mem_idx);
 
-        const n: u32 = @bitCast(vals.pop().i32);
-        const dupe: u8 = @truncate(@as(u32, @bitCast(vals.pop().i32)));
-        const d: u32 = @bitCast(vals.pop().i32);
+        const n: u32 = @bitCast(vals.pop().?.i32);
+        const dupe: u8 = @truncate(@as(u32, @bitCast(vals.pop().?.i32)));
+        const d: u32 = @bitCast(vals.pop().?.i32);
 
         mem.fill(n, dupe, d) catch {
             int.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
@@ -2494,9 +2495,9 @@ const opcode_handlers = struct {
         const table_idx = i.nextIdx(Module.TableIdx);
         const module = int.currentFrame().function.expanded().wasm.module;
 
-        const n: u32 = @bitCast(vals.pop().i32);
-        const src_idx: u32 = @bitCast(vals.pop().i32);
-        const d: u32 = @bitCast(vals.pop().i32);
+        const n: u32 = @bitCast(vals.pop().?.i32);
+        const src_idx: u32 = @bitCast(vals.pop().?.i32);
+        const d: u32 = @bitCast(vals.pop().?.i32);
 
         runtime.TableInst.init(
             table_idx,
@@ -2537,9 +2538,9 @@ const opcode_handlers = struct {
         const dst_table = module.tableAddr(dst_idx);
         const src_table = module.tableAddr(src_idx);
 
-        const n: u32 = @bitCast(vals.pop().i32);
-        const src_addr: u32 = @bitCast(vals.pop().i32);
-        const d: u32 = @bitCast(vals.pop().i32);
+        const n: u32 = @bitCast(vals.pop().?.i32);
+        const src_addr: u32 = @bitCast(vals.pop().?.i32);
+        const d: u32 = @bitCast(vals.pop().?.i32);
 
         dst_table.table.copy(
             src_table.table,
