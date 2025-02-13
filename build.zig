@@ -131,7 +131,7 @@ pub fn build(b: *std.Build) void {
 
             // simd_*.wast tests are skipped as 128-bit SIMD is not yet supported
 
-            // "tests/spec/skip-stack-guard-page.wast", // TODO: parser needs support for non-inline exports
+            "tests/spec/skip-stack-guard-page.wast",
             "tests/spec/stack.wast",
             // "tests/spec/start.wast", // TODO: start field parser
             "tests/spec/store.wast",
