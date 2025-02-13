@@ -82,9 +82,45 @@ pub const ValType = struct {
     }
 };
 
-pub const Import = struct {
+pub const ImportName = struct {
     module: Name,
     name: Name,
+
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        ctx: *ParseContext,
+        arena: *IndexedArena,
+        caches: *Caches,
+        parent: sexpr.List.Id,
+        scratch: *ArenaAllocator,
+    ) sexpr.Parser.ParseError!ImportName {
+        const module = try Name.parse(
+            contents,
+            ctx,
+            caches.allocator,
+            &caches.names,
+            arena,
+            parent,
+            scratch,
+        );
+
+        _ = scratch.reset(.retain_capacity);
+        const name = try Name.parse(
+            contents,
+            ctx,
+            caches.allocator,
+            &caches.names,
+            arena,
+            parent,
+            scratch,
+        );
+
+        return ImportName{ .module = module, .name = name };
+    }
+};
+
+pub const Import = struct {
+    name: ImportName,
     desc_keyword: sexpr.TokenId,
     desc_id: Ident.Symbolic,
     desc: Desc,
@@ -113,24 +149,11 @@ pub const Import = struct {
     ) sexpr.Parser.ParseError!IndexedArena.Idx(Import) {
         const import = try arena.create(Import);
 
-        const module = try Name.parse(
+        const name = try ImportName.parseContents(
             contents,
             ctx,
-            caches.allocator,
-            &caches.names,
             arena,
-            parent,
-            scratch,
-        );
-
-        _ = scratch.reset(.retain_capacity);
-
-        const name = try Name.parse(
-            contents,
-            ctx,
-            caches.allocator,
-            &caches.names,
-            arena,
+            caches,
             parent,
             scratch,
         );
@@ -203,7 +226,6 @@ pub const Import = struct {
         import.set(
             arena,
             Import{
-                .module = module,
                 .name = name,
                 .desc_keyword = desc_keyword,
                 .desc_id = desc_id,
@@ -330,43 +352,6 @@ pub const Result = struct {
 };
 
 pub const Local = ParamOrLocal;
-
-pub const ImportName = struct {
-    module: Name,
-    name: Name,
-
-    pub fn parseContents(
-        contents: *sexpr.Parser,
-        ctx: *ParseContext,
-        arena: *IndexedArena,
-        caches: *Caches,
-        parent: sexpr.List.Id,
-        scratch: *ArenaAllocator,
-    ) sexpr.Parser.ParseError!ImportName {
-        const module = try Name.parse(
-            contents,
-            ctx,
-            caches.allocator,
-            &caches.names,
-            arena,
-            parent,
-            scratch,
-        );
-
-        _ = scratch.reset(.retain_capacity);
-        const name = try Name.parse(
-            contents,
-            ctx,
-            caches.allocator,
-            &caches.names,
-            arena,
-            parent,
-            scratch,
-        );
-
-        return ImportName{ .module = module, .name = name };
-    }
-};
 
 pub const InlineImport = struct {
     /// The `import` keyword.

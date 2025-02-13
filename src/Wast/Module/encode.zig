@@ -210,7 +210,7 @@ const TypeDedup = struct {
 };
 
 const Import = union(enum) {
-    // module_field: IndexedArena.Idx(Text.ImportField),
+    module_field: IndexedArena.Idx(Text.Import),
     inline_func: IndexedArena.Idx(Text.Func),
     inline_table: IndexedArena.Idx(Text.Table),
     inline_mem: IndexedArena.Idx(Text.Mem),
@@ -218,6 +218,7 @@ const Import = union(enum) {
 
     fn name(import: Import, arena: IndexedArena.ConstData) *const Text.ImportName {
         return switch (import) {
+            .module_field => |field| &field.getPtr(arena).name,
             .inline_func => |func| &func.getPtr(arena).body.inline_import,
             .inline_table => |table| &table.getPtr(arena).inlineImport().?.name,
             .inline_mem => |mem| &mem.getPtr(arena).inlineImport().?.name,
@@ -1094,7 +1095,6 @@ fn encodeText(
     var code_needs_data_count = false;
     for (@as([]const Text.Field, module.fields.items(arena))) |field| {
         switch (field.keyword.tag(text_ctx.tree)) {
-            // .keyword_import => {wasm.checkImportOrdering();},
             .keyword_type => {
                 const type_field = field.contents.type;
                 const type_field_ptr: *const Text.Type = type_field.getPtr(arena);
@@ -1107,6 +1107,57 @@ fn encodeText(
                     &type_field_ptr.func,
                     type_idx,
                     .{ .arena = arena, .tree = text_ctx.tree },
+                );
+            },
+            .keyword_import => {
+                try wasm.checkImportOrdering(text_ctx, field.keyword);
+                const import_field = field.contents.import;
+                const import_field_ptr: *const Text.Import = import_field.getPtr(arena);
+
+                switch (import_field_ptr.desc_keyword.tag(text_ctx.tree)) {
+                    .keyword_func => {
+                        try wasm.func_ids.insert(
+                            text_ctx,
+                            import_field_ptr.desc_id,
+                            try wasm.func_count.increment(),
+                            alloca,
+                        );
+
+                        try wasm.appendTypeUse(
+                            alloca,
+                            import_field_ptr.desc.func.getPtr(arena),
+                        );
+                    },
+                    .keyword_table => try wasm.table_ids.insert(
+                        text_ctx,
+                        import_field_ptr.desc_id,
+                        try wasm.table_count.increment(),
+                        alloca,
+                    ),
+                    .keyword_memory => try wasm.mem_ids.insert(
+                        text_ctx,
+                        import_field_ptr.desc_id,
+                        try wasm.mem_count.increment(),
+                        alloca,
+                    ),
+                    .keyword_global => try wasm.global_ids.insert(
+                        text_ctx,
+                        import_field_ptr.desc_id,
+                        try wasm.global_count.increment(),
+                        alloca,
+                    ),
+                    else => {
+                        _ = try text_ctx.errorAtToken(
+                            import_field_ptr.desc_keyword,
+                            "unrecognized import kind",
+                        );
+                        continue;
+                    },
+                }
+
+                try wasm.imports.append(
+                    alloca.allocator(),
+                    .{ .module_field = import_field },
                 );
             },
             .keyword_func => {
@@ -1466,6 +1517,43 @@ fn encodeText(
                         text_ctx.tree,
                         &global_field.getPtr(arena).global_type,
                     );
+                },
+                .module_field => |import_field| {
+                    const import_field_ptr: *const Text.Import = import_field.getPtr(arena);
+                    switch (import_field_ptr.desc_keyword.tag(text_ctx.tree)) {
+                        .keyword_func => {
+                            try output.writeByte(0x00);
+                            try encodeIdx(
+                                output,
+                                TypeIdx,
+                                wasm.type_uses.get(import_field_ptr.desc.func.getPtr(arena)).?,
+                            );
+                        },
+                        .keyword_table => {
+                            try output.writeByte(0x01);
+                            try encodeTableType(
+                                output,
+                                text_ctx.tree,
+                                import_field_ptr.desc.table.getPtr(arena),
+                            );
+                        },
+                        .keyword_memory => {
+                            try output.writeByte(0x02);
+                            try encodeMemType(
+                                output,
+                                import_field_ptr.desc.memory.getPtr(arena),
+                            );
+                        },
+                        .keyword_global => {
+                            try output.writeByte(0x03);
+                            try encodeGlobalType(
+                                output,
+                                text_ctx.tree,
+                                import_field_ptr.desc.global.getPtr(arena),
+                            );
+                        },
+                        else => unreachable,
+                    }
                 },
             }
         }
