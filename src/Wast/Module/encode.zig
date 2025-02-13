@@ -232,7 +232,7 @@ const Import = union(enum) {
 };
 
 const Export = union(enum) {
-    // module_field: IndexedArena.Idx(Text.ExportField),
+    module_field: IndexedArena.Idx(Text.ExportField),
     inline_func: struct { field: IndexedArena.Idx(Text.Func), idx: FuncIdx },
     inline_table: struct {
         field: IndexedArena.Idx(Text.Table),
@@ -1445,6 +1445,13 @@ fn encodeText(
                     try wasm.defined_globals.append(alloca.allocator(), global_field);
                 }
             },
+            .keyword_export => {
+                wasm.exports_count = try addOrOom(u32, wasm.exports_count, 1);
+                try wasm.exports.append(
+                    alloca.allocator(),
+                    .{ .module_field = field.contents.@"export" },
+                );
+            },
             .keyword_start => {
                 const start_ident: Ident = field.contents.start.get(arena);
                 if (wasm.start.some) {
@@ -1709,12 +1716,72 @@ fn encodeText(
                     encodeIdx(export_desc_buf.writer(), GlobalIdx, global.idx) catch unreachable;
                     break :exports global.field.getPtr(arena).inline_exports;
                 },
+                .module_field => |export_field| {
+                    const export_field_ptr: *const Text.ExportField = export_field.getPtr(arena);
+                    try encodeByteVec(
+                        output,
+                        export_field_ptr.name.id.bytes(arena, &caches.names),
+                    );
+
+                    const desc_tag = export_field_ptr.desc_keyword.tag(text_ctx.tree);
+                    export_desc_buf.appendAssumeCapacity(
+                        switch (desc_tag) {
+                            .keyword_func => 0x00,
+                            .keyword_table => 0x01,
+                            .keyword_memory => 0x02,
+                            .keyword_global => 0x03,
+                            else => unreachable,
+                        },
+                    );
+
+                    switch (desc_tag) {
+                        .keyword_func => encodeIdx(
+                            export_desc_buf.writer(),
+                            FuncIdx,
+                            try wasm.func_ids.getFromIdent(
+                                text_ctx,
+                                export_field_ptr.desc,
+                            ),
+                        ) catch unreachable,
+                        .keyword_table => encodeIdx(
+                            export_desc_buf.writer(),
+                            TableIdx,
+                            try wasm.table_ids.getFromIdent(
+                                text_ctx,
+                                export_field_ptr.desc,
+                            ),
+                        ) catch unreachable,
+                        .keyword_memory => encodeIdx(
+                            export_desc_buf.writer(),
+                            MemIdx,
+                            try wasm.mem_ids.getFromIdent(
+                                text_ctx,
+                                export_field_ptr.desc,
+                            ),
+                        ) catch unreachable,
+                        .keyword_global => encodeIdx(
+                            export_desc_buf.writer(),
+                            GlobalIdx,
+                            try wasm.global_ids.getFromIdent(
+                                text_ctx,
+                                export_field_ptr.desc,
+                            ),
+                        ) catch unreachable,
+                        else => unreachable,
+                    }
+
+                    try output.writeAll(export_desc_buf.constSlice());
+                    continue;
+                },
             };
 
             std.debug.assert(export_desc_buf.len >= 2);
             std.debug.assert(export_list.len > 0);
             for (export_list.items(arena)) |inline_export| {
-                try encodeByteVec(output, inline_export.name.id.bytes(arena, &caches.names));
+                try encodeByteVec(
+                    output,
+                    inline_export.name.id.bytes(arena, &caches.names),
+                );
                 try output.writeAll(export_desc_buf.constSlice());
             }
         }

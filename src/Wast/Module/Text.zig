@@ -41,11 +41,11 @@ pub const Field = struct {
 pub const Contents = union {
     type: IndexedArena.Idx(Type),
     import: IndexedArena.Idx(Import),
-    // export: IndexedArena.Idx(Export),
     func: IndexedArena.Idx(Func),
     table: IndexedArena.Idx(Table),
     mem: IndexedArena.Idx(Mem),
     global: IndexedArena.Idx(Global),
+    @"export": IndexedArena.Idx(ExportField),
     data: IndexedArena.Idx(Data),
     elem: IndexedArena.Idx(Elem),
     start: IndexedArena.IdxAligned(Ident, 4),
@@ -123,7 +123,7 @@ pub const ImportName = struct {
 pub const Import = struct {
     name: ImportName,
     desc_keyword: sexpr.TokenId,
-    desc_id: Ident.Symbolic,
+    desc_id: Ident.Symbolic align(4),
     desc: Desc,
 
     pub const Desc = union {
@@ -263,6 +263,72 @@ pub const Export = struct {
         );
 
         return Export{ .keyword = keyword, .name = name };
+    }
+};
+
+pub const ExportField = struct {
+    name: Name,
+    desc_keyword: sexpr.TokenId,
+    desc: Ident align(4),
+
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        ctx: *ParseContext,
+        parent: sexpr.List.Id,
+        arena: *IndexedArena,
+        caches: *Caches,
+        scratch: *ArenaAllocator,
+    ) sexpr.Parser.ParseError!IndexedArena.Idx(ExportField) {
+        const field = try arena.create(ExportField);
+        const name = try Name.parse(
+            contents,
+            ctx,
+            caches.allocator,
+            &caches.names,
+            arena,
+            parent,
+            scratch,
+        );
+
+        const desc_list = try contents.parseListInList(parent, ctx);
+        var desc_parser = sexpr.Parser.init(desc_list.contents(ctx.tree).values(ctx.tree));
+
+        const desc_keyword = try desc_parser.parseAtomInList(
+            desc_list,
+            ctx,
+            "export kind",
+        );
+
+        switch (desc_keyword.tag(ctx.tree)) {
+            .keyword_func,
+            .keyword_table,
+            .keyword_memory,
+            .keyword_global,
+            => {},
+            else => {
+                return (try ctx.errorAtToken(desc_keyword, "unknown import kind")).err;
+            },
+        }
+
+        const desc = try Ident.parse(
+            &desc_parser,
+            ctx,
+            parent,
+            caches.allocator,
+            &caches.ids,
+        );
+
+        try desc_parser.expectEmpty(ctx);
+
+        field.set(
+            arena,
+            ExportField{
+                .name = name,
+                .desc_keyword = desc_keyword,
+                .desc = desc,
+            },
+        );
+        return field;
     }
 };
 
@@ -1580,6 +1646,21 @@ pub fn parseFields(
                 };
 
                 break :field .{ .global = parsed_global };
+            },
+            .keyword_export => {
+                const parsed_export = ExportField.parseContents(
+                    &field_contents,
+                    ctx,
+                    field_list,
+                    arena,
+                    caches,
+                    scratch,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
+                };
+
+                break :field .{ .@"export" = parsed_export };
             },
             .keyword_elem => {
                 const parsed_elem = Elem.parseContents(
