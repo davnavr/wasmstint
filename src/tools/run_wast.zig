@@ -766,6 +766,144 @@ const State = struct {
         }
     }
 
+    fn checkResultValue(
+        state: *State,
+        script: *const Wast,
+        actual: *const Interpreter.TaggedValue,
+        expected: *const Wast.Command.Result,
+        pos: u32,
+    ) Error!void {
+        switch (expected.keyword.tag(state.errors.tree)) {
+            .@"keyword_i32.const" => try state.checkIntegerResult(
+                expected.value_token,
+                expected.value.i32,
+                try state.expectTypedValue(
+                    expected.value_token,
+                    actual,
+                    pos,
+                    .i32,
+                ),
+            ),
+            .@"keyword_i64.const" => try state.checkIntegerResult(
+                expected.value_token,
+                expected.value.i64.get(script.arena),
+                try state.expectTypedValue(
+                    expected.value_token,
+                    actual,
+                    pos,
+                    .i64,
+                ),
+            ),
+            .@"keyword_f32.const" => {
+                const GetF32 = struct {
+                    fn bits(_: @This(), result: *const Wast.Command.Result) u32 {
+                        return result.value.f32;
+                    }
+                };
+
+                try state.checkFloatResult(
+                    expected,
+                    GetF32{},
+                    try state.expectTypedValue(
+                        expected.value_token,
+                        actual,
+                        pos,
+                        .f32,
+                    ),
+                );
+            },
+            .@"keyword_f64.const" => {
+                const GetF64 = struct {
+                    arena: *const Wast.Arena,
+
+                    fn bits(ctx: @This(), result: *const Wast.Command.Result) u64 {
+                        return result.value.f64.get(ctx.arena);
+                    }
+                };
+
+                try state.checkFloatResult(
+                    expected,
+                    GetF64{ .arena = script.arena },
+                    try state.expectTypedValue(
+                        expected.value_token,
+                        actual,
+                        pos,
+                        .f64,
+                    ),
+                );
+            },
+            .@"keyword_ref.extern" => ref_extern: {
+                const actual_extern: wasmstint.runtime.ExternAddr = try state.expectTypedValue(
+                    expected.value_token,
+                    actual,
+                    pos,
+                    .externref,
+                );
+
+                if (expected.keyword == expected.value_token) {
+                    _ = expected.value.ref_extern_unspecified;
+                    break :ref_extern;
+                }
+
+                const expected_nat = expected.value.ref_extern;
+                const actual_nat = actual_extern.nat.toInt() orelse {
+                    return scriptError(state.errors.errorFmtAtToken(
+                        expected.value_token,
+                        "expected result #{} to be (ref.extern {}), but got null",
+                        .{ pos, expected_nat },
+                    ));
+                };
+
+                if (expected_nat != actual_nat)
+                    return scriptError(state.errors.errorFmtAtToken(
+                        expected.value_token,
+                        "expected result #{} to be (ref.extern {}), but got (ref.extern {})",
+                        .{ pos, expected_nat, actual_nat },
+                    ));
+            },
+            .@"keyword_ref.null" => switch (expected.value_token.tag(script.tree)) {
+                .keyword_func => {
+                    const actual_func = try state.expectTypedValue(
+                        expected.value_token,
+                        actual,
+                        pos,
+                        .funcref,
+                    );
+
+                    if (actual_func.funcInst()) |_|
+                        return scriptError(state.errors.errorAtToken(
+                            expected.value_token,
+                            "expected result #{} to be (ref.null func)",
+                        ));
+                },
+                .keyword_extern => {
+                    const actual_extern: wasmstint.runtime.ExternAddr = try state.expectTypedValue(
+                        expected.value_token,
+                        actual,
+                        pos,
+                        .externref,
+                    );
+
+                    if (actual_extern.nat.toInt()) |nat|
+                        return scriptError(state.errors.errorFmtAtToken(
+                            expected.value_token,
+                            "expected result #{} to be (ref.null extern), but got (ref.extern {})",
+                            .{ pos, nat },
+                        ));
+                },
+                else => return scriptError(state.errors.errorAtToken(
+                    expected.value_token,
+                    "unrecognized heap type",
+                )),
+            },
+            else => |bad| return scriptError(state.errors.errorFmtAtToken(
+                expected.keyword,
+                "TODO: handle result {s} (got {any})",
+                .{ @tagName(bad), actual },
+            )),
+        }
+    }
+
     fn expectResultValues(
         state: *State,
         interpreter: *Interpreter,
@@ -795,136 +933,12 @@ const State = struct {
         }
 
         for (actual_results, results, 0..) |*actual, *expected, index| {
-            const pos: u32 = @intCast(index);
-            switch (expected.keyword.tag(state.errors.tree)) {
-                .@"keyword_i32.const" => try state.checkIntegerResult(
-                    expected.value_token,
-                    expected.value.i32,
-                    try state.expectTypedValue(
-                        expected.value_token,
-                        actual,
-                        pos,
-                        .i32,
-                    ),
-                ),
-                .@"keyword_i64.const" => try state.checkIntegerResult(
-                    expected.value_token,
-                    expected.value.i64.get(script.arena),
-                    try state.expectTypedValue(
-                        expected.value_token,
-                        actual,
-                        pos,
-                        .i64,
-                    ),
-                ),
-                .@"keyword_f32.const" => {
-                    const GetF32 = struct {
-                        fn bits(_: @This(), result: *const Wast.Command.Result) u32 {
-                            return result.value.f32;
-                        }
-                    };
-
-                    try state.checkFloatResult(
-                        expected,
-                        GetF32{},
-                        try state.expectTypedValue(
-                            expected.value_token,
-                            actual,
-                            pos,
-                            .f32,
-                        ),
-                    );
-                },
-                .@"keyword_f64.const" => {
-                    const GetF64 = struct {
-                        arena: *const Wast.Arena,
-
-                        fn bits(ctx: @This(), result: *const Wast.Command.Result) u64 {
-                            return result.value.f64.get(ctx.arena);
-                        }
-                    };
-
-                    try state.checkFloatResult(
-                        expected,
-                        GetF64{ .arena = script.arena },
-                        try state.expectTypedValue(
-                            expected.value_token,
-                            actual,
-                            pos,
-                            .f64,
-                        ),
-                    );
-                },
-                .@"keyword_ref.extern" => ref_extern: {
-                    const actual_extern: wasmstint.runtime.ExternAddr = try state.expectTypedValue(
-                        expected.value_token,
-                        actual,
-                        pos,
-                        .externref,
-                    );
-
-                    if (expected.keyword == expected.value_token) {
-                        _ = expected.value.ref_extern_unspecified;
-                        break :ref_extern;
-                    }
-
-                    const expected_nat = expected.value.ref_extern;
-                    const actual_nat = actual_extern.nat.toInt() orelse {
-                        return scriptError(state.errors.errorFmtAtToken(
-                            expected.value_token,
-                            "expected result #{} to be (ref.extern {}), but got null",
-                            .{ pos, expected_nat },
-                        ));
-                    };
-
-                    if (expected_nat != actual_nat)
-                        return scriptError(state.errors.errorFmtAtToken(
-                            expected.value_token,
-                            "expected result #{} to be (ref.extern {}), but got (ref.extern {})",
-                            .{ pos, expected_nat, actual_nat },
-                        ));
-                },
-                .@"keyword_ref.null" => switch (expected.value_token.tag(script.tree)) {
-                    .keyword_func => {
-                        const actual_func = try state.expectTypedValue(
-                            expected.value_token,
-                            actual,
-                            pos,
-                            .funcref,
-                        );
-
-                        if (actual_func.funcInst()) |_|
-                            return scriptError(state.errors.errorAtToken(
-                                expected.value_token,
-                                "expected result #{} to be (ref.null func)",
-                            ));
-                    },
-                    .keyword_extern => {
-                        const actual_extern: wasmstint.runtime.ExternAddr = try state.expectTypedValue(
-                            expected.value_token,
-                            actual,
-                            pos,
-                            .externref,
-                        );
-
-                        if (actual_extern.nat.toInt()) |nat|
-                            return scriptError(state.errors.errorFmtAtToken(
-                                expected.value_token,
-                                "expected result #{} to be (ref.null extern), but got (ref.extern {})",
-                                .{ pos, nat },
-                            ));
-                    },
-                    else => return scriptError(state.errors.errorAtToken(
-                        expected.value_token,
-                        "unrecognized heap type",
-                    )),
-                },
-                else => |bad| return scriptError(state.errors.errorFmtAtToken(
-                    expected.keyword,
-                    "TODO: handle result {s} (got {any})",
-                    .{ @tagName(bad), actual },
-                )),
-            }
+            try state.checkResultValue(
+                script,
+                actual,
+                expected,
+                @intCast(index),
+            );
         }
     }
 
@@ -1005,10 +1019,11 @@ const State = struct {
         state: *State,
         script: *const Wast,
         interpreter: *Interpreter,
+        fuel: *Interpreter.Fuel,
         parent: Wast.sexpr.TokenId,
         failure: *const Wast.Command.Failure,
     ) Error!void {
-        try state.runToCompletion(interpreter);
+        try state.runToCompletion(interpreter, fuel);
         const interruption_cause: Interpreter.InterruptionCause = switch (interpreter.state) {
             .awaiting_lazy_validation => unreachable,
             .trapped => |trap| return state.errorInterpreterTrap(parent, trap.code),
@@ -1017,15 +1032,22 @@ const State = struct {
         };
 
         switch (interruption_cause) {
-            .validation_finished => unreachable,
+            .validation_finished, .memory_grow => unreachable,
             .out_of_fuel, .call_stack_exhaustion => {},
         }
 
         const expected_msg = "call stack exhausted";
         if (!std.mem.eql(u8, failure.msg.slice(script.arena), expected_msg)) {
-            return scriptError(state.errors.errorAtToken(parent, "expected failure string \"" ++ expected_msg ++ "\""));
+            return scriptError(
+                state.errors.errorAtToken(parent, "expected failure string \"" ++ expected_msg ++ "\""),
+            );
         }
     }
+
+    const Action = union(enum) {
+        invoke,
+        get: Interpreter.TaggedValue,
+    };
 
     fn beginAction(
         state: *State,
@@ -1034,20 +1056,30 @@ const State = struct {
         action: *const Wast.Command.Action,
         interpreter: *Interpreter,
         fuel: *Interpreter.Fuel,
-    ) Error!void {
+    ) Error!Action {
         const module = try state.getModuleInst(action.module, keyword);
+        const export_name = script.nameContents(action.name.id);
+        const target_export = module.findExport(export_name) catch return scriptError(
+            state.errors.errorFmtAtToken(
+                action.name.token,
+                "no exported value found with name {s}",
+                .{export_name},
+            ),
+        );
+
         switch (action.keyword.tag(state.errors.tree)) {
             .keyword_invoke => {
-                const export_name = script.nameContents(action.name.id);
-                const target_export = module.findExport(export_name) catch return scriptError(
-                    state.errors.errorFmtAtToken(
-                        action.name.token,
-                        "no exported value found with name {s}",
-                        .{export_name},
+                const callee = switch (target_export) {
+                    .func => |f| f,
+                    else => return scriptError(
+                        state.errors.errorFmtAtToken(
+                            action.keyword,
+                            "cannot invoke {s}, got a {s}",
+                            .{ export_name, @tagName(target_export) },
+                        ),
                     ),
-                );
+                };
 
-                const callee = target_export.func;
                 const arguments = allocateFunctionArguments(
                     script,
                     action.target.invoke.arguments,
@@ -1073,6 +1105,50 @@ const State = struct {
                         ),
                     ),
                 };
+
+                return .invoke;
+            },
+            .keyword_get => {
+                const global: wasmstint.runtime.GlobalAddr = switch (target_export) {
+                    .global => |global| global,
+                    else => return scriptError(
+                        state.errors.errorFmtAtToken(
+                            action.keyword,
+                            "expected {s} to be a global,, got a {s}",
+                            .{ export_name, @tagName(target_export) },
+                        ),
+                    ),
+                };
+
+                const value: Interpreter.TaggedValue = switch (global.global_type.val_type) {
+                    .i32 => .{
+                        .i32 = @as(*const i32, @ptrCast(@alignCast(global.value))).*,
+                    },
+                    .f32 => .{
+                        .f32 = @as(*const f32, @ptrCast(@alignCast(global.value))).*,
+                    },
+                    .i64 => .{
+                        .i64 = @as(*const i64, @ptrCast(@alignCast(global.value))).*,
+                    },
+                    .f64 => .{
+                        .f64 = @as(*const f64, @ptrCast(@alignCast(global.value))).*,
+                    },
+                    .externref => .{
+                        .externref = @as(
+                            *const wasmstint.runtime.ExternAddr,
+                            @ptrCast(@alignCast(global.value)),
+                        ).*,
+                    },
+                    .funcref => .{
+                        .funcref = @as(
+                            *const wasmstint.runtime.FuncAddr.Nullable,
+                            @ptrCast(@alignCast(global.value)),
+                        ),
+                    },
+                    .v128 => unreachable,
+                };
+
+                return .{ .get = value };
             },
             else => unreachable,
         }
@@ -1235,7 +1311,7 @@ fn runScript(
             .keyword_assert_return => {
                 const assert_return: *const Wast.Command.AssertReturn = cmd.inner.assert_return.getPtr(script.arena);
 
-                state.beginAction(
+                const action = state.beginAction(
                     script,
                     cmd.keyword,
                     assert_return.action.getPtr(script.arena),
@@ -1246,21 +1322,46 @@ fn runScript(
                     error.ScriptError => break :run_cmds,
                 };
 
-                state.expectResultValues(
-                    &interp,
-                    &fuel,
-                    cmd.keyword,
-                    script,
-                    assert_return.results.items(script.arena),
-                ) catch |e| switch (e) {
-                    error.OutOfMemory => |oom| return oom,
-                    error.ScriptError => break :run_cmds,
-                };
+                switch (action) {
+                    .invoke => {
+                        state.expectResultValues(
+                            &interp,
+                            &fuel,
+                            cmd.keyword,
+                            script,
+                            assert_return.results.items(script.arena),
+                        ) catch |e| switch (e) {
+                            error.OutOfMemory => |oom| return oom,
+                            error.ScriptError => break :run_cmds,
+                        };
+                    },
+                    .get => |actual_value| {
+                        const expected_result_list = assert_return.results.items(script.arena);
+                        if (expected_result_list.len != 1) {
+                            _ = try state.errors.errorFmtAtToken(
+                                cmd.keyword,
+                                "'get' yields exactly 1 value, but {} were expected",
+                                .{expected_result_list.len},
+                            );
+                            break :run_cmds;
+                        }
+
+                        state.checkResultValue(
+                            script,
+                            &actual_value,
+                            &expected_result_list[0],
+                            0,
+                        ) catch |e| switch (e) {
+                            error.OutOfMemory => |oom| return oom,
+                            error.ScriptError => break :run_cmds,
+                        };
+                    },
+                }
             },
             .keyword_assert_trap => {
                 const assert_trap: *const Wast.Command.AssertTrap = cmd.inner.assert_trap.getPtr(script.arena);
 
-                state.beginAction(
+                const action = state.beginAction(
                     script,
                     cmd.keyword,
                     assert_trap.action.getPtr(script.arena),
@@ -1270,6 +1371,14 @@ fn runScript(
                     error.OutOfMemory => |oom| return oom,
                     error.ScriptError => break :run_cmds,
                 };
+
+                if (action != .invoke) {
+                    _ = try state.errors.errorAtToken(
+                        cmd.keyword,
+                        "reading globals never traps",
+                    );
+                    break :run_cmds;
+                }
 
                 state.expectTrap(
                     script,
@@ -1285,12 +1394,31 @@ fn runScript(
             .keyword_assert_exhaustion => {
                 const assert_exhaustion: *const Wast.Command.AssertExhaustion = cmd.inner.assert_exhaustion.getPtr(script.arena);
 
-                state.beginAction(
+                const action = state.beginAction(
                     script,
                     cmd.keyword,
                     assert_exhaustion.action.getPtr(script.arena),
                     &interp,
                     &fuel,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ScriptError => break :run_cmds,
+                };
+
+                if (action != .invoke) {
+                    _ = try state.errors.errorAtToken(
+                        cmd.keyword,
+                        "reading globals never exhausts the call stack",
+                    );
+                    break :run_cmds;
+                }
+
+                state.expectExhaustion(
+                    script,
+                    &interp,
+                    &fuel,
+                    cmd.keyword,
+                    &assert_exhaustion.failure,
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
                     error.ScriptError => break :run_cmds,
@@ -1340,7 +1468,7 @@ fn runScript(
             .keyword_invoke => {
                 const invoke: *const Wast.Command.Action = cmd.inner.action.getPtr(script.arena);
 
-                state.beginAction(
+                const action = state.beginAction(
                     script,
                     cmd.keyword,
                     invoke,
@@ -1351,9 +1479,13 @@ fn runScript(
                     error.ScriptError => break :run_cmds,
                 };
 
-                try state.runToCompletion(&interp, &fuel);
-
-                // TODO: Does invoke error-out if its action results in a trap?
+                switch (action) {
+                    .invoke => {
+                        // TODO: Does invoke error-out if its action results in a trap?
+                        try state.runToCompletion(&interp, &fuel);
+                    },
+                    .get => {},
+                }
             },
             else => {
                 _ = try state.errors.errorAtToken(cmd.keyword, "unrecognized command");
