@@ -8,6 +8,8 @@ pub const float = @import("float.zig");
 pub const runtime = @import("runtime.zig");
 pub const Interpreter = @import("Interpreter.zig");
 
+pub const LimitedAllocator = @import("LimitedAllocator.zig");
+
 comptime {
     const std = @import("std");
 

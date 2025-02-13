@@ -10,12 +10,14 @@ const Arguments = struct {
     rng_seed: u256 = 42,
     fuel: u64 = 2_000_000,
     call_stack_reserve: u32 = 100,
+    soft_memory_limit: usize = 64 * (1024 * 1024), // 64 MiB
 
     const Flag = enum {
         run,
         wait_for_debugger,
         fuel,
         call_stack_reserve,
+        soft_memory_limit,
 
         const lookup = std.StaticStringMap(Flag).initComptime(.{
             .{ "--run", .run },
@@ -23,6 +25,7 @@ const Arguments = struct {
             .{ "--wait-for-debugger", .wait_for_debugger },
             .{ "--fuel", .fuel },
             .{ "--call-stack-reserve", .call_stack_reserve },
+            .{ "--soft-memory-limit", .soft_memory_limit },
         });
     };
 
@@ -81,6 +84,13 @@ const Arguments = struct {
                     arguments.call_stack_reserve = std.fmt.parseUnsigned(u32, amt_arg, 0) catch
                         return error.InvalidCommandLineArgument;
                 },
+                .soft_memory_limit => {
+                    const amt_arg = iter.next() orelse
+                        return error.InvalidCommandLineArgument;
+
+                    arguments.soft_memory_limit = std.fmt.parseIntSizeSuffix(amt_arg, 0) catch
+                        return error.InvalidCommandLineArgument;
+                },
             }
         }
 
@@ -92,24 +102,34 @@ const Arguments = struct {
     }
 };
 
-const file_max_bytes = @as(usize, 1) << 21; // 2 MiB
+const file_max_bytes = 1 * (1024 * 1024); // 1 MiB
 
 pub fn main() !u8 {
-    var arguments_arena = ArenaAllocator.init(std.heap.page_allocator);
+    const initial_memory_limit = 16 * 1024; // 16 KiB
+    var memory_limit: usize = initial_memory_limit;
+
+    var limited_page_allocator = wasmstint.LimitedAllocator.init(
+        &memory_limit,
+        std.heap.page_allocator,
+    );
+    const pages = limited_page_allocator.allocator();
+
+    var arguments_arena = ArenaAllocator.init(pages);
     defer arguments_arena.deinit();
 
-    var scratch = ArenaAllocator.init(std.heap.page_allocator);
+    var scratch = ArenaAllocator.init(pages);
     defer scratch.deinit();
 
     const arguments = try Arguments.parse(&arguments_arena, &scratch);
+    memory_limit = arguments.soft_memory_limit -| (initial_memory_limit - memory_limit);
 
-    var file_buffer = std.ArrayList(u8).init(std.heap.page_allocator);
+    var file_buffer = std.ArrayList(u8).init(pages);
     defer file_buffer.deinit();
 
-    var encoding_buffer = std.ArrayList(u8).init(std.heap.page_allocator);
+    var encoding_buffer = std.ArrayList(u8).init(pages);
     defer encoding_buffer.deinit();
 
-    var parse_arena = ArenaAllocator.init(std.heap.page_allocator);
+    var parse_arena = ArenaAllocator.init(pages);
     defer parse_arena.deinit();
 
     const color_config = std.io.tty.detectConfig(std.io.getStdErr());
@@ -1023,7 +1043,11 @@ const State = struct {
         parent: Wast.sexpr.TokenId,
         failure: *const Wast.Command.Failure,
     ) Error!void {
-        try state.runToCompletion(interpreter, fuel);
+        state.runToCompletion(interpreter, fuel) catch {
+            // @panic("TODO: How to handle OOM and call stack exhaustion gracefully?");
+            return;
+        };
+
         const interruption_cause: Interpreter.InterruptionCause = switch (interpreter.state) {
             .awaiting_lazy_validation => unreachable,
             .trapped => |trap| return state.errorInterpreterTrap(parent, trap.code),
