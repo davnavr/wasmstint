@@ -48,6 +48,7 @@ pub const Contents = union {
     global: IndexedArena.Idx(Global),
     data: IndexedArena.Idx(Data),
     elem: IndexedArena.Idx(Elem),
+    start: IndexedArena.IdxAligned(Ident, 4),
 };
 
 pub const ValType = struct {
@@ -1608,6 +1609,24 @@ pub fn parseFields(
                 };
 
                 break :field .{ .data = parsed_data };
+            },
+            .keyword_start => {
+                const start = try arena.alignedCreate(Ident, 4);
+                start.set(
+                    arena,
+                    Ident.parse(
+                        &field_contents,
+                        ctx,
+                        field_list,
+                        caches.allocator,
+                        &caches.ids,
+                    ) catch |e| switch (e) {
+                        error.OutOfMemory => |oom| return oom,
+                        error.ReportedParserError => continue,
+                    },
+                );
+
+                break :field .{ .start = start };
             },
             else => {
                 _ = try ctx.errorAtToken(field_keyword, "expected module field keyword");

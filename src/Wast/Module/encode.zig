@@ -411,6 +411,8 @@ const Wasm = struct {
     elem_segments: std.SegmentedList(ElemSegment, 1) = .{},
     data_segments: std.SegmentedList(DataSegment, 1) = .{},
 
+    start: Ident.Opt align(4) = .none,
+
     type_uses: std.AutoArrayHashMapUnmanaged(*const Text.TypeUse, TypeIdx) = .empty,
     type_dedup: TypeDedup = .empty,
 
@@ -1443,6 +1445,17 @@ fn encodeText(
                     try wasm.defined_globals.append(alloca.allocator(), global_field);
                 }
             },
+            .keyword_start => {
+                const start_ident: Ident = field.contents.start.get(arena);
+                if (wasm.start.some) {
+                    _ = try text_ctx.errorAtToken(
+                        start_ident.token,
+                        "duplicate start section",
+                    );
+                } else {
+                    wasm.start = Ident.Opt.init(start_ident);
+                }
+            },
             else => |bad| if (@import("builtin").mode == .Debug)
                 std.debug.panic("TODO: handle module field {s}", .{@tagName(bad)})
             else
@@ -1709,7 +1722,16 @@ fn encodeText(
         try encodeSection(final_output, 7, section_buf.items);
     }
 
-    // start function
+    if (wasm.start.get()) |start_id| {
+        var start_idx = std.BoundedArray(u8, 5){};
+        encodeIdx(
+            start_idx.writer(),
+            FuncIdx,
+            try wasm.func_ids.getFromIdent(text_ctx, start_id),
+        ) catch unreachable;
+
+        try encodeSection(final_output, 8, start_idx.constSlice());
+    }
 
     if (wasm.elem_segments.len > 0) {
         section_buf.clearRetainingCapacity();
