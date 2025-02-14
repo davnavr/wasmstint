@@ -24,8 +24,10 @@ pub const FuncIdx = enum(u31) {
     }
 
     pub fn code(idx: FuncIdx, module: *const Module) ?*Code {
-        const i = std.math.sub(u32, @intFromEnum(idx), module.inner.func_import_count) catch return null;
-        return &module.code()[i];
+        return if (@intFromEnum(idx) < module.inner.func_import_count)
+            null
+        else
+            module.code(idx);
     }
 };
 
@@ -83,7 +85,8 @@ inner: extern struct {
 
     /// Not set if `code_count == 0`.
     code_section: [*]const u8,
-    code_entries: [*]Code,
+    code_entries: [*]Code.Entry,
+    code: [*]Code,
 
     global_exprs: [*]ConstExpr,
     global_types: [*]const GlobalType,
@@ -195,8 +198,14 @@ pub inline fn globalImportTypes(module: *const Module) []const GlobalType {
     return module.globalTypes()[0..module.inner.global_import_count];
 }
 
-pub inline fn code(module: *const Module) []Code {
+pub inline fn codeEntries(module: *const Module) []Code.Entry {
     return module.inner.code_entries[0..module.inner.code_count];
+}
+
+/// Asserts that the function index refers to a function definition.
+pub inline fn code(module: *const Module, idx: FuncIdx) *Code {
+    return &module.inner
+        .code[0..module.inner.code_count][@intFromEnum(idx) - module.inner.func_import_count];
 }
 
 pub inline fn dataSegmentContents(module: *const Module, idx: DataIdx) []const u8 {
@@ -430,14 +439,7 @@ pub const ActiveElem = struct {
     },
 };
 
-pub const Code = struct {
-    contents: WasmSlice,
-    state: validator.State = .{},
-
-    pub const SideTableEntry = validator.SideTableEntry;
-    pub const Ip = validator.Ip;
-    pub const End = validator.End;
-};
+pub const Code = validator.Code;
 
 pub const ActiveData = extern struct {
     header: packed struct(u32) {
@@ -1458,7 +1460,8 @@ pub fn parse(
 
     const CodeSec = struct {
         start: [*]const u8 = undefined,
-        entries: IndexedArena.Slice(Code) = .empty,
+        entries: IndexedArena.Slice(Code.Entry) = .empty,
+        code: IndexedArena.Slice(Code) = .empty,
     };
 
     const defined_func_count = func_types.len - import_sec.funcs.len;
@@ -1474,18 +1477,24 @@ pub fn parse(
 
         const code_sec = CodeSec{
             .start = code_reader.bytes.*.ptr,
-            .entries = try arena.alloc(Code, code_len),
+            .entries = try arena.alloc(Code.Entry, code_len),
+            .code = try arena.alloc(Code, code_len),
         };
 
         for (code_sec.entries.items(&arena)) |*code_entry| {
             const contents = try code_reader.readByteVec();
-            code_entry.* = Code{
+            code_entry.* = .{
                 .contents = .{
                     .size = @intCast(contents.len),
                     .offset = @intCast(@intFromPtr(contents.ptr) - @intFromPtr(code_sec.start)),
                 },
             };
         }
+
+        @memset(
+            code_sec.code.items(&arena),
+            .{ .inner = Code.validation_failed },
+        );
 
         try code_reader.expectEndOfStream();
         known_sections.code = undefined;
@@ -1641,7 +1650,8 @@ pub fn parse(
             .func_count = func_types.len,
 
             .code_section = code_sec.start,
-            .code_entries = @ptrCast(code_sec.entries.items(arena_data)),
+            .code_entries = code_sec.entries.items(arena_data).ptr,
+            .code = code_sec.code.items(arena_data).ptr,
             .code_count = code_sec.entries.len,
 
             .table_types = table_types.items(arena_data).ptr,
@@ -1691,16 +1701,11 @@ pub fn parse(
 /// Returns `false` if validation of one of the functions began in another thread and did not yet finish.
 pub fn finishCodeValidation(module: *Module, allocator: Allocator, scratch: *ArenaAllocator) validator.Error!bool {
     var allValidated = true;
-    for (
-        module.inner.func_import_count..module.inner.func_count,
-        module.code(),
-    ) |func_idx, *code_entry| {
+    for (module.inner.code[0..module.inner.code_count]) |*code_entry| {
         _ = scratch.reset(.retain_capacity);
-        allValidated = allValidated and try code_entry.state.validate(
+        allValidated = allValidated and try code_entry.validate(
             allocator,
             module,
-            module.funcTypeIdx(@enumFromInt(@as(@typeInfo(FuncIdx).@"enum".tag_type, @intCast(func_idx)))),
-            code_entry.contents,
             scratch,
         );
     }

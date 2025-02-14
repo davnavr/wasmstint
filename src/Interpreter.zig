@@ -48,16 +48,23 @@ const Stp = [*]const Module.Code.SideTableEntry;
 
 pub const StackFrame = extern struct {
     function: runtime.FuncAddr,
-    instructions: Instructions,
-    branch_table: Stp,
+    /// These fields must only be used in WASM functions.
+    wasm: extern struct {
+        instructions: Instructions,
+        branch_table: Stp,
+    },
     /// The total space taken by parameters, local variables, and values in the interpreter's
     /// `value_stack`.
+    ///
+    /// When a host function is called, this is set to the number of parameters.
     values_count: u16,
     /// The number of return values this function has.
     result_count: u16,
-    /// The index into the `value_stack` at which local variables begin.
+    /// The index into the `value_stack` at which local variables (specifically its parameters)
+    /// begin.
     ///
-    /// The length of the value stack to restore when returning from this function is equal to .
+    /// The length of the value stack to restore when returning from this function is equal to this
+    /// value.
     values_base: u32,
     instantiate_flag: *bool,
 
@@ -65,19 +72,114 @@ pub const StackFrame = extern struct {
     // - to ensure quick access to top, store ptr to current top of call stack
     // - allows allocator to reuse space instead of having a big block that needs resizing
 
-    // TODO: Determine impact of StackFrame size on performance.
-    // comptime {
-    //     // Something about cache lines?
-    //     std.debug.assert(std.math.isPowerOfTwo(@sizeOf(StackFrame)));
-    // }
+    /// Asserts that the current `frame` is of a WASM function.
+    fn currentModule(frame: *const StackFrame) runtime.ModuleInst {
+        return frame.function.expanded().wasm.module;
+    }
 };
 
 const ValStack = std.ArrayListUnmanaged(Value);
 
+/// For every WASM stack frame, calculates a hash of the value stack and the called function.
+///
+/// This is used to detect bugs in debug mode where the value stacks of functions are incorrectly
+/// modified.
+const HashStack = struct {
+    const enabled = builtin.mode == .Debug;
+
+    const Hashes = std.SegmentedList(u64, 4);
+
+    inner: if (enabled)
+        Hashes
+    else
+        void,
+
+    fn init(alloca: Allocator, capacity: usize) Allocator.Error!HashStack {
+        if (enabled) {
+            var entries = Hashes{};
+            if (Hashes.prealloc_count < capacity)
+                try entries.setCapacity(alloca, capacity);
+
+            return .{ .inner = entries };
+        } else return .{ .inner = {} };
+    }
+
+    fn clearRetainingCapacity(stack: *HashStack) void {
+        if (enabled)
+            stack.inner.clearRetainingCapacity();
+    }
+
+    fn prevHash(stack: *const HashStack) u64 {
+        return if (stack.inner.len == 0)
+            0
+        else
+            stack.inner.at(stack.inner.len - 1).*;
+    }
+
+    fn hash(
+        prev_hash: u64,
+        func: runtime.FuncAddr.Expanded.Wasm,
+        values: []Value,
+    ) u64 {
+        var hasher = std.hash.XxHash64.init(prev_hash);
+
+        hasher.update(std.mem.asBytes(&func.module.data));
+        hasher.update(std.mem.asBytes(&func.idx));
+
+        for (values) |*val| {
+            // Note that padding bytes might get inadvertently hashed, but since those values shouldn't
+            // be modified anyway, it should be fine.
+            hasher.update(std.mem.asBytes(val));
+        }
+
+        return hasher.final();
+    }
+
+    /// Pushes a hash onto the stack for a WASM function that is no longer on the top of the call stack.
+    ///
+    /// Note that the values should exclude the top values used as function parameters.
+    fn push(
+        stack: *HashStack,
+        alloca: Allocator,
+        func: runtime.FuncAddr.Expanded.Wasm,
+        values: []Value,
+    ) Allocator.Error!void {
+        if (!enabled) return;
+
+        const prev_hash = stack.prevHash();
+        const new_hash = try stack.inner.addOne(alloca);
+        errdefer comptime unreachable;
+        new_hash.* = hash(prev_hash, func, values);
+    }
+
+    /// Asserts that the WASM function that is now the top of the call stack did not have
+    /// its value stack and local variables modified.
+    fn pop(
+        stack: *HashStack,
+        func: runtime.FuncAddr.Expanded.Wasm,
+        values: []Value,
+    ) void {
+        if (!enabled) return;
+
+        const expected_hash: u64 = stack.inner.pop().?;
+        const actual_hash: u64 = hash(stack.prevHash(), func, values);
+        if (expected_hash != actual_hash) {
+            std.debug.panic(
+                "bad function hash: expected 0x{X:0>16}, got 0x{X:0>16}",
+                .{
+                    expected_hash,
+                    actual_hash,
+                },
+            );
+        }
+    }
+};
+
 value_stack: ValStack,
 call_stack: std.ArrayListUnmanaged(StackFrame),
-state: State = .{ .awaiting_host = &[0]Module.ValType{} },
-dummy_instantiate_flag: bool = true,
+hash_stack: HashStack,
+state: State = State.initial,
+dummy_instantiate_flag: bool = false,
 
 const Interpreter = @This();
 
@@ -102,6 +204,7 @@ pub fn init(alloca: Allocator, options: InitOptions) Allocator.Error!Interpreter
             alloca,
             options.call_stack_capacity,
         ),
+        .hash_stack = try HashStack.init(alloca, options.call_stack_capacity),
     };
 }
 
@@ -115,7 +218,7 @@ pub const Trap = struct {
         ///
         /// See <https://webassembly.github.io/spec/core/appendix/implementation.html#validation> for more
         /// information.
-        lazy_validation_failed, // TODO: rename to lazy_validation_failure
+        lazy_validation_failure,
         integer_division_by_zero,
         integer_overflow,
         invalid_conversion_to_integer,
@@ -188,22 +291,14 @@ pub const Trap = struct {
 };
 
 pub const InterruptionCause = union(enum) {
-    /// Indicates that the current function needs to allocate space for their local variables and value stack.
-    validation_finished,
     out_of_fuel,
-    /// A call instruction required pushing a new stack frame, which required a reallocation of the `call_stack`.
-    call_stack_exhaustion: struct {
-        values_base: u32,
-        callee: runtime.FuncAddr,
-    },
     memory_grow: MemoryGrow,
+    // table_grow: TableGrow,
 
     pub const MemoryGrow = struct {
         memory: *runtime.MemInst,
-        module: runtime.ModuleInst,
         /// The amount to increase the size of the memory by, in bytes.
         delta: usize,
-        old_size: usize,
 
         /// Returns the old memory, or `null` if the same base address was passed.
         pub fn resize(
@@ -230,296 +325,363 @@ pub const InterruptionCause = union(enum) {
 };
 
 pub const State = union(enum) {
-    /// Either WASM code is waiting to be interpreted, or WASM code is awaiting the results of
-    /// calling a host function.
-    ///
-    /// Also indicates the types of the values at the top of the value stack, which are the results of the most
-    /// recently called function.
-    awaiting_host: []const Module.ValType,
-    /// The current function is awaiting the results of lazy validation, with arguments already written to a buffer.
-    awaiting_lazy_validation,
-    /// Execution of WASM bytecode was interrupted.
-    ///
-    /// The host can stop using the interpreter further, resume execution with more fuel by calling
-    /// `.resumeExecution()`, or reuse the interpreter for a new computation after calling `.reset()`.
-    interrupted: InterruptionCause,
-    // memory_grow,
+    awaiting_host: AwaitingHost,
+    awaiting_validation: AwaitingValidation,
+    call_stack_exhaustion: CallStackExhaustion,
+    interrupted: Interrupted,
     /// The computation was aborted due to a *trap*. The call stack of the interpreter can be
     /// inspected to determine where and when the trap occurred.
+    ///
+    /// Note that in the case of a *trap* occurring during module *instantation* (before the
+    /// *start* function is invoked), no stack frame will be recorded.
     trapped: Trap,
     // unhandled_exception: Exception,
-};
 
-pub const Error = error{InvalidInterpreterState} || Allocator.Error;
+    fn stateInterpreterPtr(
+        self: anytype,
+    ) (if (@typeInfo(@TypeOf(self)).pointer.is_const) *const Interpreter else *Interpreter) {
+        const Self = @typeInfo(@TypeOf(self)).pointer.child;
+        const state: *State = state: inline for (@typeInfo(State).@"union".fields) |field| {
+            if (field.type == Self) {
+                break :state @fieldParentPtr(field.name, @constCast(self));
+            }
+        } else @compileError(@typeName(Self) ++ " is not a State struct");
 
-pub fn copyResultValues(interp: *const Interpreter, arena: *std.heap.ArenaAllocator) Error![]TaggedValue {
-    const types: []const Module.ValType = switch (interp.state) {
-        .awaiting_host => |s| s,
-        else => return error.InvalidInterpreterState,
-    };
-
-    const dst = try arena.allocator().alloc(TaggedValue, types.len);
-    for (
-        dst,
-        types,
-        interp.value_stack.items[interp.value_stack.items.len - types.len ..],
-    ) |*tagged, result_type, *result| {
-        tagged.* = switch (result_type) {
-            .v128 => unreachable, // Not implemented
-            .funcref => func: {
-                const dup = try arena.allocator().create(FuncRef);
-                dup.* = result.funcref;
-                break :func TaggedValue{ .funcref = dup };
-            },
-            .externref => TaggedValue{ .externref = result.externref.addr },
-            inline else => |tag| @unionInit(
-                TaggedValue,
-                @tagName(tag),
-                @field(result, @tagName(tag)),
-            ),
-        };
+        return @fieldParentPtr("state", state);
     }
 
-    return dst;
-}
+    /// Either WASM code is ready to be interpreted, or WASM code is awaiting the results of
+    /// calling a host function.
+    pub const AwaitingHost = struct {
+        /// The types of the values at the top of the value stack, which are the results of the most
+        /// recently called function.
+        result_types: []const Module.ValType,
 
-/// Reserves space for the value stack and local variables (that aren't parameters).
-fn allocateValueStackSpace(interp: *Interpreter, alloca: Allocator, code: *const Module.Code) Allocator.Error!u16 {
-    const total = std.math.add(u16, code.state.local_values, code.state.max_values) catch
-        return error.OutOfMemory;
+        const interpreter = State.stateInterpreterPtr;
 
-    try interp.value_stack.ensureUnusedCapacity(alloca, total);
-
-    // In WebAssembly, locals are set to zero on entrance to a function.
-    interp.value_stack.appendNTimes(undefined, std.mem.zeroes(Value), code.state.local_values) catch unreachable;
-
-    const value_stack_base = interp.value_stack.items.len;
-    @memset(interp.value_stack.items[value_stack_base..], undefined);
-
-    // std.debug.print(
-    //     "allocated {} entries: {} locals, {} for value stack (base height = {})\n",
-    //     .{ total, code.state.local_values, code.state.max_values, value_stack_base },
-    // );
-
-    return total;
-}
-
-inline fn currentFrame(interp: *Interpreter) *StackFrame {
-    return &interp.call_stack.items[interp.call_stack.items.len - 1];
-}
-
-/// Resumes execution of WASM bytecode after being `interrupted`.
-pub fn resumeExecution(interp: *Interpreter, alloca: Allocator, fuel: *Fuel) Error!void {
-    const interruption: InterruptionCause = switch (interp.state) {
-        .interrupted => |cause| cause,
-        else => return error.InvalidInterpreterState,
-    };
-
-    // const saved_value_stack_len = interp.value_stack.items.len;
-    // errdefer interp.value_stack.items.len = saved_value_stack_len;
-
-    const current_frame = interp.currentFrame();
-    switch (interruption) {
-        .validation_finished => {
-            // TODO: How to handle too large stack frame? Introduce new stack_exhausted state?
-            const code: *const Module.Code = current_frame.function.expanded().wasm.code();
-
-            switch (code.state.flag.load(.acquire)) {
-                .init, .validating => unreachable,
-                // TODO: Only have a single `.finished` flag.
-                .successful, .failed => {},
+        pub fn copyResultValues(
+            self: *const AwaitingHost,
+            arena: *std.heap.ArenaAllocator,
+        ) Allocator.Error![]TaggedValue {
+            const types = self.result_types;
+            const dst = try arena.allocator().alloc(TaggedValue, types.len);
+            const interp = self.interpreter();
+            for (
+                dst,
+                types,
+                interp.value_stack.items[interp.value_stack.items.len - types.len ..],
+            ) |*tagged, result_type, *result| {
+                tagged.* = switch (result_type) {
+                    .v128 => unreachable, // Not implemented
+                    .funcref => func: {
+                        const dup = try arena.allocator().create(FuncRef);
+                        dup.* = result.funcref;
+                        break :func TaggedValue{ .funcref = dup };
+                    },
+                    .externref => TaggedValue{ .externref = result.externref.addr },
+                    inline else => |tag| @unionInit(
+                        TaggedValue,
+                        @tagName(tag),
+                        @field(result, @tagName(tag)),
+                    ),
+                };
             }
 
-            if (code.state.@"error") |_| {
-                @branchHint(.cold);
-                interp.state = .{ .trapped = Trap.init(.lazy_validation_failed, {}) };
-                return;
+            return dst;
+        }
+
+        /// Begins the process of calling a function, allocating stack space.
+        ///
+        /// For a host function, this returns back to the caller, while a WASM function
+        /// will enter the interpreter loop, returning when a `Trap` occurs or when `Interrupted`.
+        ///
+        /// Returns an error if `alloca` could not reserve enough space to execute the function.
+        pub fn beginCall(
+            self: *AwaitingHost,
+            alloca: Allocator,
+            callee: runtime.FuncAddr,
+            arguments: []const TaggedValue,
+            fuel: *Fuel,
+        ) (error{ArgumentTypeOrCountMismatch} || Allocator.Error)!*State {
+            const interp: *Interpreter = self.interpreter();
+            const signature = callee.signature();
+            if (arguments.len != signature.param_count) {
+                return error.ArgumentTypeOrCountMismatch;
             }
 
-            const total_values = try interp.allocateValueStackSpace(alloca, code);
-            current_frame.instructions = Instructions.init(code.state.instructions, code.state.instructions_end);
-            current_frame.branch_table = code.state.side_table_ptr;
-            current_frame.values_count = total_values;
+            const saved_call_stack_len = interp.call_stack.items.len;
+            try interp.call_stack.ensureUnusedCapacity(alloca, 1);
+            errdefer interp.call_stack.items.len = saved_call_stack_len;
 
-            @panic("TODO: update stack frame after lazy validation");
-        },
-        .out_of_fuel => {},
-        .call_stack_exhaustion => |info| {
-            const signature = info.callee.signature();
-            const entry_point = try interp.setupStackFrame(
+            const values_base: u32 = @intCast(interp.value_stack.items.len);
+            const new_values_len = std.math.add(u32, values_base, signature.param_count) catch
+                return error.OutOfMemory;
+
+            try interp.value_stack.ensureTotalCapacity(alloca, new_values_len);
+            errdefer interp.value_stack.items.len = values_base;
+
+            try interp.call_stack.ensureUnusedCapacity(alloca, 1);
+
+            for (arguments, signature.parameters()) |arg, param_type| {
+                interp.value_stack.appendAssumeCapacity(
+                    value: switch (@as(std.meta.Tag(TaggedValue), arg)) {
+                        .funcref => {
+                            if (param_type != .funcref)
+                                return error.ArgumentTypeOrCountMismatch;
+
+                            break :value Value{ .funcref = arg.funcref.* };
+                        },
+                        .externref => {
+                            if (param_type != .externref)
+                                return error.ArgumentTypeOrCountMismatch;
+
+                            break :value .{ .externref = .{ .addr = arg.externref } };
+                        },
+                        inline else => |tag| {
+                            if (param_type != @field(Module.ValType, @tagName(tag)))
+                                return error.ArgumentTypeOrCountMismatch;
+
+                            break :value @unionInit(
+                                Value,
+                                @tagName(tag),
+                                @field(arg, @tagName(tag)),
+                            );
+                        },
+                    },
+                );
+            }
+
+            const setup = try interp.setupStackFrame(
                 alloca,
-                info.callee,
-                info.values_base,
+                callee,
+                values_base,
                 signature,
                 &interp.dummy_instantiate_flag,
             );
 
-            interp.state = State{
-                .awaiting_host = if (entry_point == .host)
-                    signature.parameters()
-                else
-                    &[0]Module.ValType{},
+            errdefer comptime unreachable;
+
+            switch (setup) {
+                .wasm_validate => interp.state = .{ .awaiting_validation = .{} },
+                .wasm_ready => interp.enterMainLoop(fuel),
+                .host_ready => self.result_types = signature.parameters(),
+            }
+
+            return &interp.state;
+        }
+
+        /// Instantiates a module, beginning the process of invoking its start function (if it
+        /// exists) as if passed to `.beginCall()`.
+        pub fn instantiateModule(
+            self: *AwaitingHost,
+            alloca: Allocator,
+            module: *runtime.ModuleAlloc,
+            fuel: *Fuel,
+        ) Allocator.Error!*State {
+            const interp: *Interpreter = self.interpreter();
+            const maybe_start = moduleInstantiationSetup(module) catch |e| {
+                interp.state = .{
+                    .trapped = switch (e) {
+                        error.MemoryAccessOutOfBounds => Trap.init(
+                            .memory_access_out_of_bounds,
+                            {},
+                        ),
+                        error.TableAccessOutOfBounds => Trap.init(
+                            .table_access_out_of_bounds,
+                            {},
+                        ),
+                    },
+                };
+                return &interp.state;
             };
 
-            if (entry_point != .wasm) return;
-        },
-        .memory_grow => |info| {
-            interp.value_stack.appendAssumeCapacity(
-                Value{
-                    .i32 = result: {
-                        const new_len = std.math.add(
-                            usize,
-                            info.old_size,
-                            info.delta,
-                        ) catch break :result -1;
+            if (maybe_start.funcInst()) |start| {
+                std.debug.assert(!module.instantiated);
+                std.debug.assert(start.signature().param_count == 0);
+                std.debug.assert(start.signature().result_count == 0);
 
-                        std.debug.assert(info.memory.size == info.old_size);
+                const setup = try interp.setupStackFrame(
+                    alloca,
+                    start,
+                    @intCast(interp.value_stack.items.len),
+                    &Module.FuncType.empty,
+                    &module.instantiated,
+                );
 
-                        if (@min(info.memory.limit, info.memory.capacity) < new_len)
-                            break :result -1;
+                errdefer comptime unreachable;
 
-                        info.memory.size = new_len;
-                        break :result @bitCast(
-                            @as(
-                                u32,
-                                @intCast(info.old_size / runtime.MemInst.page_size),
-                            ),
-                        );
+                switch (setup) {
+                    .wasm_validate => interp.state = .{
+                        .awaiting_validation = .{},
                     },
-                },
-            );
+                    .wasm_ready => interp.enterMainLoop(fuel),
+                    .host_ready => self.result_types = &[0]Module.ValType{},
+                }
 
-            interp.state = State{ .awaiting_host = &[0]Module.ValType{} };
-        },
-    }
+                return &interp.state;
+            } else {
+                std.debug.assert(module.instantiated);
+                return &interp.state;
+            }
+        }
 
-    errdefer comptime unreachable;
-
-    interp.enterMainLoop(fuel);
-}
-
-//pub fn waitForLazyValidation(Timeout)
-
-/// After validation, execution of the function can continue by calling `.resumeExecution()`.
-///
-/// Returns `true` if validation already succeeded or failed, or `false` if validation is occurring
-/// in another thread.
-pub fn finishLazyValidation(
-    interp: *Interpreter,
-    code_allocator: Allocator,
-    scratch: *std.heap.ArenaAllocator,
-) Error!bool {
-    if (interp.state != .awaiting_lazy_validation)
-        return error.InvalidInterpreterState;
-
-    const current_function = interp.currentFrame().function.expanded().wasm;
-    const module = current_function.module.module;
-    const code = current_function.code.code(module).?;
-    const validated = code.state.validate(
-        code_allocator,
-        module,
-        module.funcTypeIdx(current_function.code),
-        code.contents,
-        scratch,
-    ) catch |e| {
-        @branchHint(.cold);
-
-        // TODO: Should now unused arguments be popped from the stack?
-
-        // Trap occurs even if OOM error is reported, since currently `state.flag` is set to `.failed` if OOM occurs
-        // during validation.
-        interp.state = .{ .trapped = Trap.init(.lazy_validation_failed, {}) };
-
-        return switch (e) {
-            error.OutOfMemory => |oom| return oom,
-            else => true,
-        };
+        // /// Return from the currently executing host function to the calling function, typically
+        // /// WASM code whose interpretation will continue with the given `fuel` amount.
+        // pub fn returnFromHost(inter: *Interpreter, alloca: Allocator, results: []TaggedValue, fuel: *Fuel) Allocator.Error
     };
 
-    if (validated) {
-        if (code.state.@"error") |_| {
-            unreachable; // TODO: Same code path as in catch handler that sets .state = .trapped;
-        } else {
-            interp.state = .{ .interrupted = InterruptionCause.validation_finished };
+    /// Indicates that a function to call needs to be validated, and once successful, allocate
+    /// space for their local variables and value stack.
+    pub const AwaitingValidation = struct {
+        padding: enum(u8) { padding = 0 } = .padding,
+
+        const interpreter = State.stateInterpreterPtr;
+
+        // pub fn waitForLazyValidation(Timeout)
+
+        pub fn validate(
+            self: *AwaitingValidation,
+            allocator: Allocator,
+            scratch: *std.heap.ArenaAllocator,
+            fuel: *Fuel,
+        ) *State {
+            const interp = self.interpreter();
+            const current_frame = interp.currentFrame();
+
+            const function = current_frame.function.expanded().wasm;
+            const code = function.code();
+            const finished = code.validate(
+                allocator,
+                function.module.header().module,
+                scratch,
+            );
+
+            if (finished != false) {
+                if (finished == true) {
+                    current_frame.wasm = .{
+                        .instructions = Instructions.init(
+                            code.inner.instructions_start,
+                            code.inner.instructions_end,
+                        ),
+                        .branch_table = code.inner.side_table_ptr,
+                    };
+                }
+
+                interp.enterMainLoop(fuel);
+            }
+
+            return &interp.state;
         }
-    }
+    };
 
-    return validated;
-}
+    /// A call instruction required pushing a new stack frame, which required a reallocation of the
+    /// `call_stack`.
+    ///
+    /// In this state, the IP of the current frame refers to the instruction after the call
+    /// instruction, which will be executed next.
+    pub const CallStackExhaustion = struct {
+        // Parameters passed to `setupStackFrame`.
+        callee: runtime.FuncAddr,
+        values_base: u32,
+        signature: *const Module.FuncType,
 
-pub fn beginCall(
-    interp: *Interpreter,
-    alloca: Allocator,
-    callee: runtime.FuncAddr,
-    arguments: []const TaggedValue,
-    fuel: *Fuel,
-) (error{ArgumentTypeOrCountMismatch} || Error)!void {
-    if (interp.state != .awaiting_host) return Error.InvalidInterpreterState;
+        const interpreter = State.stateInterpreterPtr;
 
-    const signature = callee.signature();
-    if (arguments.len != signature.param_count) {
-        return error.ArgumentTypeOrCountMismatch;
-    }
+        pub fn resumeExecution(
+            self: *CallStackExhaustion,
+            alloca: Allocator,
+            fuel: *Fuel,
+        ) Allocator.Error!*State {
+            const args = self.*;
+            const interp: *Interpreter = self.interpreter();
+            const setup = try interp.setupStackFrame(
+                alloca,
+                args.callee,
+                args.values_base,
+                args.signature,
+                &interp.dummy_instantiate_flag,
+            );
 
-    const saved_call_stack_len = interp.call_stack.items.len;
-    try interp.call_stack.ensureUnusedCapacity(alloca, 1);
-    errdefer interp.call_stack.items.len = saved_call_stack_len;
-
-    const saved_value_stack_len = interp.value_stack.items.len;
-    try interp.value_stack.ensureUnusedCapacity(alloca, signature.param_count);
-    errdefer interp.value_stack.items.len = saved_value_stack_len;
-
-    const values_base = std.math.cast(u32, interp.value_stack.items.len) orelse return Error.OutOfMemory;
-
-    for (arguments, signature.parameters()) |arg, param_type| {
-        interp.value_stack.appendAssumeCapacity(
-            value: switch (@as(std.meta.Tag(TaggedValue), arg)) {
-                .funcref => {
-                    if (param_type != .funcref)
-                        return error.ArgumentTypeOrCountMismatch;
-
-                    break :value Value{ .funcref = arg.funcref.* };
+            switch (setup) {
+                .wasm_validate => interp.state = .{ .awaiting_validation = .{} },
+                .wasm_ready => interp.enterMainLoop(fuel),
+                .host_ready => interp.state = .{
+                    .awaiting_host = .{
+                        .result_types = args.signature.parameters(),
+                    },
                 },
-                .externref => {
-                    if (param_type != .externref)
-                        return error.ArgumentTypeOrCountMismatch;
+            }
 
-                    break :value .{ .externref = .{ .addr = arg.externref } };
-                },
-                inline else => |tag| {
-                    if (param_type != @field(Module.ValType, @tagName(tag)))
-                        return error.ArgumentTypeOrCountMismatch;
+            return &interp.state;
+        }
+    };
 
-                    break :value @unionInit(
-                        Value,
-                        @tagName(tag),
-                        @field(arg, @tagName(tag)),
+    /// Execution of WASM bytecode was interrupted.
+    ///
+    /// The host can stop using the interpreter further, resume execution with more fuel by calling
+    /// `.resumeExecution()`, or reuse the interpreter for a new computation after calling `.reset()`.
+    ///
+    /// In this state, the IP of the current frame refers to the instruction to execute next after
+    /// the interrupt is handled.
+    pub const Interrupted = struct {
+        cause: InterruptionCause,
+
+        const interpreter = State.stateInterpreterPtr;
+
+        /// Resumes execution of WASM bytecode after being `interrupted`.
+        ///
+        /// Returns an error if an attempt to grow the call stack with `alloca` fails, in which case
+        /// `resumeExecution` is allowed to be called again.
+        pub fn resumeExecution(
+            self: *Interrupted,
+            fuel: *Fuel,
+        ) *State {
+            const cause = self.cause;
+            const interp: *Interpreter = self.interpreter();
+            switch (cause) {
+                .out_of_fuel => {},
+                .memory_grow => |info| {
+                    interp.value_stack.appendAssumeCapacity(
+                        Value{
+                            .i32 = result: {
+                                const old_len = info.memory.size;
+                                const new_len = std.math.add(
+                                    usize,
+                                    old_len,
+                                    info.delta,
+                                ) catch break :result -1;
+
+                                if (@min(info.memory.limit, info.memory.capacity) < new_len)
+                                    break :result -1;
+
+                                info.memory.size = new_len;
+                                break :result @bitCast(
+                                    @as(
+                                        u32,
+                                        @intCast(old_len / runtime.MemInst.page_size),
+                                    ),
+                                );
+                            },
+                        },
                     );
                 },
-            },
-        );
-    }
+            }
 
-    const entry_point = try interp.setupStackFrame(
-        alloca,
-        callee,
-        values_base,
-        signature,
-        &interp.dummy_instantiate_flag,
-    );
+            interp.enterMainLoop(fuel);
+            return &interp.state;
+        }
+    };
 
-    switch (entry_point) {
-        .wasm => interp.enterMainLoop(fuel),
-        .host, .complete => {},
-    }
-}
+    pub const initial = State{
+        .awaiting_host = .{ .result_types = &[0]Module.ValType{} },
+    };
+};
 
-pub fn instantiateModule(
-    interp: *Interpreter,
-    alloca: Allocator,
+/// Performs the steps of module instantiation up to but excluding the invocation of the *start*
+/// function, which is returned.
+fn moduleInstantiationSetup(
     module: *runtime.ModuleAlloc,
-    fuel: *Fuel,
-) Error!void {
+) (runtime.MemInst.OobError || runtime.TableInst.OobError)!FuncRef {
     const module_inst = module.requiring_instantiation.header();
     const wasm = module_inst.module;
     const global_types = wasm.globalTypes()[wasm.inner.global_import_count..];
@@ -593,17 +755,14 @@ pub fn instantiateModule(
             },
         };
 
-        runtime.TableInst.init(
+        try runtime.TableInst.init(
             active_elem.header.table,
             module.requiring_instantiation,
             active_elem.header.elements,
             null,
             0,
             offset,
-        ) catch {
-            interp.state = .{ .trapped = Trap.init(.table_access_out_of_bounds, {}) };
-            return;
-        };
+        );
 
         module_inst.elemSegmentDropFlag(active_elem.header.elements).drop();
     }
@@ -621,38 +780,65 @@ pub fn instantiateModule(
         };
 
         const src: []const u8 = module_inst.dataSegment(active_data.data);
-        mem.init(src, @intCast(src.len), 0, offset) catch {
-            interp.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
-            return;
-        };
+        try mem.init(src, @intCast(src.len), 0, offset);
 
         module_inst.dataSegmentDropFlag(active_data.data).drop();
     }
 
-    const start_func = if (wasm.inner.start.get()) |start_idx|
-        module_inst.funcAddr(start_idx)
+    errdefer comptime unreachable;
+
+    if (wasm.inner.start.get()) |start_idx|
+        return @bitCast(module_inst.funcAddr(start_idx))
     else {
         module.instantiated = true;
-        return;
-    };
-
-    const entry_point = try interp.setupStackFrame(
-        alloca,
-        start_func,
-        std.math.cast(u32, interp.value_stack.items.len) orelse return Error.OutOfMemory,
-        &Module.FuncType.empty,
-        &module.instantiated,
-    );
-
-    switch (entry_point) {
-        .wasm => interp.enterMainLoop(fuel),
-        .host, .complete => {},
+        return .null;
     }
 }
 
-/// Pushes a new frame onto the call stack, with function arguments expected to already be on the stack.
-///
-/// Asserts that there is already enough space on the call stack.
+/// Reserves space for the value stack and local variables (that aren't parameters).
+fn allocateValueStackSpace(
+    interp: *Interpreter,
+    alloca: Allocator,
+    code: *const Module.Code.Inner,
+) Allocator.Error!u16 {
+    const total = std.math.add(
+        u16,
+        code.local_values,
+        code.max_values,
+    ) catch return error.OutOfMemory;
+
+    try interp.value_stack.ensureUnusedCapacity(alloca, total);
+
+    // In WebAssembly, locals are set to zero on entrance to a function.
+    interp.value_stack.appendNTimes(
+        undefined,
+        std.mem.zeroes(Value),
+        code.local_values,
+    ) catch unreachable;
+
+    const value_stack_base = interp.value_stack.items.len;
+    @memset(interp.value_stack.items[value_stack_base..], undefined);
+
+    // std.debug.print(
+    //     "allocated {} entries: {} locals, {} for value stack (base height = {})\n",
+    //     .{ total, code.local_values, code.max_values, value_stack_base },
+    // );
+
+    return total;
+}
+
+inline fn currentFrame(interp: *Interpreter) *StackFrame {
+    return &interp.call_stack.items[interp.call_stack.items.len - 1];
+}
+
+const SetupStackFrame = enum {
+    wasm_ready,
+    host_ready,
+    wasm_validate,
+};
+
+/// Pushes a new frame onto the call stack, with function arguments expected to already be on the
+/// value stack.
 fn setupStackFrame(
     interp: *Interpreter,
     alloca: Allocator,
@@ -660,57 +846,61 @@ fn setupStackFrame(
     values_base: u32,
     signature: *const Module.FuncType,
     instantiate_flag: *bool,
-) Allocator.Error!enum { host, wasm, complete } {
+) Allocator.Error!SetupStackFrame {
     std.debug.assert(interp.value_stack.items[values_base..].len >= signature.param_count);
+
+    if (interp.call_stack.items.len > 0 and
+        interp.currentFrame().function.expanded() == .wasm)
+    {
+        try interp.hash_stack.push(
+            alloca,
+            interp.currentFrame().function.expanded().wasm,
+            interp.value_stack.items[interp.currentFrame().values_base..values_base],
+        );
+    }
+
     switch (callee.expanded()) {
         .wasm => |wasm| {
             const code: *const Module.Code = wasm.code();
 
-            switch (code.state.flag.load(.acquire)) {
-                .init, .validating => {
-                    interp.state = .awaiting_lazy_validation;
-                    return .complete;
-                },
-                // TODO: Only have a single `.finished` flag.
-                .successful, .failed => {},
-            }
+            const validated = code.isValidationFinished();
+            const code_inner = if (validated) &code.inner else &Module.Code.validation_failed;
 
-            if (code.state.@"error") |_| {
-                @branchHint(.cold);
-                interp.state = .{ .trapped = Trap.init(.lazy_validation_failed, {}) };
-                return .complete;
-            }
-
-            const total_values = try interp.allocateValueStackSpace(alloca, code);
+            const total_values = try interp.allocateValueStackSpace(alloca, code_inner);
 
             try interp.call_stack.append(
                 alloca,
                 StackFrame{
                     .function = callee,
-                    .instructions = Instructions.init(code.state.instructions, code.state.instructions_end),
-                    .branch_table = code.state.side_table_ptr,
+                    .wasm = .{
+                        .instructions = Instructions.init(
+                            code_inner.instructions_start,
+                            code_inner.instructions_end,
+                        ),
+                        .branch_table = code_inner.side_table_ptr,
+                    },
                     .values_base = values_base,
                     .values_count = total_values,
                     .result_count = signature.result_count,
                     .instantiate_flag = instantiate_flag,
                 },
             );
-            return .wasm;
+
+            return if (validated) .wasm_ready else .wasm_validate;
         },
         .host => {
             try interp.call_stack.append(
                 alloca,
                 StackFrame{
                     .function = callee,
-                    .instructions = undefined,
-                    .branch_table = undefined,
+                    .wasm = undefined,
                     .values_base = values_base,
                     .values_count = signature.param_count,
                     .result_count = signature.result_count,
                     .instantiate_flag = instantiate_flag,
                 },
             );
-            return .host;
+            return .host_ready;
         },
     }
 }
@@ -764,7 +954,7 @@ const Instructions = extern struct {
 
     inline fn nextOpcodeHandler(reader: *Instructions, fuel: *Fuel, interp: *Interpreter) ?OpcodeHandler {
         if (fuel.remaining == 0) {
-            interp.state = .{ .interrupted = .out_of_fuel };
+            interp.state = .{ .interrupted = .{ .cause = .out_of_fuel } };
             return null;
         } else {
             fuel.remaining -= 1;
@@ -802,8 +992,17 @@ fn returnFromWasm(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *F
 
     const popped = int.currentFrame();
     std.debug.assert(popped.function.expanded() == .wasm);
+    std.debug.assert(popped.values_base == loc);
+
     int.call_stack.items.len -= 1;
     popped.instantiate_flag.* = true;
+
+    if (int.call_stack.items.len > 0 and int.currentFrame().function.expanded() == .wasm) {
+        int.hash_stack.pop(
+            int.currentFrame().function.expanded().wasm,
+            vals.items[int.currentFrame().values_base..loc],
+        );
+    }
 
     const new_value_stack_len = loc + popped.result_count;
     std.mem.copyForwards(
@@ -818,11 +1017,18 @@ fn returnFromWasm(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *F
 
         const caller_frame = int.currentFrame();
         switch (caller_frame.function.expanded()) {
-            .wasm => if (caller_frame.instructions.nextOpcodeHandler(fuel, int)) |next| {
+            .wasm => if (caller_frame.wasm.instructions.nextOpcodeHandler(fuel, int)) |next| {
                 @call(
                     .always_tail,
                     next,
-                    .{ &caller_frame.instructions, &caller_frame.branch_table, caller_frame.values_base, vals, fuel, int },
+                    .{
+                        &caller_frame.wasm.instructions,
+                        &caller_frame.wasm.branch_table,
+                        caller_frame.values_base,
+                        vals,
+                        fuel,
+                        int,
+                    },
                 );
             } else return,
             .host => break :return_to_host,
@@ -833,7 +1039,7 @@ fn returnFromWasm(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *F
 
     const signature = popped.function.signature();
     std.debug.assert(signature.result_count == popped.result_count);
-    int.state = .{ .awaiting_host = signature.results() };
+    int.state = .{ .awaiting_host = .{ .result_types = signature.results() } };
 }
 
 /// Continues execution of WASM code up to calling the `target_function`, with arguments expected
@@ -841,6 +1047,9 @@ fn returnFromWasm(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *F
 ///
 /// To ensure the interpreter cannot overflow the stack, opcode handlers must ensure this function is
 /// called inline.
+///
+/// If enough stack space is not available, then the interpreter is interrupted and the IP is set to
+/// `call_ip`, which is a pointer to the call instruction to restart.
 inline fn invokeWithinWasm(
     target_function: runtime.FuncAddr,
     loc: u32,
@@ -853,7 +1062,7 @@ inline fn invokeWithinWasm(
     // Overlap trick to avoid copying arguments.
     const values_base = @as(u32, @intCast(vals.items.len)) - signature.param_count;
 
-    const entry_point = int.setupStackFrame(
+    const setup = int.setupStackFrame(
         no_allocation.allocator,
         target_function,
         values_base,
@@ -861,37 +1070,41 @@ inline fn invokeWithinWasm(
         &int.dummy_instantiate_flag,
     ) catch |e| switch (e) {
         error.OutOfMemory => {
-            // Could set ip back to before the call instruction to allow trying again.
-            // std.debug.print("call stack depth: {}\n", .{int.call_stack.items.len});
             int.state = .{
-                .interrupted = InterruptionCause{
-                    .call_stack_exhaustion = .{
-                        .values_base = values_base,
-                        .callee = target_function,
-                    },
+                .call_stack_exhaustion = .{
+                    .callee = target_function,
+                    .values_base = values_base,
+                    .signature = signature,
                 },
             };
             return;
         },
     };
 
-    switch (entry_point) {
-        .wasm => {
+    switch (setup) {
+        .wasm_ready => {
             std.debug.assert(loc <= values_base);
 
             const new_frame = int.currentFrame();
-            if (new_frame.instructions.nextOpcodeHandler(fuel, int)) |next| {
+            if (new_frame.wasm.instructions.nextOpcodeHandler(fuel, int)) |next| {
                 @call(
                     .always_tail,
                     next,
-                    .{ &new_frame.instructions, &new_frame.branch_table, values_base, vals, fuel, int },
+                    .{
+                        &new_frame.wasm.instructions,
+                        &new_frame.wasm.branch_table,
+                        values_base,
+                        vals,
+                        fuel,
+                        int,
+                    },
                 );
             }
         },
-        .host => {
-            int.state = State{ .awaiting_host = signature.parameters() };
+        .host_ready => int.state = .{
+            .awaiting_host = .{ .result_types = signature.parameters() },
         },
-        .complete => {},
+        .wasm_validate => int.state = .{ .awaiting_validation = .{} },
     }
 }
 
@@ -1670,12 +1883,12 @@ inline fn takeBranch(
     const wasm_base_ptr = @intFromPtr(current_frame.function.expanded().wasm
         .module.header().module.wasm.ptr);
 
-    const side_table_end = @intFromPtr(code.state.side_table_ptr + code.state.side_table_len);
+    const side_table_end = @intFromPtr(code.inner.side_table_ptr + code.inner.side_table_len);
     std.debug.assert(@intFromPtr(s.* + branch) < side_table_end);
     const target: *const Module.Code.SideTableEntry = &s.*[branch];
 
     if (builtin.mode == .Debug) {
-        const origin_ip = code.state.instructions + target.origin;
+        const origin_ip = code.inner.instructions_start + target.origin;
         if (@intFromPtr(base_ip) != @intFromPtr(origin_ip)) {
             std.debug.panic(
                 "expected this branch to originate from {X:0>6}, but got {X:0>6}",
@@ -1687,8 +1900,8 @@ inline fn takeBranch(
     // std.debug.print(
     //     " ? TGT BRANCH #{} (current is #{}): delta_ip={}, delta_stp={}, copy={}, pop={}\n",
     //     .{
-    //         (@intFromPtr(target) - @intFromPtr(code.state.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry),
-    //         (@intFromPtr(s.*) - @intFromPtr(code.state.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry),
+    //         (@intFromPtr(target) - @intFromPtr(code.inner.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry),
+    //         (@intFromPtr(s.*) - @intFromPtr(code.inner.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry),
     //         target.delta_ip.done,
     //         target.delta_stp,
     //         target.copy_count,
@@ -1697,7 +1910,7 @@ inline fn takeBranch(
     // );
 
     i.p = addPtrWithOffset(base_ip, target.delta_ip.done);
-    std.debug.assert(@intFromPtr(code.state.instructions) <= @intFromPtr(i.p));
+    std.debug.assert(@intFromPtr(code.inner.instructions_start) <= @intFromPtr(i.p));
     std.debug.assert(@intFromPtr(i.p) <= @intFromPtr(i.ep));
 
     // std.debug.print(
@@ -1710,12 +1923,12 @@ inline fn takeBranch(
     // );
 
     s.* = addPtrWithOffset(s.* + branch, target.delta_stp);
-    std.debug.assert(@intFromPtr(code.state.side_table_ptr) <= @intFromPtr(s.*));
+    std.debug.assert(@intFromPtr(code.inner.side_table_ptr) <= @intFromPtr(s.*));
     std.debug.assert(@intFromPtr(s.*) <= side_table_end);
 
     // std.debug.print(
     //     " ? STP=#{}\n",
-    //     .{(@intFromPtr(s.*) - @intFromPtr(code.state.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry)},
+    //     .{(@intFromPtr(s.*) - @intFromPtr(code.inner.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry)},
     // );
 
     // std.debug.print(" ? value stack height was {}\n", .{vals.items.len});
@@ -1873,6 +2086,7 @@ const opcode_handlers = struct {
 
     pub fn call(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         _ = s;
+
         const func_idx = i.nextIdx(Module.FuncIdx);
         const callee = int.currentFrame().function.expanded().wasm
             .module.header().funcAddr(func_idx);
@@ -1882,6 +2096,7 @@ const opcode_handlers = struct {
 
     pub fn call_indirect(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         _ = s;
+
         const current_module = int.currentFrame().function.expanded().wasm
             .module.header();
 
@@ -2159,11 +2374,8 @@ const opcode_handlers = struct {
             } else {
                 int.state = .{
                     .interrupted = .{
-                        .memory_grow = .{
-                            .delta = delta_bytes,
-                            .memory = mem,
-                            .module = module,
-                            .old_size = mem.size,
+                        .cause = .{
+                            .memory_grow = .{ .delta = delta_bytes, .memory = mem },
                         },
                     },
                 };
@@ -2171,7 +2383,6 @@ const opcode_handlers = struct {
             }
         };
 
-        // TODO: Add a new interruption kind.
         vals.appendAssumeCapacity(.{ .i32 = result });
 
         std.debug.assert(loc <= vals.items.len);
@@ -2564,43 +2775,29 @@ const byte_dispatch_table = dispatchTable(opcodes.ByteOpcode, opcode_handlers.in
 
 /// Given a WASM function at the top of the call stack, resumes execution.
 fn enterMainLoop(interp: *Interpreter, fuel: *Fuel) void {
-    std.debug.assert(interp.state == .awaiting_host);
-
-    if (fuel.remaining == 0) {
-        interp.state = .{ .interrupted = .out_of_fuel };
-        return;
-    }
-
     var starting_frame = interp.currentFrame();
     std.debug.assert(starting_frame.function.expanded() == .wasm);
 
-    const handler = starting_frame.instructions.nextOpcodeHandler(
+    const handler = starting_frame.wasm.instructions.nextOpcodeHandler(
         fuel,
         interp,
     ).?;
 
     _ = handler(
-        &starting_frame.instructions,
-        &starting_frame.branch_table,
+        &starting_frame.wasm.instructions,
+        &starting_frame.wasm.branch_table,
         starting_frame.values_base,
         &interp.value_stack,
         fuel,
         interp,
     );
-    starting_frame = undefined;
 }
-
-// /// Return from the currently executing host function to the calling function, typically WASM code.
-// pub fn returnFromHost(inter: *Interpreter, results: []TaggedValue, fuel: *Fuel)
-
-// TODO: Don't want extra branch in code that handles function return? How to handle module instantiation?
-// - custom frame kind, so there is WASM, Host, and Instantiation, when latter is popped, it updates flag
-// - add note saying it is not thread safe, host responsible when calling instantiate()
 
 /// Discards the current computation.
 pub fn reset(interp: *Interpreter) void {
     interp.value_stack.clearRetainingCapacity();
     interp.call_stack.clearRetainingCapacity();
+    interp.hash_stack.clearRetainingCapactity();
     interp.state = .{ .awaiting_host = &[0]Module.ValType{} };
 }
 

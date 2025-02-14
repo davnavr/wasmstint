@@ -16,6 +16,8 @@ const Module = @import("../Module.zig");
 const ValType = Module.ValType;
 const opcodes = @import("../opcodes.zig");
 
+const validator = @This();
+
 pub const Error = error{InvalidWasm} ||
     Module.ReaderError ||
     Module.LimitError ||
@@ -33,6 +35,10 @@ const DebugSideTableEntry = struct {
     pop_count: u8,
     /// Set to the same value as `fixup_origin`.
     origin: u32,
+
+    comptime {
+        std.debug.assert(@sizeOf(DebugSideTableEntry) == 16);
+    }
 };
 
 pub const ReleaseSideTableEntry = packed struct(u64) {
@@ -48,104 +54,133 @@ pub const ReleaseSideTableEntry = packed struct(u64) {
     origin: void = {},
 };
 
-/// Describes the changes to interpreter state should occur if its corresponding branch is taken.
-pub const SideTableEntry = if (builtin.mode == .Debug)
-    DebugSideTableEntry
-else
-    ReleaseSideTableEntry;
-
-pub const End = enum(u8) { end = @intFromEnum(opcodes.ByteOpcode.end) };
-
-pub const Ip = [*:@intFromEnum(opcodes.ByteOpcode.end)]const u8;
-
-pub const State = struct {
-    /// Pointer to the first byte of the first opcode.
-    instructions: Ip = undefined,
-    instructions_end: *const End = undefined,
-    flag: std.atomic.Value(Flag) = .{ .raw = .init },
-    side_table_len: u32 = undefined,
-    side_table_ptr: [*]const SideTableEntry = undefined,
-    @"error": ?Error = null,
-    /// The maximum amount of space needed in the value stack for executing this function.
-    max_values: u16 = undefined,
-    /// The number of local variables, excluding parameters.
-    local_values: u16 = undefined,
-    /// Offset into the code bytes indicating where the error occurred.
-    ///
-    /// For example, `0` means the first byte of the LEB128-encoded count of the locals vector.
-    error_offset: u32 = undefined,
-
-    /// 32-bit integer allows using `std.Thread.Futex` to wait for another thread that is currently
-    /// validating the same code.
-    pub const Flag = enum(u32) {
-        init = 0,
-        validating = 1,
-        successful = 2,
-        failed = 3,
+pub const Code = extern struct {
+    /// Code entries are stored in a separate array, optimizing for the case where `Code`
+    /// has already been validated.
+    pub const Entry = extern struct {
+        /// The contents of the WASM function body, including its local variable declarations.
+        ///
+        /// The offset is relative to the first byte of the `Module`'s *code* section.
+        ///
+        /// This field must never be mutated.
+        contents: Module.WasmSlice,
     };
 
-    pub fn isValidated(state: *State) bool {
-        return switch (state.flag.load(.acquire)) {
-            .init, .validating => false,
-            .successful, .failed => true,
-        };
+    /// A 32-bit integer allows using `std.Thread.Futex` to wait for another thread that is
+    /// currently validating the same code.
+    pub const Status = enum(u32) {
+        not_started = 0,
+        in_progress = 1,
+        finished = 2,
+    };
+
+    pub const End = enum(u8) { end = @intFromEnum(opcodes.ByteOpcode.end) };
+    pub const Ip = [*:@intFromEnum(End.end)]const u8;
+
+    /// Describes the changes to interpreter state should occur if its corresponding branch is taken.
+    pub const SideTableEntry = if (builtin.mode == .Debug)
+        DebugSideTableEntry
+    else
+        ReleaseSideTableEntry;
+
+    pub const Inner = extern struct {
+        instructions_start: Ip,
+        instructions_end: *const End,
+        side_table_ptr: [*]const SideTableEntry,
+        side_table_len: u32,
+        /// The maximum amount of space needed in the value stack for executing this function.
+        max_values: u16,
+        /// The number of local variables, excluding parameters.
+        local_values: u16,
+    };
+
+    // TODO: See how struct size influences performance (false sharing? cache lines?)
+    // - IndexedArena design doesn't allow large alignments required for padding!
+    // TODO: Padding can be used to store inline []SideTableEntry
+    inner: Inner,
+    status: std.atomic.Value(Status) = .{ .raw = .not_started },
+
+    const validation_failed_body = [_:@intFromEnum(End.end)]u8{
+        @intFromEnum(opcodes.IllegalOpcode.@"wasmstint.validation_fail"),
+    };
+
+    pub const validation_failed = Inner{
+        .instructions_start = &validation_failed_body,
+        .instructions_end = @ptrCast(&validation_failed_body[validation_failed_body.len]),
+        .side_table_ptr = &[0]SideTableEntry{},
+        .side_table_len = 0,
+        .max_values = 0,
+        .local_values = 0,
+    };
+
+    pub inline fn isValidationFinished(code: *const Code) bool {
+        return code.status.load(.acquire) == Status.finished;
     }
 
-    /// Waits until validation in the other thread finishes.
-    pub fn waitForValidation(state: *State, futex_timeout: std.Thread.Futex.Deadline) error{Timeout}!?Error {
-        comptime std.debug.assert(@bitSizeOf(Flag) == 32);
-        while (true) {
-            try futex_timeout.wait(@ptrCast(&state.flag), @intFromEnum(Flag.validating));
-            switch (state.flag.load(.acquire)) {
-                .init, .validating => continue,
-                .successful => return null,
-                .failed => return state.@"error",
-            }
-        }
-    }
+    // pub fn waitForValidation(state: *State, futex_timeout: std.Thread.Futex.Deadline) error{Timeout}!void {
 
     /// Returns `true` if validation succeeded, `false` if the current thread would block, or an
     /// error if validation failed.
     ///
-    /// If `false` is returned, callers can wait for validation on the other thread to finish
-    /// by calling `.waitForValidation()`.
+    /// Callers should first check the status flag before calling this method to determine if
+    /// validation has already occurred.
+    ///
+    /// If `false` is returned, callers can wait for validation on other threads to finish by
+    /// waiting for the `status` flag to change.
+    ///
+    /// Note that due to API limitations, encountering an OOM condition during validation is
+    /// treated as a validation failure. Attempting to interpret a function that failed validation
+    /// is treated as a trap.
+    ///
+    /// Asserts that this `Code` belongs to the given `Module`.
     pub fn validate(
-        state: *State,
+        code: *Code,
         allocator: Allocator,
         module: *const Module,
-        signature: Module.TypeIdx,
-        code: Module.WasmSlice,
         scratch: *ArenaAllocator,
     ) Error!bool {
         check: {
-            const current_flag = state.flag.cmpxchgWeak(
-                Flag.init,
-                Flag.validating,
-                .acquire,
+            const current_flag = code.status.cmpxchgWeak(
+                .not_started,
+                .in_progress,
+                .acq_rel,
                 .acquire,
             ) orelse break :check;
 
             return switch (current_flag) {
-                .init => unreachable,
-                .validating => false,
-                .successful => true,
-                .failed => state.@"error".?,
+                .not_started => unreachable,
+                .in_progress => false,
+                .finished => true,
             };
         }
 
-        // Now only this thread can modify `State`.
-        std.debug.assert(code.size <= std.math.maxInt(u32));
+        const code_addr = @intFromPtr(code);
+        const code_sec_ptr = module.inner.code;
+        std.debug.assert(@intFromPtr(code_sec_ptr) <= code_addr);
+        std.debug.assert(code_addr < @intFromPtr(code_sec_ptr + module.inner.code_count));
 
-        _ = scratch.reset(.retain_capacity);
-        try doValidation(
-            state,
+        const func_idx: Module.FuncIdx = @enumFromInt(@as(
+            @typeInfo(Module.FuncIdx).@"enum".tag_type,
+            @intCast(
+                module.inner.func_import_count + @divExact(
+                    code_addr - @intFromPtr(code_sec_ptr),
+                    @sizeOf(Code),
+                ),
+            ),
+        ));
+
+        defer code.status.store(.finished, .release);
+        const result = rawValidate(
             allocator,
             module,
-            signature,
-            code.slice(module.inner.code_section, module.wasm),
+            module.funcTypeIdx(func_idx),
+            module.codeEntries()[@intFromEnum(func_idx)].contents
+                .slice(module.inner.code_section, module.wasm),
             scratch,
         );
 
+        code.inner = result catch validation_failed;
+        _ = result catch |err| return err;
         return true;
     }
 };
@@ -645,7 +680,8 @@ const BranchFixup = packed struct(u32) {
 };
 
 const SideTableBuilder = struct {
-    const Entries = std.SegmentedList(SideTableEntry, 4);
+    const Entry = Code.SideTableEntry;
+    const Entries = std.SegmentedList(Entry, 4);
 
     const ActiveList = struct {
         block_offset: BlockOffset,
@@ -709,7 +745,7 @@ const SideTableBuilder = struct {
         const fixup = try table.alternate.addOne(arena.allocator());
 
         fixup.* = .{ .entry_idx = idx };
-        entry.* = SideTableEntry{
+        entry.* = Entry{
             .delta_ip = .{ .fixup_origin = origin },
             .delta_stp = undefined,
             .copy_count = copy_count,
@@ -775,7 +811,7 @@ const SideTableBuilder = struct {
         target_side_table_idx: u32,
         end_offset: u32,
     ) Module.LimitError!void {
-        const entry: *SideTableEntry = table.entries.at(fixup_entry.entry_idx);
+        const entry: *Entry = table.entries.at(fixup_entry.entry_idx);
         const origin = entry.delta_ip.fixup_origin;
 
         entry.delta_ip = .{
@@ -924,27 +960,23 @@ fn validateStoreInstr(
     try readMemArg(reader, natural_alignment, module);
 }
 
-fn doValidation(
-    state: *State,
+pub fn rawValidate(
     allocator: Allocator,
     module: *const Module,
     signature: Module.TypeIdx,
     code: []const u8,
     scratch: *ArenaAllocator,
-) Error!void {
+    // diagnostics: ?*ValidationDiagnostics,
+) Error!Code.Inner {
+    _ = scratch.reset(.retain_capacity);
+
     var code_ptr = code;
     var reader = Module.Reader.init(&code_ptr);
-
-    errdefer |e| {
-        state.@"error" = e;
-        state.flag.store(State.Flag.failed, .release);
-        state.error_offset = @intCast(code_ptr.ptr - code.ptr);
-    }
 
     const func_type = signature.funcType(module);
 
     var val_stack: ValStack = undefined;
-    const locals: []const ValType = locals: {
+    const locals: struct { types: []const ValType, count: u16 } = locals: {
         const local_group_count = try reader.readUleb128(u32);
         var local_vars = ValBuf{};
 
@@ -980,11 +1012,11 @@ fn doValidation(
             }
         }
 
-        state.local_values = @intCast(local_vars.len - func_type.param_count);
+        const count: u16 = @intCast(local_vars.len - func_type.param_count);
 
         const buf = try scratch.allocator().alloc(ValType, local_vars.len);
         local_vars.writeToSlice(@ptrCast(buf), 0);
-        break :locals buf;
+        break :locals .{ .types = buf, .count = count };
     };
 
     var side_table = SideTableBuilder{};
@@ -1010,7 +1042,7 @@ fn doValidation(
         .reuse,
     ) catch unreachable;
 
-    state.instructions = @ptrCast(reader.bytes.ptr);
+    const instructions: Code.Ip = @ptrCast(reader.bytes.ptr);
 
     var per_instr_arena = ArenaAllocator.init(scratch.allocator());
 
@@ -1019,7 +1051,7 @@ fn doValidation(
         _ = per_instr_arena.reset(.retain_capacity);
 
         // Offset from the first byte of the first instruction to the first byte of the instruction being parsed.
-        instr_offset = @intCast(@intFromPtr(reader.bytes.ptr) - @intFromPtr(state.instructions));
+        instr_offset = @intCast(@intFromPtr(reader.bytes.ptr) - @intFromPtr(instructions));
 
         const byte_tag = try reader.readByteTag(opcodes.ByteOpcode);
         // std.debug.print("validate: {}\n", .{byte_tag});
@@ -1321,15 +1353,15 @@ fn doValidation(
             },
 
             .@"local.get" => {
-                const local_type = try readLocalIdx(&reader, locals);
+                const local_type = try readLocalIdx(&reader, locals.types);
                 try val_stack.push(scratch, local_type);
             },
             .@"local.set" => {
-                const local_type = try readLocalIdx(&reader, locals);
+                const local_type = try readLocalIdx(&reader, locals.types);
                 try val_stack.popExpecting(&ctrl_stack, local_type);
             },
             .@"local.tee" => {
-                const local_type = try readLocalIdx(&reader, locals);
+                const local_type = try readLocalIdx(&reader, locals.types);
                 try val_stack.popThenPushExpecting(scratch, &ctrl_stack, local_type, local_type);
             },
             .@"global.get" => {
@@ -1824,22 +1856,20 @@ fn doValidation(
     std.debug.assert(side_table.active.len == 0);
     std.debug.assert(side_table.alternate.len == 0);
 
-    state.instructions_end = @ptrCast(state.instructions + instr_offset);
-    state.max_values = val_stack.max;
-    state.side_table_len = std.math.cast(u32, side_table.entries.len) orelse return error.WasmImplementationLimit;
-    state.side_table_ptr = side_table: {
-        const copied = try allocator.alloc(SideTableEntry, side_table.entries.len);
+    const eip: *const Code.End = @ptrCast(instructions + instr_offset);
+    const max_values: u16 = val_stack.max;
+    const final_side_table: []const Code.SideTableEntry = side_table: {
+        const copied = try allocator.alloc(Code.SideTableEntry, side_table.entries.len);
         side_table.entries.writeToSlice(copied, 0);
-        break :side_table @as([]const SideTableEntry, copied).ptr;
+        break :side_table copied;
     };
 
     errdefer comptime unreachable;
 
-    for (0..state.side_table_len) |i| {
-        const entry: *const SideTableEntry = &state.side_table_ptr[i];
-
-        // catch any entries that were not fixed up when safety checks are enabled.
+    for (final_side_table, 0..) |*entry, i| {
+        // Catch any entries that were not fixed up when safety checks are enabled.
         _ = entry.delta_ip.done;
+        _ = i;
 
         //std.debug.print(
         //    "#{}: delta_ip = {}, delta_stp = {}, copied = {}, popped = {}\n",
@@ -1853,6 +1883,12 @@ fn doValidation(
         //);
     }
 
-    std.debug.assert(state.@"error" == null);
-    state.flag.store(State.Flag.successful, .release);
+    return .{
+        .instructions_start = instructions,
+        .instructions_end = eip,
+        .max_values = max_values,
+        .local_values = locals.count,
+        .side_table_len = @intCast(final_side_table.len),
+        .side_table_ptr = final_side_table.ptr,
+    };
 }

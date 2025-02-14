@@ -210,6 +210,21 @@ pub const ByteOpcode = enum(u8) {
     // @"0xFD" = 0xFD,
 };
 
+pub const IllegalOpcode = enum(u8) {
+    /// The `0xFF` opcode is currently used by some engines for private opcodes.
+    ///
+    /// See <https://github.com/WebAssembly/design/issues/1539> for more information.
+    @"wasmstint.validation_fail" = 0xFF,
+
+    comptime {
+        for (std.enums.values(IllegalOpcode)) |illegal| {
+            for (std.enums.values(ByteOpcode)) |byte| {
+                std.debug.assert(@intFromEnum(illegal) != @intFromEnum(byte));
+            }
+        }
+    }
+};
+
 // Added in some proposal?
 /// Technically a LEB128 encoded `u32`, but all of these are `<= 0x7F` for now.
 pub const FCPrefixOpcode = enum(u5) {

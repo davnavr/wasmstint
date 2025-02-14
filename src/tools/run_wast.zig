@@ -464,13 +464,6 @@ fn allocateFunctionArguments(
     return dst_values;
 }
 
-inline fn wrapInterpreterError(result: anytype) Allocator.Error!@typeInfo(@TypeOf(result)).error_union.payload {
-    return result catch |e| switch (e) {
-        error.OutOfMemory => |oom| return oom,
-        wasmstint.Interpreter.Error.InvalidInterpreterState => unreachable,
-    };
-}
-
 const State = struct {
     const ModuleInst = wasmstint.runtime.ModuleInst;
     const Interpreter = wasmstint.Interpreter;
@@ -516,53 +509,50 @@ const State = struct {
         interpreter: *Interpreter,
         fuel: *Interpreter.Fuel,
     ) Allocator.Error!void {
-        while (true) {
+        for (0..1_024) |_| {
             switch (interpreter.state) {
-                .awaiting_lazy_validation => unreachable,
-                .interrupted => |cause| switch (cause) {
-                    .out_of_fuel => return,
-                    .validation_finished => unreachable,
-                    .call_stack_exhaustion => {},
-                    .memory_grow => |info| {
-                        const new_size = info.delta + info.memory.size;
-                        std.debug.assert(info.memory.size == info.old_size);
-
-                        const resized_in_place = state.store.arena.allocator().resize(
-                            info.memory.base[0..info.memory.capacity],
-                            new_size,
-                        );
-
-                        if (resized_in_place) {
-                            _ = info.resize(info.memory.base[0..new_size]);
-                        } else resize_failed: {
-                            _ = info.resize(
-                                state.store.arena.allocator().alignedAlloc(
-                                    u8,
-                                    wasmstint.runtime.MemInst.buffer_align,
-                                    @max(new_size, info.memory.capacity *| 2),
-                                ) catch break :resize_failed,
-                            );
-                        }
-                    },
-                },
-                .trapped => return,
                 .awaiting_host => if (interpreter.call_stack.items.len == 0) {
                     return;
                 } else {
                     std.debug.panic("TODO: Handle host call", .{});
                 },
-            }
+                .awaiting_validation => unreachable,
+                .call_stack_exhaustion => |*oof| {
+                    _ = oof.resumeExecution(state.cmd_arena.allocator(), fuel) catch
+                        return;
+                },
+                .interrupted => |*interrupt| {
+                    switch (interrupt.cause) {
+                        .out_of_fuel => return,
+                        .memory_grow => |info| {
+                            const new_size = info.delta + info.memory.size;
 
-            interpreter.resumeExecution(
-                state.cmd_arena.allocator(),
-                fuel,
-            ) catch |e| switch (e) {
-                error.OutOfMemory => |oom| return oom,
-                else => unreachable,
-            };
+                            const resized_in_place = state.store.arena.allocator().resize(
+                                info.memory.base[0..info.memory.capacity],
+                                new_size,
+                            );
+
+                            if (resized_in_place) {
+                                _ = info.resize(info.memory.base[0..new_size]);
+                            } else resize_failed: {
+                                _ = info.resize(
+                                    state.store.arena.allocator().alignedAlloc(
+                                        u8,
+                                        wasmstint.runtime.MemInst.buffer_align,
+                                        @max(new_size, info.memory.capacity *| 2),
+                                    ) catch break :resize_failed,
+                                );
+                            }
+                        },
+                    }
+
+                    _ = interrupt.resumeExecution(fuel);
+                },
+                .trapped => return,
+            }
         }
 
-        comptime unreachable;
+        @panic("Possible infinite loop in interpreter handler");
     }
 
     fn errorInterpreterTrap(state: *State, parent: Wast.sexpr.TokenId, trap_code: Interpreter.Trap.Code) Error {
@@ -573,6 +563,15 @@ const State = struct {
         ));
     }
 
+    fn errorCallStackExhausted(state: *State, parent: Wast.sexpr.TokenId) Error {
+        return scriptError(
+            state.errors.errorAtToken(
+                parent,
+                "unexpected error, call stack exhausted",
+            ),
+        );
+    }
+
     fn errorInterpreterInterrupted(
         state: *State,
         parent: Wast.sexpr.TokenId,
@@ -580,10 +579,7 @@ const State = struct {
     ) Error {
         const msg = switch (cause) {
             .out_of_fuel => "unexpected error, execution ran out of fuel",
-            .call_stack_exhaustion => "unexpected error, call stack exhausted",
-            .validation_finished,
-            .memory_grow,
-            => unreachable,
+            .memory_grow => unreachable,
         };
 
         return scriptError(state.errors.errorAtToken(parent, msg));
@@ -594,10 +590,7 @@ const State = struct {
         parent: Wast.sexpr.TokenId,
         interpreter: *const Interpreter,
     ) Error {
-        const results = interpreter.copyResultValues(&state.cmd_arena) catch |e| switch (e) {
-            error.OutOfMemory => |oom| return oom,
-            error.InvalidInterpreterState => unreachable,
-        };
+        const results = try interpreter.state.awaiting_host.copyResultValues(&state.cmd_arena);
 
         const Results = struct {
             values: []const wasmstint.Interpreter.TaggedValue,
@@ -934,15 +927,18 @@ const State = struct {
     ) Error!void {
         try state.runToCompletion(interpreter, fuel);
         switch (interpreter.state) {
-            .awaiting_lazy_validation => unreachable,
+            .awaiting_validation => unreachable,
+            .call_stack_exhaustion => return state.errorCallStackExhausted(parent),
             .trapped => |trap| return state.errorInterpreterTrap(parent, trap.code),
-            .interrupted => |cause| return state.errorInterpreterInterrupted(parent, cause),
+            .interrupted => |interrupt| return state.errorInterpreterInterrupted(
+                parent,
+                interrupt.cause,
+            ),
             .awaiting_host => std.debug.assert(interpreter.call_stack.items.len == 0),
         }
 
-        const actual_results: []const Interpreter.TaggedValue = try wrapInterpreterError(
-            interpreter.copyResultValues(&state.cmd_arena),
-        );
+        const actual_results: []const Interpreter.TaggedValue = try interpreter.state
+            .awaiting_host.copyResultValues(&state.cmd_arena);
 
         if (actual_results.len != results.len) {
             return scriptError(state.errors.errorFmtAtToken(
@@ -1000,9 +996,13 @@ const State = struct {
     ) Error!void {
         try state.runToCompletion(interpreter, fuel);
         const trap: *const Interpreter.Trap = switch (interpreter.state) {
-            .awaiting_lazy_validation => unreachable,
+            .awaiting_validation => unreachable,
             .trapped => |*trap| trap,
-            .interrupted => |cause| return state.errorInterpreterInterrupted(parent, cause),
+            .call_stack_exhaustion => return state.errorCallStackExhausted(parent),
+            .interrupted => |interrupt| return state.errorInterpreterInterrupted(
+                parent,
+                interrupt.cause,
+            ),
             .awaiting_host => return state.errorInterpreterResults(parent, interpreter),
         };
 
@@ -1043,28 +1043,27 @@ const State = struct {
         parent: Wast.sexpr.TokenId,
         failure: *const Wast.Command.Failure,
     ) Error!void {
-        state.runToCompletion(interpreter, fuel) catch {
-            // @panic("TODO: How to handle OOM and call stack exhaustion gracefully?");
-            return;
-        };
-
-        const interruption_cause: Interpreter.InterruptionCause = switch (interpreter.state) {
-            .awaiting_lazy_validation => unreachable,
-            .trapped => |trap| return state.errorInterpreterTrap(parent, trap.code),
-            .interrupted => |cause| cause,
-            .awaiting_host => return state.errorInterpreterResults(parent, interpreter),
-        };
-
-        switch (interruption_cause) {
-            .validation_finished, .memory_grow => unreachable,
-            .out_of_fuel, .call_stack_exhaustion => {},
-        }
-
         const expected_msg = "call stack exhausted";
         if (!std.mem.eql(u8, failure.msg.slice(script.arena), expected_msg)) {
             return scriptError(
-                state.errors.errorAtToken(parent, "expected failure string \"" ++ expected_msg ++ "\""),
+                state.errors.errorAtToken(
+                    parent,
+                    "expected failure string \"" ++ expected_msg ++ "\"",
+                ),
             );
+        }
+
+        state.runToCompletion(interpreter, fuel) catch return;
+
+        switch (interpreter.state) {
+            .awaiting_validation => unreachable,
+            .call_stack_exhaustion => {},
+            .trapped => |trap| return state.errorInterpreterTrap(parent, trap.code),
+            .interrupted => |interrupt| return state.errorInterpreterInterrupted(
+                parent,
+                interrupt.cause,
+            ),
+            .awaiting_host => return state.errorInterpreterResults(parent, interpreter),
         }
     }
 
@@ -1114,14 +1113,13 @@ const State = struct {
                     error.ReportedParserError => error.ScriptError,
                 };
 
-                interpreter.beginCall(
+                _ = interpreter.state.awaiting_host.beginCall(
                     state.cmd_arena.allocator(),
                     callee,
                     arguments,
                     fuel,
                 ) catch |e| return switch (e) {
                     error.OutOfMemory => |oom| oom,
-                    error.InvalidInterpreterState => unreachable,
                     error.ArgumentTypeOrCountMismatch => scriptError(
                         state.errors.errorAtToken(
                             action.keyword,
@@ -1295,12 +1293,10 @@ fn runScript(
                     },
                 };
 
-                try wrapInterpreterError(
-                    interp.instantiateModule(
-                        state.cmd_arena.allocator(),
-                        &module_alloc,
-                        &fuel,
-                    ),
+                _ = try interp.state.awaiting_host.instantiateModule(
+                    state.cmd_arena.allocator(),
+                    &module_alloc,
+                    &fuel,
                 );
 
                 state.expectResultValues(
