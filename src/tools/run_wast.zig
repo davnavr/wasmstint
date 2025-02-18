@@ -1206,6 +1206,11 @@ fn runScript(
         var interp = try wasmstint.Interpreter.init(state.cmd_arena.allocator(), options);
         // defer interp.reset();
 
+        // std.debug.print(
+        //     "TRACE: {any}\n",
+        //     .{state.errors.locator.locate(script.tree.source, cmd.keyword.offset(script.tree).start)},
+        // );
+
         switch (cmd.keyword.tag(script.tree)) {
             .keyword_module => {
                 _ = state.next_module_arena.reset(.retain_capacity);

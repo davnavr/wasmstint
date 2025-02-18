@@ -146,6 +146,11 @@ const HashStack = struct {
     ) Allocator.Error!void {
         if (!enabled) return;
 
+        // std.debug.print(
+        //     "HASH PUSH: {} values starting at {*}\n",
+        //     .{ values.len, values.ptr },
+        // );
+
         const prev_hash = stack.prevHash();
         const new_hash = try stack.inner.addOne(alloca);
         errdefer comptime unreachable;
@@ -160,6 +165,11 @@ const HashStack = struct {
         values: []Value,
     ) void {
         if (!enabled) return;
+
+        // std.debug.print(
+        //     "HASH POP: {} values starting at {*}\n",
+        //     .{ values.len, values.ptr },
+        // );
 
         const expected_hash: u64 = stack.inner.pop().?;
         const actual_hash: u64 = hash(stack.prevHash(), func, values);
@@ -849,6 +859,8 @@ fn setupStackFrame(
 ) Allocator.Error!SetupStackFrame {
     std.debug.assert(interp.value_stack.items[values_base..].len >= signature.param_count);
 
+    const saved_hash_stack_len = interp.hash_stack.inner.len;
+
     if (interp.call_stack.items.len > 0 and
         interp.currentFrame().function.expanded() == .wasm)
     {
@@ -858,6 +870,8 @@ fn setupStackFrame(
             interp.value_stack.items[interp.currentFrame().values_base..values_base],
         );
     }
+
+    errdefer interp.hash_stack.inner.len = saved_hash_stack_len;
 
     switch (callee.expanded()) {
         .wasm => |wasm| {
