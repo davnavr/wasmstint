@@ -81,7 +81,7 @@ pub fn build(b: *std.Build) void {
             // "tests/spec/data.wast", // TODO: some keyword is incorrectly parsed as an instruction (revamp data segment parsing?)
             // "tests/spec/elem.wast", // TODO: parser needs support for non-inline imports and assert_trap on modules
             "tests/spec/endianness.wast",
-            // "tests/spec/exports.wast", // TODO: parser needs support for non-inline exports
+            "tests/spec/exports.wast",
             "tests/spec/f32_bitwise.wast",
             "tests/spec/f32_cmp.wast",
             "tests/spec/f32.wast",
@@ -95,8 +95,8 @@ pub fn build(b: *std.Build) void {
             // "tests/spec/float_misc.wast", // TODO: rounding error in f32.nearest implementation caused by not picking the even when tied
             "tests/spec/forward.wast",
             // "tests/spec/func_ptrs.wast", // TODO: blocked on spec interpreter host call support
-            "tests/spec/func.wast", // TODO: encoder should take into account parameters when assigning local indices, even when the typeuse of the function has no explicit params
-            // "tests/spec/global.wast", // TODO: blocked on non-inline export parsing
+            "tests/spec/func.wast",
+            "tests/spec/global.wast",
             "tests/spec/i32.wast",
             "tests/spec/i64.wast",
             "tests/spec/if.wast",
