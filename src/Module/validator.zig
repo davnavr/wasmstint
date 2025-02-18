@@ -174,8 +174,8 @@ pub const Code = extern struct {
             allocator,
             module,
             module.funcTypeIdx(func_idx),
-            module.codeEntries()[@intFromEnum(func_idx)].contents
-                .slice(module.inner.code_section, module.wasm),
+            module.codeEntries()[@intFromEnum(func_idx) - module.inner.func_import_count]
+                .contents.slice(module.inner.code_section, module.wasm),
             scratch,
         );
 
