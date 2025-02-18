@@ -453,7 +453,9 @@ pub const ModuleAlloc = struct {
 
             switch (val) {
                 .global => |global| {
-                    if (global.global_type.matches(global_type)) return error.ImportFailure;
+                    if (!global.global_type.matches(global_type))
+                        return error.ImportFailure;
+
                     import.* = GlobalFixup{ .ptr = global.value };
                 },
                 else => return error.ImportFailure,

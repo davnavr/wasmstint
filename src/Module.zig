@@ -690,7 +690,7 @@ pub const Reader = struct {
             .@"global.get" => {
                 const global_idx = try reader.readIdx(GlobalIdx, global_types);
                 const actual_type: *const GlobalType = global_types.ptrAt(@intFromEnum(global_idx), arena);
-                if (!actual_type.val_type.eql(expected_type) or actual_type.isVar())
+                if (!actual_type.val_type.eql(expected_type))
                     return error.InvalidWasm;
 
                 break :expr .{ .@"global.get" = global_idx };
@@ -1138,7 +1138,7 @@ pub fn parse(
         const import_types_slice = globals.types.slice(0, global_import_len);
         global_import_types.writeToSlice(import_types_slice.items(&arena), 0);
 
-        for (0..global_len) |i| {
+        for (0..global_len) |def_idx| {
             const ty = try global_reader.readGlobalType();
             const expr = try global_reader.readConstExpr(
                 ty.val_type,
@@ -1147,8 +1147,8 @@ pub fn parse(
                 &arena,
             );
 
-            globals.types.setAt(i, &arena, ty);
-            globals.exprs.setAt(i, &arena, expr);
+            globals.types.setAt(def_idx + global_import_len, &arena, ty);
+            globals.exprs.setAt(def_idx, &arena, expr);
         }
 
         try global_reader.expectEndOfStream();
