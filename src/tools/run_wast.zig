@@ -8,9 +8,9 @@ const Wast = wasmstint.Wast;
 const Arguments = struct {
     run: []const [:0]const u8 = &[0][:0]const u8{},
     rng_seed: u256 = 42,
-    fuel: u64 = 2_000_000,
+    fuel: u64 = 2_500_000,
     call_stack_reserve: u32 = 100,
-    soft_memory_limit: usize = 64 * (1024 * 1024), // 64 MiB
+    soft_memory_limit: usize = 100 * (1024 * 1024), // 100 MiB
 
     const Flag = enum {
         run,
