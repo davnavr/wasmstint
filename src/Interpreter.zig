@@ -25,6 +25,14 @@ const Value = extern union {
     f64: f64,
     externref: ExternRef,
     funcref: FuncRef,
+
+    comptime {
+        std.debug.assert(@sizeOf(Value) == switch (@sizeOf(*anyopaque)) {
+            4 => 8, // 16 if support for  v128 is added
+            8 => 16,
+            else => unreachable,
+        });
+    }
 };
 
 pub const TaggedValue = union(enum) {
@@ -33,14 +41,33 @@ pub const TaggedValue = union(enum) {
     i64: i64,
     f64: f64,
     externref: runtime.ExternAddr,
-    funcref: *const FuncRef,
+    funcref: FuncRef,
 
     comptime {
-        std.debug.assert(@sizeOf(TaggedValue) == 16);
+        std.debug.assert(@sizeOf(TaggedValue) == switch (@sizeOf(*anyopaque)) {
+            4 => 12,
+            8 => 24,
+            else => unreachable,
+        });
+    }
+
+    pub fn value_type(tagged: *const TaggedValue) Module.ValType {
+        return switch (@as(std.meta.Tag(TaggedValue), tagged.*)) {
+            inline else => |tag| @field(Module.ValType, @tagName(tag)),
+        };
+    }
+
+    fn untagged(tagged: *const TaggedValue) Value {
+        return switch (@as(std.meta.Tag(TaggedValue), tagged.*)) {
+            .externref => .{ .externref = .{ .addr = tagged.externref } },
+            inline else => |tag| @unionInit(
+                Value,
+                @tagName(tag),
+                @field(tagged, @tagName(tag)),
+            ),
+        };
     }
 };
-
-const ValueTag = std.meta.Tag(TaggedValue);
 
 const Ip = Module.Code.Ip;
 const Eip = *const Module.Code.End;
@@ -383,11 +410,6 @@ pub const State = union(enum) {
             ) |*tagged, result_type, *result| {
                 tagged.* = switch (result_type) {
                     .v128 => unreachable, // Not implemented
-                    .funcref => func: {
-                        const dup = try arena.allocator().create(FuncRef);
-                        dup.* = result.funcref;
-                        break :func TaggedValue{ .funcref = dup };
-                    },
                     .externref => TaggedValue{ .externref = result.externref.addr },
                     inline else => |tag| @unionInit(
                         TaggedValue,
@@ -412,11 +434,11 @@ pub const State = union(enum) {
             callee: runtime.FuncAddr,
             arguments: []const TaggedValue,
             fuel: *Fuel,
-        ) (error{ArgumentTypeOrCountMismatch} || Allocator.Error)!*State {
+        ) (error{ValueTypeOrCountMismatch} || Allocator.Error)!*State {
             const interp: *Interpreter = self.interpreter();
             const signature = callee.signature();
             if (arguments.len != signature.param_count) {
-                return error.ArgumentTypeOrCountMismatch;
+                return error.ValueTypeOrCountMismatch;
             }
 
             const saved_call_stack_len = interp.call_stack.items.len;
@@ -432,33 +454,11 @@ pub const State = union(enum) {
 
             try interp.call_stack.ensureUnusedCapacity(alloca, 1);
 
-            for (arguments, signature.parameters()) |arg, param_type| {
-                interp.value_stack.appendAssumeCapacity(
-                    value: switch (@as(std.meta.Tag(TaggedValue), arg)) {
-                        .funcref => {
-                            if (param_type != .funcref)
-                                return error.ArgumentTypeOrCountMismatch;
+            for (arguments, signature.parameters()) |*arg, param_type| {
+                if (param_type != arg.value_type())
+                    return error.ValueTypeOrCountMismatch;
 
-                            break :value Value{ .funcref = arg.funcref.* };
-                        },
-                        .externref => {
-                            if (param_type != .externref)
-                                return error.ArgumentTypeOrCountMismatch;
-
-                            break :value .{ .externref = .{ .addr = arg.externref } };
-                        },
-                        inline else => |tag| {
-                            if (param_type != @field(Module.ValType, @tagName(tag)))
-                                return error.ArgumentTypeOrCountMismatch;
-
-                            break :value @unionInit(
-                                Value,
-                                @tagName(tag),
-                                @field(arg, @tagName(tag)),
-                            );
-                        },
-                    },
-                );
+                interp.value_stack.appendAssumeCapacity(arg.untagged());
             }
 
             const setup = try interp.setupStackFrame(
@@ -535,9 +535,60 @@ pub const State = union(enum) {
             }
         }
 
-        // /// Return from the currently executing host function to the calling function, typically
-        // /// WASM code whose interpretation will continue with the given `fuel` amount.
-        // pub fn returnFromHost(inter: *Interpreter, alloca: Allocator, results: []TaggedValue, fuel: *Fuel) Allocator.Error
+        /// Return from the currently executing host function to the calling function, typically
+        /// WASM code whose interpretation will continue with the given `fuel` amount.
+        pub fn returnFromHost(
+            self: *AwaitingHost,
+            results: []const TaggedValue,
+            fuel: *Fuel,
+        ) error{ValueTypeOrCountMismatch}!*State {
+            const interp: *Interpreter = self.interpreter();
+            const popped = interp.currentFrame();
+            const signature = popped.function.signature();
+
+            if (results.len != signature.result_count)
+                return error.ValueTypeOrCountMismatch;
+
+            interp.call_stack.items.len -= 1;
+            errdefer interp.call_stack.items.len += 1;
+
+            const saved_value_stack_len = interp.value_stack.items.len;
+            errdefer interp.value_stack.items.len = saved_value_stack_len;
+
+            const results_dst = interp.value_stack
+                .items[popped.values_base .. popped.values_base + popped.result_count];
+
+            for (
+                results,
+                signature.results(),
+                results_dst,
+            ) |*src, result_type, *dst| {
+                if (result_type != src.value_type())
+                    return error.ValueTypeOrCountMismatch;
+
+                dst.* = src.untagged();
+            }
+
+            interp.value_stack.items.len = popped.values_base + popped.result_count;
+
+            errdefer comptime unreachable;
+
+            popped.instantiate_flag.* = true;
+
+            const current = interp.currentFrame();
+            switch (current.function.expanded()) {
+                .wasm => |wasm| {
+                    interp.hash_stack.pop(
+                        wasm,
+                        interp.value_stack[current.values_base..popped.values_base],
+                    );
+                    interp.enterMainLoop(fuel);
+                },
+                .host => self.result_types = signature.results(),
+            }
+
+            return &interp.state;
+        }
     };
 
     /// Indicates that a function to call needs to be validated, and once successful, allocate

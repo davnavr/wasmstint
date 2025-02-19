@@ -336,10 +336,14 @@ const SpectestImports = struct {
             break :functions result;
         };
 
+        fn hostFunc(func: PrintFunction) *wasmstint.runtime.FuncAddr.Host {
+            return &functions[@intFromEnum(func)];
+        }
+
         fn addr(func: PrintFunction) wasmstint.runtime.FuncAddr {
             return wasmstint.runtime.FuncAddr.init(.{
                 .host = .{
-                    .func = &functions[@intFromEnum(func)],
+                    .func = func.hostFunc(),
                     .data = null,
                 },
             });
@@ -445,7 +449,7 @@ fn allocateFunctionArguments(
             },
             .@"keyword_ref.null" => switch (src.value_token.tag(script.tree)) {
                 .keyword_func => .{
-                    .funcref = &wasmstint.runtime.FuncAddr.Nullable.null,
+                    .funcref = wasmstint.runtime.FuncAddr.Nullable.null,
                 },
                 .keyword_extern => .{ .externref = wasmstint.runtime.ExternAddr.null },
                 else => return (try errors.errorAtToken(
@@ -511,9 +515,10 @@ const State = struct {
     ) Allocator.Error!void {
         for (0..1_024) |_| {
             switch (interpreter.state) {
-                .awaiting_host => if (interpreter.call_stack.items.len == 0) {
+                .awaiting_host => |host| if (interpreter.call_stack.items.len == 0) {
                     return;
                 } else {
+                    _ = host;
                     std.debug.panic("TODO: Handle host call", .{});
                 },
                 .awaiting_validation => unreachable,
@@ -1120,7 +1125,7 @@ const State = struct {
                     fuel,
                 ) catch |e| return switch (e) {
                     error.OutOfMemory => |oom| oom,
-                    error.ArgumentTypeOrCountMismatch => scriptError(
+                    error.ValueTypeOrCountMismatch => scriptError(
                         state.errors.errorAtToken(
                             action.keyword,
                             "argument count or type mismatch",
@@ -1165,7 +1170,7 @@ const State = struct {
                         .funcref = @as(
                             *const wasmstint.runtime.FuncAddr.Nullable,
                             @ptrCast(@alignCast(global.value)),
-                        ),
+                        ).*,
                     },
                     .v128 => unreachable,
                 };
@@ -1283,19 +1288,29 @@ fn runScript(
                     module_arena.allocator(),
                     store.allocator(),
                     &import_error,
-                ) catch |e| switch (e) {
-                    error.OutOfMemory => |oom| return oom,
-                    error.ImportFailure => {
-                        _ = try state.errors.errorFmtAtToken(
+                ) catch |e| {
+                    switch (e) {
+                        error.OutOfMemory => {
+                            std.debug.print("TODO: Handle OOM in module allocate!", .{});
+                            if (@errorReturnTrace()) |err_trace| {
+                                std.debug.dumpStackTrace(err_trace.*);
+                            }
+
+                            _ = try state.errors.errorAtToken(
+                                cmd.keyword,
+                                "out of memory",
+                            );
+                        },
+                        error.ImportFailure => _ = try state.errors.errorFmtAtToken(
                             cmd.keyword,
                             "could not provide import {s} {s}",
                             .{
                                 import_error.module.bytes,
                                 import_error.name.bytes,
                             },
-                        );
-                        break :run_cmds;
-                    },
+                        ),
+                    }
+                    break :run_cmds;
                 };
 
                 _ = try interp.state.awaiting_host.instantiateModule(
