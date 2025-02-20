@@ -120,7 +120,11 @@ pub const Ident = packed struct(u63) {
                 },
                 .integer => {
                     const n = value.unsignedInteger(u32, atom.contents(ctx.tree)) catch |e| switch (e) {
-                        error.Overflow => return (try ctx.errorAtToken(atom, "invalid numeric")).err,
+                        error.Overflow => return (try ctx.errorAtToken(
+                            atom,
+                            "invalid numeric",
+                            @errorReturnTrace(),
+                        )).err,
                     };
 
                     return Opt.init(Ident.initNumeric(atom, n));
@@ -155,7 +159,11 @@ pub const Ident = packed struct(u63) {
         cache: *Cache,
     ) sexpr.Parser.ParseError!Ident {
         const ident = try Opt.parseAtom(atom, ctx, cache_allocator, cache);
-        return ident.get() orelse (try ctx.errorAtToken(atom, expected_msg)).err;
+        return ident.get() orelse (try ctx.errorAtToken(
+            atom,
+            expected_msg,
+            @errorReturnTrace(),
+        )).err;
     }
 
     pub fn parse(
@@ -167,7 +175,11 @@ pub const Ident = packed struct(u63) {
     ) sexpr.Parser.ParseError!Ident {
         const atom = try parser.parseAtomInList(parent, ctx, "identifier");
         const ident = try Opt.parseAtom(atom, ctx, cache_allocator, cache);
-        return ident.get() orelse (try ctx.errorAtToken(atom, expected_msg)).err;
+        return ident.get() orelse (try ctx.errorAtToken(
+            atom,
+            expected_msg,
+            @errorReturnTrace(),
+        )).err;
     }
 
     pub const Union = union(enum) {

@@ -109,12 +109,20 @@ pub fn parse(
         .string, .string_raw => {
             const id = cache.intern(cache_allocator, arena, atom, ctx.tree, scratch) catch |e| return switch (e) {
                 error.OutOfMemory => |oom| oom,
-                error.InvalidUtf8 => return (try ctx.errorAtToken(atom, "name strings must be valid UTF-8")).err,
+                error.InvalidUtf8 => return (try ctx.errorAtToken(
+                    atom,
+                    "name strings must be valid UTF-8",
+                    @errorReturnTrace(),
+                )).err,
             };
 
             return .{ .token = atom, .id = id };
         },
-        else => return (try ctx.errorAtToken(atom, "expected name string")).err,
+        else => return (try ctx.errorAtToken(
+            atom,
+            "expected name string",
+            @errorReturnTrace(),
+        )).err,
     }
 }
 

@@ -47,7 +47,12 @@ pub fn parse(
         const cmd_list = switch (cmd_value.unpacked()) {
             .list => |list| list,
             .atom => |bad_token| {
-                _ = try errors.reportExpectedListAtToken(bad_token, tree, &parser_context.locator);
+                _ = try errors.reportExpectedListAtToken(
+                    bad_token,
+                    tree,
+                    &parser_context.locator,
+                    @errorReturnTrace(),
+                );
                 continue;
             },
         };
@@ -313,6 +318,7 @@ pub fn parse(
                     tree,
                     &parser_context.locator,
                     "unknown command keyword",
+                    @errorReturnTrace(),
                 );
                 continue;
             },

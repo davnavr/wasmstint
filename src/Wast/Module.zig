@@ -98,13 +98,20 @@ pub fn parseContents(
             const format_tag = peeked_atom.tag(ctx.tree);
             switch (format_tag) {
                 .keyword_binary, .keyword_quote => format_keyword = sexpr.TokenId.Opt.init(peeked_atom),
-                else => return (try ctx.errorAtToken(peeked_atom, "expected 'binary' or 'quote' keyword")).err,
+                else => return (try ctx.errorAtToken(
+                    peeked_atom,
+                    "expected 'binary' or 'quote' keyword",
+                    @errorReturnTrace(),
+                )).err,
             }
 
             contents.* = lookahead;
             lookahead = undefined;
 
-            var strings = try IndexedArena.BoundedArrayList(String).initCapacity(arena, contents.remaining.len);
+            var strings = try IndexedArena.BoundedArrayList(String).initCapacity(
+                arena,
+                contents.remaining.len,
+            );
             for (0..strings.capacity) |_| {
                 const string_atom = contents.parseAtom(ctx, "string literal") catch |e| switch (e) {
                     error.EndOfStream => break,
@@ -113,7 +120,11 @@ pub fn parseContents(
 
                 switch (string_atom.tag(ctx.tree)) {
                     .string, .string_raw => strings.appendAssumeCapacity(arena, String{ .token = string_atom }),
-                    else => return (try ctx.errorAtToken(string_atom, "expected string literal")).err,
+                    else => return (try ctx.errorAtToken(
+                        string_atom,
+                        "expected string literal",
+                        @errorReturnTrace(),
+                    )).err,
                 }
             }
 
@@ -177,7 +188,11 @@ pub fn parseOrEmpty(
             try contents.expectEmpty(ctx);
             return module;
         },
-        else => return (try ctx.errorAtToken(module_token, "expected 'module' (TODO: handle module field parsing)")).err,
+        else => return (try ctx.errorAtToken(
+            module_token,
+            "expected 'module' (TODO: handle module field parsing)",
+            @errorReturnTrace(),
+        )).err,
     }
 }
 
@@ -190,7 +205,12 @@ pub fn parse(
     scratch: *ArenaAllocator,
 ) sexpr.Parser.ParseError!Module {
     return parseOrEmpty(parser, ctx, arena, caches, scratch) catch |e| switch (e) {
-        error.EndOfStream => (try ctx.errorAtList(parent, .end, "expected a module")).err,
+        error.EndOfStream => (try ctx.errorAtList(
+            parent,
+            .end,
+            "expected a module",
+            @errorReturnTrace(),
+        )).err,
         else => |err| err,
     };
 }

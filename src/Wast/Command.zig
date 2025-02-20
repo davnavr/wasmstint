@@ -50,11 +50,19 @@ pub fn parseConstOrResult(
                 .nan_canonical => if (@hasField(Value, "f32_nan"))
                     .{ .f32_nan = {} }
                 else
-                    return (try ctx.errorAtToken(f.token, "invalid f32 literal")).err,
+                    return (try ctx.errorAtToken(
+                        f.token,
+                        "invalid f32 literal",
+                        @errorReturnTrace(),
+                    )).err,
                 .nan_arithmetic => if (@hasField(Value, "f32_nan"))
                     .{ .f32_nan = {} }
                 else
-                    return (try ctx.errorAtToken(f.token, "invalid f32 literal")).err,
+                    return (try ctx.errorAtToken(
+                        f.token,
+                        "invalid f32 literal",
+                        @errorReturnTrace(),
+                    )).err,
             };
 
             break :value .{ .token = f.token, .value = value };
@@ -76,11 +84,19 @@ pub fn parseConstOrResult(
                 .nan_canonical => if (@hasField(Value, "f64_nan"))
                     .{ .f64_nan = {} }
                 else
-                    return (try ctx.errorAtToken(f.token, "invalid f64 literal")).err,
+                    return (try ctx.errorAtToken(
+                        f.token,
+                        "invalid f64 literal",
+                        @errorReturnTrace(),
+                    )).err,
                 .nan_arithmetic => if (@hasField(Value, "f64_nan"))
                     .{ .f64_nan = {} }
                 else
-                    return (try ctx.errorAtToken(f.token, "invalid f64 literal")).err,
+                    return (try ctx.errorAtToken(
+                        f.token,
+                        "invalid f64 literal",
+                        @errorReturnTrace(),
+                    )).err,
             };
 
             break :value .{ .token = f.token, .value = value };
@@ -90,17 +106,30 @@ pub fn parseConstOrResult(
                 error.EndOfStream => if (@hasField(Value, "ref_extern_unspecified")) {
                     break :value .{ .token = keyword, .value = .{ .ref_extern_unspecified = {} } };
                 } else {
-                    return (try ctx.errorAtList(list, .end, "expected natural number")).err;
+                    return (try ctx.errorAtList(
+                        list,
+                        .end,
+                        "expected natural number",
+                        @errorReturnTrace(),
+                    )).err;
                 },
                 else => |err| return err,
             };
 
             if (maybe_int.tag(ctx.tree) != .integer) {
-                return (try ctx.errorAtToken(maybe_int, "expected natural number")).err;
+                return (try ctx.errorAtToken(
+                    maybe_int,
+                    "expected natural number",
+                    @errorReturnTrace(),
+                )).err;
             }
 
             const nat = @import("value.zig").unsignedInteger(u31, maybe_int.contents(ctx.tree)) catch {
-                return (try ctx.errorAtToken(maybe_int, "host reference number too large")).err;
+                return (try ctx.errorAtToken(
+                    maybe_int,
+                    "host reference number too large",
+                    @errorReturnTrace(),
+                )).err;
             };
 
             break :value .{ .token = maybe_int, .value = .{ .ref_extern = nat } };
@@ -109,12 +138,20 @@ pub fn parseConstOrResult(
             const heap_type = try list_parser.parseAtom(ctx, "heap type");
             switch (heap_type.tag(ctx.tree)) {
                 .keyword_func, .keyword_extern => {},
-                else => return (try ctx.errorAtToken(heap_type, "invalid heap type")).err,
+                else => return (try ctx.errorAtToken(
+                    heap_type,
+                    "invalid heap type",
+                    @errorReturnTrace(),
+                )).err,
             }
 
             break :value .{ .token = heap_type, .value = .{ .ref_null = {} } };
         },
-        else => return (try ctx.errorAtToken(keyword, "expected " ++ T.expected)).err,
+        else => return (try ctx.errorAtToken(
+            keyword,
+            "expected " ++ T.expected,
+            @errorReturnTrace(),
+        )).err,
     };
 
     try list_parser.expectEmpty(ctx);
@@ -273,7 +310,11 @@ pub const Action = struct {
                 },
             },
             .keyword_get => .{ .get = {} },
-            else => return (try ctx.errorAtToken(action_keyword, "expected 'invoke' or 'get' keyword")).err,
+            else => return (try ctx.errorAtToken(
+                action_keyword,
+                "expected 'invoke' or 'get' keyword",
+                @errorReturnTrace(),
+            )).err,
         };
 
         try contents.expectEmpty(ctx);
@@ -352,9 +393,17 @@ pub const Failure = struct {
                 return if (std.unicode.utf8ValidateSlice(printed_msg.items))
                     .{ .msg = String.initAllocated(try arena.dupe(u8, printed_msg.items)) }
                 else
-                    (try ctx.errorAtToken(atom, "failure string must be valid UTF-8")).err;
+                    (try ctx.errorAtToken(
+                        atom,
+                        "failure string must be valid UTF-8",
+                        @errorReturnTrace(),
+                    )).err;
             },
-            else => return (try ctx.errorAtToken(atom, "expected failure string")).err,
+            else => return (try ctx.errorAtToken(
+                atom,
+                "expected failure string",
+                @errorReturnTrace(),
+            )).err,
         }
     }
 };

@@ -24,7 +24,11 @@ pub const RawIdentLookup = struct {
 
         const entry = try lookup.map.getOrPut(alloca.allocator(), id.ident);
         if (entry.found_existing) {
-            _ = try ctx.errorAtToken(id.token, "identifier defined twice (TODO: include original location)");
+            _ = try ctx.errorAtToken(
+                id.token,
+                "identifier defined twice (TODO: include original location)",
+                @errorReturnTrace(),
+            );
         } else {
             entry.value_ptr.* = Value{ .id = id.token, .index = index };
         }
@@ -39,7 +43,11 @@ pub const RawIdentLookup = struct {
         return if (lookup.map.get(id)) |value|
             value.index
         else
-            (try ctx.errorAtToken(token, "undefined variable")).err;
+            (try ctx.errorAtToken(
+                token,
+                "undefined variable",
+                @errorReturnTrace(),
+            )).err;
     }
 };
 

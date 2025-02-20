@@ -224,6 +224,15 @@ pub fn main() !u8 {
             buf_writer.* = .{ .unbuffered_writer = raw_stderr.writer() };
             var w = buf_writer.writer();
 
+            var open_debug_info: std.debug.SelfInfo = undefined;
+            const maybe_debug_info: ?*std.debug.SelfInfo = opened: {
+                open_debug_info = std.debug.SelfInfo.open(scratch.allocator()) catch
+                    break :opened null;
+
+                break :opened &open_debug_info;
+            };
+
+            var debug_symbol_arena = ArenaAllocator.init(scratch.allocator());
             var errors_iter = errors.list.constIterator(0);
             while (errors_iter.next()) |err| {
                 try w.print(
@@ -233,6 +242,7 @@ pub fn main() !u8 {
                     },
                 );
 
+                // TODO: https://ziglang.org/documentation/master/std/#std.io.tty.Config.setColor
                 switch (color_config) {
                     .escape_codes => try w.writeAll("\x1B[31m" ++ "error" ++ "\x1B[39m"),
                     else => try w.writeAll("error"),
@@ -242,6 +252,65 @@ pub fn main() !u8 {
                 try err.src.print(w);
 
                 try w.writeByte('\n');
+
+                if (err.trace) |stack_trace| dump_trace: {
+                    const debug_info = maybe_debug_info orelse break :dump_trace;
+
+                    if (color_config == .escape_codes) {
+                        try w.writeAll("\x1B[90m");
+                    }
+
+                    const frame_count = @min(stack_trace.index, stack_trace.instruction_addresses.len);
+                    for (stack_trace.instruction_addresses[0..frame_count]) |ra| {
+                        defer _ = debug_symbol_arena.reset(.retain_capacity);
+
+                        try w.writeAll("- ");
+
+                        // Taken from std.debug.printSourceAtAddress() and std.debug.writeStackTrace()
+                        line: {
+                            const address = ra - 1;
+
+                            const module = debug_info.getModuleForAddress(address) catch |e| switch (e) {
+                                error.MissingDebugInfo, error.InvalidDebugInfo => {
+                                    try w.writeAll("(unknown module)");
+                                    break :line;
+                                },
+                                else => return e,
+                            };
+
+                            const symbol_info = module.getSymbolAtAddress(
+                                debug_symbol_arena.allocator(),
+                                address,
+                            ) catch |e| switch (e) {
+                                error.MissingDebugInfo, error.InvalidDebugInfo => {
+                                    try w.writeAll("(unknown source)");
+                                    break :line;
+                                },
+                                else => return e,
+                            };
+
+                            if (symbol_info.source_location) |src_loc| {
+                                try w.print(
+                                    "{s}:{}:{}",
+                                    .{ src_loc.file_name, src_loc.line, src_loc.column },
+                                );
+                            } else {
+                                try w.writeAll("???:?:?");
+                            }
+
+                            try w.print(
+                                " @ 0x{X} in {s} ({s})",
+                                .{ address, symbol_info.name, symbol_info.compile_unit_name },
+                            );
+                        }
+
+                        try w.writeByte('\n');
+                    }
+
+                    if (color_config == .escape_codes) {
+                        try w.writeAll("\x1B[39m");
+                    }
+                }
             }
 
             if (errors.list.len > 0) {
@@ -455,12 +524,14 @@ fn allocateFunctionArguments(
                 else => return (try errors.errorAtToken(
                     src.value_token,
                     "unrecognized heap type",
+                    @errorReturnTrace(),
                 )).err,
             },
             else => |bad| return (try errors.errorFmtAtToken(
                 src.keyword,
                 "TODO: encode argument {s}",
                 .{@tagName(bad)},
+                @errorReturnTrace(),
             )).err,
         };
     }
@@ -501,11 +572,19 @@ const State = struct {
             if (state.module_lookups.get(id.ident)) |found|
                 found
             else
-                scriptError(state.errors.errorAtToken(id.token, "no module with the given name was instantiated"))
+                scriptError(state.errors.errorAtToken(
+                    id.token,
+                    "no module with the given name was instantiated",
+                    @errorReturnTrace(),
+                ))
         else if (state.current_module) |current|
             current
         else
-            scriptError(state.errors.errorAtToken(parent, "no module has been instantiated at this point"));
+            scriptError(state.errors.errorAtToken(
+                parent,
+                "no module has been instantiated at this point",
+                @errorReturnTrace(),
+            ));
     }
 
     fn runToCompletion(
@@ -579,6 +658,7 @@ const State = struct {
             parent,
             "unexpected trap, {any}",
             .{trap_code},
+            @errorReturnTrace(),
         ));
     }
 
@@ -587,6 +667,7 @@ const State = struct {
             state.errors.errorAtToken(
                 parent,
                 "unexpected error, call stack exhausted",
+                @errorReturnTrace(),
             ),
         );
     }
@@ -601,7 +682,11 @@ const State = struct {
             .memory_grow => unreachable,
         };
 
-        return scriptError(state.errors.errorAtToken(parent, msg));
+        return scriptError(state.errors.errorAtToken(
+            parent,
+            msg,
+            @errorReturnTrace(),
+        ));
     }
 
     fn errorInterpreterResults(
@@ -654,6 +739,7 @@ const State = struct {
             parent,
             "call unexpectedly succeeded with {}",
             .{Results{ .values = results }},
+            @errorReturnTrace(),
         ));
     }
 
@@ -669,6 +755,7 @@ const State = struct {
                 parent,
                 "expected result #{} to be a " ++ @tagName(tag) ++ ", but got a {s}",
                 .{ pos, @tagName(value.*) },
+                @errorReturnTrace(),
             ))
         else
             @field(value, @tagName(tag));
@@ -696,6 +783,7 @@ const State = struct {
                     .actual_u = @as(Unsigned, @bitCast(actual)),
                     .width = @sizeOf(@TypeOf(expected_token)) * 2,
                 },
+                @errorReturnTrace(),
             ));
         }
     }
@@ -736,6 +824,7 @@ const State = struct {
                             .actual_f = actual,
                             .width = print_width,
                         },
+                        @errorReturnTrace(),
                     ));
             },
             .@"keyword_nan:canonical" => {
@@ -749,6 +838,7 @@ const State = struct {
                             .width = print_width,
                             .float = actual,
                         },
+                        @errorReturnTrace(),
                     ));
             },
             .@"keyword_nan:arithmetic" => {
@@ -761,6 +851,7 @@ const State = struct {
                             .width = print_width,
                             .float = actual,
                         },
+                        @errorReturnTrace(),
                     ));
             },
             .keyword_unknown => {
@@ -782,6 +873,7 @@ const State = struct {
                             .width = print_width,
                             .float = actual,
                         },
+                        @errorReturnTrace(),
                     ));
             },
             else => |bad| return scriptError(state.errors.errorFmtAtToken(
@@ -794,6 +886,7 @@ const State = struct {
                     .width = print_width,
                     .float = actual,
                 },
+                @errorReturnTrace(),
             )),
         }
     }
@@ -883,6 +976,7 @@ const State = struct {
                         expected.value_token,
                         "expected result #{} to be (ref.extern {}), but got null",
                         .{ pos, expected_nat },
+                        @errorReturnTrace(),
                     ));
                 };
 
@@ -891,6 +985,7 @@ const State = struct {
                         expected.value_token,
                         "expected result #{} to be (ref.extern {}), but got (ref.extern {})",
                         .{ pos, expected_nat, actual_nat },
+                        @errorReturnTrace(),
                     ));
             },
             .@"keyword_ref.null" => switch (expected.value_token.tag(script.tree)) {
@@ -906,6 +1001,7 @@ const State = struct {
                         return scriptError(state.errors.errorAtToken(
                             expected.value_token,
                             "expected result #{} to be (ref.null func)",
+                            @errorReturnTrace(),
                         ));
                 },
                 .keyword_extern => {
@@ -921,17 +1017,20 @@ const State = struct {
                             expected.value_token,
                             "expected result #{} to be (ref.null extern), but got (ref.extern {})",
                             .{ pos, nat },
+                            @errorReturnTrace(),
                         ));
                 },
                 else => return scriptError(state.errors.errorAtToken(
                     expected.value_token,
                     "unrecognized heap type",
+                    @errorReturnTrace(),
                 )),
             },
             else => |bad| return scriptError(state.errors.errorFmtAtToken(
                 expected.keyword,
                 "TODO: handle result {s} (got {any})",
                 .{ @tagName(bad), actual },
+                @errorReturnTrace(),
             )),
         }
     }
@@ -964,6 +1063,7 @@ const State = struct {
                 parent,
                 "expected {} results, but got {}",
                 .{ results.len, actual_results.len },
+                @errorReturnTrace(),
             ));
         }
 
@@ -1001,6 +1101,7 @@ const State = struct {
                 parent,
                 "expected call to fail with trap code {s}, but got {s}",
                 .{ @tagName(expected), @tagName(actual) },
+                @errorReturnTrace(),
             ),
         );
     }
@@ -1043,6 +1144,7 @@ const State = struct {
                     parent,
                     "expected index {}, but got {}",
                     .{ expected_idx, actual_idx },
+                    @errorReturnTrace(),
                 ),
             );
         } else return scriptError(
@@ -1050,6 +1152,7 @@ const State = struct {
                 parent,
                 "call failed with wrong or unrecognized trap ({s})",
                 .{@tagName(trap.code)},
+                @errorReturnTrace(),
             ),
         );
     }
@@ -1068,6 +1171,7 @@ const State = struct {
                 state.errors.errorAtToken(
                     parent,
                     "expected failure string \"" ++ expected_msg ++ "\"",
+                    @errorReturnTrace(),
                 ),
             );
         }
@@ -1106,6 +1210,7 @@ const State = struct {
                 action.name.token,
                 "no exported value found with name {s}",
                 .{export_name},
+                @errorReturnTrace(),
             ),
         );
 
@@ -1118,6 +1223,7 @@ const State = struct {
                             action.keyword,
                             "cannot invoke {s}, got a {s}",
                             .{ export_name, @tagName(target_export) },
+                            @errorReturnTrace(),
                         ),
                     ),
                 };
@@ -1143,6 +1249,7 @@ const State = struct {
                         state.errors.errorAtToken(
                             action.keyword,
                             "argument count or type mismatch",
+                            @errorReturnTrace(),
                         ),
                     ),
                 };
@@ -1157,6 +1264,7 @@ const State = struct {
                             action.keyword,
                             "expected {s} to be a global,, got a {s}",
                             .{ export_name, @tagName(target_export) },
+                            @errorReturnTrace(),
                         ),
                     ),
                 };
@@ -1265,12 +1373,12 @@ fn runScript(
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
                     else => |parse_error| {
-                        std.debug.print("TODO: Module parse error {}\n", .{parse_error});
-                        if (@errorReturnTrace()) |err_trace| {
-                            std.debug.dumpStackTrace(err_trace.*);
-                        }
-
-                        _ = try state.errors.errorAtToken(cmd.keyword, "module failed to parse");
+                        _ = try state.errors.errorFmtAtToken(
+                            cmd.keyword,
+                            "module failed to parse ({})",
+                            .{parse_error},
+                            @errorReturnTrace(),
+                        );
                         break :run_cmds;
                     },
                 };
@@ -1282,12 +1390,12 @@ fn runScript(
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
                     else => |validation_err| {
-                        std.debug.print("TODO: Code validation error {}\n", .{validation_err});
-                        if (@errorReturnTrace()) |err_trace| {
-                            std.debug.dumpStackTrace(err_trace.*);
-                        }
-
-                        _ = try state.errors.errorAtToken(cmd.keyword, "module was invalid");
+                        _ = try state.errors.errorFmtAtToken(
+                            cmd.keyword,
+                            "module validation error ({})",
+                            .{validation_err},
+                            @errorReturnTrace(),
+                        );
                         break :run_cmds;
                     },
                 };
@@ -1305,14 +1413,10 @@ fn runScript(
                 ) catch |e| {
                     switch (e) {
                         error.OutOfMemory => {
-                            std.debug.print("TODO: Handle OOM in module allocate!", .{});
-                            if (@errorReturnTrace()) |err_trace| {
-                                std.debug.dumpStackTrace(err_trace.*);
-                            }
-
                             _ = try state.errors.errorAtToken(
                                 cmd.keyword,
                                 "out of memory",
+                                @errorReturnTrace(),
                             );
                         },
                         error.ImportFailure => _ = try state.errors.errorFmtAtToken(
@@ -1322,6 +1426,7 @@ fn runScript(
                                 import_error.module.bytes,
                                 import_error.name.bytes,
                             },
+                            @errorReturnTrace(),
                         ),
                     }
                     break :run_cmds;
@@ -1345,6 +1450,7 @@ fn runScript(
                         _ = try state.errors.errorAtToken(
                             cmd.keyword,
                             "module instantiation or start function invocation failed",
+                            @errorReturnTrace(),
                         );
                         break :run_cmds;
                     },
@@ -1396,6 +1502,7 @@ fn runScript(
                                 cmd.keyword,
                                 "'get' yields exactly 1 value, but {} were expected",
                                 .{expected_result_list.len},
+                                @errorReturnTrace(),
                             );
                             break :run_cmds;
                         }
@@ -1430,6 +1537,7 @@ fn runScript(
                     _ = try state.errors.errorAtToken(
                         cmd.keyword,
                         "reading globals never traps",
+                        @errorReturnTrace(),
                     );
                     break :run_cmds;
                 }
@@ -1463,6 +1571,7 @@ fn runScript(
                     _ = try state.errors.errorAtToken(
                         cmd.keyword,
                         "reading globals never exhausts the call stack",
+                        @errorReturnTrace(),
                     );
                     break :run_cmds;
                 }
@@ -1542,7 +1651,11 @@ fn runScript(
                 }
             },
             else => {
-                _ = try state.errors.errorAtToken(cmd.keyword, "unrecognized command");
+                _ = try state.errors.errorAtToken(
+                    cmd.keyword,
+                    "unrecognized command",
+                    @errorReturnTrace(),
+                );
                 break :run_cmds;
             },
         }

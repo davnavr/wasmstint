@@ -7,6 +7,7 @@ pub const Message = struct {
     loc: LineCol,
     msg: []const u8,
     src: Src,
+    trace: ?*const std.builtin.StackTrace,
 
     pub const Src = struct {
         line: []const u8,
@@ -83,14 +84,47 @@ pub const Report = struct {
 // Want to return `Allocator.Error!error{ReportedParserError}`; the `Report` struct is a workaround for this.
 // See https://github.com/ziglang/zig/issues/14698
 
-pub fn report(errors: *Errors, loc: LineCol, msg: []const u8, src: Message.Src) Allocator.Error!Report {
+pub fn report(
+    errors: *Errors,
+    loc: LineCol,
+    msg: []const u8,
+    src: Message.Src,
+    stack_trace: ?*const std.builtin.StackTrace,
+) Allocator.Error!Report {
     std.debug.assert(std.unicode.utf8ValidateSlice(msg));
     std.debug.assert(std.unicode.utf8ValidateSlice(src.line));
 
-    try errors.list.append(
-        errors.arena.allocator(),
-        Message{ .loc = loc, .msg = msg, .src = src },
-    );
+    const alloca = errors.arena.allocator();
+
+    const err = try errors.list.addOne(alloca);
+    errdefer _ = errors.list.pop().?;
+
+    const src_trace_ptr: ?*const std.builtin.StackTrace = stack_trace orelse @errorReturnTrace();
+    const dupe_stack_trace: ?*const std.builtin.StackTrace = if (src_trace_ptr) |src_trace| dupe: {
+        if (@import("builtin").strip_debug_info)
+            break :dupe null;
+
+        const instr_addresses = try alloca.dupe(usize, src_trace.instruction_addresses);
+        errdefer alloca.free(instr_addresses);
+
+        const dupe = try alloca.create(std.builtin.StackTrace);
+        dupe.* = .{
+            .index = src_trace.index,
+            .instruction_addresses = instr_addresses,
+        };
+        std.debug.captureStackTrace(null, dupe);
+
+        break :dupe dupe;
+    } else null;
+
+    errdefer comptime unreachable;
+
+    err.* = Message{
+        .loc = loc,
+        .msg = msg,
+        .src = src,
+        .trace = dupe_stack_trace,
+    };
 
     return .{
         .err = error.ReportedParserError,
@@ -104,11 +138,13 @@ pub fn reportFmt(
     comptime fmt: []const u8,
     args: anytype,
     src: Message.Src,
+    stack_trace: ?*const std.builtin.StackTrace,
 ) Allocator.Error!Report {
     return errors.report(
         loc,
         try std.fmt.allocPrint(errors.arena.allocator(), fmt, args),
         src,
+        stack_trace,
     );
 }
 
@@ -118,11 +154,13 @@ pub fn reportAtOffset(
     tree: *const sexpr.Tree,
     locator: *LineCol.FromOffset,
     msg: []const u8,
+    stack_trace: ?*const std.builtin.StackTrace,
 ) Allocator.Error!Report {
     return errors.report(
         locator.locate(tree.source, offset.start),
         msg,
         Message.Src.init(tree, offset),
+        stack_trace,
     );
 }
 
@@ -132,8 +170,15 @@ pub fn reportAtToken(
     tree: *const sexpr.Tree,
     locator: *LineCol.FromOffset,
     msg: []const u8,
+    stack_trace: ?*const std.builtin.StackTrace,
 ) Allocator.Error!Report {
-    return errors.reportAtOffset(token.offset(tree), tree, locator, msg);
+    return errors.reportAtOffset(
+        token.offset(tree),
+        tree,
+        locator,
+        msg,
+        stack_trace,
+    );
 }
 
 pub const ListParenthesis = enum {
@@ -158,9 +203,10 @@ pub fn reportAtList(
     tree: *const sexpr.Tree,
     locator: *LineCol.FromOffset,
     msg: []const u8,
+    stack_trace: ?*const std.builtin.StackTrace,
 ) Allocator.Error!Report {
     const offset = position.offset(list, tree);
-    return errors.reportAtOffset(&offset, tree, locator, msg);
+    return errors.reportAtOffset(&offset, tree, locator, msg, stack_trace);
 }
 
 pub fn reportFmtAtOffset(
@@ -170,12 +216,14 @@ pub fn reportFmtAtOffset(
     locator: *LineCol.FromOffset,
     comptime fmt: []const u8,
     args: anytype,
+    stack_trace: ?*const std.builtin.StackTrace,
 ) Allocator.Error!Report {
     return errors.reportFmt(
         locator.locate(tree.source, offset.start),
         fmt,
         args,
         Message.Src.init(tree, offset),
+        stack_trace,
     );
 }
 
@@ -186,6 +234,7 @@ pub fn reportFmtAtToken(
     locator: *LineCol.FromOffset,
     comptime fmt: []const u8,
     args: anytype,
+    stack_trace: ?*const std.builtin.StackTrace,
 ) Allocator.Error!Report {
     return errors.reportFmtAtOffset(
         token.offset(tree),
@@ -193,6 +242,7 @@ pub fn reportFmtAtToken(
         locator,
         fmt,
         args,
+        stack_trace,
     );
 }
 
@@ -204,9 +254,10 @@ pub fn reportFmtAtList(
     locator: *LineCol.FromOffset,
     comptime fmt: []const u8,
     args: anytype,
+    stack_trace: ?*const std.builtin.StackTrace,
 ) Allocator.Error!Report {
     const offset = position.offset(list, tree);
-    return errors.reportFmtAtOffset(&offset, tree, locator, fmt, args);
+    return errors.reportFmtAtOffset(&offset, tree, locator, fmt, args, stack_trace);
 }
 
 pub fn reportUnexpectedToken(
@@ -214,12 +265,14 @@ pub fn reportUnexpectedToken(
     token: sexpr.TokenId,
     tree: *const sexpr.Tree,
     locator: *LineCol.FromOffset,
+    stack_trace: ?*const std.builtin.StackTrace,
 ) Allocator.Error!Report {
     return errors.reportAtToken(
         token,
         tree,
         locator,
         "unexpected token",
+        stack_trace,
     );
 }
 
@@ -228,11 +281,13 @@ pub fn reportExpectedListAtToken(
     token: sexpr.TokenId,
     tree: *const sexpr.Tree,
     locator: *LineCol.FromOffset,
+    stack_trace: ?*const std.builtin.StackTrace,
 ) Allocator.Error!Report {
     return errors.reportAtToken(
         token,
         tree,
         locator,
         "expected closing parenthesis, but got token",
+        stack_trace,
     );
 }

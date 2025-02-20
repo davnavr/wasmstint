@@ -72,7 +72,13 @@ pub fn parseContents(
                     result_count > 0 or
                     result_buf.len > 0 or
                     !type_use.id.header.is_inline)
-                    return (try ctx.errorAtToken(keyword, "expected 'param' or 'result' keyword")).err;
+                {
+                    return (try ctx.errorAtToken(
+                        keyword,
+                        "expected 'param' or 'result' keyword",
+                        @errorReturnTrace(),
+                    )).err;
+                }
 
                 std.debug.assert(type_use.func.parameters.isEmpty());
 
@@ -91,8 +97,13 @@ pub fn parseContents(
                 };
             },
             .keyword_param => {
-                if (result_count > 0 or result_buf.len > 0)
-                    return (try ctx.errorAtToken(keyword, "expected 'result' keyword")).err;
+                if (result_count > 0 or result_buf.len > 0) {
+                    return (try ctx.errorAtToken(
+                        keyword,
+                        "expected 'result' keyword",
+                        @errorReturnTrace(),
+                    )).err;
+                }
 
                 const parsed_param = try Text.Param.parseContents(
                     &list_contents,

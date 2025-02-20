@@ -73,7 +73,11 @@ pub const ValType = struct {
                 _ = parent;
                 return .{ .keyword = atom, .type = .{ .simple = {} } };
             },
-            else => return (try ctx.errorAtToken(atom, "expected valtype")).err,
+            else => return (try ctx.errorAtToken(
+                atom,
+                "expected valtype",
+                @errorReturnTrace(),
+            )).err,
         }
     }
 
@@ -219,7 +223,11 @@ pub const Import = struct {
 
                 break :desc .{ .global = global_type };
             },
-            else => return (try ctx.errorAtToken(desc_keyword, "unknown import kind")).err,
+            else => return (try ctx.errorAtToken(
+                desc_keyword,
+                "unknown import kind",
+                @errorReturnTrace(),
+            )).err,
         };
 
         try desc_parser.expectEmpty(ctx);
@@ -306,7 +314,11 @@ pub const ExportField = struct {
             .keyword_global,
             => {},
             else => {
-                return (try ctx.errorAtToken(desc_keyword, "unknown import kind")).err;
+                return (try ctx.errorAtToken(
+                    desc_keyword,
+                    "unknown import kind",
+                    @errorReturnTrace(),
+                )).err;
             },
         }
 
@@ -587,7 +599,11 @@ pub const DataString = struct {
                     arena,
                     StringLiteral{ .token = lit_token },
                 ),
-                else => _ = try ctx.errorAtToken(lit_token, "expected data string literal"),
+                else => _ = try ctx.errorAtToken(
+                    lit_token,
+                    "expected data string literal",
+                    @errorReturnTrace(),
+                ),
             }
         }
 
@@ -669,8 +685,14 @@ pub const Mem = struct {
 
         // Decide if a `memtype` or inline data segment is present.
         var lookahead: sexpr.Parser = contents.*;
-        const memtype_or_data = lookahead.parseValue() catch
-            return (try ctx.errorAtList(parent, .end, "expected memtype or inline data segment")).err;
+        const memtype_or_data = lookahead.parseValue() catch {
+            return (try ctx.errorAtList(
+                parent,
+                .end,
+                "expected memtype or inline data segment",
+                @errorReturnTrace(),
+            )).err;
+        };
 
         const mem: Mem = switch (memtype_or_data.unpacked()) {
             .atom => .{
@@ -689,7 +711,11 @@ pub const Mem = struct {
                 var in_data = sexpr.Parser.init(data_list.contents(ctx.tree).values(ctx.tree));
                 const data_keyword = try in_data.parseAtomInList(data_list, ctx, "'data' keyword");
                 if (data_keyword.tag(ctx.tree) != .keyword_data)
-                    return (try ctx.errorAtToken(data_keyword, "expected 'data' keyword")).err;
+                    return (try ctx.errorAtToken(
+                        data_keyword,
+                        "expected 'data' keyword",
+                        @errorReturnTrace(),
+                    )).err;
 
                 const data = try DataString.parseContents(&in_data, ctx, arena);
 
@@ -725,7 +751,11 @@ pub const TableType = struct {
         const ref_type = try contents.parseAtomInList(parent, ctx, "reftype");
         switch (ref_type.tag(ctx.tree)) {
             .keyword_funcref, .keyword_externref => {},
-            else => return (try ctx.errorAtToken(ref_type, "expected reftype")).err,
+            else => return (try ctx.errorAtToken(
+                ref_type,
+                "expected reftype",
+                @errorReturnTrace(),
+            )).err,
         }
 
         return .{ .limits = limits, .ref_type = ref_type };
@@ -816,19 +846,35 @@ pub const Table = struct {
                 contents.* = lookahead;
                 lookahead = undefined;
 
-                if (import_exports.import.keyword.some)
-                    return (try ctx.errorAtToken(type_token, "expected inline element segment")).err;
+                if (import_exports.import.keyword.some) {
+                    return (try ctx.errorAtToken(
+                        type_token,
+                        "expected inline element segment",
+                        @errorReturnTrace(),
+                    )).err;
+                }
 
                 const elem_list = try contents.parseListInList(parent, ctx);
 
                 var elem_contents = sexpr.Parser.init(elem_list.contents(ctx.tree).values(ctx.tree));
                 const elem_keyword = try elem_contents.parseAtomInList(elem_list, ctx, "'elem' keyword");
 
-                if (elem_keyword.tag(ctx.tree) != .keyword_elem)
-                    return (try ctx.errorAtToken(elem_keyword, "expected 'elem' keyword")).err;
+                if (elem_keyword.tag(ctx.tree) != .keyword_elem) {
+                    return (try ctx.errorAtToken(
+                        elem_keyword,
+                        "expected 'elem' keyword",
+                        @errorReturnTrace(),
+                    )).err;
+                }
 
-                const first_elem_value = elem_contents.parseValue() catch
-                    return (try ctx.errorAtList(elem_list, .end, "expected inline element segment")).err;
+                const first_elem_value = elem_contents.parseValue() catch {
+                    return (try ctx.errorAtList(
+                        elem_list,
+                        .end,
+                        "expected inline element segment",
+                        @errorReturnTrace(),
+                    )).err;
+                };
 
                 const elements = elements: switch (first_elem_value.unpacked()) {
                     .atom => |first_idx| {
@@ -912,7 +958,11 @@ pub const Table = struct {
                     },
                 };
             },
-            else => return (try ctx.errorAtToken(type_token, "expected reftype or table type")).err,
+            else => return (try ctx.errorAtToken(
+                type_token,
+                "expected reftype or table type",
+                @errorReturnTrace(),
+            )).err,
         };
 
         table_idx.set(arena, table);
@@ -934,8 +984,14 @@ pub const GlobalType = struct {
         ctx: *ParseContext,
         parent: sexpr.List.Id,
     ) sexpr.Parser.ParseError!GlobalType {
-        const value = parser.parseValue() catch
-            return (try ctx.errorAtList(parent, .start, "expected global type")).err;
+        const value = parser.parseValue() catch {
+            return (try ctx.errorAtList(
+                parent,
+                .start,
+                "expected global type",
+                @errorReturnTrace(),
+            )).err;
+        };
 
         switch (value.unpacked()) {
             .atom => |type_keyword| return .{
@@ -946,8 +1002,13 @@ pub const GlobalType = struct {
                 var list_contents = sexpr.Parser.init(list.contents(ctx.tree).values(ctx.tree));
                 const mut_keyword = try list_contents.parseAtomInList(list, ctx, "'mut' keyword");
 
-                if (mut_keyword.tag(ctx.tree) != .keyword_mut)
-                    return (try ctx.errorAtToken(mut_keyword, "expected 'mut' keyword")).err;
+                if (mut_keyword.tag(ctx.tree) != .keyword_mut) {
+                    return (try ctx.errorAtToken(
+                        mut_keyword,
+                        "expected 'mut' keyword",
+                        @errorReturnTrace(),
+                    )).err;
+                }
 
                 const val_type = try ValType.parse(&list_contents, ctx, parent);
 
@@ -1145,6 +1206,7 @@ pub const Data = struct {
                     .all,
                     "offset abbreviation requires a single instruction, got {} instructions",
                     .{data.offset.expr.count - 1},
+                    @errorReturnTrace(),
                 );
             }
 
@@ -1457,6 +1519,7 @@ pub const Elem = struct {
                     else => return (try ctx.errorAtToken(
                         maybe_elem_type,
                         "expected reftype, 'func' keyword, or element list",
+                        @errorReturnTrace(),
                     )).err,
                 }
             },
@@ -1710,7 +1773,11 @@ pub fn parseFields(
                 break :field .{ .start = start };
             },
             else => {
-                _ = try ctx.errorAtToken(field_keyword, "expected module field keyword");
+                _ = try ctx.errorAtToken(
+                    field_keyword,
+                    "expected module field keyword",
+                    @errorReturnTrace(),
+                );
                 continue;
             },
         };

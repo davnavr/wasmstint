@@ -188,14 +188,22 @@ pub const MemArg = struct {
 
             const digits_token = offset_lexer.next() orelse return mem_arg;
             if (digits_token.tag != .integer) {
-                _ = try ctx.errorAtToken(offset_token, "expected memarg 'offset' or instruction");
+                _ = try ctx.errorAtToken(
+                    offset_token,
+                    "expected memarg 'offset' or instruction",
+                    @errorReturnTrace(),
+                );
                 return mem_arg;
             }
 
             contents.* = lookahead;
 
             const offset_value = parseUninterpretedInteger(u64, digits_token.contents(lexer_bytes)) catch {
-                _ = try ctx.errorAtToken(offset_token, "invalid offset integer");
+                _ = try ctx.errorAtToken(
+                    offset_token,
+                    "invalid offset integer",
+                    @errorReturnTrace(),
+                );
                 break :parse_offset;
             };
 
@@ -219,19 +227,31 @@ pub const MemArg = struct {
 
             const digits_token = offset_lexer.next() orelse return mem_arg;
             if (digits_token.tag != .integer) {
-                _ = try ctx.errorAtToken(align_token, "expected memarg 'align' or instruction");
+                _ = try ctx.errorAtToken(
+                    align_token,
+                    "expected memarg 'align' or instruction",
+                    @errorReturnTrace(),
+                );
                 return mem_arg;
             }
 
             contents.* = lookahead;
 
             const align_value = parseUninterpretedInteger(u32, digits_token.contents(lexer_bytes)) catch {
-                _ = try ctx.errorAtToken(align_token, "invalid offset integer");
+                _ = try ctx.errorAtToken(
+                    align_token,
+                    "invalid offset integer",
+                    @errorReturnTrace(),
+                );
                 return mem_arg;
             };
 
             if (!std.math.isPowerOfTwo(align_value))
-                _ = try ctx.errorAtToken(align_token, "alignment must be a power of two");
+                _ = try ctx.errorAtToken(
+                    align_token,
+                    "alignment must be a power of two",
+                    @errorReturnTrace(),
+                );
 
             mem_arg.align_token = TokenId.Opt.init(align_token);
             mem_arg.align_pow = std.math.log2_int(u32, align_value);
@@ -285,7 +305,11 @@ pub const HeapType = packed struct(u32) {
             .tag = switch (token.tag(ctx.tree)) {
                 .keyword_func => .func,
                 .keyword_extern => .@"extern",
-                else => return (try ctx.errorAtToken(token, "expected 'func' or 'extern'")).err,
+                else => return (try ctx.errorAtToken(
+                    token,
+                    "expected 'func' or 'extern'",
+                    @errorReturnTrace(),
+                )).err,
             },
             .token = token,
         };

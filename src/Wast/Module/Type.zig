@@ -54,8 +54,13 @@ pub fn parseContents(
 
     const func_keyword = try func_contents.parseAtomInList(func_list, ctx, "'func' keyword");
 
-    if (func_keyword.tag(ctx.tree) != .keyword_func)
-        return (try ctx.errorAtToken(func_keyword, "expected 'func' keyword")).err;
+    if (func_keyword.tag(ctx.tree) != .keyword_func) {
+        return (try ctx.errorAtToken(
+            func_keyword,
+            "expected 'func' keyword",
+            @errorReturnTrace(),
+        )).err;
+    }
 
     _ = temporary.reset(.retain_capacity);
     var parameters = IndexedArena.Slice(Text.Param).empty;
@@ -84,7 +89,11 @@ pub fn parseContents(
         switch (param_or_result_keyword.tag(ctx.tree)) {
             .keyword_param => {
                 if (results_buf.len > 0) {
-                    _ = try ctx.errorAtToken(param_or_result_keyword, wrong_keyword_msg);
+                    _ = try ctx.errorAtToken(
+                        param_or_result_keyword,
+                        wrong_keyword_msg,
+                        @errorReturnTrace(),
+                    );
                     break;
                 }
 
@@ -125,7 +134,11 @@ pub fn parseContents(
                 try results_buf.append(temporary.allocator(), result);
             },
             else => {
-                _ = try ctx.errorAtToken(param_or_result_keyword, wrong_keyword_msg);
+                _ = try ctx.errorAtToken(
+                    param_or_result_keyword,
+                    wrong_keyword_msg,
+                    @errorReturnTrace(),
+                );
                 break;
             },
         }

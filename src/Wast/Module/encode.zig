@@ -433,7 +433,13 @@ const Wasm = struct {
             wasm.defined_mems.len > 0 or
             wasm.defined_tables.len > 0 or
             wasm.defined_globals.len > 0)
-            _ = try ctx.errorAtToken(import_keyword, "imports must occur before all non-import definitions");
+        {
+            _ = try ctx.errorAtToken(
+                import_keyword,
+                "imports must occur before all non-import definitions",
+                @errorReturnTrace(),
+            );
+        }
     }
 
     const TypeSec = std.SegmentedList(Type, 8);
@@ -517,6 +523,7 @@ const Wasm = struct {
                                 _ = try ctx.errorAtToken(
                                     type_use.id.type.token,
                                     "type use does not match its definition (TODO: include why)",
+                                    @errorReturnTrace(),
                                 );
                             }
                         }
@@ -652,10 +659,15 @@ fn checkMatchingLabels(
                     expected.get(text.tree, cache),
                     label.ident.get(text.tree, cache),
                 },
+                @errorReturnTrace(),
             );
         }
     } else if (label.some) {
-        _ = try text.errorAtToken(label.token, "unexpected label");
+        _ = try text.errorAtToken(
+            label.token,
+            "unexpected label",
+            @errorReturnTrace(),
+        );
     }
 }
 
@@ -733,7 +745,11 @@ const LabelLookup = struct {
             .symbolic => |id| if (lookup.map.get(id)) |entry| {
                 return @as(u32, @intCast(lookup.stack.len)) - @intFromEnum(entry.id) - 1;
             } else {
-                _ = try text.errorAtToken(ident.token, "undefined label variable");
+                _ = try text.errorAtToken(
+                    ident.token,
+                    "undefined label variable",
+                    @errorReturnTrace(),
+                );
                 return std.math.maxInt(u32);
             },
             .numeric => |idx| return idx,
@@ -782,6 +798,7 @@ fn encodeExpr(
                                 _ = try text.errorAtToken(
                                     instr.keyword.getAtom().?,
                                     "invalid arity in select instruction",
+                                    @errorReturnTrace(),
                                 );
                         }
                     }
@@ -1152,6 +1169,7 @@ fn encodeText(
                         _ = try text_ctx.errorAtToken(
                             import_field_ptr.desc_keyword,
                             "unrecognized import kind",
+                            @errorReturnTrace(),
                         );
                         continue;
                     },
@@ -1458,6 +1476,7 @@ fn encodeText(
                     _ = try text_ctx.errorAtToken(
                         start_ident.token,
                         "duplicate start section",
+                        @errorReturnTrace(),
                     );
                 } else {
                     wasm.start = Ident.Opt.init(start_ident);
@@ -2206,6 +2225,7 @@ pub fn encode(
                         _ = try text_ctx.errorAtToken(
                             module.format_keyword.get().?,
                             "WebAssembly Text is not valid UTF-8",
+                            @errorReturnTrace(),
                         );
                         return;
                     },
@@ -2235,6 +2255,7 @@ pub fn encode(
                     _ = try text_ctx.errorAtToken(
                         module.format_keyword.get().?,
                         "expected a module, but got end of file",
+                        @errorReturnTrace(),
                     );
                     return;
                 },

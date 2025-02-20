@@ -31,7 +31,11 @@ pub fn parseContents(
         contents.* = lookahead;
 
         const max_value = @import("../value.zig").unsignedInteger(u64, max_token.contents(ctx.tree)) catch {
-            _ = try ctx.errorAtToken(max_token, "limit maximum is not a valid integer literal");
+            _ = try ctx.errorAtToken(
+                max_token,
+                "limit maximum is not a valid integer literal",
+                @errorReturnTrace(),
+            );
             break :no_max;
         };
 

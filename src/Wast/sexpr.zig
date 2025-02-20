@@ -186,7 +186,12 @@ pub const Tree = struct {
             switch (tok.tag) {
                 .reserved => {
                     const token = try TokenId.create(tok, &tree.arenas.tokens, gpa);
-                    _ = try errors.reportUnexpectedToken(token, &tree, &locator);
+                    _ = try errors.reportUnexpectedToken(
+                        token,
+                        &tree,
+                        &locator,
+                        @errorReturnTrace(),
+                    );
                 },
                 .open_paren => {
                     try list_stack.headers.append(
@@ -202,6 +207,7 @@ pub const Tree = struct {
                             &tree,
                             &locator,
                             "unmatched closing parenthesis",
+                            @errorReturnTrace(),
                         );
                     },
                     else => {
@@ -250,6 +256,7 @@ pub const Tree = struct {
                         &tree,
                         &locator,
                         "unexpected end of file or input",
+                        @errorReturnTrace(),
                     );
                     break;
                 },
@@ -271,6 +278,7 @@ pub const Tree = struct {
                 &locator,
                 "expected {} closing parenthesis",
                 .{list_stack.headers.count()},
+                @errorReturnTrace(),
             );
 
             while (list_stack.headers.count() > 1) {

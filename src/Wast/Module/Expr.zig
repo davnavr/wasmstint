@@ -77,12 +77,20 @@ fn parseInstrList(
                 .keyword_else => if (block_stack.pop() == .@"if") {
                     block_stack.append(undefined, .@"else") catch unreachable;
                 } else {
-                    _ = try ctx.errorAtToken(keyword, "expected 'end' or instruction");
+                    _ = try ctx.errorAtToken(
+                        keyword,
+                        "expected 'end' or instruction",
+                        @errorReturnTrace(),
+                    );
                     _ = contents.empty();
                     break :parse_body;
                 },
                 .keyword_end => if (block_stack.pop() == null) {
-                    _ = try ctx.errorAtToken(keyword, "expected instruction");
+                    _ = try ctx.errorAtToken(
+                        keyword,
+                        "expected instruction",
+                        @errorReturnTrace(),
+                    );
                     _ = contents.empty();
                     break :parse_body;
                 },
@@ -180,7 +188,11 @@ fn parseInstrList(
                     };
 
                     if (else_keyword.tag(ctx.tree) != .keyword_else) {
-                        _ = try ctx.errorAtToken(else_keyword, "expected 'else' instruction");
+                        _ = try ctx.errorAtToken(
+                            else_keyword,
+                            "expected 'else' instruction",
+                            @errorReturnTrace(),
+                        );
                         break :no_else;
                     }
 
@@ -240,7 +252,12 @@ fn parseInstrList(
                     try output.appendMovedList(instr_list_arena, &parent_output, instr_list_pool);
 
                     if (!then_branch.keyword.some) {
-                        _ = try ctx.errorAtList(list, .end, "missing then branch in folded if instruction");
+                        _ = try ctx.errorAtList(
+                            list,
+                            .end,
+                            "missing then branch in folded if instruction",
+                            @errorReturnTrace(),
+                        );
                         _ = contents.empty();
                         break :parse_body;
                     }
@@ -310,6 +327,7 @@ fn parseInstrList(
             .end,
             "missing {} 'end' instructions",
             .{block_stack.len},
+            @errorReturnTrace(),
         );
     }
 

@@ -40,19 +40,27 @@ pub const Context = struct {
     locator: LineCol.FromOffset = .init,
     errors: *Errors,
 
-    pub inline fn errorAtToken(
+    pub fn errorAtToken(
         ctx: *Context,
         token: sexpr.TokenId,
         msg: []const u8,
+        stack_trace: ?*const std.builtin.StackTrace,
     ) AllocatorError!Errors.Report {
-        return ctx.errors.reportAtToken(token, ctx.tree, &ctx.locator, msg);
+        return ctx.errors.reportAtToken(
+            token,
+            ctx.tree,
+            &ctx.locator,
+            msg,
+            stack_trace,
+        );
     }
 
-    pub inline fn errorAtList(
+    pub fn errorAtList(
         ctx: *Context,
         list: sexpr.List.Id,
         position: Errors.ListParenthesis,
         msg: []const u8,
+        stack_trace: ?*const std.builtin.StackTrace,
     ) AllocatorError!Errors.Report {
         return ctx.errors.reportAtList(
             list,
@@ -60,24 +68,34 @@ pub const Context = struct {
             ctx.tree,
             &ctx.locator,
             msg,
+            stack_trace,
         );
     }
 
-    pub inline fn errorFmtAtToken(
+    pub fn errorFmtAtToken(
         ctx: *Context,
         token: sexpr.TokenId,
         comptime fmt: []const u8,
         args: anytype,
+        stack_trace: ?*const std.builtin.StackTrace,
     ) AllocatorError!Errors.Report {
-        return ctx.errors.reportFmtAtToken(token, ctx.tree, &ctx.locator, fmt, args);
+        return ctx.errors.reportFmtAtToken(
+            token,
+            ctx.tree,
+            &ctx.locator,
+            fmt,
+            args,
+            stack_trace,
+        );
     }
 
-    pub inline fn errorFmtAtList(
+    pub fn errorFmtAtList(
         ctx: *Context,
         list: sexpr.List.Id,
         position: Errors.ListParenthesis,
         comptime fmt: []const u8,
         args: anytype,
+        stack_trace: ?*const std.builtin.StackTrace,
     ) AllocatorError!Errors.Report {
         return ctx.errors.reportFmtAtList(
             list,
@@ -86,11 +104,21 @@ pub const Context = struct {
             &ctx.locator,
             fmt,
             args,
+            stack_trace,
         );
     }
 
-    pub inline fn errorUnexpectedToken(ctx: *Context, token: sexpr.TokenId) AllocatorError!Errors.Report {
-        return ctx.errors.reportUnexpectedToken(token, ctx.tree, &ctx.locator);
+    pub fn errorUnexpectedToken(
+        ctx: *Context,
+        token: sexpr.TokenId,
+        stack_trace: ?*const std.builtin.StackTrace,
+    ) AllocatorError!Errors.Report {
+        return ctx.errors.reportUnexpectedToken(
+            token,
+            ctx.tree,
+            &ctx.locator,
+            stack_trace,
+        );
     }
 };
 
@@ -103,7 +131,13 @@ pub fn parseAtom(
     return if (value.getAtom()) |atom|
         atom
     else
-        (try ctx.errorFmtAtList(value.getList().?, .start, "expected {s}", .{expected})).err;
+        (try ctx.errorFmtAtList(
+            value.getList().?,
+            .start,
+            "expected {s}",
+            .{expected},
+            @errorReturnTrace(),
+        )).err;
 }
 
 pub fn parseList(parser: *Parser, ctx: *Context) ParseOrEofError!List.Id {
@@ -111,7 +145,11 @@ pub fn parseList(parser: *Parser, ctx: *Context) ParseOrEofError!List.Id {
     return if (value.getList()) |list|
         list
     else
-        (try ctx.errorAtToken(value.getAtom().?, "expected opening parenthesis")).err;
+        (try ctx.errorAtToken(
+            value.getAtom().?,
+            "expected opening parenthesis",
+            @errorReturnTrace(),
+        )).err;
 }
 
 pub fn parseAtomInList(parser: *Parser, list: List.Id, ctx: *Context, expected: []const u8) ParseError!TokenId {
@@ -121,6 +159,7 @@ pub fn parseAtomInList(parser: *Parser, list: List.Id, ctx: *Context, expected: 
             .end,
             "expected {s}, but got closing parenthesis",
             .{expected},
+            @errorReturnTrace(),
         )).err,
         else => |err| err,
     };
@@ -132,6 +171,7 @@ pub fn parseListInList(parser: *Parser, list: List.Id, ctx: *Context) ParseError
             list,
             .end,
             "expected opening parenthesis, but got closing parenthesis",
+            @errorReturnTrace(),
         )).err,
         else => |err| err,
     };
@@ -154,11 +194,16 @@ pub fn parseUninterpretedInteger(
                 error.Overflow => return (try ctx.errorAtToken(
                     atom,
                     "value cannot fit into an " ++ @typeName(T) ++ " literal",
+                    @errorReturnTrace(),
                 )).err,
             },
         }
     else
-        (try ctx.errorAtToken(atom, "expected " ++ @typeName(T) ++ " literal")).err;
+        (try ctx.errorAtToken(
+            atom,
+            "expected " ++ @typeName(T) ++ " literal",
+            @errorReturnTrace(),
+        )).err;
 }
 
 pub fn parseUninterpretedIntegerInList(
@@ -172,6 +217,7 @@ pub fn parseUninterpretedIntegerInList(
             list,
             .end,
             "expected " ++ @typeName(T) ++ " literal, but got closing parenthesis",
+            @errorReturnTrace(),
         )).err,
         else => |err| err,
     };
@@ -204,6 +250,7 @@ pub fn ParsedFloat(comptime F: type) type {
                 .nan_arithmetic, .nan_canonical => (try ctx.errorAtToken(
                     float.token,
                     "invalid " ++ @typeName(F) ++ " literal",
+                    @errorReturnTrace(),
                 )).err,
             };
         }
@@ -229,7 +276,11 @@ pub fn parseFloat(
         => {},
         else => |tag| {
             if (tag != .keyword_unknown or !std.mem.startsWith(u8, contents, "nan:0x")) {
-                return (try ctx.errorAtToken(atom, "expected " ++ @typeName(F) ++ " literal")).err;
+                return (try ctx.errorAtToken(
+                    atom,
+                    "expected " ++ @typeName(F) ++ " literal",
+                    @errorReturnTrace(),
+                )).err;
             }
 
             const digits = contents[6..];
@@ -239,7 +290,11 @@ pub fn parseFloat(
                 std.mem.indexOfNone(u8, digits, "0123456789_abcdefABCDEF") != null;
 
             if (invalid)
-                return (try ctx.errorAtToken(atom, "invalid " ++ @typeName(F) ++ " literal")).err;
+                return (try ctx.errorAtToken(
+                    atom,
+                    "invalid " ++ @typeName(F) ++ " literal",
+                    @errorReturnTrace(),
+                )).err;
         },
     }
 
@@ -247,6 +302,7 @@ pub fn parseFloat(
         error.InvalidNanPayload => return (try ctx.errorAtToken(
             atom,
             "invalid NaN literal payload in " ++ @typeName(F) ++ " literal",
+            @errorReturnTrace(),
         )).err,
     };
 
@@ -264,6 +320,7 @@ pub fn parseFloatInList(
             list,
             .end,
             "expected " ++ @typeName(F) ++ " literal, but got closing parenthesis",
+            @errorReturnTrace(),
         )).err,
         else => |err| err,
     };
@@ -282,8 +339,16 @@ pub fn empty(parser: *Parser) []const Value {
 pub fn expectEmpty(parser: *Parser, ctx: *Context) error{OutOfMemory}!void {
     if (@as(?Value, parser.parseValue() catch null)) |value| {
         _ = switch (value.unpacked()) {
-            .atom => |token| try ctx.errorUnexpectedToken(token),
-            .list => |list| try ctx.errorAtList(list, .start, "unexpected opening parenthesis"),
+            .atom => |token| try ctx.errorUnexpectedToken(
+                token,
+                @errorReturnTrace(),
+            ),
+            .list => |list| try ctx.errorAtList(
+                list,
+                .start,
+                "unexpected opening parenthesis",
+                @errorReturnTrace(),
+            ),
         };
     }
 
