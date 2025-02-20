@@ -328,7 +328,7 @@ const SpectestImports = struct {
 
         const all = std.enums.values(PrintFunction);
 
-        var functions: [all.len]wasmstint.runtime.FuncAddr.Host = functions: {
+        const functions: [all.len]wasmstint.runtime.FuncAddr.Host = functions: {
             var result: [all.len]wasmstint.runtime.FuncAddr.Host = undefined;
             for (all) |func| {
                 result[@intFromEnum(func)] = .{ .signature = func.signature() };
@@ -336,14 +336,14 @@ const SpectestImports = struct {
             break :functions result;
         };
 
-        fn hostFunc(func: PrintFunction) *wasmstint.runtime.FuncAddr.Host {
+        fn hostFunc(func: PrintFunction) *const wasmstint.runtime.FuncAddr.Host {
             return &functions[@intFromEnum(func)];
         }
 
         fn addr(func: PrintFunction) wasmstint.runtime.FuncAddr {
             return wasmstint.runtime.FuncAddr.init(.{
                 .host = .{
-                    .func = func.hostFunc(),
+                    .func = @constCast(func.hostFunc()),
                     .data = null,
                 },
             });
@@ -515,11 +515,25 @@ const State = struct {
     ) Allocator.Error!void {
         for (0..1_024) |_| {
             switch (interpreter.state) {
-                .awaiting_host => |host| if (interpreter.call_stack.items.len == 0) {
+                .awaiting_host => |*host| if (interpreter.call_stack.items.len == 0) {
                     return;
                 } else {
-                    _ = host;
-                    std.debug.panic("TODO: Handle host call", .{});
+                    const callee = host.currentHostFunction().?;
+                    const print_func_idx = @divExact(
+                        @intFromPtr(callee.func) - @intFromPtr(&SpectestImports.PrintFunction.functions),
+                        @sizeOf(wasmstint.runtime.FuncAddr.Host),
+                    );
+
+                    switch (SpectestImports.PrintFunction.all[print_func_idx]) {
+                        .print_i32 => {
+                            std.debug.print(
+                                "TODO INSERT DIAGNOSTIC INFO = print_i32({})\n",
+                                host.valuesTyped(struct { i32 }) catch unreachable,
+                            );
+                            _ = host.returnFromHostTyped({}, fuel) catch unreachable;
+                        },
+                        else => |bad| std.debug.panic("TODO: Handle host call {any}", .{bad}),
+                    }
                 },
                 .awaiting_validation => unreachable,
                 .call_stack_exhaustion => |*oof| {
@@ -595,7 +609,7 @@ const State = struct {
         parent: Wast.sexpr.TokenId,
         interpreter: *const Interpreter,
     ) Error {
-        const results = try interpreter.state.awaiting_host.copyResultValues(&state.cmd_arena);
+        const results = try interpreter.state.awaiting_host.copyValues(&state.cmd_arena);
 
         const Results = struct {
             values: []const wasmstint.Interpreter.TaggedValue,
@@ -943,7 +957,7 @@ const State = struct {
         }
 
         const actual_results: []const Interpreter.TaggedValue = try interpreter.state
-            .awaiting_host.copyResultValues(&state.cmd_arena);
+            .awaiting_host.copyValues(&state.cmd_arena);
 
         if (actual_results.len != results.len) {
             return scriptError(state.errors.errorFmtAtToken(

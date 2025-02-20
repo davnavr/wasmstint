@@ -67,6 +67,32 @@ pub const TaggedValue = union(enum) {
             ),
         };
     }
+
+    pub fn initInferred(value: anytype) TaggedValue {
+        const T = @TypeOf(value);
+
+        if (@typeInfo(T) == .pointer) {
+            if (@typeInfo(T).pointer.size != .one)
+                @compileError("unsupported value pointer type " ++ @typeName(T));
+
+            return initInferred(value.*);
+        }
+
+        return switch (T) {
+            i32, u32 => .{ .i32 = @bitCast(value) },
+            i64, u64 => .{ .i64 = @bitCast(value) },
+            f32 => .{ .f32 = value },
+            f64 => .{ .f64 = value },
+            runtime.ExternAddr => .{ .externref = value },
+            FuncRef => .{ .funcref = value },
+            runtime.FuncAddr => .{ .funcref = @bitCast(value) },
+            else => switch (@typeInfo(T)) {
+                .int => @compileError("unsupported integer value type " ++ @typeName(T)),
+                .float => @compileError("unsupported float value type " ++ @typeName(T)),
+                else => @compileError("unrecognized value type" ++ @typeName(T)),
+            },
+        };
+    }
 };
 
 const Ip = Module.Code.Ip;
@@ -391,16 +417,16 @@ pub const State = union(enum) {
     /// calling a host function.
     pub const AwaitingHost = struct {
         /// The types of the values at the top of the value stack, which are the results of the most
-        /// recently called function.
-        result_types: []const Module.ValType,
+        /// recently called function or the parameters passed to a host function.
+        types: []const Module.ValType,
 
         const interpreter = State.stateInterpreterPtr;
 
-        pub fn copyResultValues(
+        pub fn copyValues(
             self: *const AwaitingHost,
             arena: *std.heap.ArenaAllocator,
         ) Allocator.Error![]TaggedValue {
-            const types = self.result_types;
+            const types = self.types;
             const dst = try arena.allocator().alloc(TaggedValue, types.len);
             const interp = self.interpreter();
             for (
@@ -420,6 +446,60 @@ pub const State = union(enum) {
             }
 
             return dst;
+        }
+
+        pub fn valuesTyped(
+            self: *const AwaitingHost,
+            comptime T: type,
+        ) error{ValueTypeOrCountMismatch}!T {
+            const result_fields = tuple: {
+                switch (@typeInfo(T)) {
+                    .@"struct" => |s| if (s.is_tuple) break :tuple s.fields,
+                    else => {},
+                }
+
+                @compileError("expect tuple, got " ++ @typeName(T));
+            };
+
+            const interp: *const Interpreter = self.interpreter();
+            const types = self.types;
+            var results: T = undefined;
+            inline for (
+                0..result_fields.len,
+                result_fields,
+                types,
+                interp.value_stack.items[interp.value_stack.items.len - types.len ..],
+            ) |i, *field, ty, *src| {
+                results[i] = val: switch (field.type) {
+                    i32, u32 => {
+                        if (ty != .i32) return error.ValueTypeOrCountMismatch;
+                        break :val src.i32;
+                    },
+                    i64, u64 => {
+                        if (ty != .i64) return error.ValueTypeOrCountMismatch;
+                        break :val src.i64;
+                    },
+                    f32 => {
+                        if (ty != .f32) return error.ValueTypeOrCountMismatch;
+                        break :val src.f32;
+                    },
+                    f64 => {
+                        if (ty != .f64) return error.ValueTypeOrCountMismatch;
+                        break :val src.f64;
+                    },
+                    runtime.ExternAddr => {
+                        if (ty != .externref) return error.ValueTypeOrCountMismatch;
+                        break :val src.externref.addr;
+                    },
+                    FuncRef => {
+                        if (ty != .funcref) return error.ValueTypeOrCountMismatch;
+                        break :val src.funcref;
+                    },
+                    else => @compileError("unsupported result type " ++ @typeName(field.type)),
+                };
+            }
+
+            return results;
         }
 
         /// Begins the process of calling a function, allocating stack space.
@@ -474,7 +554,7 @@ pub const State = union(enum) {
             switch (setup) {
                 .wasm_validate => interp.state = .{ .awaiting_validation = .{} },
                 .wasm_ready => interp.enterMainLoop(fuel),
-                .host_ready => self.result_types = signature.parameters(),
+                .host_ready => self.types = signature.parameters(),
             }
 
             return &interp.state;
@@ -525,7 +605,7 @@ pub const State = union(enum) {
                         .awaiting_validation = .{},
                     },
                     .wasm_ready => interp.enterMainLoop(fuel),
-                    .host_ready => self.result_types = &[0]Module.ValType{},
+                    .host_ready => self.types = &[0]Module.ValType{},
                 }
 
                 return &interp.state;
@@ -533,6 +613,17 @@ pub const State = union(enum) {
                 std.debug.assert(module.instantiated);
                 return &interp.state;
             }
+        }
+
+        pub fn currentHostFunction(
+            self: *const AwaitingHost,
+        ) ?*const runtime.FuncAddr.Expanded.Host {
+            const interp: *const Interpreter = self.interpreter();
+            if (interp.call_stack.items.len == 0)
+                return null;
+
+            return &interp.call_stack.items[interp.call_stack.items.len - 1]
+                .function.expanded().host;
         }
 
         /// Return from the currently executing host function to the calling function, typically
@@ -580,14 +671,39 @@ pub const State = union(enum) {
                 .wasm => |wasm| {
                     interp.hash_stack.pop(
                         wasm,
-                        interp.value_stack[current.values_base..popped.values_base],
+                        interp.value_stack.items[current.values_base..popped.values_base],
                     );
                     interp.enterMainLoop(fuel);
                 },
-                .host => self.result_types = signature.results(),
+                .host => self.types = signature.results(),
             }
 
             return &interp.state;
+        }
+
+        pub fn returnFromHostTyped(
+            self: *AwaitingHost,
+            results: anytype,
+            fuel: *Fuel,
+        ) error{ValueTypeOrCountMismatch}!*State {
+            if (@TypeOf(results) == void)
+                return self.returnFromHost(&[0]TaggedValue{}, fuel);
+
+            const results_len = len: {
+                switch (@typeInfo(@TypeOf(results))) {
+                    .@"struct" => |s| if (s.is_tuple) break :len s.fields.len,
+                    else => {},
+                }
+
+                @compileError("expect result tuple, got " ++ @typeName(@TypeOf(results)));
+            };
+
+            var result_array: [results_len]TaggedValue = undefined;
+            inline for (&result_array, results) |*dst, src| {
+                dst.* = TaggedValue.initInferred(src);
+            }
+
+            return self.returnFromHost(&result_array, fuel);
         }
     };
 
@@ -668,7 +784,7 @@ pub const State = union(enum) {
                 .wasm_ready => interp.enterMainLoop(fuel),
                 .host_ready => interp.state = .{
                     .awaiting_host = .{
-                        .result_types = args.signature.parameters(),
+                        .types = args.signature.parameters(),
                     },
                 },
             }
@@ -734,7 +850,7 @@ pub const State = union(enum) {
     };
 
     pub const initial = State{
-        .awaiting_host = .{ .result_types = &[0]Module.ValType{} },
+        .awaiting_host = .{ .types = &[0]Module.ValType{} },
     };
 };
 
@@ -1104,7 +1220,7 @@ fn returnFromWasm(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *F
 
     const signature = popped.function.signature();
     std.debug.assert(signature.result_count == popped.result_count);
-    int.state = .{ .awaiting_host = .{ .result_types = signature.results() } };
+    int.state = .{ .awaiting_host = .{ .types = signature.results() } };
 }
 
 /// Continues execution of WASM code up to calling the `target_function`, with arguments expected
@@ -1167,7 +1283,7 @@ inline fn invokeWithinWasm(
             }
         },
         .host_ready => int.state = .{
-            .awaiting_host = .{ .result_types = signature.parameters() },
+            .awaiting_host = .{ .types = signature.parameters() },
         },
         .wasm_validate => int.state = .{ .awaiting_validation = .{} },
     }

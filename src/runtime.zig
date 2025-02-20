@@ -1136,11 +1136,13 @@ pub const FuncAddr = extern struct {
     };
 
     pub const Expanded = union(enum) {
-        host: struct {
-            func: *Host,
-            data: ?*anyopaque,
-        },
+        host: Expanded.Host,
         wasm: Wasm,
+
+        pub const Host = struct {
+            func: *FuncAddr.Host,
+            data: ?*anyopaque,
+        };
 
         pub const Wasm = struct {
             module: ModuleInst,
