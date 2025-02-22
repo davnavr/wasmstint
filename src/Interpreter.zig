@@ -171,19 +171,17 @@ const HashStack = struct {
 
     fn hash(
         prev_hash: u64,
-        func: runtime.FuncAddr.Expanded.Wasm,
-        values: []Value,
+        frame: *const StackFrame,
+        values: []const Value,
+        values_end: u32,
     ) u64 {
         var hasher = std.hash.XxHash64.init(prev_hash);
+        std.debug.assert(frame.function.expanded() == .wasm);
 
-        hasher.update(std.mem.asBytes(&func.module.data));
-        hasher.update(std.mem.asBytes(&func.idx));
-
-        for (values) |*val| {
-            // Note that padding bytes might get inadvertently hashed, but since those values shouldn't
-            // be modified anyway, it should be fine.
-            hasher.update(std.mem.asBytes(val));
-        }
+        // Note that padding bytes might get inadvertently hashed, but since those values shouldn't
+        // be modified anyway, it should be fine.
+        hasher.update(std.mem.asBytes(frame));
+        hasher.update(std.mem.sliceAsBytes(values[frame.values_base..values_end]));
 
         return hasher.final();
     }
@@ -194,38 +192,30 @@ const HashStack = struct {
     fn push(
         stack: *HashStack,
         alloca: Allocator,
-        func: runtime.FuncAddr.Expanded.Wasm,
-        values: []Value,
+        frame: *const StackFrame,
+        values: []const Value,
+        values_end: u32,
     ) Allocator.Error!void {
         if (!enabled) return;
-
-        // std.debug.print(
-        //     "HASH PUSH: {} values starting at {*}\n",
-        //     .{ values.len, values.ptr },
-        // );
 
         const prev_hash = stack.prevHash();
         const new_hash = try stack.inner.addOne(alloca);
         errdefer comptime unreachable;
-        new_hash.* = hash(prev_hash, func, values);
+        new_hash.* = hash(prev_hash, frame, values, values_end);
     }
 
     /// Asserts that the WASM function that is now the top of the call stack did not have
     /// its value stack and local variables modified.
     fn pop(
         stack: *HashStack,
-        func: runtime.FuncAddr.Expanded.Wasm,
-        values: []Value,
+        frame: *const StackFrame,
+        values: []const Value,
+        values_end: u32,
     ) void {
         if (!enabled) return;
 
-        // std.debug.print(
-        //     "HASH POP: {} values starting at {*}\n",
-        //     .{ values.len, values.ptr },
-        // );
-
         const expected_hash: u64 = stack.inner.pop().?;
-        const actual_hash: u64 = hash(stack.prevHash(), func, values);
+        const actual_hash: u64 = hash(stack.prevHash(), frame, values, values_end);
         if (expected_hash != actual_hash) {
             std.debug.panic(
                 "bad function hash: expected 0x{X:0>16}, got 0x{X:0>16}",
@@ -668,10 +658,11 @@ pub const State = union(enum) {
 
             const current = interp.currentFrame();
             switch (current.function.expanded()) {
-                .wasm => |wasm| {
+                .wasm => {
                     interp.hash_stack.pop(
-                        wasm,
-                        interp.value_stack.items[current.values_base..popped.values_base],
+                        current,
+                        interp.value_stack.items,
+                        popped.values_base,
                     );
                     interp.enterMainLoop(fuel);
                 },
@@ -1033,8 +1024,9 @@ fn setupStackFrame(
     {
         try interp.hash_stack.push(
             alloca,
-            interp.currentFrame().function.expanded().wasm,
-            interp.value_stack.items[interp.currentFrame().values_base..values_base],
+            interp.currentFrame(),
+            interp.value_stack.items,
+            values_base,
         );
     }
 
@@ -1180,8 +1172,9 @@ fn returnFromWasm(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *F
 
     if (int.call_stack.items.len > 0 and int.currentFrame().function.expanded() == .wasm) {
         int.hash_stack.pop(
-            int.currentFrame().function.expanded().wasm,
-            vals.items[int.currentFrame().values_base..loc],
+            int.currentFrame(),
+            vals.items,
+            loc,
         );
     }
 
