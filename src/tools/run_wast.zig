@@ -158,12 +158,12 @@ pub fn main() !u8 {
     for (arguments.run) |script_path| {
         defer progress_root.completeOne();
 
-        const full_script_path_fmt = std.fs.path.fmtAsUtf8Lossy(script_path);
+        const script_path_fmt = std.fs.path.fmtAsUtf8Lossy(script_path);
         const script_buf: []const u8 = buf: {
             const script_file = cwd.openFileZ(script_path, .{}) catch |e| {
                 std.debug.print(
                     "Could not open script file {}: {!}",
-                    .{ full_script_path_fmt, e },
+                    .{ script_path_fmt, e },
                 );
                 return e;
             };
@@ -179,7 +179,7 @@ pub fn main() !u8 {
             script_file.reader().readAllArrayList(&file_buffer, file_max_bytes) catch |e| {
                 if (e != error.OutOfMemory) std.debug.print(
                     "Could not read script file {}",
-                    .{full_script_path_fmt},
+                    .{script_path_fmt},
                 );
                 return e;
             };
@@ -193,14 +193,6 @@ pub fn main() !u8 {
             _ = parse_arena.allocator().alloc(u8, script_buf.len) catch {};
             _ = parse_arena.reset(.retain_capacity);
         }
-
-        const script_name_lossy = std.unicode.Utf8View{
-            .bytes = try std.fmt.allocPrint(
-                parse_arena.allocator(),
-                "{}",
-                .{std.fs.path.fmtAsUtf8Lossy(std.fs.path.basename(script_path))},
-            ),
-        };
 
         var errors = Wast.Errors.init(parse_arena.allocator());
 
@@ -238,7 +230,7 @@ pub fn main() !u8 {
                 &encoding_buffer,
                 &parse_arena,
                 progress_root,
-                script_name_lossy,
+                script_path,
                 &errors,
             );
         }
@@ -272,7 +264,7 @@ pub fn main() !u8 {
             while (errors_iter.next()) |err| {
                 try w.print(
                     "{}:{}: ",
-                    .{ full_script_path_fmt, err.loc },
+                    .{ script_path_fmt, err.loc },
                 );
 
                 // TODO: https://ziglang.org/documentation/master/std/#std.io.tty.Config.setColor
@@ -385,7 +377,7 @@ pub fn main() !u8 {
                 try w.writeAll("\x1B[39m");
             }
 
-            try w.print(" - {}\n", .{full_script_path_fmt});
+            try w.print(" - {}\n", .{script_path_fmt});
 
             try buf_writer.flush();
         }
@@ -577,6 +569,7 @@ const State = struct {
     const Interpreter = wasmstint.Interpreter;
 
     errors: Wast.sexpr.Parser.Context,
+    script_path: []const u8,
 
     /// Allocated in the `run_arena`.
     module_lookups: std.AutoHashMapUnmanaged(Wast.Ident.Interned, ModuleInst) = .empty,
@@ -624,31 +617,54 @@ const State = struct {
         state: *State,
         interpreter: *Interpreter,
         fuel: *Interpreter.Fuel,
+        parent: Wast.sexpr.TokenId,
     ) Allocator.Error!void {
         for (0..1_024) |_| {
             switch (interpreter.state) {
                 .awaiting_host => |*host| if (interpreter.call_stack.items.len == 0) {
                     return;
                 } else {
-                    std.Progress.lockStdErr();
-                    defer std.Progress.unlockStdErr();
-
                     const callee = host.currentHostFunction().?;
                     const print_func_idx = @divExact(
                         @intFromPtr(callee.func) - @intFromPtr(&SpectestImports.PrintFunction.functions),
                         @sizeOf(wasmstint.runtime.FuncAddr.Host),
                     );
 
-                    switch (SpectestImports.PrintFunction.all[print_func_idx]) {
-                        .print_i32 => {
-                            std.debug.print(
-                                "TODO INSERT DIAGNOSTIC INFO = print_i32({})\n",
-                                host.valuesTyped(struct { i32 }) catch unreachable,
-                            );
-                            _ = host.returnFromHostTyped({}, fuel) catch unreachable;
+                    const print_func = SpectestImports.PrintFunction.all[print_func_idx];
+
+                    std.Progress.lockStdErr();
+                    defer std.Progress.unlockStdErr();
+
+                    var stderr_buf = std.io.BufferedWriter(128, std.fs.File.Writer){
+                        .unbuffered_writer = std.io.getStdErr().writer(),
+                    };
+                    defer stderr_buf.flush() catch {};
+
+                    const stderr = stderr_buf.writer();
+                    stderr.print(
+                        "{s}:{} - {s}(",
+                        .{
+                            state.script_path,
+                            state.errors.locator.locate(
+                                state.errors.tree.source,
+                                parent.offset(state.errors.tree).start,
+                            ),
+                            @tagName(print_func),
                         },
+                    ) catch {};
+
+                    switch (print_func) {
+                        .print => {},
+                        .print_i32 => stderr.print(
+                            "{}",
+                            host.valuesTyped(struct { i32 }) catch unreachable,
+                        ) catch {},
                         else => |bad| std.debug.panic("TODO: Handle host call {any}", .{bad}),
                     }
+
+                    _ = host.returnFromHostTyped({}, fuel) catch unreachable;
+
+                    stderr.writeAll(")\n") catch {};
                 },
                 .awaiting_validation => unreachable,
                 .call_stack_exhaustion => |*oof| {
@@ -1079,7 +1095,7 @@ const State = struct {
         script: *const Wast,
         results: []const Wast.Command.Result,
     ) Error!void {
-        try state.runToCompletion(interpreter, fuel);
+        try state.runToCompletion(interpreter, fuel, parent);
         switch (interpreter.state) {
             .awaiting_validation => unreachable,
             .call_stack_exhaustion => return state.errorCallStackExhausted(parent),
@@ -1150,7 +1166,7 @@ const State = struct {
         parent: Wast.sexpr.TokenId,
         failure: *const Wast.Command.Failure,
     ) Error!void {
-        try state.runToCompletion(interpreter, fuel);
+        try state.runToCompletion(interpreter, fuel, parent);
         const trap: *const Interpreter.Trap = switch (interpreter.state) {
             .awaiting_validation => unreachable,
             .trapped => |*trap| trap,
@@ -1212,7 +1228,7 @@ const State = struct {
             );
         }
 
-        state.runToCompletion(interpreter, fuel) catch return;
+        state.runToCompletion(interpreter, fuel, parent) catch return;
 
         switch (interpreter.state) {
             .awaiting_validation => unreachable,
@@ -1348,10 +1364,16 @@ fn runScript(
     encoding_buffer: *std.ArrayList(u8),
     run_arena: *ArenaAllocator, // Must not be reset for the lifetime of this function call.
     progress_root: std.Progress.Node,
-    script_path: std.unicode.Utf8View,
+    script_path: [:0]const u8,
     errors: *Wast.Errors,
 ) Allocator.Error!u32 {
-    const script_progress = progress_root.start(script_path.bytes, script.commands.len);
+    const script_name = try std.fmt.allocPrint(
+        run_arena.allocator(),
+        "{}",
+        .{std.fs.path.fmtAsUtf8Lossy(std.fs.path.basename(script_path))},
+    );
+
+    const script_progress = progress_root.start(script_name, script.commands.len);
     defer script_progress.end();
 
     var store = wasmstint.runtime.ModuleAllocator.WithinArena{
@@ -1363,6 +1385,11 @@ fn runScript(
         .errors = .{ .tree = script.tree, .errors = errors },
         .next_module_arena = ArenaAllocator.init(run_arena.allocator()),
         .cmd_arena = ArenaAllocator.init(run_arena.allocator()),
+        .script_path = try std.fmt.allocPrint(
+            run_arena.allocator(),
+            "{}",
+            .{std.fs.path.fmtAsUtf8Lossy(script_path)},
+        ),
         .store = &store,
     };
 
@@ -1386,7 +1413,7 @@ fn runScript(
             name: {
                 var cmd_name_buf = try std.ArrayList(u8).initCapacity(
                     state.cmd_arena.allocator(),
-                    script_path.bytes.len +% 5,
+                    script_name.len +% 5,
                 );
 
                 const cmd_loc = state.errors.locator.locate(
@@ -1396,7 +1423,7 @@ fn runScript(
 
                 try cmd_name_buf.writer().print(
                     "{s}:{} - {s}",
-                    .{ script_path.bytes, cmd_loc, cmd.keyword.contents(script.tree) },
+                    .{ script_name, cmd_loc, cmd.keyword.contents(script.tree) },
                 );
 
                 break :name cmd_name_buf.items;
@@ -1712,7 +1739,7 @@ fn runScript(
                 switch (action) {
                     .invoke => {
                         // TODO: Does invoke error-out if its action results in a trap?
-                        try state.runToCompletion(&interp, &fuel);
+                        try state.runToCompletion(&interp, &fuel, cmd.keyword);
                     },
                     .get => {},
                 }
