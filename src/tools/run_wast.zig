@@ -141,11 +141,30 @@ pub fn main() !u8 {
         break :rng init;
     };
 
+    const progress_draw_buf = try std.heap.page_allocator.alloc(
+        u8,
+        std.heap.pageSize() * 2,
+    );
+    defer std.heap.page_allocator.free(progress_draw_buf);
+
+    const progress_root = std.Progress.start(.{
+        .root_name = "scripts",
+        .estimated_total_items = arguments.run.len,
+        .draw_buffer = progress_draw_buf,
+    });
+    defer progress_root.end();
+
     var fail = false;
     for (arguments.run) |script_path| {
+        defer progress_root.completeOne();
+
+        const full_script_path_fmt = std.fs.path.fmtAsUtf8Lossy(script_path);
         const script_buf: []const u8 = buf: {
             const script_file = cwd.openFileZ(script_path, .{}) catch |e| {
-                std.debug.print("Could not open script file {s}: {!}", .{ script_path, e });
+                std.debug.print(
+                    "Could not open script file {}: {!}",
+                    .{ full_script_path_fmt, e },
+                );
                 return e;
             };
 
@@ -158,7 +177,10 @@ pub fn main() !u8 {
             }
 
             script_file.reader().readAllArrayList(&file_buffer, file_max_bytes) catch |e| {
-                if (e != error.OutOfMemory) std.debug.print("Could not read script file {s}", .{script_path});
+                if (e != error.OutOfMemory) std.debug.print(
+                    "Could not read script file {}",
+                    .{full_script_path_fmt},
+                );
                 return e;
             };
 
@@ -171,6 +193,14 @@ pub fn main() !u8 {
             _ = parse_arena.allocator().alloc(u8, script_buf.len) catch {};
             _ = parse_arena.reset(.retain_capacity);
         }
+
+        const script_name_lossy = std.unicode.Utf8View{
+            .bytes = try std.fmt.allocPrint(
+                parse_arena.allocator(),
+                "{}",
+                .{std.fs.path.fmtAsUtf8Lossy(std.fs.path.basename(script_path))},
+            ),
+        };
 
         var errors = Wast.Errors.init(parse_arena.allocator());
 
@@ -207,6 +237,8 @@ pub fn main() !u8 {
                 rng.random(),
                 &encoding_buffer,
                 &parse_arena,
+                progress_root,
+                script_name_lossy,
                 &errors,
             );
         }
@@ -219,6 +251,9 @@ pub fn main() !u8 {
                     std.fs.File.Writer,
                 ),
             );
+
+            std.Progress.lockStdErr();
+            defer std.Progress.unlockStdErr();
 
             const raw_stderr = std.io.getStdErr();
             buf_writer.* = .{ .unbuffered_writer = raw_stderr.writer() };
@@ -236,10 +271,8 @@ pub fn main() !u8 {
             var errors_iter = errors.list.constIterator(0);
             while (errors_iter.next()) |err| {
                 try w.print(
-                    "{s}:{}: ",
-                    .{
-                        script_path, err.loc,
-                    },
+                    "{}:{}: ",
+                    .{ full_script_path_fmt, err.loc },
                 );
 
                 // TODO: https://ziglang.org/documentation/master/std/#std.io.tty.Config.setColor
@@ -352,7 +385,7 @@ pub fn main() !u8 {
                 try w.writeAll("\x1B[39m");
             }
 
-            try w.print(" - {s}\n", .{script_path});
+            try w.print(" - {}\n", .{full_script_path_fmt});
 
             try buf_writer.flush();
         }
@@ -597,6 +630,9 @@ const State = struct {
                 .awaiting_host => |*host| if (interpreter.call_stack.items.len == 0) {
                     return;
                 } else {
+                    std.Progress.lockStdErr();
+                    defer std.Progress.unlockStdErr();
+
                     const callee = host.currentHostFunction().?;
                     const print_func_idx = @divExact(
                         @intFromPtr(callee.func) - @intFromPtr(&SpectestImports.PrintFunction.functions),
@@ -1311,8 +1347,13 @@ fn runScript(
     rng: std.Random,
     encoding_buffer: *std.ArrayList(u8),
     run_arena: *ArenaAllocator, // Must not be reset for the lifetime of this function call.
+    progress_root: std.Progress.Node,
+    script_path: std.unicode.Utf8View,
     errors: *Wast.Errors,
 ) Allocator.Error!u32 {
+    const script_progress = progress_root.start(script_path.bytes, script.commands.len);
+    defer script_progress.end();
+
     var store = wasmstint.runtime.ModuleAllocator.WithinArena{
         .arena = run_arena,
         .mem_limit = .{ .up_to_amount = 2 * wasmstint.runtime.MemInst.page_size },
@@ -1327,7 +1368,10 @@ fn runScript(
 
     var pass_count: u32 = 0;
     run_cmds: for (script.commands.items(script.arena)) |cmd| {
-        defer _ = state.cmd_arena.reset(.retain_capacity);
+        defer {
+            _ = state.cmd_arena.reset(.retain_capacity);
+            script_progress.completeOne();
+        }
 
         var fuel = wasmstint.Interpreter.Fuel{ .remaining = starting_fuel };
         var interp = try wasmstint.Interpreter.init(state.cmd_arena.allocator(), options);
@@ -1337,6 +1381,29 @@ fn runScript(
         //     "TRACE: {any}\n",
         //     .{state.errors.locator.locate(script.tree.source, cmd.keyword.offset(script.tree).start)},
         // );
+
+        const cmd_progress = script_progress.start(
+            name: {
+                var cmd_name_buf = try std.ArrayList(u8).initCapacity(
+                    state.cmd_arena.allocator(),
+                    script_path.bytes.len +% 5,
+                );
+
+                const cmd_loc = state.errors.locator.locate(
+                    script.tree.source,
+                    cmd.keyword.offset(script.tree).start,
+                );
+
+                try cmd_name_buf.writer().print(
+                    "{s}:{} - {s}",
+                    .{ script_path.bytes, cmd_loc, cmd.keyword.contents(script.tree) },
+                );
+
+                break :name cmd_name_buf.items;
+            },
+            0,
+        );
+        defer cmd_progress.end();
 
         switch (cmd.keyword.tag(script.tree)) {
             .keyword_module => {
