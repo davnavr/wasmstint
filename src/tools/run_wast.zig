@@ -1615,37 +1615,48 @@ fn runScript(
             },
             .keyword_assert_trap => {
                 const assert_trap: *const Wast.Command.AssertTrap = cmd.inner.assert_trap.getPtr(script.arena);
+                switch (assert_trap.action_keyword.tag(script.tree)) {
+                    .keyword_invoke => {
+                        const invoke = &assert_trap.action.invoke;
+                        const action = state.beginAction(
+                            script,
+                            cmd.keyword,
+                            &Wast.Command.Action{
+                                .keyword = assert_trap.action_keyword,
+                                .module = invoke.module,
+                                .name = invoke.name,
+                                .target = .{
+                                    .invoke = .{ .arguments = invoke.arguments },
+                                },
+                            },
+                            &interp,
+                            &fuel,
+                        ) catch |e| switch (e) {
+                            error.OutOfMemory => |oom| return oom,
+                            error.ScriptError => break :run_cmds,
+                        };
+                        std.debug.assert(action == .invoke);
 
-                const action = state.beginAction(
-                    script,
-                    cmd.keyword,
-                    assert_trap.action.getPtr(script.arena),
-                    &interp,
-                    &fuel,
-                ) catch |e| switch (e) {
-                    error.OutOfMemory => |oom| return oom,
-                    error.ScriptError => break :run_cmds,
-                };
-
-                if (action != .invoke) {
-                    _ = try state.errors.errorAtToken(
-                        cmd.keyword,
-                        "reading globals never traps",
-                        @errorReturnTrace(),
-                    );
-                    break :run_cmds;
+                        state.expectTrap(
+                            script,
+                            &interp,
+                            &fuel,
+                            cmd.keyword,
+                            &assert_trap.failure,
+                        ) catch |e| switch (e) {
+                            error.OutOfMemory => |oom| return oom,
+                            error.ScriptError => break :run_cmds,
+                        };
+                    },
+                    else => {
+                        _ = try state.errors.errorAtToken(
+                            assert_trap.action_keyword,
+                            "TODO: bad assert_trap",
+                            @errorReturnTrace(),
+                        );
+                        break :run_cmds;
+                    },
                 }
-
-                state.expectTrap(
-                    script,
-                    &interp,
-                    &fuel,
-                    cmd.keyword,
-                    &assert_trap.failure,
-                ) catch |e| switch (e) {
-                    error.OutOfMemory => |oom| return oom,
-                    error.ScriptError => break :run_cmds,
-                };
             },
             .keyword_assert_exhaustion => {
                 const assert_exhaustion: *const Wast.Command.AssertExhaustion = cmd.inner.assert_exhaustion.getPtr(script.arena);

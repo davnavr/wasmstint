@@ -8,6 +8,7 @@ const ParseContext = sexpr.Parser.Context;
 const Wast = @import("../Wast.zig");
 const Ident = @import("ident.zig").Ident;
 const Name = @import("Name.zig");
+const Module = @import("Module.zig");
 
 const Caches = @import("Caches.zig");
 
@@ -409,8 +410,108 @@ pub const Failure = struct {
 };
 
 pub const AssertTrap = struct {
-    action: IndexedArena.Idx(Action),
+    /// The `invoke` or `module` keyword.
+    action_keyword: sexpr.TokenId,
+    action: AssertTrap.Action,
     failure: Failure,
+
+    pub const Action = union {
+        module: Module,
+        invoke: struct {
+            module: Ident.Symbolic align(4),
+            name: Name,
+            arguments: Arguments,
+        },
+    };
+
+    pub fn parseContents(
+        contents: *sexpr.Parser,
+        ctx: *ParseContext,
+        arena: *IndexedArena,
+        caches: *Caches,
+        parent: sexpr.List.Id,
+        scratch: *ArenaAllocator,
+    ) sexpr.Parser.ParseError!IndexedArena.Idx(AssertTrap) {
+        const assert_trap = try arena.create(AssertTrap);
+
+        const action_list = try contents.parseListInList(parent, ctx);
+
+        var action_parser = sexpr.Parser.init(action_list.contents(ctx.tree).values(ctx.tree));
+        const action_keyword = try action_parser.parseAtomInList(
+            action_list,
+            ctx,
+            "'invoke' or 'module'",
+        );
+
+        const action: AssertTrap.Action = action: switch (action_keyword.tag(ctx.tree)) {
+            .keyword_invoke => {
+                const module = try Ident.Symbolic.parse(
+                    &action_parser,
+                    ctx.tree,
+                    caches.allocator,
+                    &caches.ids,
+                );
+
+                _ = scratch.reset(.retain_capacity);
+                const name = try Name.parse(
+                    &action_parser,
+                    ctx,
+                    caches.allocator,
+                    &caches.names,
+                    arena,
+                    action_list,
+                    scratch,
+                );
+
+                break :action AssertTrap.Action{
+                    .invoke = .{
+                        .module = module,
+                        .name = name,
+                        .arguments = try parseConstOrResultList(
+                            &action_parser,
+                            Const,
+                            ctx,
+                            arena,
+                        ),
+                    },
+                };
+            },
+            .keyword_module => AssertTrap.Action{
+                .module = try Module.parseContents(
+                    &action_parser,
+                    ctx,
+                    arena,
+                    caches,
+                    scratch,
+                ),
+            },
+            else => return (try ctx.errorAtToken(
+                action_keyword,
+                "expected 'invoke' or 'module'",
+                @errorReturnTrace(),
+            )).err,
+        };
+
+        try action_parser.expectEmpty(ctx);
+
+        const failure = try Failure.parseInList(
+            contents,
+            ctx,
+            arena,
+            parent,
+            scratch,
+        );
+
+        errdefer comptime unreachable;
+
+        assert_trap.set(arena, AssertTrap{
+            .action_keyword = action_keyword,
+            .action = action,
+            .failure = failure,
+        });
+
+        return assert_trap;
+    }
 };
 
 pub const AssertExhaustion = struct {
