@@ -76,7 +76,7 @@ pub fn build(b: *std.Build) void {
             "tests/spec/call.wast",
             // "tests/spec/comment.wast", // TODO: pending support for module fields as abbreviation for module
             // "tests/spec/const.wast", // TODO: need to fix float literal parsing
-            // "tests/spec/conversions.wast",  // TODO: need to detect when @intFromFloat would cause a panic
+            "tests/spec/conversions.wast",
             "tests/spec/custom.wast",
             // "tests/spec/data.wast", // TODO: some keyword is incorrectly parsed as an instruction (revamp data segment parsing?)
             // "tests/spec/elem.wast", // TODO: parser needs support for non-inline imports and assert_trap on modules
