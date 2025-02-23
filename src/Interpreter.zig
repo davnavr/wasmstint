@@ -656,17 +656,21 @@ pub const State = union(enum) {
 
             popped.instantiate_flag.* = true;
 
-            const current = interp.currentFrame();
-            switch (current.function.expanded()) {
-                .wasm => {
-                    interp.hash_stack.pop(
-                        current,
-                        interp.value_stack.items,
-                        popped.values_base,
-                    );
-                    interp.enterMainLoop(fuel);
-                },
-                .host => self.types = signature.results(),
+            if (interp.call_stack.items.len > 0) {
+                const current = interp.currentFrame();
+                switch (current.function.expanded()) {
+                    .wasm => {
+                        interp.hash_stack.pop(
+                            current,
+                            interp.value_stack.items,
+                            popped.values_base,
+                        );
+                        interp.enterMainLoop(fuel);
+                    },
+                    .host => self.types = signature.results(),
+                }
+            } else {
+                self.types = signature.results();
             }
 
             return &interp.state;
@@ -677,8 +681,9 @@ pub const State = union(enum) {
             results: anytype,
             fuel: *Fuel,
         ) error{ValueTypeOrCountMismatch}!*State {
-            if (@TypeOf(results) == void)
+            if (@TypeOf(results) == void) {
                 return self.returnFromHost(&[0]TaggedValue{}, fuel);
+            }
 
             const results_len = len: {
                 switch (@typeInfo(@TypeOf(results))) {
@@ -995,7 +1000,7 @@ fn allocateValueStackSpace(
     return total;
 }
 
-inline fn currentFrame(interp: *Interpreter) *StackFrame {
+fn currentFrame(interp: *Interpreter) *StackFrame {
     return &interp.call_stack.items[interp.call_stack.items.len - 1];
 }
 
