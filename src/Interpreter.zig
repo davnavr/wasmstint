@@ -1661,14 +1661,26 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
                 return @bitCast(std.math.rotr(Unsigned, @bitCast(i_1), i_2));
             }
 
+            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-trunc-s
             fn trunc_s(z: anytype) !Signed {
                 if (std.math.isNan(z)) return error.NotANumber;
+
+                // std.debug.print(
+                //     "> ({[i]s}.trunc_{[f]s}_s) ({[f]s}.const {[z]d})\n",
+                //     .{ .i = @typeName(Signed), .f = @typeName(@TypeOf(z)), .z = z },
+                // );
 
                 const tr = @trunc(z);
                 return if (tr < std.math.minInt(Signed) or std.math.maxInt(Signed) < tr)
                     error.Overflow
                 else
-                    @intFromFloat(tr);
+                    std.math.cast(
+                        Signed,
+                        @as(
+                            std.meta.Int(.signed, @typeInfo(Signed).int.bits + 1),
+                            @intFromFloat(tr),
+                        ),
+                    ) orelse error.Overflow;
             }
 
             fn trunc_u(z: anytype) !Signed {
@@ -1678,7 +1690,18 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
                 return if (tr < -0.0 or std.math.maxInt(Unsigned) < tr)
                     error.Overflow
                 else
-                    @bitCast(@as(Unsigned, @intFromFloat(tr)));
+                    @bitCast(
+                        std.math.cast(
+                            Unsigned,
+                            @as(
+                                std.meta.Int(
+                                    .unsigned,
+                                    @typeInfo(Signed).int.bits + 1,
+                                ),
+                                @intFromFloat(tr),
+                            ),
+                        ) orelse return error.Overflow,
+                    );
             }
 
             fn trunc_sat_s(z: anytype) !Signed {
