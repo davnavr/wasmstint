@@ -120,6 +120,9 @@ pub fn main() !u8 {
     var scratch = ArenaAllocator.init(pages);
     defer scratch.deinit();
 
+    var stack_trace_arena = ArenaAllocator.init(std.heap.page_allocator);
+    defer stack_trace_arena.deinit();
+
     const arguments = try Arguments.parse(&arguments_arena, &scratch);
     memory_limit = arguments.soft_memory_limit -| (initial_memory_limit - memory_limit);
 
@@ -253,13 +256,15 @@ pub fn main() !u8 {
 
             var open_debug_info: std.debug.SelfInfo = undefined;
             const maybe_debug_info: ?*std.debug.SelfInfo = opened: {
-                open_debug_info = std.debug.SelfInfo.open(scratch.allocator()) catch
+                _ = stack_trace_arena.reset(.{ .retain_with_limit = memory_limit });
+
+                open_debug_info = std.debug.SelfInfo.open(stack_trace_arena.allocator()) catch
                     break :opened null;
 
                 break :opened &open_debug_info;
             };
 
-            var debug_symbol_arena = ArenaAllocator.init(scratch.allocator());
+            var debug_symbol_arena = ArenaAllocator.init(stack_trace_arena.allocator());
             var errors_iter = errors.list.constIterator(0);
             while (errors_iter.next()) |err| {
                 try w.print(
