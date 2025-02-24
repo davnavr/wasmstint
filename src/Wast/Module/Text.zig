@@ -1108,7 +1108,6 @@ pub const Data = struct {
     pub fn parseContents(
         contents: *sexpr.Parser,
         ctx: *ParseContext,
-        parent: sexpr.List.Id,
         arena: *IndexedArena,
         caches: *Caches,
         scratch: *ArenaAllocator,
@@ -1126,91 +1125,129 @@ pub const Data = struct {
                 .memory_keyword = undefined,
                 .has_offset = false,
             },
-            .offset = undefined,
-            .data = undefined,
+            .offset = .{
+                .keyword = .none,
+                .expr = undefined,
+            },
+            .data = .{ .contents = .empty },
         };
 
-        is_passive: {
-            var lookahead = contents.*;
-            const memuse_or_offset_list = (lookahead.parseValue() catch break :is_passive)
-                .getList() orelse break :is_passive;
+        const State = union(enum) {
+            start,
+            memuse: struct {
+                list: sexpr.List.Id,
+                parser: sexpr.Parser,
+            },
+            offset: struct {
+                list: sexpr.List.Id,
+                parser: sexpr.Parser,
+            },
+        };
 
-            contents.* = lookahead;
-            lookahead = undefined;
-            data.active.has_offset = true;
-            data.offset.keyword = .none;
+        state: switch (State{ .start = {} }) {
+            .start => {
+                var lookahead: sexpr.Parser = contents.*;
+                const memuse_or_offset_list =
+                    (lookahead.parseValue() catch break :state).getList() orelse break :state;
 
-            var memuse_parser = sexpr.Parser.init(
-                memuse_or_offset_list
-                    .contents(ctx.tree)
-                    .values(ctx.tree),
-            );
-            var offset_parser = memuse_parser;
+                contents.* = lookahead;
 
-            const memuse_or_offset_keyword = try memuse_parser.parseAtomInList(
-                memuse_or_offset_list,
-                ctx,
-                "'memory' or 'offset' keyword, or an instruction",
-            );
+                const offset_abbrev_parser =
+                    sexpr.Parser.init(memuse_or_offset_list.contents(ctx.tree).values(ctx.tree));
 
-            var offset_list = memuse_or_offset_list;
-            var offset_expr_parser = offset_parser;
-            var maybe_offset_keyword = memuse_or_offset_keyword;
-            if (memuse_or_offset_keyword.tag(ctx.tree) == .keyword_memory) {
-                const mem_idx = try Ident.parse(
+                var memuse_or_offset_parser = offset_abbrev_parser;
+                const keyword = try memuse_or_offset_parser.parseAtomInList(
+                    memuse_or_offset_list,
+                    ctx,
+                    "'memory', 'offset', or instruction",
+                );
+
+                switch (keyword.tag(ctx.tree)) {
+                    .keyword_memory => {
+                        data.active.memory_keyword = keyword;
+                        continue :state State{
+                            .memuse = .{
+                                .parser = memuse_or_offset_parser,
+                                .list = memuse_or_offset_list,
+                            },
+                        };
+                    },
+                    .keyword_offset => {
+                        data.offset.keyword = sexpr.TokenId.Opt.init(keyword);
+                        continue :state State{
+                            .offset = .{
+                                .parser = memuse_or_offset_parser,
+                                .list = memuse_or_offset_list,
+                            },
+                        };
+                    },
+                    else => continue :state State{
+                        .offset = .{
+                            .parser = offset_abbrev_parser,
+                            .list = memuse_or_offset_list,
+                        },
+                    },
+                }
+            },
+            .memuse => |memuse| {
+                var memuse_parser = memuse.parser;
+                const memidx = try Ident.parse(
                     &memuse_parser,
                     ctx,
-                    memuse_or_offset_list,
+                    memuse.list,
                     caches.allocator,
                     &caches.ids,
                 );
 
-                data.memory = Ident.Opt.init(mem_idx);
-                data.active.memory_keyword = memuse_or_offset_keyword;
-
                 try memuse_parser.expectEmpty(ctx);
+                data.memory = Ident.Opt.init(memidx);
 
-                offset_list = try contents.parseListInList(parent, ctx);
-                offset_parser = sexpr.Parser.init(offset_list.contents(ctx.tree).values(ctx.tree));
-                offset_expr_parser = offset_parser;
-                maybe_offset_keyword = try offset_parser.parseAtomInList(
+                var lookahead: sexpr.Parser = contents.*;
+                const offset_list =
+                    (lookahead.parseValue() catch break :state).getList() orelse break :state;
+
+                contents.* = lookahead;
+
+                const offset_parser =
+                    sexpr.Parser.init(offset_list.contents(ctx.tree).values(ctx.tree));
+
+                var offset_parser_lookahead = offset_parser;
+                const keyword = try offset_parser_lookahead.parseAtomInList(
                     offset_list,
                     ctx,
-                    "'offset' keyword or instruction",
+                    "'offset' or instruction",
                 );
-            }
 
-            const maybe_offset_tag = maybe_offset_keyword.tag(ctx.tree);
-            std.debug.assert(maybe_offset_tag != .keyword_memory);
-
-            const has_offset_keyword = maybe_offset_tag == .keyword_offset;
-            if (has_offset_keyword) {
-                offset_expr_parser = offset_parser;
-                data.offset.keyword = sexpr.TokenId.Opt.init(maybe_offset_keyword);
-            }
-
-            offset_parser = undefined;
-
-            data.offset.expr = try Expr.parseContents(
-                &offset_expr_parser,
-                ctx,
-                offset_list,
-                arena,
-                caches,
-                scratch,
-            );
-
-            if (!has_offset_keyword and data.offset.expr.count != 2) {
-                _ = try ctx.errorFmtAtList(
-                    offset_list,
-                    .all,
-                    "offset abbreviation requires a single instruction, got {} instructions",
-                    .{data.offset.expr.count - 1},
-                    @errorReturnTrace(),
+                if (keyword.tag(ctx.tree) == .keyword_offset) {
+                    data.offset.keyword = sexpr.TokenId.Opt.init(keyword);
+                    continue :state State{
+                        .offset = .{
+                            .parser = offset_parser_lookahead,
+                            .list = offset_list,
+                        },
+                    };
+                } else continue :state State{
+                    .offset = .{
+                        .parser = offset_parser,
+                        .list = offset_list,
+                    },
+                };
+            },
+            .offset => |offset| {
+                var offset_parser = offset.parser;
+                data.active.has_offset = true;
+                data.offset.expr = try Expr.parseContents(
+                    &offset_parser,
+                    ctx,
+                    offset.list,
+                    arena,
+                    caches,
+                    scratch,
                 );
-            }
 
-            std.debug.assert(offset_expr_parser.isEmpty());
+                std.debug.assert(offset_parser.isEmpty());
+                break :state;
+            },
         }
 
         data.data = try DataString.parseContents(contents, ctx, arena);
@@ -1743,7 +1780,6 @@ pub fn parseFields(
                 const parsed_data = Data.parseContents(
                     &field_contents,
                     ctx,
-                    field_list,
                     arena,
                     caches,
                     scratch,
