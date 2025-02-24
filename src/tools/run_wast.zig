@@ -10,7 +10,7 @@ const Arguments = struct {
     rng_seed: u256 = 42,
     fuel: u64 = 2_500_000,
     call_stack_reserve: u32 = 100,
-    soft_memory_limit: usize = 256 * (1024 * 1024), // MiB
+    soft_memory_limit: usize = 128 * (1024 * 1024), // MiB
 
     const Flag = enum {
         run,
@@ -1234,10 +1234,12 @@ const State = struct {
             .awaiting_validation => unreachable,
             .call_stack_exhaustion => {},
             .trapped => |trap| return state.errorInterpreterTrap(parent, trap.code),
-            .interrupted => |interrupt| return state.errorInterpreterInterrupted(
-                parent,
-                interrupt.cause,
-            ),
+            .interrupted => |interrupt| if (interrupt.cause != .out_of_fuel) {
+                return state.errorInterpreterInterrupted(
+                    parent,
+                    interrupt.cause,
+                );
+            },
             .awaiting_host => return state.errorInterpreterResults(parent, interpreter),
         }
     }
