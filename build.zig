@@ -133,7 +133,7 @@ pub fn build(b: *std.Build) void {
 
             "tests/spec/skip-stack-guard-page.wast",
             "tests/spec/stack.wast",
-            // "tests/spec/start.wast", // TODO: start field parser
+            "tests/spec/start.wast",
             "tests/spec/store.wast",
             "tests/spec/switch.wast",
             // "tests/spec/table_copy.wast", // TODO: parsing non-inline imports
