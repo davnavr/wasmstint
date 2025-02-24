@@ -1070,10 +1070,10 @@ pub const TableInst = extern struct {
         if (len == 0) return;
 
         const src_slice: []const u8 = src.bytes()[src_idx * src.stride .. src_end_idx * src.stride];
-        std.debug.assert(@intFromPtr(src_slice.ptr) % src.stride == 0);
+        std.debug.assert(src_slice.len % src.stride == 0);
 
         const dst_slice = dst.bytes()[dst_idx * dst.stride .. dst_end_idx * dst.stride];
-        std.debug.assert(@intFromPtr(dst_slice.ptr) % dst.stride == 0);
+        std.debug.assert(dst_slice.len % dst.stride == 0);
 
         // This is duplicate code from the `memory.copy` helper
         if (@intFromPtr(src) == @intFromPtr(dst) and (dst_idx < src_end_idx or src_idx < dst_end_idx)) {
