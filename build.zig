@@ -92,7 +92,7 @@ pub fn build(b: *std.Build) void {
             "tests/spec/float_exprs.wast",
             "tests/spec/float_literals.wast",
             "tests/spec/float_memory.wast",
-            // "tests/spec/float_misc.wast", // TODO: rounding error in f32.nearest implementation caused by not picking the even when tied
+            "tests/spec/float_misc.wast",
             "tests/spec/forward.wast",
             "tests/spec/func_ptrs.wast",
             "tests/spec/func.wast",
