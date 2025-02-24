@@ -1785,6 +1785,8 @@ fn floatOpcodeHandlers(comptime F: type) type {
 
         const canonical_nan_bit: Bits = 1 << (std.math.floatMantissaBits(F) - 1);
 
+        const precise_int_limit = 1 << (std.math.floatMantissaBits(F) + 1);
+
         const operators = struct {
             fn convert_s(i: anytype) !F {
                 comptime std.debug.assert(@typeInfo(@TypeOf(i)).int.signedness == .signed);
@@ -1822,38 +1824,38 @@ fn floatOpcodeHandlers(comptime F: type) type {
                 return z_1 >= z_2;
             }
 
-            // https://webassembly.github.io/spec/core/exec/numerics.html#op-fabs
+            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-fabs
             fn abs(z: F) F {
                 return @abs(z);
             }
 
-            // https://webassembly.github.io/spec/core/exec/numerics.html#op-fneg
+            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-fneg
             fn neg(z: F) F {
                 // const Int = std.meta.Int(.unsigned, @bitSizeOf(F));
                 // return @bitCast(@as(Int, @bitCast(z)) ^ std.math.minInt(Int));
                 return -z;
             }
 
-            // https://webassembly.github.io/spec/core/exec/numerics.html#op-fceil
+            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-fceil
             fn ceil(z: F) F {
                 return @ceil(z);
             }
 
-            // https://webassembly.github.io/spec/core/exec/numerics.html#op-ffloor
+            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-ffloor
             fn floor(z: F) F {
                 return @floor(z);
             }
 
-            // https://webassembly.github.io/spec/core/exec/numerics.html#op-ftrunc
+            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-ftrunc
             fn trunc(z: F) F {
                 return if (z <= -0.0) @ceil(z) else @floor(z);
             }
 
-            // https://webassembly.github.io/spec/core/exec/numerics.html#op-fnearest
+            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-fnearest
             fn nearest(z: F) F {
-                // TODO: WASM seems to require rounds-to-nearest-ties-even
-                // '@round' compiles to 'llvm.round.*', but what is needed is 'llvm.roundeven.*'
+                // WASM requires rounds-to-nearest-ties-even
 
+                // '@round' compiles to 'llvm.round.*', but what is needed is 'llvm.roundeven.*'
                 // See also:
                 // - https://github.com/ziglang/zig/issues/767
                 // - https://github.com/ziglang/zig/issues/2535
@@ -1873,28 +1875,43 @@ fn floatOpcodeHandlers(comptime F: type) type {
                     std.math.isNegativeZero(z))
                 {
                     return z;
+                } else if (0 < z and z <= 0.5) {
+                    return 0.0;
+                } else if (-0.5 <= z and z < 0) {
+                    return -0.0;
                 }
 
-                // Zig rounds away from zero, so this tries to catch that.
-                const rounded = @round(z);
-                const rounded_towards_zero = @round(if (std.math.signbit(z)) z + 1.0 else z - 1.0);
+                const left_int = @round(z);
+                const right_int = @round(if (std.math.signbit(z)) z + 1.0 else z - 1.0);
 
-                const dist_to_rounded = @abs(rounded - z);
-                const dist_to_rounded_towards_zero = @abs(rounded_towards_zero - z);
+                const left_dist = @abs(left_int - z);
+                const right_dist = @abs(right_int - z);
 
-                // Does this pick the even one if the distance is the "same"?
+                if (left_dist < right_dist) {
+                    return left_int;
+                } else if (right_dist < left_dist) {
+                    return right_dist;
+                } else if (-@as(F, precise_int_limit) < z and z < @as(F, precise_int_limit)) {
+                    const RoundedInt = std.math.IntFittingRange(-precise_int_limit, precise_int_limit);
 
-                return if ((std.math.signbit(rounded) != std.math.signbit(rounded_towards_zero)) and
-                    !(std.math.isPositiveZero(rounded) or std.math.isNegativeZero(rounded)) and
-                    !(std.math.isPositiveZero(rounded_towards_zero) or std.math.isNegativeZero(rounded_towards_zero)))
-                    if (std.math.signbit(z)) -0.0 else 0.0
-                else if (dist_to_rounded < dist_to_rounded_towards_zero)
-                    rounded
-                else
-                    rounded_towards_zero;
+                    // Both candidates are the same distance from `z`, so pick the even one
+                    const left_i: RoundedInt = @intFromFloat(left_int);
+                    const right_i: RoundedInt = @intFromFloat(right_int);
+                    std.debug.assert(left_i != right_i);
+
+                    if (@rem(left_i, 2) == 0) {
+                        std.debug.assert(@rem(right_i, 2) != 0);
+                        return left_int;
+                    } else {
+                        return right_int;
+                    }
+                } else {
+                    std.debug.assert(left_int == right_int);
+                    return left_int;
+                }
             }
 
-            // https://webassembly.github.io/spec/core/exec/numerics.html#op-fsqrt
+            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-fsqrt
             fn sqrt(z: F) F {
                 return std.math.sqrt(z);
             }
