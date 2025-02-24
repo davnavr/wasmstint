@@ -26,7 +26,7 @@ const Instr = @This();
 
 pub fn tag(instr: *const Instr, tree: *const sexpr.Tree) ?Lexer.Token.InstrTag {
     const atom = instr.keyword.getAtom() orelse return null;
-    return Lexer.Token.tagToInstrTag(atom.tag(tree));
+    return Lexer.Token.tagToInstrTag(atom.tag(tree)).?;
 }
 
 /// Optimizations (CSE) should ensure accessing argument information simply
@@ -95,7 +95,7 @@ pub const List = struct {
         const Args: type = @TypeOf(arguments);
 
         const expected = Arguments.tagFromType(Args);
-        const actual = argumentTag(Lexer.Token.tagToInstrTag(keyword.tag(tree)));
+        const actual = argumentTag(Lexer.Token.tagToInstrTag(keyword.tag(tree)).?);
         if (expected != actual and @import("builtin").mode == .Debug) {
             std.debug.panic("{} != {} for {s}", .{ expected, actual, @typeName(Args) });
         }
@@ -559,8 +559,13 @@ pub fn parseArgs(
     caches: *Caches,
     scratch: *ArenaAllocator,
 ) sexpr.Parser.ParseError!void {
-    // TODO: If keyword.tag is not an instruction, shouldn't this just return an error?
-    switch (argumentTag(Lexer.Token.tagToInstrTag(keyword.tag(ctx.tree)))) {
+    const instr_tag = Lexer.Token.tagToInstrTag(keyword.tag(ctx.tree)) orelse return (try ctx.errorAtToken(
+        keyword,
+        "expected instruction",
+        @errorReturnTrace(),
+    )).err;
+
+    switch (argumentTag(instr_tag)) {
         .none => try list.append(list_arena, keyword, {}, ctx.tree),
         .block_type => {
             _ = scratch.reset(.retain_capacity);

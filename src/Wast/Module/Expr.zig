@@ -404,7 +404,7 @@ pub const Iterator = struct {
             .arguments = .{ .none = @ptrFromInt(4) },
         };
 
-        switch (Lexer.Token.tagToInstrTag(atom.tag(iter.tree))) {
+        switch (Lexer.Token.tagToInstrTag(atom.tag(iter.tree)).?) {
             inline else => |tag| {
                 const argument_name = @tagName(comptime Instr.argumentTag(tag));
                 const Args = @typeInfo(@FieldType(Instr.Arguments, argument_name)).pointer.child;

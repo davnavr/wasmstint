@@ -181,14 +181,11 @@ pub const Token = struct {
 
     comptime {
         std.debug.assert(!@hasField(InstrTag, "ident"));
+        std.debug.assert(!@hasField(InstrTag, "select t"));
     }
 
-    pub fn tagToInstrTag(tag: Tag) InstrTag {
-        // return @enumFromInt(@as(
-        //     @typeInfo(InstrTag).@"enum".tag_type,
-        //     @intCast(@intFromEnum(tag) - @intFromEnum(Tag.keyword_nop)),
-        // ));
-        return @enumFromInt(@intFromEnum(tag));
+    pub fn tagToInstrTag(tag: Tag) ?InstrTag {
+        return std.meta.intToEnum(InstrTag, @intFromEnum(tag)) catch null;
     }
 
     pub fn contents(token: *const Token, src: []const u8) []const u8 {
