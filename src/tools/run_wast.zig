@@ -10,7 +10,7 @@ const Arguments = struct {
     rng_seed: u256 = 42,
     fuel: u64 = 2_500_000,
     call_stack_reserve: u32 = 100,
-    soft_memory_limit: usize = 100 * (1024 * 1024), // 100 MiB
+    soft_memory_limit: usize = 256 * (1024 * 1024), // MiB
 
     const Flag = enum {
         run,
@@ -1432,6 +1432,8 @@ fn runScript(
         );
         defer cmd_progress.end();
 
+        var scratch = ArenaAllocator.init(state.cmd_arena.allocator());
+
         switch (cmd.keyword.tag(script.tree)) {
             .keyword_module => {
                 _ = state.next_module_arena.reset(.retain_capacity);
@@ -1446,11 +1448,13 @@ fn runScript(
                     script.caches,
                     encoding_buffer.writer(),
                     errors,
-                    &state.cmd_arena,
+                    &scratch,
                 );
 
                 if (before_encode_error_count < errors.list.len)
                     break :run_cmds;
+
+                _ = scratch.reset(.retain_capacity);
 
                 var module_contents: []const u8 = if (module.name.some)
                     try run_arena.allocator().dupe(u8, encoding_buffer.items)
@@ -1461,7 +1465,7 @@ fn runScript(
                 parsed_module.* = wasmstint.Module.parse(
                     module_arena.allocator(),
                     &module_contents,
-                    &state.cmd_arena,
+                    &scratch,
                     rng,
                     .{ .realloc_contents = true },
                 ) catch |e| switch (e) {
@@ -1477,10 +1481,12 @@ fn runScript(
                     },
                 };
 
-                //parsed_module.finishCodeValidationInParallel(state.cmd_arena, thread_pool)
+                _ = scratch.reset(.retain_capacity);
+
+                //parsed_module.finishCodeValidationInParallel(&scratch, thread_pool)
                 const validation_finished = parsed_module.finishCodeValidation(
                     module_arena.allocator(),
-                    &state.cmd_arena,
+                    &scratch,
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
                     else => |validation_err| {
@@ -1493,6 +1499,8 @@ fn runScript(
                         break :run_cmds;
                     },
                 };
+
+                _ = scratch.reset(.retain_capacity);
 
                 std.debug.assert(validation_finished);
 
@@ -1648,6 +1656,113 @@ fn runScript(
                             error.ScriptError => break :run_cmds,
                         };
                     },
+                    .keyword_module => {
+                        // Duplicate code taken from .keyword_module command handler
+                        const module = &assert_trap.action.module;
+
+                        encoding_buffer.clearRetainingCapacity();
+                        const before_encode_error_count = errors.list.len;
+                        try module.encode(
+                            script.tree,
+                            script.arena.dataSlice(),
+                            script.caches,
+                            encoding_buffer.writer(),
+                            errors,
+                            &scratch,
+                        );
+
+                        if (before_encode_error_count < errors.list.len)
+                            break :run_cmds;
+
+                        _ = scratch.reset(.retain_capacity);
+
+                        var wasm: []const u8 = encoding_buffer.items;
+                        var parsed_module = wasmstint.Module.parse(
+                            state.cmd_arena.allocator(),
+                            &wasm,
+                            &scratch,
+                            rng,
+                            .{ .realloc_contents = true },
+                        ) catch |e| switch (e) {
+                            error.OutOfMemory => |oom| return oom,
+                            else => |parse_error| {
+                                _ = try state.errors.errorFmtAtToken(
+                                    cmd.keyword,
+                                    "module failed to parse ({})",
+                                    .{parse_error},
+                                    @errorReturnTrace(),
+                                );
+                                break :run_cmds;
+                            },
+                        };
+
+                        _ = scratch.reset(.retain_capacity);
+
+                        const validation_finished = parsed_module.finishCodeValidation(
+                            state.cmd_arena.allocator(),
+                            &scratch,
+                        ) catch |e| switch (e) {
+                            error.OutOfMemory => |oom| return oom,
+                            else => |validation_err| {
+                                _ = try state.errors.errorFmtAtToken(
+                                    cmd.keyword,
+                                    "module validation error ({})",
+                                    .{validation_err},
+                                    @errorReturnTrace(),
+                                );
+                                break :run_cmds;
+                            },
+                        };
+
+                        std.debug.assert(validation_finished);
+
+                        var imports = try SpectestImports.init(&state.cmd_arena);
+                        var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
+                        var module_alloc = wasmstint.runtime.ModuleAlloc.allocate(
+                            &parsed_module,
+                            imports.provider(),
+                            state.cmd_arena.allocator(),
+                            store.allocator(),
+                            &import_error,
+                        ) catch |e| {
+                            switch (e) {
+                                error.OutOfMemory => {
+                                    _ = try state.errors.errorAtToken(
+                                        cmd.keyword,
+                                        "out of memory",
+                                        @errorReturnTrace(),
+                                    );
+                                },
+                                error.ImportFailure => _ = try state.errors.errorFmtAtToken(
+                                    cmd.keyword,
+                                    "could not provide import {s} {s}",
+                                    .{
+                                        import_error.module.bytes,
+                                        import_error.name.bytes,
+                                    },
+                                    @errorReturnTrace(),
+                                ),
+                            }
+                            break :run_cmds;
+                        };
+
+                        _ = try interp.state.awaiting_host.instantiateModule(
+                            state.cmd_arena.allocator(),
+                            &module_alloc,
+                            &fuel,
+                        );
+
+                        state.expectTrap(
+                            script,
+                            &interp,
+                            &fuel,
+                            cmd.keyword,
+                            &assert_trap.failure,
+                        ) catch |e| switch (e) {
+                            error.OutOfMemory => |oom| return oom,
+                            error.ScriptError => break :run_cmds,
+                        };
+                    },
                     else => {
                         _ = try state.errors.errorAtToken(
                             assert_trap.action_keyword,
@@ -1695,7 +1810,6 @@ fn runScript(
             .keyword_assert_invalid => {
                 if (true) continue; // For debugging purposes only!
 
-                var alloca = ArenaAllocator.init(state.cmd_arena.allocator());
                 const assert_invalid: *const Wast.Command.AssertInvalid = cmd.inner.assert_invalid.getPtr(script.arena);
 
                 // TODO: Actually check that validation fails with the right message.
@@ -1709,16 +1823,18 @@ fn runScript(
                     script.caches,
                     encoding_buffer.writer(),
                     &module_errors,
-                    &alloca,
+                    &scratch,
                 );
 
                 if (module_errors.list.len > 0) continue;
+
+                _ = scratch.reset(.retain_capacity);
 
                 var module_contents: []const u8 = encoding_buffer.items;
                 _ = wasmstint.Module.parse(
                     state.cmd_arena.allocator(),
                     &module_contents,
-                    &alloca,
+                    &scratch,
                     rng,
                     .{ .realloc_contents = true },
                 ) catch |e| switch (e) {
