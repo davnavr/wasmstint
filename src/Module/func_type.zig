@@ -31,4 +31,34 @@ pub const FuncType = extern struct {
             a.result_count == b.result_count and
             std.mem.eql(ValType, a.paramAndResultTypes(), b.paramAndResultTypes()));
     }
+
+    pub fn format(
+        func_type: FuncType,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+
+        for (0..func_type.param_count, func_type.parameters()) |i, param| {
+            if (i > 0) {
+                try writer.writeByte(' ');
+            }
+
+            try writer.print("(param {})", .{param});
+        }
+
+        if (func_type.param_count > 0 and func_type.result_count > 0) {
+            try writer.writeByte(' ');
+        }
+
+        for (0..func_type.param_count, func_type.parameters()) |i, param| {
+            if (i > 0) {
+                try writer.writeByte(' ');
+            }
+
+            try writer.print("(result {})", .{param});
+        }
+    }
 };

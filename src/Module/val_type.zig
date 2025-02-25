@@ -22,6 +22,17 @@ pub const ValType = enum(u8) { // packed union
         };
     }
 
+    pub fn format(
+        val_type: ValType,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        try writer.writeAll(@tagName(val_type));
+    }
+
     // comptime {
     //     std.debug.assert(@sizeOf(ValType) == @sizeOf(usize));
     //     std.debug.assert(@sizeOf(ValType) == @sizeOf(*const anytype));

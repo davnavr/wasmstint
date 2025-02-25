@@ -299,6 +299,17 @@ pub const Limits = extern struct {
     pub inline fn matches(a: *const Limits, b: *const Limits) bool {
         return a.min >= b.min and a.max <= b.max;
     }
+
+    pub fn format(
+        limits: *const Limits,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("{} {}", .{ limits.min, limits.max });
+    }
 };
 
 pub const TableType = extern struct {
@@ -310,6 +321,17 @@ pub const TableType = extern struct {
 
     pub fn matches(a: *const TableType, b: *const TableType) bool {
         return a.limits.matches(&b.limits) and a.elem_type.eql(b.elem_type);
+    }
+
+    pub fn format(
+        table_type: *const TableType,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("{} {}", .{ table_type.limits, table_type.elem_type });
     }
 };
 
@@ -324,6 +346,17 @@ pub const MemType = extern struct {
 
     pub fn matches(a: *const MemType, b: *const MemType) bool {
         return a.limits.matches(&b.limits);
+    }
+
+    pub fn format(
+        mem_type: *const MemType,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("{}", .{mem_type.limits});
     }
 };
 
@@ -345,6 +378,20 @@ pub const GlobalType = extern struct {
 
     pub fn matches(a: *const GlobalType, b: *const GlobalType) bool {
         return a.val_type.eql(b.val_type) and a.mut == b.mut;
+    }
+
+    pub fn format(
+        global_type: *const GlobalType,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        switch (global_type.mut) {
+            .@"const" => try writer.print("{}", .{global_type.val_type}),
+            .@"var" => try writer.print("(mut {})", .{global_type.val_type}),
+        }
     }
 };
 
