@@ -750,21 +750,53 @@ pub const ModuleInst = extern struct {
         ExportNotFound,
     };
 
+    fn exportVal(inst: ModuleInst, exp: *align(4) const Module.Export) ExternVal {
+        const instance = inst.header();
+        return switch (exp.desc_tag) {
+            .func => .{ .func = instance.funcAddr(exp.desc.func) },
+            .table => .{ .table = instance.tableAddr(exp.desc.table) },
+            .mem => .{ .mem = instance.memAddr(exp.desc.mem) },
+            .global => .{ .global = instance.globalAddr(exp.desc.global) },
+        };
+    }
+
     pub fn findExport(inst: ModuleInst, name: []const u8) FindExportError!ExternVal {
         const instance = inst.header();
 
         for (instance.module.exports()) |*exp| {
-            if (!std.mem.eql(u8, name, exp.name(instance.module).bytes)) continue;
+            if (!std.mem.eql(u8, name, exp.name(instance.module).bytes))
+                continue;
 
-            return switch (exp.desc_tag) {
-                .func => .{ .func = instance.funcAddr(exp.desc.func) },
-                .table => .{ .table = instance.tableAddr(exp.desc.table) },
-                .mem => .{ .mem = instance.memAddr(exp.desc.mem) },
-                .global => .{ .global = instance.globalAddr(exp.desc.global) },
-            };
+            return inst.exportVal(exp);
         }
 
         return error.ExportNotFound;
+    }
+
+    pub const ExportVals = struct {
+        inst: ModuleInst,
+        len: u32,
+
+        pub const Export = struct {
+            name: []const u8,
+            val: ExternVal,
+        };
+
+        pub fn at(self: ExportVals, i: usize) Export {
+            const module = self.inst.header().module;
+            const exp = &module.exports()[i];
+            return .{
+                .val = self.inst.exportVal(exp),
+                .name = exp.name(module).bytes,
+            };
+        }
+    };
+
+    pub fn exports(inst: ModuleInst) ExportVals {
+        return .{
+            .inst = inst,
+            .len = @intCast(inst.header().module.exports().len),
+        };
     }
 
     /// Callers must ensure that there are no dangling references to this module's functions,

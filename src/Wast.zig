@@ -103,15 +103,12 @@ pub fn parse(
                     error.ReportedParserError => continue,
                 };
 
-                const id = Ident.Opt.parse(
+                const id = try Ident.Symbolic.parse(
                     &cmd_parser,
-                    &parser_context,
+                    tree,
                     caches.allocator,
                     &caches.ids,
-                ) catch |e| switch (e) {
-                    error.OutOfMemory => |oom| return oom,
-                    error.ReportedParserError => continue,
-                };
+                );
 
                 register.set(arena, .{ .name = name, .id = id });
                 break :cmd .{ .register = register };

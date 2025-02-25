@@ -249,7 +249,7 @@ pub const Register = struct {
     /// Identifies which module to register for imports.
     ///
     /// If `.none`, then the latest initialized module is used.
-    id: Ident.Opt align(4),
+    id: Ident.Symbolic align(4),
 };
 
 pub const Arguments = IndexedArena.Slice(Const);

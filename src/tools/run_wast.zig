@@ -395,6 +395,56 @@ pub fn main() !u8 {
 
 const SpectestImports = struct {
     lookup: std.StringHashMapUnmanaged(wasmstint.runtime.ExternVal),
+    registered: RegisteredImports = .empty,
+    registered_context: RegisteredImportsContext,
+
+    const RegisteredImports = std.HashMapUnmanaged(
+        ImportName,
+        wasmstint.runtime.ExternVal,
+        RegisteredImportsContext,
+        std.hash_map.default_max_load_percentage,
+    );
+
+    const RegisteredImportsContext = struct {
+        seed: u32,
+
+        pub fn hash(ctx: RegisteredImportsContext, key: ImportName) u64 {
+            var hasher = std.hash.Wyhash.init(ctx.seed);
+            hasher.update(key.module());
+            hasher.update("\xFF");
+            hasher.update(key.name());
+            return hasher.final();
+        }
+
+        pub fn eql(_: RegisteredImportsContext, a: ImportName, b: ImportName) bool {
+            return std.mem.eql(u8, a.module(), b.module()) and
+                std.mem.eql(u8, a.name(), b.name());
+        }
+    };
+
+    const ImportName = struct {
+        module_ptr: [*]const u8,
+        module_len: u32,
+        name_len: u32,
+        name_ptr: [*]const u8,
+
+        fn init(module_bytes: []const u8, name_bytes: []const u8) ImportName {
+            return .{
+                .module_ptr = module_bytes.ptr,
+                .module_len = @intCast(module_bytes.len),
+                .name_ptr = name_bytes.ptr,
+                .name_len = @intCast(name_bytes.len),
+            };
+        }
+
+        fn module(self: *const ImportName) []const u8 {
+            return self.module_ptr[0..self.module_len];
+        }
+
+        fn name(self: *const ImportName) []const u8 {
+            return self.name_ptr[0..self.name_len];
+        }
+    };
 
     const PrintFunction = enum(u8) {
         print = 0,
@@ -475,11 +525,13 @@ const SpectestImports = struct {
 
     fn init(
         arena: *ArenaAllocator,
+        rng: std.Random,
         memory: *wasmstint.runtime.MemInst,
         table: wasmstint.runtime.TableAddr,
     ) Allocator.Error!SpectestImports {
         var imports = SpectestImports{
             .lookup = std.StringHashMapUnmanaged(wasmstint.runtime.ExternVal).empty,
+            .registered_context = .{ .seed = rng.int(u32) },
         };
 
         try imports.lookup.ensureTotalCapacity(
@@ -522,13 +574,16 @@ const SpectestImports = struct {
         name: std.unicode.Utf8View,
         desc: wasmstint.runtime.ImportProvider.Desc,
     ) ?wasmstint.runtime.ExternVal {
-        const host: *SpectestImports = @ptrCast(@alignCast(ctx));
+        const host: *const SpectestImports = @ptrCast(@alignCast(ctx));
         _ = desc;
 
-        if (!std.mem.eql(u8, "spectest", module.bytes))
-            return null;
-
-        return host.lookup.get(name.bytes);
+        return if (std.mem.eql(u8, "spectest", module.bytes))
+            host.lookup.get(name.bytes)
+        else
+            host.registered.getContext(
+                ImportName.init(module.bytes, name.bytes),
+                host.registered_context,
+            );
     }
 };
 
@@ -586,9 +641,6 @@ const State = struct {
     /// Allocated in the `run_arena`.
     module_lookups: std.AutoHashMapUnmanaged(Wast.Ident.Interned, ModuleInst) = .empty,
 
-    /// Live until the next `module` command is executed.
-    next_module_arena: ArenaAllocator,
-    /// Allocated either in the `next_module_arena` or the `run_arena`.
     current_module: ?ModuleInst = null,
 
     /// Live for the execution of a single command.
@@ -1398,7 +1450,6 @@ fn runScript(
 
     var state: State = .{
         .errors = .{ .tree = script.tree, .errors = errors },
-        .next_module_arena = ArenaAllocator.init(run_arena.allocator()),
         .cmd_arena = ArenaAllocator.init(run_arena.allocator()),
         .script_path = try std.fmt.allocPrint(
             run_arena.allocator(),
@@ -1429,6 +1480,7 @@ fn runScript(
 
     var imports = try SpectestImports.init(
         run_arena,
+        rng,
         &spectest_import_memory[0],
         .{ .elem_type = .funcref, .table = &spectest_import_table[0] },
     );
@@ -1476,10 +1528,8 @@ fn runScript(
 
         switch (cmd.keyword.tag(script.tree)) {
             .keyword_module => {
-                _ = state.next_module_arena.reset(.retain_capacity);
                 const module: *const Wast.Module = cmd.inner.module.getPtr(script.arena);
 
-                const module_arena = if (module.name.some) run_arena else &state.next_module_arena;
                 encoding_buffer.clearRetainingCapacity();
                 const before_encode_error_count = errors.list.len;
                 try module.encode(
@@ -1496,14 +1546,14 @@ fn runScript(
 
                 _ = scratch.reset(.retain_capacity);
 
-                var module_contents: []const u8 = if (module.name.some)
-                    try run_arena.allocator().dupe(u8, encoding_buffer.items)
-                else
-                    encoding_buffer.items;
+                var module_contents: []const u8 = try run_arena.allocator().dupe(
+                    u8,
+                    encoding_buffer.items,
+                );
 
-                const parsed_module = try module_arena.allocator().create(wasmstint.Module);
+                const parsed_module = try run_arena.allocator().create(wasmstint.Module);
                 parsed_module.* = wasmstint.Module.parse(
-                    module_arena.allocator(),
+                    run_arena.allocator(),
                     &module_contents,
                     &scratch,
                     rng,
@@ -1525,7 +1575,7 @@ fn runScript(
 
                 //parsed_module.finishCodeValidationInParallel(&scratch, thread_pool)
                 const validation_finished = parsed_module.finishCodeValidation(
-                    module_arena.allocator(),
+                    run_arena.allocator(),
                     &scratch,
                 ) catch |e| switch (e) {
                     error.OutOfMemory => |oom| return oom,
@@ -1548,7 +1598,7 @@ fn runScript(
                 var module_alloc = wasmstint.runtime.ModuleAlloc.allocate(
                     parsed_module,
                     imports.provider(),
-                    module_arena.allocator(),
+                    run_arena.allocator(),
                     store.allocator(),
                     &import_error,
                 ) catch |e| {
@@ -1908,6 +1958,33 @@ fn runScript(
                         try state.runToCompletion(&interp, &fuel, cmd.keyword);
                     },
                     .get => {},
+                }
+            },
+            .keyword_register => {
+                const register: *const Wast.Command.Register = cmd.inner.register.getPtr(script.arena);
+                const target_module: wasmstint.runtime.ModuleInst = state.getModuleInst(
+                    register.id,
+                    cmd.keyword,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ScriptError => break :run_cmds,
+                };
+
+                const export_vals = target_module.exports();
+                try imports.registered.ensureUnusedCapacityContext(
+                    run_arena.allocator(),
+                    export_vals.len,
+                    imports.registered_context,
+                );
+
+                const module_name = script.nameContents(register.name.id);
+                for (0..export_vals.len) |i| {
+                    const val = export_vals.at(i);
+                    imports.registered.putAssumeCapacityContext(
+                        SpectestImports.ImportName.init(module_name, val.name),
+                        val.val,
+                        imports.registered_context,
+                    );
                 }
             },
             else => {
