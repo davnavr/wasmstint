@@ -1478,8 +1478,9 @@ pub fn parse(
 
             elems.appendAssumeCapacity(&arena, elem_segment);
 
+            const is_declarative = tag.kind == .passive_or_declarative and tag.bit_1.is_declarative;
             non_declarative_mask.ptrAt(i / 32, &arena).* |=
-                @as(u32, @intFromBool(tag.kind == .active or !tag.bit_1.is_declarative)) << @as(u5, @intCast(i % 32));
+                @as(u32, @intFromBool(!is_declarative)) << @as(u5, @intCast(i % 32));
         }
 
         try elems_reader.expectEndOfStream();
