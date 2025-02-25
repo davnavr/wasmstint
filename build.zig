@@ -123,7 +123,7 @@ pub fn build(b: *std.Build) void {
             "tests/spec/names.wast",
             "tests/spec/nop.wast",
             "tests/spec/obsolete-keywords.wast", // Currently skipped
-            // "tests/spec/ref_func.wast", // TODO: blocked on 'register' command support
+            "tests/spec/ref_func.wast",
             "tests/spec/ref_is_null.wast",
             "tests/spec/ref_null.wast",
             "tests/spec/return.wast",
