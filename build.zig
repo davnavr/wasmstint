@@ -117,7 +117,7 @@ pub fn build(b: *std.Build) void {
             // "tests/spec/memory_grow.wast", // TODO: parsing non-inline imports
             "tests/spec/memory_init.wast",
             "tests/spec/memory_redundancy.wast",
-            // "tests/spec/memory_size.wast", // TODO: OOM, due to hard-coded limit in allocator
+            "tests/spec/memory_size.wast",
             "tests/spec/memory_trap.wast",
             "tests/spec/memory.wast",
             // "tests/spec/names.wast", // TODO: export and imports not yet supported by parser

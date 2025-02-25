@@ -1385,7 +1385,8 @@ fn runScript(
 
     var store = wasmstint.runtime.ModuleAllocator.WithinArena{
         .arena = run_arena,
-        .mem_limit = .{ .up_to_amount = 2 * wasmstint.runtime.MemInst.page_size },
+        // TODO: don't hardcode memory page count limit
+        .mem_limit = .{ .up_to_amount = 4 * wasmstint.runtime.MemInst.page_size },
     };
 
     var state: State = .{
