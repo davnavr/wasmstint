@@ -885,8 +885,6 @@ fn moduleInstantiationSetup(
                 }
             },
             .@"ref.func" => |func_idx| {
-                // Enforced during validation
-                std.debug.assert(@intFromEnum(func_idx) < wasm.inner.func_import_count);
                 @as(*runtime.FuncAddr.Nullable, @ptrCast(@alignCast(global_value))).* =
                     @bitCast(@as(runtime.FuncAddr, module_inst.funcAddr(func_idx)));
             },
