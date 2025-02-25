@@ -778,11 +778,16 @@ const State = struct {
         ));
     }
 
-    fn errorCallStackExhausted(state: *State, parent: Wast.sexpr.TokenId) Error {
+    fn errorCallStackExhausted(
+        state: *State,
+        parent: Wast.sexpr.TokenId,
+        interpreter: *const Interpreter,
+    ) Error {
         return scriptError(
-            state.errors.errorAtToken(
+            state.errors.errorFmtAtToken(
                 parent,
-                "unexpected error, call stack exhausted",
+                "unexpected error, call stack exhausted ({} frames)",
+                .{interpreter.call_stack.items.len},
                 @errorReturnTrace(),
             ),
         );
@@ -1162,7 +1167,7 @@ const State = struct {
         try state.runToCompletion(interpreter, fuel, parent);
         switch (interpreter.state) {
             .awaiting_validation => unreachable,
-            .call_stack_exhaustion => return state.errorCallStackExhausted(parent),
+            .call_stack_exhaustion => return state.errorCallStackExhausted(parent, interpreter),
             .trapped => |trap| return state.errorInterpreterTrap(parent, trap.code),
             .interrupted => |interrupt| return state.errorInterpreterInterrupted(
                 parent,
@@ -1234,7 +1239,7 @@ const State = struct {
         const trap: *const Interpreter.Trap = switch (interpreter.state) {
             .awaiting_validation => unreachable,
             .trapped => |*trap| trap,
-            .call_stack_exhaustion => return state.errorCallStackExhausted(parent),
+            .call_stack_exhaustion => return state.errorCallStackExhausted(parent, interpreter),
             .interrupted => |interrupt| return state.errorInterpreterInterrupted(
                 parent,
                 interrupt.cause,
