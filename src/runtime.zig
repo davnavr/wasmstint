@@ -1067,7 +1067,35 @@ pub const TableInst = extern struct {
                     .extern_expressions => unreachable,
                 }
             },
-            .externref => @panic("TODO: handle tables of externref"),
+            .externref => {
+                const dst_elems: []ExternAddr = table_inst.base
+                    .extern_ref[0..table_inst.len][dst_idx..dst_end_idx];
+
+                const src_exprs = src_elems.contents.expressions
+                    .items(module_inst.module.arena_data)[src_idx..src_end_idx];
+
+                for (
+                    @as([]const Module.ElemSegment.Expr, src_exprs),
+                    dst_elems,
+                ) |*src_expr, *dst| {
+                    dst.* = switch (src_expr.tag) {
+                        .@"ref.null" => ExternAddr.null,
+                        .@"global.get" => get: {
+                            const global = module_inst.globalAddr(
+                                src_expr.inner.@"global.get".get(),
+                            );
+
+                            std.debug.assert(global.global_type.val_type == .externref);
+
+                            break :get @as(
+                                *const ExternAddr,
+                                @ptrCast(@alignCast(global.value)),
+                            ).*;
+                        },
+                        .@"ref.func" => unreachable,
+                    };
+                }
+            },
             else => unreachable,
         }
     }
