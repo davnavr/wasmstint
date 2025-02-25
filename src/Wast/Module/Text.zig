@@ -1439,6 +1439,8 @@ pub const Elem = struct {
                     .atom => |token| switch (token.tag(ctx.tree)) {
                         .keyword_declare => {
                             contents.* = lookahead;
+                            std.debug.assert(!elem.keyword.some);
+                            elem.keyword = sexpr.TokenId.Opt.init(token);
                             continue :state .elem_list;
                         },
                         .id, .integer => break :state,
@@ -1464,6 +1466,7 @@ pub const Elem = struct {
                                 );
 
                                 elem.table = Ident.Opt.init(table_id);
+                                std.debug.assert(!elem.keyword.some);
                                 elem.keyword = sexpr.TokenId.Opt.init(token);
                                 try list_parser.expectEmpty(ctx);
 
