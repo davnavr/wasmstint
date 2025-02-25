@@ -1892,6 +1892,11 @@ fn encodeText(
                         (!elem_field.keyword.some or elem_field.keyword.inner_id.tag(text_ctx.tree) != .keyword_table) and
                         elem_field.offset.isOmitted();
 
+                    const elem_reftype = if (elem_field.elements.ref_type.asValType(text_ctx.tree)) |ref_type|
+                        ValType.fromValType(ref_type, text_ctx.tree)
+                    else
+                        ValType.funcref;
+
                     const flags = Flags{
                         .is_not_active = is_not_active,
                         .bit_1 = if (is_not_active)
@@ -1900,7 +1905,7 @@ fn encodeText(
                                     elem_field.keyword.inner_id.tag(text_ctx.tree) == .keyword_declare,
                             }
                         else
-                            .{ .active_has_table_idx = table != .default },
+                            .{ .active_has_table_idx = table != .default or elem_reftype != .funcref },
                         .use_elem_exprs = elem_field.elements.itemsTag(text_ctx.tree) == .expressions,
                     };
 
@@ -1908,7 +1913,6 @@ fn encodeText(
 
                     const is_active = !is_not_active;
                     if (is_active and flags.bit_1.active_has_table_idx) {
-                        std.debug.assert(is_active);
                         try encodeIdx(output, TableIdx, table);
                     }
 
@@ -1928,16 +1932,11 @@ fn encodeText(
                         try output.writeAll(offset_zero);
                     }
 
-                    const elem_reftype = if (elem_field.elements.ref_type.asValType(text_ctx.tree)) |ref_type|
-                        ValType.fromValType(ref_type, text_ctx.tree)
-                    else
-                        ValType.funcref;
-
-                    if (is_active and !flags.bit_1.active_has_table_idx) {
-                        std.debug.assert(elem_reftype == .funcref);
-                    } else if (flags.use_elem_exprs) {
-                        try elem_reftype.encode(output);
-                    } else {
+                    const active_omit_type = is_active and !flags.bit_1.active_has_table_idx;
+                    if (flags.use_elem_exprs) {
+                        if (!active_omit_type)
+                            try elem_reftype.encode(output);
+                    } else if (!active_omit_type) {
                         std.debug.assert(elem_reftype == .funcref);
                         try output.writeByte(@intFromEnum(ElemKind.funcref));
                     }
