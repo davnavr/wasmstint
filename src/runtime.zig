@@ -248,6 +248,22 @@ pub const ImportProvider = struct {
         table: *const Module.TableType,
         mem: *const Module.MemType,
         global: *const Module.GlobalType,
+
+        pub fn format(
+            desc: *const Desc,
+            comptime fmt: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
+            _ = fmt;
+            _ = options;
+            switch (desc.*) {
+                .func => |func| try writer.print("(func {})", .{func}),
+                .table => |table| try writer.print("(table {})", .{table}),
+                .mem => |mem| try writer.print("(memory {})", .{mem}),
+                .global => |global| try writer.print("(global {})", .{global}),
+            }
+        }
     };
 
     ctx: *anyopaque,
@@ -297,15 +313,15 @@ pub const ImportProvider = struct {
                     return provided.func;
                 },
                 .table => if (provided == .table) {
-                    if (provided.table.tableType().matches(desc)) break :failed_request;
-                    return provided.table.table;
+                    if (!provided.table.tableType().matches(desc)) break :failed_request;
+                    return provided.table;
                 },
                 .mem => if (provided == .mem) {
-                    if (provided.mem.memType().matches(desc)) break :failed_request;
+                    if (!provided.mem.memType().matches(desc)) break :failed_request;
                     return provided.mem;
                 },
                 .global => if (provided == .global) {
-                    if (provided.global.global_type.matches(desc)) break :failed_request;
+                    if (!provided.global.global_type.matches(desc)) break :failed_request;
                     return provided.global;
                 },
             }
@@ -372,20 +388,13 @@ pub const ModuleAlloc = struct {
             module.tableImportNames(),
             module.tableImportTypes(),
         ) |*import, name, *table_type| {
-            const val = import_provider.resolve(
-                import_provider.ctx,
+            import.* = (try import_provider.resolveTyped(
                 name.module_name(module),
                 name.desc_name(module),
-                .{ .table = table_type },
-            ) orelse return error.ImportFailure;
-
-            switch (val) {
-                .table => |table| {
-                    if (table.tableType().matches(table_type)) return error.ImportFailure;
-                    import.* = table.table;
-                },
-                else => return error.ImportFailure,
-            }
+                .table,
+                table_type,
+                import_failure,
+            )).table;
         }
 
         const table_definitions = try arena_array.alloc(
@@ -399,20 +408,13 @@ pub const ModuleAlloc = struct {
             module.memImportNames(),
             module.memImportTypes(),
         ) |*import, name, *mem_type| {
-            const val = import_provider.resolve(
-                import_provider.ctx,
+            import.* = try import_provider.resolveTyped(
                 name.module_name(module),
                 name.desc_name(module),
-                .{ .mem = mem_type },
-            ) orelse return error.ImportFailure;
-
-            switch (val) {
-                .mem => |mem| {
-                    if (mem.memType().matches(mem_type)) return error.ImportFailure;
-                    import.* = mem;
-                },
-                else => return error.ImportFailure,
-            }
+                .mem,
+                mem_type,
+                import_failure,
+            );
         }
 
         const mem_definitions = try arena_array.alloc(
@@ -444,22 +446,15 @@ pub const ModuleAlloc = struct {
             module.globalImportNames(),
             module.globalImportTypes(),
         ) |*import, name, *global_type| {
-            const val = import_provider.resolve(
-                import_provider.ctx,
-                name.module_name(module),
-                name.desc_name(module),
-                .{ .global = global_type },
-            ) orelse return error.ImportFailure;
-
-            switch (val) {
-                .global => |global| {
-                    if (!global.global_type.matches(global_type))
-                        return error.ImportFailure;
-
-                    import.* = GlobalFixup{ .ptr = global.value };
-                },
-                else => return error.ImportFailure,
-            }
+            import.* = GlobalFixup{
+                .ptr = (try import_provider.resolveTyped(
+                    name.module_name(module),
+                    name.desc_name(module),
+                    .global,
+                    global_type,
+                    import_failure,
+                )).value,
+            };
         }
 
         for (
