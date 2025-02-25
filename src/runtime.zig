@@ -29,6 +29,22 @@ pub const ModuleAllocator = struct {
         mem_types: []const Module.MemType,
         mems: [*]MemInst,
 
+        pub fn init(
+            table_types: []const Module.TableType,
+            tables: []TableInst,
+            mem_types: []const Module.MemType,
+            mems: []MemInst,
+        ) Request {
+            std.debug.assert(table_types.len <= tables.len);
+            std.debug.assert(mem_types.len <= mems.len);
+            return .{
+                .table_types = table_types,
+                .tables = tables.ptr,
+                .mem_types = mem_types,
+                .mems = mems.ptr,
+            };
+        }
+
         pub fn nextTableType(req: *const Request) ?*const Module.TableType {
             return if (req.table_types.len > 0) &req.table_types[0] else null;
         }
@@ -423,12 +439,12 @@ pub const ModuleAlloc = struct {
         );
 
         {
-            var request = ModuleAllocator.Request{
-                .tables = table_definitions.items(&arena_array).ptr,
-                .table_types = module.tableTypes()[module.inner.table_import_count..],
-                .mems = mem_definitions.items(&arena_array).ptr,
-                .mem_types = module.memTypes()[module.inner.mem_import_count..],
-            };
+            var request = ModuleAllocator.Request.init(
+                module.tableTypes()[module.inner.table_import_count..],
+                table_definitions.items(&arena_array),
+                module.memTypes()[module.inner.mem_import_count..],
+                mem_definitions.items(&arena_array),
+            );
 
             try store.allocate(&request);
 

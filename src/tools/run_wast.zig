@@ -473,14 +473,18 @@ const SpectestImports = struct {
         const names = [4][]const u8{ "i32", "i64", "f32", "f64" };
     };
 
-    fn init(arena: *ArenaAllocator) Allocator.Error!SpectestImports {
+    fn init(
+        arena: *ArenaAllocator,
+        memory: *wasmstint.runtime.MemInst,
+        table: wasmstint.runtime.TableAddr,
+    ) Allocator.Error!SpectestImports {
         var imports = SpectestImports{
             .lookup = std.StringHashMapUnmanaged(wasmstint.runtime.ExternVal).empty,
         };
 
         try imports.lookup.ensureTotalCapacity(
             arena.allocator(),
-            PrintFunction.all.len + globals.names.len,
+            PrintFunction.all.len + globals.names.len + 2,
         );
 
         errdefer comptime unreachable;
@@ -498,6 +502,9 @@ const SpectestImports = struct {
                 .{ .global = @field(globals, name) },
             );
         }
+
+        imports.lookup.putAssumeCapacityNoClobber("memory", .{ .mem = memory });
+        imports.lookup.putAssumeCapacityNoClobber("table", .{ .table = table });
 
         return imports;
     }
@@ -1401,6 +1408,31 @@ fn runScript(
         .store = &store,
     };
 
+    var spectest_import_memory: [1]wasmstint.runtime.MemInst = undefined;
+    var spectest_import_table: [1]wasmstint.runtime.TableInst = undefined;
+    {
+        var spectest_import_request = wasmstint.runtime.ModuleAllocator.Request.init(
+            &[1]wasmstint.Module.TableType{
+                .{
+                    .elem_type = .funcref,
+                    .limits = .{ .min = 10, .max = 20 },
+                },
+            },
+            &spectest_import_table,
+            &[1]wasmstint.Module.MemType{.{ .limits = .{ .min = 1, .max = 2 } }},
+            &spectest_import_memory,
+        );
+
+        try store.allocator().allocate(&spectest_import_request);
+        std.debug.assert(spectest_import_request.isDone());
+    }
+
+    var imports = try SpectestImports.init(
+        run_arena,
+        &spectest_import_memory[0],
+        .{ .elem_type = .funcref, .table = &spectest_import_table[0] },
+    );
+
     var pass_count: u32 = 0;
     run_cmds: for (script.commands.items(script.arena)) |cmd| {
         defer {
@@ -1512,7 +1544,6 @@ fn runScript(
 
                 std.debug.assert(validation_finished);
 
-                var imports = try SpectestImports.init(module_arena);
                 var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
                 var module_alloc = wasmstint.runtime.ModuleAlloc.allocate(
                     parsed_module,
@@ -1725,7 +1756,6 @@ fn runScript(
 
                         std.debug.assert(validation_finished);
 
-                        var imports = try SpectestImports.init(&state.cmd_arena);
                         var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
                         var module_alloc = wasmstint.runtime.ModuleAlloc.allocate(
                             &parsed_module,
