@@ -100,13 +100,13 @@ pub fn build(b: *std.Build) void {
             "tests/spec/i32.wast",
             "tests/spec/i64.wast",
             "tests/spec/if.wast",
-            // "tests/spec/imports.wast", // TODO: blocked on `assert_unlinkable` support
+            "tests/spec/imports.wast",
             // "tests/spec/inline-module.wast", // TODO: parser doesn't support inline modules
             "tests/spec/int_exprs.wast",
             "tests/spec/int_literals.wast",
             "tests/spec/labels.wast",
             "tests/spec/left-to-right.wast",
-            // "tests/spec/linking.wast", // TODO: blocked on `assert_unlinkable` support
+            // "tests/spec/linking.wast", // TODO: panicking in memory.grow
             "tests/spec/load.wast",
             "tests/spec/local_get.wast",
             "tests/spec/local_set.wast",
