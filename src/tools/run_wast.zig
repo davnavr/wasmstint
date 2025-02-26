@@ -698,7 +698,26 @@ const State = struct {
                             "{}",
                             host.valuesTyped(struct { i32 }) catch unreachable,
                         ) catch {},
-                        else => |bad| std.debug.panic("TODO: Handle host call {any}", .{bad}),
+                        .print_i64 => stderr.print(
+                            "{}",
+                            host.valuesTyped(struct { i64 }) catch unreachable,
+                        ) catch {},
+                        .print_f32 => stderr.print(
+                            "{}",
+                            host.valuesTyped(struct { f32 }) catch unreachable,
+                        ) catch {},
+                        .print_f64 => stderr.print(
+                            "{}",
+                            host.valuesTyped(struct { f64 }) catch unreachable,
+                        ) catch {},
+                        .print_i32_f32 => stderr.print(
+                            "{}, {}",
+                            host.valuesTyped(struct { i32, f32 }) catch unreachable,
+                        ) catch {},
+                        .print_f64_f64 => stderr.print(
+                            "{}, {}",
+                            host.valuesTyped(struct { f64, f64 }) catch unreachable,
+                        ) catch {},
                     }
 
                     _ = host.returnFromHostTyped({}, fuel) catch unreachable;
