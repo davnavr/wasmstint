@@ -733,7 +733,10 @@ const State = struct {
                     switch (interrupt.cause) {
                         .out_of_fuel => return,
                         .memory_grow => |info| {
-                            const new_size = info.delta + info.memory.size;
+                            const new_size = @min(
+                                info.delta + info.memory.size,
+                                info.memory.limit,
+                            );
 
                             const resized_in_place = state.store.arena.allocator().resize(
                                 info.memory.base[0..info.memory.capacity],
@@ -747,7 +750,10 @@ const State = struct {
                                     state.store.arena.allocator().alignedAlloc(
                                         u8,
                                         wasmstint.runtime.MemInst.buffer_align,
-                                        @max(new_size, info.memory.capacity *| 2),
+                                        @min(
+                                            @max(new_size, info.memory.capacity *| 2),
+                                            info.memory.limit,
+                                        ),
                                     ) catch break :resize_failed,
                                 );
                             }

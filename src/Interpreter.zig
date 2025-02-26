@@ -354,6 +354,8 @@ pub const InterruptionCause = union(enum) {
         delta: usize,
 
         /// Returns the old memory, or `null` if the same base address was passed.
+        ///
+        /// Asserts that the size of the memory's buffer does not exceed its `limit`.
         pub fn resize(
             grow: *const MemoryGrow,
             new: []align(runtime.MemInst.buffer_align) u8,
@@ -371,7 +373,7 @@ pub const InterruptionCause = union(enum) {
 
             @memset(grow.memory.base[grow.memory.size..new.len], 0);
 
-            grow.memory.capacity = new.len;
+            grow.memory.capacity = @max(grow.memory.capacity, new.len);
             return prev_mem;
         }
     };
