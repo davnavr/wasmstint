@@ -272,11 +272,9 @@ pub fn main() !u8 {
                     .{ script_path_fmt, err.loc },
                 );
 
-                // TODO: https://ziglang.org/documentation/master/std/#std.io.tty.Config.setColor
-                switch (color_config) {
-                    .escape_codes => try w.writeAll("\x1B[31m" ++ "error" ++ "\x1B[39m"),
-                    else => try w.writeAll("error"),
-                }
+                try color_config.setColor(w, .red);
+                try w.writeAll("error");
+                try color_config.setColor(w, .reset);
 
                 try w.print(": {s}\n", .{err.msg});
                 try err.src.print(w);
@@ -286,9 +284,7 @@ pub fn main() !u8 {
                 if (err.trace) |stack_trace| dump_trace: {
                     const debug_info = maybe_debug_info orelse break :dump_trace;
 
-                    if (color_config == .escape_codes) {
-                        try w.writeAll("\x1B[90m");
-                    }
+                    try color_config.setColor(w, .bright_black);
 
                     const frame_count = @min(stack_trace.index, stack_trace.instruction_addresses.len);
                     for (stack_trace.instruction_addresses[0..frame_count]) |ra| {
@@ -337,50 +333,29 @@ pub fn main() !u8 {
                         try w.writeByte('\n');
                     }
 
-                    if (color_config == .escape_codes) {
-                        try w.writeAll("\x1B[39m");
-                    }
+                    try color_config.setColor(w, .reset);
                 }
             }
 
             if (errors.list.len > 0) {
-                if (color_config == .escape_codes) {
-                    try w.writeAll("\x1B[31m");
-                }
-
+                try color_config.setColor(w, .red);
                 try w.print("{} errors", .{errors.list.count()});
-
-                if (color_config == .escape_codes) {
-                    try w.writeAll("\x1B[39m");
-                }
-
+                try color_config.setColor(w, .reset);
                 try w.writeAll(", ");
             }
 
             const skipped_count = script.commands.len - pass_count;
             if (skipped_count > 0) {
-                if (color_config == .escape_codes) {
-                    try w.writeAll("\x1B[33m");
-                }
-
+                try color_config.setColor(w, .yellow);
                 try w.print("{} skipped", .{skipped_count});
-
-                if (color_config == .escape_codes) {
-                    try w.writeAll("\x1B[39m");
-                }
+                try color_config.setColor(w, .reset);
 
                 try w.writeAll(", ");
             }
 
-            if (color_config == .escape_codes) {
-                try w.writeAll("\x1B[32m");
-            }
-
+            try color_config.setColor(w, .green);
             try w.print("{} passed", .{pass_count});
-
-            if (color_config == .escape_codes) {
-                try w.writeAll("\x1B[39m");
-            }
+            try color_config.setColor(w, .reset);
 
             try w.print(" - {}\n", .{script_path_fmt});
 
