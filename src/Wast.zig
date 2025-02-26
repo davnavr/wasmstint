@@ -289,6 +289,40 @@ pub fn parse(
 
                 break :cmd .{ .assert_invalid = assert_invalid };
             },
+            .keyword_assert_unlinkable => {
+                // Duplicate code from `assert_invalid` handler.
+                const assert_unlinkable = try arena.create(Command.AssertUnlinkable);
+                const module = Module.parse(
+                    &cmd_parser,
+                    &parser_context,
+                    arena,
+                    caches,
+                    cmd_list,
+                    scratch,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    error.ReportedParserError => continue,
+                };
+
+                assert_unlinkable.set(
+                    arena,
+                    .{
+                        .module = module,
+                        .failure = Command.Failure.parseInList(
+                            &cmd_parser,
+                            &parser_context,
+                            arena,
+                            cmd_list,
+                            scratch,
+                        ) catch |e| switch (e) {
+                            error.OutOfMemory => |oom| return oom,
+                            error.ReportedParserError => continue,
+                        },
+                    },
+                );
+
+                break :cmd .{ .assert_unlinkable = assert_unlinkable };
+            },
             else => {
                 _ = try errors.reportAtToken(
                     cmd_keyword_id,

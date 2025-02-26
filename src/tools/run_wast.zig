@@ -1937,6 +1937,127 @@ fn runScript(
 
                 unreachable; // TODO: Process 'assert_malformed'
             },
+            .keyword_assert_unlinkable => pass: {
+                const assert_unlinkable: *const Wast.Command.AssertUnlinkable =
+                    cmd.inner.assert_unlinkable.getPtr(script.arena);
+
+                // Duplicate code taken from .keyword_assert_trap command handler
+                const module = &assert_unlinkable.module;
+                const msg = assert_unlinkable.failure.msg.slice(script.arena);
+
+                encoding_buffer.clearRetainingCapacity();
+                const before_encode_error_count = errors.list.len;
+                try module.encode(
+                    script.tree,
+                    script.arena.dataSlice(),
+                    script.caches,
+                    encoding_buffer.writer(),
+                    errors,
+                    &scratch,
+                );
+
+                if (before_encode_error_count < errors.list.len)
+                    break :run_cmds;
+
+                _ = scratch.reset(.retain_capacity);
+
+                var wasm: []const u8 = encoding_buffer.items;
+                var parsed_module = wasmstint.Module.parse(
+                    state.cmd_arena.allocator(),
+                    &wasm,
+                    &scratch,
+                    rng,
+                    .{ .realloc_contents = true },
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    else => |parse_error| {
+                        _ = try state.errors.errorFmtAtToken(
+                            cmd.keyword,
+                            "module failed to parse ({})",
+                            .{parse_error},
+                            @errorReturnTrace(),
+                        );
+                        break :run_cmds;
+                    },
+                };
+
+                _ = scratch.reset(.retain_capacity);
+
+                const validation_finished = parsed_module.finishCodeValidation(
+                    state.cmd_arena.allocator(),
+                    &scratch,
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => |oom| return oom,
+                    else => |validation_err| {
+                        _ = try state.errors.errorFmtAtToken(
+                            cmd.keyword,
+                            "module validation error ({})",
+                            .{validation_err},
+                            @errorReturnTrace(),
+                        );
+                        break :run_cmds;
+                    },
+                };
+
+                std.debug.assert(validation_finished);
+
+                var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
+                _ = wasmstint.runtime.ModuleAlloc.allocate(
+                    &parsed_module,
+                    imports.provider(),
+                    state.cmd_arena.allocator(),
+                    store.allocator(),
+                    &import_error,
+                ) catch |e| {
+                    switch (e) {
+                        error.OutOfMemory => {
+                            _ = try state.errors.errorAtToken(
+                                cmd.keyword,
+                                "out of memory",
+                                @errorReturnTrace(),
+                            );
+                        },
+                        error.ImportFailure => {
+                            if (std.mem.eql(u8, "unknown import", msg)) wrong_failure: {
+                                if (import_error.reason != .none_provided)
+                                    break :wrong_failure;
+
+                                break :pass;
+                            } else if (std.mem.eql(u8, "incompatible import type", msg)) wrong_failure: {
+                                if (import_error.reason == .none_provided)
+                                    break :wrong_failure;
+
+                                break :pass;
+                            } else {
+                                _ = try state.errors.errorFmtAtToken(
+                                    cmd.keyword,
+                                    "unrecognized expected message, got {}",
+                                    .{import_error.reason},
+                                    @errorReturnTrace(),
+                                );
+                                break :run_cmds;
+                            }
+
+                            _ = try state.errors.errorFmtAtToken(
+                                cmd.keyword,
+                                "wrong linking failure, got {}",
+                                .{import_error.reason},
+                                @errorReturnTrace(),
+                            );
+                            break :run_cmds;
+                        },
+                    }
+
+                    _ = try state.errors.errorAtToken(
+                        cmd.keyword,
+                        "module instantiation unexpectedly succeeded",
+                        @errorReturnTrace(),
+                    );
+                    break :run_cmds;
+                };
+
+                break :run_cmds;
+            },
             .keyword_invoke => {
                 const invoke: *const Wast.Command.Action = cmd.inner.action.getPtr(script.arena);
 

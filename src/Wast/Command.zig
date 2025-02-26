@@ -24,7 +24,7 @@ pub const Inner = union {
     assert_exhaustion: IndexedArena.Idx(AssertExhaustion),
     assert_malformed: IndexedArena.Idx(AssertMalformed),
     assert_invalid: IndexedArena.Idx(AssertInvalid),
-    // assert_unlinkable: AssertUnlinkable,
+    assert_unlinkable: IndexedArena.Idx(AssertUnlinkable),
 };
 
 pub fn parseConstOrResult(
@@ -526,6 +526,11 @@ pub const AssertInvalid = struct {
 };
 
 pub const AssertMalformed = struct {
+    module: Wast.Module,
+    failure: Failure,
+};
+
+pub const AssertUnlinkable = struct {
     module: Wast.Module,
     failure: Failure,
 };

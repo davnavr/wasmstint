@@ -308,6 +308,13 @@ pub const ImportProvider = struct {
         module: std.unicode.Utf8View,
         name: std.unicode.Utf8View,
         desc: Desc,
+        reason: Reason,
+
+        pub const Reason = enum {
+            none_provided,
+            type_mismatch,
+            wrong_desc,
+        };
     };
 
     fn resolveTyped(
@@ -324,38 +331,49 @@ pub const ImportProvider = struct {
             desc,
         );
 
-        failed_request: {
+        const reason: FailedRequest.Reason = failed_request: {
             const provided = provider.resolve(
                 provider.ctx,
                 module,
                 name,
                 import_desc,
-            ) orelse break :failed_request;
+            ) orelse break :failed_request .none_provided;
 
             switch (desc_tag) {
                 .func => if (provided == .func) {
-                    if (!provided.func.signature().matches(desc)) break :failed_request;
+                    if (!provided.func.signature().matches(desc))
+                        break :failed_request .type_mismatch;
+
                     return provided.func;
                 },
                 .table => if (provided == .table) {
-                    if (!provided.table.tableType().matches(desc)) break :failed_request;
+                    if (!provided.table.tableType().matches(desc))
+                        break :failed_request .type_mismatch;
+
                     return provided.table;
                 },
                 .mem => if (provided == .mem) {
-                    if (!provided.mem.memType().matches(desc)) break :failed_request;
+                    if (!provided.mem.memType().matches(desc))
+                        break :failed_request .type_mismatch;
+
                     return provided.mem;
                 },
                 .global => if (provided == .global) {
-                    if (!provided.global.global_type.matches(desc)) break :failed_request;
+                    if (!provided.global.global_type.matches(desc))
+                        break :failed_request .type_mismatch;
+
                     return provided.global;
                 },
             }
-        }
+
+            break :failed_request .wrong_desc;
+        };
 
         if (failed) |failed_ptr| failed_ptr.* = FailedRequest{
             .module = module,
             .name = name,
             .desc = import_desc,
+            .reason = reason,
         };
 
         return Error.ImportFailure;
