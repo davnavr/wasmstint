@@ -79,7 +79,7 @@ pub fn build(b: *std.Build) void {
             "tests/spec/conversions.wast",
             "tests/spec/custom.wast",
             "tests/spec/data.wast",
-            // "tests/spec/elem.wast", // TODO: parser needs support for non-inline imports and assert_trap on modules
+            "tests/spec/elem.wast",
             "tests/spec/endianness.wast",
             "tests/spec/exports.wast",
             "tests/spec/f32_bitwise.wast",
