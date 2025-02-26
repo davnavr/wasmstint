@@ -346,14 +346,14 @@ pub const Trap = struct {
 pub const InterruptionCause = union(enum) {
     out_of_fuel,
     memory_grow: MemoryGrow,
-    // table_grow: TableGrow,
+    table_grow: TableGrow,
 
     pub const MemoryGrow = struct {
         memory: *runtime.MemInst,
         /// The amount to increase the size of the memory by, in bytes.
         delta: usize,
 
-        /// Returns the old memory, or `null` if the same base address was passed.
+        /// Returns the old memory buffer, or `null` if the same base address was passed.
         ///
         /// Asserts that the size of the memory's buffer does not exceed its `limit`.
         pub fn resize(
@@ -375,6 +375,41 @@ pub const InterruptionCause = union(enum) {
 
             grow.memory.capacity = @max(grow.memory.capacity, new.len);
             return prev_mem;
+        }
+    };
+
+    pub const TableGrow = struct {
+        table: runtime.TableAddr,
+        elem: Value,
+        /// The amount to increase the size of the table by, in elements.
+        delta: u32,
+
+        /// Returns the old table buffer, or `null` if the same base address was passed.
+        ///
+        /// Asserts that the size of the table's buffer does not exceed its `limit`.
+        pub fn resize(
+            grow: *const TableGrow,
+            new: []align(runtime.TableInst.buffer_align) u8,
+        ) ?[]align(runtime.TableInst.buffer_align) u8 {
+            const table = grow.table.table;
+            const new_len: u32 = @intCast(@divExact(new.len, table.stride));
+            std.debug.assert(new_len <= table.limit);
+            std.debug.assert(table.capacity <= new_len);
+
+            const prev_table = if (@intFromPtr(table.base.ptr) != @intFromPtr(new.ptr)) moved: {
+                @memcpy(new[0 .. table.len * table.stride], table.bytes());
+                const old_mem = table.base.ptr[0 .. @as(usize, table.capacity) * table.stride];
+                table.base.ptr = new.ptr;
+                break :moved old_mem;
+            } else null;
+
+            const src_elem = std.mem.asBytes(&grow.elem)[0..table.stride];
+            for (table.len..new_len) |idx| {
+                @memcpy(table.elementSlice(idx) catch unreachable, src_elem);
+            }
+
+            table.capacity = @max(table.capacity, new_len);
+            return prev_table;
         }
     };
 };
@@ -815,31 +850,44 @@ pub const State = union(enum) {
             const interp: *Interpreter = self.interpreter();
             switch (cause) {
                 .out_of_fuel => {},
-                .memory_grow => |info| {
-                    interp.value_stack.appendAssumeCapacity(
-                        Value{
-                            .i32 = result: {
-                                const old_len = info.memory.size;
-                                const new_len = std.math.add(
-                                    usize,
-                                    old_len,
-                                    info.delta,
-                                ) catch break :result -1;
+                .memory_grow => |grow| interp.value_stack.appendAssumeCapacity(Value{
+                    .i32 = result: {
+                        const old_len = grow.memory.size;
+                        const new_len = std.math.add(
+                            usize,
+                            old_len,
+                            grow.delta,
+                        ) catch break :result -1;
 
-                                if (@min(info.memory.limit, info.memory.capacity) < new_len)
-                                    break :result -1;
+                        if (@min(grow.memory.limit, grow.memory.capacity) < new_len)
+                            break :result -1;
 
-                                info.memory.size = new_len;
-                                break :result @bitCast(
-                                    @as(
-                                        u32,
-                                        @intCast(old_len / runtime.MemInst.page_size),
-                                    ),
-                                );
-                            },
-                        },
-                    );
-                },
+                        grow.memory.size = new_len;
+                        break :result @bitCast(
+                            @as(
+                                u32,
+                                @intCast(old_len / runtime.MemInst.page_size),
+                            ),
+                        );
+                    },
+                }),
+                .table_grow => |grow| interp.value_stack.appendAssumeCapacity(Value{
+                    .i32 = result: {
+                        const table = grow.table.table;
+                        const old_len = table.len;
+                        const new_len = std.math.add(
+                            u32,
+                            old_len,
+                            grow.delta,
+                        ) catch break :result -1;
+
+                        if (@min(table.limit, table.capacity) < new_len)
+                            break :result -1;
+
+                        table.len = new_len;
+                        break :result @bitCast(old_len);
+                    },
+                }),
             }
 
             interp.enterMainLoop(fuel);
@@ -2651,7 +2699,7 @@ const opcode_handlers = struct {
         const table = int.currentFrame().function.expanded().wasm
             .module.header().tableAddr(table_idx).table;
 
-        const ref = vals.pop();
+        const ref = vals.pop().?;
         const idx: u32 = @bitCast(vals.pop().?.i32);
 
         @memcpy(
@@ -3122,6 +3170,67 @@ const opcode_handlers = struct {
             int.state = .{ .trapped = Trap.init(.table_access_out_of_bounds, {}) };
             return;
         };
+
+        std.debug.assert(loc <= vals.items.len);
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-grow
+    pub fn @"table.grow"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const table_idx = i.nextIdx(Module.TableIdx);
+        const module = int.currentFrame().function.expanded().wasm.module;
+        const table_addr = module.header().tableAddr(table_idx);
+        const table = table_addr.table;
+
+        const delta: u32 = @bitCast(vals.pop().?.i32);
+        const elem = vals.pop().?;
+        const grow_failed: i32 = -1;
+        const result: i32 = if (table.limit - table.len < delta)
+            grow_failed
+        else if (table.capacity - table.len >= delta) result: {
+            const new_size: u32 = table.len + delta;
+            const old_size: u32 = table.len;
+            table.len = new_size;
+
+            const src_elem = std.mem.asBytes(&elem)[0..table.stride];
+            for (0..table.len) |idx| {
+                @memcpy(table.elementSlice(idx) catch unreachable, src_elem);
+            }
+
+            break :result @bitCast(old_size);
+        } else {
+            int.state = .{
+                .interrupted = .{
+                    .cause = .{
+                        .table_grow = .{
+                            .delta = delta,
+                            .table = table_addr,
+                            .elem = elem,
+                        },
+                    },
+                },
+            };
+            return;
+        };
+
+        vals.appendAssumeCapacity(.{ .i32 = result });
+
+        std.debug.assert(loc <= vals.items.len);
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
+
+    /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-size
+    pub fn @"table.size"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const table_idx = i.nextIdx(Module.TableIdx);
+
+        const size = int.currentFrame().function.expanded().wasm
+            .module.header().tableAddr(table_idx).table.len;
+
+        vals.appendAssumeCapacity(.{ .i32 = @bitCast(@as(u32, @intCast(size))) });
 
         std.debug.assert(loc <= vals.items.len);
         if (i.nextOpcodeHandler(fuel, int)) |next| {
