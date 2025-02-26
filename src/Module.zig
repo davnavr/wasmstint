@@ -460,7 +460,7 @@ pub const ElemSegment = struct {
                     },
                 },
                 .@"global.get" => |global_idx| .{
-                    .tag = .@"ref.func",
+                    .tag = .@"global.get",
                     .inner = .{
                         .@"global.get" = try SmallIdx(u30, GlobalIdx).init(global_idx),
                     },
