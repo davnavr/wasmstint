@@ -106,7 +106,7 @@ pub fn build(b: *std.Build) void {
             "tests/spec/int_literals.wast",
             "tests/spec/labels.wast",
             "tests/spec/left-to-right.wast",
-            // "tests/spec/linking.wast", // TODO: panicking in memory.grow
+            "tests/spec/linking.wast",
             "tests/spec/load.wast",
             "tests/spec/local_get.wast",
             "tests/spec/local_set.wast",
