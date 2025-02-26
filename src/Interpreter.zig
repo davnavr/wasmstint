@@ -1081,7 +1081,7 @@ fn setupStackFrame(
     }
 }
 
-const OpcodeHandler = *const fn (
+const OpcodeHandler = fn (
     i: *Instructions,
     s: *Stp,
     loc: u32,
@@ -1111,7 +1111,10 @@ const Instructions = extern struct {
         return (try i.readByteArray(1))[0];
     }
 
-    inline fn readUleb128(reader: *Instructions, comptime T: type) error{ Overflow, EndOfStream }!T {
+    inline fn readUleb128(
+        reader: *Instructions,
+        comptime T: type,
+    ) error{ Overflow, EndOfStream }!T {
         return std.leb.readUleb128(T, reader);
     }
 
@@ -1120,15 +1123,25 @@ const Instructions = extern struct {
         return switch (I) {
             // spec w/o multi-memory allows only parsing single byte for memory indices
             Module.MemIdx => @enumFromInt(reader.readUleb128(IdxInt) catch unreachable),
-            else => @enumFromInt(@as(IdxInt, @intCast(reader.readUleb128(u32) catch unreachable))),
+            else => @enumFromInt(@as(
+                IdxInt,
+                @intCast(reader.readUleb128(u32) catch unreachable),
+            )),
         };
     }
 
-    inline fn readIleb128(reader: *Instructions, comptime T: type) error{ Overflow, EndOfStream }!T {
+    inline fn readIleb128(
+        reader: *Instructions,
+        comptime T: type,
+    ) error{ Overflow, EndOfStream }!T {
         return std.leb.readIleb128(T, reader);
     }
 
-    inline fn nextOpcodeHandler(reader: *Instructions, fuel: *Fuel, interp: *Interpreter) ?OpcodeHandler {
+    inline fn nextOpcodeHandler(
+        reader: *Instructions,
+        fuel: *Fuel,
+        interp: *Interpreter,
+    ) ?*const OpcodeHandler {
         if (fuel.remaining == 0) {
             interp.state = .{ .interrupted = .{ .cause = .out_of_fuel } };
             return null;
@@ -1162,7 +1175,14 @@ const Instructions = extern struct {
 ///
 /// To ensure the interpreter cannot overflow the stack, opcode handlers must call this function
 /// via `@call` with either `.always_tail` or `always_inline`.
-fn returnFromWasm(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+fn returnFromWasm(
+    i: *Instructions,
+    s: *Stp,
+    loc: u32,
+    vals: *ValStack,
+    fuel: *Fuel,
+    int: *Interpreter,
+) void {
     _ = i;
     _ = s;
 
@@ -1349,13 +1369,28 @@ fn linearMemoryHandlers(comptime field_name: []const u8) type {
         const T = @FieldType(Value, field_name);
         const accessors = linearMemoryAccessors(@sizeOf(T));
 
-        fn load(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        fn load(
+            i: *Instructions,
+            s: *Stp,
+            loc: u32,
+            vals: *ValStack,
+            fuel: *Fuel,
+            int: *Interpreter,
+        ) void {
             const bytes = accessors.performLoad(i, vals, int) orelse {
-                int.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
+                int.state = .{
+                    .trapped = Trap.init(.memory_access_out_of_bounds, {}),
+                };
                 return;
             };
 
-            vals.appendAssumeCapacity(@unionInit(Value, field_name, @bitCast(bytes.*)));
+            vals.appendAssumeCapacity(
+                @unionInit(
+                    Value,
+                    field_name,
+                    @bitCast(bytes.*),
+                ),
+            );
 
             std.debug.assert(loc <= vals.items.len);
             if (i.nextOpcodeHandler(fuel, int)) |next| {
@@ -1363,7 +1398,14 @@ fn linearMemoryHandlers(comptime field_name: []const u8) type {
             }
         }
 
-        fn store(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        fn store(
+            i: *Instructions,
+            s: *Stp,
+            loc: u32,
+            vals: *ValStack,
+            fuel: *Fuel,
+            int: *Interpreter,
+        ) void {
             const c: accessors.Bytes = @bitCast(@field(vals.pop().?, field_name));
             accessors.performStore(i, vals, int, c) catch |e| {
                 comptime std.debug.assert(@TypeOf(e) == error{OutOfBounds});
@@ -1379,7 +1421,10 @@ fn linearMemoryHandlers(comptime field_name: []const u8) type {
     };
 }
 
-fn extendingLinearMemoryLoad(comptime field_name: []const u8, comptime S: type) type {
+fn extendingLinearMemoryLoad(
+    comptime field_name: []const u8,
+    comptime S: type,
+) OpcodeHandler {
     return struct {
         const T = @FieldType(Value, field_name);
 
@@ -1387,8 +1432,19 @@ fn extendingLinearMemoryLoad(comptime field_name: []const u8, comptime S: type) 
             std.debug.assert(@bitSizeOf(S) < @bitSizeOf(T));
         }
 
-        fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
-            const bytes = linearMemoryAccessors(@sizeOf(S)).performLoad(i, vals, int) orelse {
+        fn handler(
+            i: *Instructions,
+            s: *Stp,
+            loc: u32,
+            vals: *ValStack,
+            fuel: *Fuel,
+            int: *Interpreter,
+        ) void {
+            const bytes = linearMemoryAccessors(@sizeOf(S)).performLoad(
+                i,
+                vals,
+                int,
+            ) orelse {
                 int.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
                 return;
             };
@@ -1406,10 +1462,13 @@ fn extendingLinearMemoryLoad(comptime field_name: []const u8, comptime S: type) 
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
         }
-    };
+    }.handler;
 }
 
-fn narrowingLinearMemoryStore(comptime field_name: []const u8, comptime size: u6) type {
+fn narrowingLinearMemoryStore(
+    comptime field_name: []const u8,
+    comptime size: u6,
+) OpcodeHandler {
     return struct {
         const T = @FieldType(Value, field_name);
         const S = std.meta.Int(.signed, size);
@@ -1418,11 +1477,25 @@ fn narrowingLinearMemoryStore(comptime field_name: []const u8, comptime size: u6
             std.debug.assert(@bitSizeOf(S) < @bitSizeOf(T));
         }
 
-        fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        fn handler(
+            i: *Instructions,
+            s: *Stp,
+            loc: u32,
+            vals: *ValStack,
+            fuel: *Fuel,
+            int: *Interpreter,
+        ) void {
             const narrowed: S = @truncate(@field(vals.pop().?, field_name));
-            linearMemoryAccessors(size / 8).performStore(i, vals, int, @bitCast(narrowed)) catch |e| {
+            linearMemoryAccessors(size / 8).performStore(
+                i,
+                vals,
+                int,
+                @bitCast(narrowed),
+            ) catch |e| {
                 comptime std.debug.assert(@TypeOf(e) == error{OutOfBounds});
-                int.state = .{ .trapped = Trap.init(.memory_access_out_of_bounds, {}) };
+                int.state = .{
+                    .trapped = Trap.init(.memory_access_out_of_bounds, {}),
+                };
                 return;
             };
 
@@ -1431,12 +1504,23 @@ fn narrowingLinearMemoryStore(comptime field_name: []const u8, comptime size: u6
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
         }
-    };
+    }.handler;
 }
 
-fn defineBinOp(comptime value_field: []const u8, comptime op: anytype, comptime trap: anytype) type {
+fn defineBinOp(
+    comptime value_field: []const u8,
+    comptime op: anytype,
+    comptime trap: anytype,
+) OpcodeHandler {
     return struct {
-        fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        fn handler(
+            i: *Instructions,
+            s: *Stp,
+            loc: u32,
+            vals: *ValStack,
+            fuel: *Fuel,
+            int: *Interpreter,
+        ) void {
             const c_2 = @field(vals.pop().?, value_field);
             const c_1 = @field(vals.pop().?, value_field);
             const result = @call(.always_inline, op, .{ c_1, c_2 }) catch |e| {
@@ -1451,12 +1535,19 @@ fn defineBinOp(comptime value_field: []const u8, comptime op: anytype, comptime 
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
         }
-    };
+    }.handler;
 }
 
-fn defineUnOp(comptime value_field: []const u8, comptime op: anytype) type {
+fn defineUnOp(comptime value_field: []const u8, comptime op: anytype) OpcodeHandler {
     return struct {
-        fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        fn handler(
+            i: *Instructions,
+            s: *Stp,
+            loc: u32,
+            vals: *ValStack,
+            fuel: *Fuel,
+            int: *Interpreter,
+        ) void {
             const c_1 = @field(vals.pop().?, value_field);
             const result = @call(.always_inline, op, .{c_1});
             vals.appendAssumeCapacity(@unionInit(Value, value_field, result));
@@ -1466,12 +1557,19 @@ fn defineUnOp(comptime value_field: []const u8, comptime op: anytype) type {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
         }
-    };
+    }.handler;
 }
 
-fn defineTestOp(comptime value_field: []const u8, comptime op: anytype) type {
+fn defineTestOp(comptime value_field: []const u8, comptime op: anytype) OpcodeHandler {
     return struct {
-        fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        fn handler(
+            i: *Instructions,
+            s: *Stp,
+            loc: u32,
+            vals: *ValStack,
+            fuel: *Fuel,
+            int: *Interpreter,
+        ) void {
             const c_1 = @field(vals.pop().?, value_field);
             const result = @call(.always_inline, op, .{c_1});
             vals.appendAssumeCapacity(Value{ .i32 = @intFromBool(result) });
@@ -1481,12 +1579,19 @@ fn defineTestOp(comptime value_field: []const u8, comptime op: anytype) type {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
         }
-    };
+    }.handler;
 }
 
-fn defineRelOp(comptime value_field: []const u8, comptime op: anytype) type {
+fn defineRelOp(comptime value_field: []const u8, comptime op: anytype) OpcodeHandler {
     return struct {
-        fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        fn handler(
+            i: *Instructions,
+            s: *Stp,
+            loc: u32,
+            vals: *ValStack,
+            fuel: *Fuel,
+            int: *Interpreter,
+        ) void {
             const c_2 = @field(vals.pop().?, value_field);
             const c_1 = @field(vals.pop().?, value_field);
             const result = @call(.always_inline, op, .{ c_1, c_2 });
@@ -1497,7 +1602,7 @@ fn defineRelOp(comptime value_field: []const u8, comptime op: anytype) type {
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
         }
-    };
+    }.handler;
 }
 
 fn defineConvOp(
@@ -1505,9 +1610,16 @@ fn defineConvOp(
     comptime dst_field: []const u8,
     comptime op: anytype,
     comptime trap: anytype,
-) type {
+) OpcodeHandler {
     return struct {
-        fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        fn handler(
+            i: *Instructions,
+            s: *Stp,
+            loc: u32,
+            vals: *ValStack,
+            fuel: *Fuel,
+            int: *Interpreter,
+        ) void {
             const t_1 = @field(vals.pop().?, src_field);
             const result = @call(.always_inline, op, .{t_1}) catch |e| {
                 int.state = .{ .trapped = @call(.always_inline, trap, .{e}) };
@@ -1521,7 +1633,7 @@ fn defineConvOp(
                 @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
             }
         }
-    };
+    }.handler;
 }
 
 fn integerOpcodeHandlers(comptime Signed: type) type {
@@ -1730,46 +1842,46 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
             }
         }
 
-        const eqz = defineTestOp(value_field, operators.eqz).handler;
-        const eq = defineRelOp(value_field, operators.eq).handler;
-        const ne = defineRelOp(value_field, operators.ne).handler;
-        const lt_s = defineRelOp(value_field, operators.lt_s).handler;
-        const lt_u = defineRelOp(value_field, operators.lt_u).handler;
-        const gt_s = defineRelOp(value_field, operators.gt_s).handler;
-        const gt_u = defineRelOp(value_field, operators.gt_u).handler;
-        const le_s = defineRelOp(value_field, operators.le_s).handler;
-        const le_u = defineRelOp(value_field, operators.le_u).handler;
-        const ge_s = defineRelOp(value_field, operators.ge_s).handler;
-        const ge_u = defineRelOp(value_field, operators.ge_u).handler;
+        const eqz = defineTestOp(value_field, operators.eqz);
+        const eq = defineRelOp(value_field, operators.eq);
+        const ne = defineRelOp(value_field, operators.ne);
+        const lt_s = defineRelOp(value_field, operators.lt_s);
+        const lt_u = defineRelOp(value_field, operators.lt_u);
+        const gt_s = defineRelOp(value_field, operators.gt_s);
+        const gt_u = defineRelOp(value_field, operators.gt_u);
+        const le_s = defineRelOp(value_field, operators.le_s);
+        const le_u = defineRelOp(value_field, operators.le_u);
+        const ge_s = defineRelOp(value_field, operators.ge_s);
+        const ge_u = defineRelOp(value_field, operators.ge_u);
 
-        const clz = defineUnOp(value_field, operators.clz).handler;
-        const ctz = defineUnOp(value_field, operators.ctz).handler;
-        const popcnt = defineUnOp(value_field, operators.popcnt).handler;
-        const add = defineBinOp(value_field, operators.add, undefined).handler;
-        const sub = defineBinOp(value_field, operators.sub, undefined).handler;
-        const mul = defineBinOp(value_field, operators.mul, undefined).handler;
-        const div_s = defineBinOp(value_field, operators.div_s, Trap.initSignedIntegerDivision).handler;
-        const div_u = defineBinOp(value_field, operators.div_u, Trap.initIntegerDivisionByZero).handler;
-        const rem_s = defineBinOp(value_field, operators.rem_s, Trap.initIntegerDivisionByZero).handler;
-        const rem_u = defineBinOp(value_field, operators.rem_u, Trap.initIntegerDivisionByZero).handler;
-        const @"and" = defineBinOp(value_field, operators.@"and", undefined).handler;
-        const @"or" = defineBinOp(value_field, operators.@"or", undefined).handler;
-        const xor = defineBinOp(value_field, operators.xor, undefined).handler;
-        const shl = defineBinOp(value_field, operators.shl, undefined).handler;
-        const shr_s = defineBinOp(value_field, operators.shr_s, undefined).handler;
-        const shr_u = defineBinOp(value_field, operators.shr_u, undefined).handler;
-        const rotl = defineBinOp(value_field, operators.rotl, undefined).handler;
-        const rotr = defineBinOp(value_field, operators.rotr, undefined).handler;
+        const clz = defineUnOp(value_field, operators.clz);
+        const ctz = defineUnOp(value_field, operators.ctz);
+        const popcnt = defineUnOp(value_field, operators.popcnt);
+        const add = defineBinOp(value_field, operators.add, undefined);
+        const sub = defineBinOp(value_field, operators.sub, undefined);
+        const mul = defineBinOp(value_field, operators.mul, undefined);
+        const div_s = defineBinOp(value_field, operators.div_s, Trap.initSignedIntegerDivision);
+        const div_u = defineBinOp(value_field, operators.div_u, Trap.initIntegerDivisionByZero);
+        const rem_s = defineBinOp(value_field, operators.rem_s, Trap.initIntegerDivisionByZero);
+        const rem_u = defineBinOp(value_field, operators.rem_u, Trap.initIntegerDivisionByZero);
+        const @"and" = defineBinOp(value_field, operators.@"and", undefined);
+        const @"or" = defineBinOp(value_field, operators.@"or", undefined);
+        const xor = defineBinOp(value_field, operators.xor, undefined);
+        const shl = defineBinOp(value_field, operators.shl, undefined);
+        const shr_s = defineBinOp(value_field, operators.shr_s, undefined);
+        const shr_u = defineBinOp(value_field, operators.shr_u, undefined);
+        const rotl = defineBinOp(value_field, operators.rotl, undefined);
+        const rotr = defineBinOp(value_field, operators.rotr, undefined);
 
-        const trunc_f32_s = defineConvOp("f32", value_field, operators.trunc_s, Trap.initTrunc).handler;
-        const trunc_f32_u = defineConvOp("f32", value_field, operators.trunc_u, Trap.initTrunc).handler;
-        const trunc_f64_s = defineConvOp("f64", value_field, operators.trunc_s, Trap.initTrunc).handler;
-        const trunc_f64_u = defineConvOp("f64", value_field, operators.trunc_u, Trap.initTrunc).handler;
+        const trunc_f32_s = defineConvOp("f32", value_field, operators.trunc_s, Trap.initTrunc);
+        const trunc_f32_u = defineConvOp("f32", value_field, operators.trunc_u, Trap.initTrunc);
+        const trunc_f64_s = defineConvOp("f64", value_field, operators.trunc_s, Trap.initTrunc);
+        const trunc_f64_u = defineConvOp("f64", value_field, operators.trunc_u, Trap.initTrunc);
 
-        const trunc_sat_f32_s = defineConvOp("f32", value_field, operators.trunc_sat_s, Trap.initTrunc).handler;
-        const trunc_sat_f32_u = defineConvOp("f32", value_field, operators.trunc_sat_u, Trap.initTrunc).handler;
-        const trunc_sat_f64_s = defineConvOp("f64", value_field, operators.trunc_sat_s, Trap.initTrunc).handler;
-        const trunc_sat_f64_u = defineConvOp("f64", value_field, operators.trunc_sat_u, Trap.initTrunc).handler;
+        const trunc_sat_f32_s = defineConvOp("f32", value_field, operators.trunc_sat_s, Trap.initTrunc);
+        const trunc_sat_f32_u = defineConvOp("f32", value_field, operators.trunc_sat_u, Trap.initTrunc);
+        const trunc_sat_f64_s = defineConvOp("f64", value_field, operators.trunc_sat_s, Trap.initTrunc);
+        const trunc_sat_f64_u = defineConvOp("f64", value_field, operators.trunc_sat_u, Trap.initTrunc);
     };
 }
 
@@ -1974,32 +2086,32 @@ fn floatOpcodeHandlers(comptime F: type) type {
             }
         }
 
-        const eq = defineRelOp(value_field, operators.eq).handler;
-        const ne = defineRelOp(value_field, operators.ne).handler;
-        const lt = defineRelOp(value_field, operators.lt).handler;
-        const gt = defineRelOp(value_field, operators.gt).handler;
-        const le = defineRelOp(value_field, operators.le).handler;
-        const ge = defineRelOp(value_field, operators.ge).handler;
+        const eq = defineRelOp(value_field, operators.eq);
+        const ne = defineRelOp(value_field, operators.ne);
+        const lt = defineRelOp(value_field, operators.lt);
+        const gt = defineRelOp(value_field, operators.gt);
+        const le = defineRelOp(value_field, operators.le);
+        const ge = defineRelOp(value_field, operators.ge);
 
-        const abs = defineUnOp(value_field, operators.abs).handler;
-        const neg = defineUnOp(value_field, operators.neg).handler;
-        const ceil = defineUnOp(value_field, operators.ceil).handler;
-        const floor = defineUnOp(value_field, operators.floor).handler;
-        const trunc = defineUnOp(value_field, operators.trunc).handler;
-        const nearest = defineUnOp(value_field, operators.nearest).handler;
-        const sqrt = defineUnOp(value_field, operators.sqrt).handler;
-        const add = defineBinOp(value_field, operators.add, undefined).handler;
-        const sub = defineBinOp(value_field, operators.sub, undefined).handler;
-        const mul = defineBinOp(value_field, operators.mul, undefined).handler;
-        const div = defineBinOp(value_field, operators.div, undefined).handler;
-        const min = defineBinOp(value_field, operators.min, undefined).handler;
-        const max = defineBinOp(value_field, operators.max, undefined).handler;
-        const copysign = defineBinOp(value_field, operators.copysign, undefined).handler;
+        const abs = defineUnOp(value_field, operators.abs);
+        const neg = defineUnOp(value_field, operators.neg);
+        const ceil = defineUnOp(value_field, operators.ceil);
+        const floor = defineUnOp(value_field, operators.floor);
+        const trunc = defineUnOp(value_field, operators.trunc);
+        const nearest = defineUnOp(value_field, operators.nearest);
+        const sqrt = defineUnOp(value_field, operators.sqrt);
+        const add = defineBinOp(value_field, operators.add, undefined);
+        const sub = defineBinOp(value_field, operators.sub, undefined);
+        const mul = defineBinOp(value_field, operators.mul, undefined);
+        const div = defineBinOp(value_field, operators.div, undefined);
+        const min = defineBinOp(value_field, operators.min, undefined);
+        const max = defineBinOp(value_field, operators.max, undefined);
+        const copysign = defineBinOp(value_field, operators.copysign, undefined);
 
-        const convert_i32_s = defineConvOp("i32", value_field, operators.convert_s, undefined).handler;
-        const convert_i32_u = defineConvOp("i32", value_field, operators.convert_u, undefined).handler;
-        const convert_i64_s = defineConvOp("i64", value_field, operators.convert_s, undefined).handler;
-        const convert_i64_u = defineConvOp("i64", value_field, operators.convert_u, undefined).handler;
+        const convert_i32_s = defineConvOp("i32", value_field, operators.convert_s, undefined);
+        const convert_i32_u = defineConvOp("i32", value_field, operators.convert_u, undefined);
+        const convert_i64_s = defineConvOp("i64", value_field, operators.convert_s, undefined);
+        const convert_i64_u = defineConvOp("i64", value_field, operators.convert_u, undefined);
     };
 }
 
@@ -2014,11 +2126,17 @@ fn dispatchTableLength(comptime Opcode: type) comptime_int {
     return maximum + 1;
 }
 
-fn dispatchTable(comptime Opcode: type, comptime invalid: OpcodeHandler) [dispatchTableLength(Opcode)]OpcodeHandler {
-    var table = [_]OpcodeHandler{invalid} ** dispatchTableLength(Opcode);
+fn dispatchTable(
+    comptime Opcode: type,
+    comptime invalid: OpcodeHandler,
+) [dispatchTableLength(Opcode)]*const OpcodeHandler {
+    var table = [_]*const OpcodeHandler{invalid} ** dispatchTableLength(Opcode);
     for (@typeInfo(Opcode).@"enum".fields) |op| {
         if (@hasDecl(opcode_handlers, op.name)) {
-            table[op.value] = @as(OpcodeHandler, @field(opcode_handlers, op.name));
+            table[op.value] = @as(
+                *const OpcodeHandler,
+                @field(opcode_handlers, op.name),
+            );
         }
     }
 
@@ -2027,7 +2145,14 @@ fn dispatchTable(comptime Opcode: type, comptime invalid: OpcodeHandler) [dispat
 
 fn prefixDispatchTable(comptime prefix: opcodes.ByteOpcode, comptime Opcode: type) type {
     return struct {
-        fn panicInvalidInstruction(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        fn panicInvalidInstruction(
+            i: *Instructions,
+            s: *Stp,
+            loc: u32,
+            vals: *ValStack,
+            fuel: *Fuel,
+            int: *Interpreter,
+        ) void {
             _ = s;
             _ = loc;
             _ = vals;
@@ -2046,7 +2171,14 @@ fn prefixDispatchTable(comptime prefix: opcodes.ByteOpcode, comptime Opcode: typ
 
         const entries = dispatchTable(Opcode, invalid);
 
-        pub fn handler(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        pub fn handler(
+            i: *Instructions,
+            s: *Stp,
+            loc: u32,
+            vals: *ValStack,
+            fuel: *Fuel,
+            int: *Interpreter,
+        ) void {
             const n = i.nextIdx(Opcode);
             const next = entries[@intFromEnum(n)];
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
@@ -2177,7 +2309,14 @@ inline fn takeBranch(
 }
 
 const opcode_handlers = struct {
-    fn panicInvalidInstruction(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+    fn panicInvalidInstruction(
+        i: *Instructions,
+        s: *Stp,
+        loc: u32,
+        vals: *ValStack,
+        fuel: *Fuel,
+        int: *Interpreter,
+    ) void {
         _ = s;
         _ = loc;
         _ = vals;
@@ -2185,7 +2324,9 @@ const opcode_handlers = struct {
         _ = int;
         const bad_opcode: u8 = (i.p - 1)[0];
         const opcode_name = name: {
-            const tag = std.meta.intToEnum(opcodes.ByteOpcode, bad_opcode) catch break :name "unknown";
+            const tag = std.meta.intToEnum(opcodes.ByteOpcode, bad_opcode) catch
+                break :name "unknown";
+
             break :name @tagName(tag);
         };
 
@@ -2533,25 +2674,25 @@ const opcode_handlers = struct {
     pub const @"i64.load" = linearMemoryHandlers("i64").load;
     pub const @"f32.load" = linearMemoryHandlers("f32").load;
     pub const @"f64.load" = linearMemoryHandlers("f64").load;
-    pub const @"i32.load8_s" = extendingLinearMemoryLoad("i32", i8).handler;
-    pub const @"i32.load8_u" = extendingLinearMemoryLoad("i32", u8).handler;
-    pub const @"i32.load16_s" = extendingLinearMemoryLoad("i32", i16).handler;
-    pub const @"i32.load16_u" = extendingLinearMemoryLoad("i32", u16).handler;
-    pub const @"i64.load8_s" = extendingLinearMemoryLoad("i64", i8).handler;
-    pub const @"i64.load8_u" = extendingLinearMemoryLoad("i64", u8).handler;
-    pub const @"i64.load16_s" = extendingLinearMemoryLoad("i64", i16).handler;
-    pub const @"i64.load16_u" = extendingLinearMemoryLoad("i64", u16).handler;
-    pub const @"i64.load32_s" = extendingLinearMemoryLoad("i64", i32).handler;
-    pub const @"i64.load32_u" = extendingLinearMemoryLoad("i64", u32).handler;
+    pub const @"i32.load8_s" = extendingLinearMemoryLoad("i32", i8);
+    pub const @"i32.load8_u" = extendingLinearMemoryLoad("i32", u8);
+    pub const @"i32.load16_s" = extendingLinearMemoryLoad("i32", i16);
+    pub const @"i32.load16_u" = extendingLinearMemoryLoad("i32", u16);
+    pub const @"i64.load8_s" = extendingLinearMemoryLoad("i64", i8);
+    pub const @"i64.load8_u" = extendingLinearMemoryLoad("i64", u8);
+    pub const @"i64.load16_s" = extendingLinearMemoryLoad("i64", i16);
+    pub const @"i64.load16_u" = extendingLinearMemoryLoad("i64", u16);
+    pub const @"i64.load32_s" = extendingLinearMemoryLoad("i64", i32);
+    pub const @"i64.load32_u" = extendingLinearMemoryLoad("i64", u32);
     pub const @"i32.store" = linearMemoryHandlers("i32").store;
     pub const @"i64.store" = linearMemoryHandlers("i64").store;
     pub const @"f32.store" = linearMemoryHandlers("f32").store;
     pub const @"f64.store" = linearMemoryHandlers("f64").store;
-    pub const @"i32.store8" = narrowingLinearMemoryStore("i32", 8).handler;
-    pub const @"i32.store16" = narrowingLinearMemoryStore("i32", 16).handler;
-    pub const @"i64.store8" = narrowingLinearMemoryStore("i64", 8).handler;
-    pub const @"i64.store16" = narrowingLinearMemoryStore("i64", 16).handler;
-    pub const @"i64.store32" = narrowingLinearMemoryStore("i64", 32).handler;
+    pub const @"i32.store8" = narrowingLinearMemoryStore("i32", 8);
+    pub const @"i32.store16" = narrowingLinearMemoryStore("i32", 16);
+    pub const @"i64.store8" = narrowingLinearMemoryStore("i64", 8);
+    pub const @"i64.store16" = narrowingLinearMemoryStore("i64", 16);
+    pub const @"i64.store32" = narrowingLinearMemoryStore("i64", 32);
 
     pub fn @"memory.size"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const mem_idx = i.nextIdx(Module.MemIdx);
@@ -2741,21 +2882,21 @@ const opcode_handlers = struct {
         }
     };
 
-    fn reinterpretOp(comptime Dst: type) type {
+    fn reinterpretOp(comptime Dst: type) (fn (anytype) error{}!Dst) {
         return struct {
-            fn op(src: anytype) !Dst {
+            fn op(src: anytype) error{}!Dst {
                 return @bitCast(src);
             }
-        };
+        }.op;
     }
 
-    pub const @"i32.wrap_i64" = defineConvOp("i64", "i32", conv_ops.@"i32.wrap_i64", undefined).handler;
+    pub const @"i32.wrap_i64" = defineConvOp("i64", "i32", conv_ops.@"i32.wrap_i64", undefined);
     pub const @"i32.trunc_f32_s" = i32_opcode_handlers.trunc_f32_s;
     pub const @"i32.trunc_f32_u" = i32_opcode_handlers.trunc_f32_u;
     pub const @"i32.trunc_f64_s" = i32_opcode_handlers.trunc_f64_s;
     pub const @"i32.trunc_f64_u" = i32_opcode_handlers.trunc_f64_u;
-    pub const @"i64.extend_i32_s" = defineConvOp("i32", "i64", conv_ops.@"i64.extend_i32_s", undefined).handler;
-    pub const @"i64.extend_i32_u" = defineConvOp("i32", "i64", conv_ops.@"i64.extend_i32_u", undefined).handler;
+    pub const @"i64.extend_i32_s" = defineConvOp("i32", "i64", conv_ops.@"i64.extend_i32_s", undefined);
+    pub const @"i64.extend_i32_u" = defineConvOp("i32", "i64", conv_ops.@"i64.extend_i32_u", undefined);
     pub const @"i64.trunc_f32_s" = i64_opcode_handlers.trunc_f32_s;
     pub const @"i64.trunc_f32_u" = i64_opcode_handlers.trunc_f32_u;
     pub const @"i64.trunc_f64_s" = i64_opcode_handlers.trunc_f64_s;
@@ -2764,32 +2905,32 @@ const opcode_handlers = struct {
     pub const @"f32.convert_i32_u" = f32_opcode_handlers.convert_i32_u;
     pub const @"f32.convert_i64_s" = f32_opcode_handlers.convert_i64_s;
     pub const @"f32.convert_i64_u" = f32_opcode_handlers.convert_i64_u;
-    pub const @"f32.demote_f64" = defineConvOp("f64", "f32", conv_ops.@"f32.demote_f64", undefined).handler;
+    pub const @"f32.demote_f64" = defineConvOp("f64", "f32", conv_ops.@"f32.demote_f64", undefined);
     pub const @"f64.convert_i32_s" = f64_opcode_handlers.convert_i32_s;
     pub const @"f64.convert_i32_u" = f64_opcode_handlers.convert_i32_u;
     pub const @"f64.convert_i64_s" = f64_opcode_handlers.convert_i64_s;
     pub const @"f64.convert_i64_u" = f64_opcode_handlers.convert_i64_u;
-    pub const @"f64.promote_f32" = defineConvOp("f32", "f64", conv_ops.@"f64.promote_f32", undefined).handler;
-    pub const @"i32.reinterpret_f32" = defineConvOp("f32", "i32", reinterpretOp(i32).op, undefined).handler;
-    pub const @"i64.reinterpret_f64" = defineConvOp("f64", "i64", reinterpretOp(i64).op, undefined).handler;
-    pub const @"f32.reinterpret_i32" = defineConvOp("i32", "f32", reinterpretOp(f32).op, undefined).handler;
-    pub const @"f64.reinterpret_i64" = defineConvOp("i64", "f64", reinterpretOp(f64).op, undefined).handler;
+    pub const @"f64.promote_f32" = defineConvOp("f32", "f64", conv_ops.@"f64.promote_f32", undefined);
+    pub const @"i32.reinterpret_f32" = defineConvOp("f32", "i32", reinterpretOp(i32), undefined);
+    pub const @"i64.reinterpret_f64" = defineConvOp("f64", "i64", reinterpretOp(i64), undefined);
+    pub const @"f32.reinterpret_i32" = defineConvOp("i32", "f32", reinterpretOp(f32), undefined);
+    pub const @"f64.reinterpret_i64" = defineConvOp("i64", "f64", reinterpretOp(f64), undefined);
 
-    fn intSignExtend(comptime I: type, comptime M: type) type {
+    fn intSignExtend(comptime I: type, comptime M: type) (fn (I) I) {
         std.debug.assert(@bitSizeOf(M) < @bitSizeOf(I));
         return struct {
             fn op(i: I) I {
                 const j: I = @mod(i, @as(I, 1 << @bitSizeOf(M)));
                 return @as(M, @truncate(j));
             }
-        };
+        }.op;
     }
 
-    pub const @"i32.extend8_s" = defineUnOp("i32", intSignExtend(i32, i8).op).handler;
-    pub const @"i32.extend16_s" = defineUnOp("i32", intSignExtend(i32, i16).op).handler;
-    pub const @"i64.extend8_s" = defineUnOp("i64", intSignExtend(i64, i8).op).handler;
-    pub const @"i64.extend16_s" = defineUnOp("i64", intSignExtend(i64, i16).op).handler;
-    pub const @"i64.extend32_s" = defineUnOp("i64", intSignExtend(i64, i32).op).handler;
+    pub const @"i32.extend8_s" = defineUnOp("i32", intSignExtend(i32, i8));
+    pub const @"i32.extend16_s" = defineUnOp("i32", intSignExtend(i32, i16));
+    pub const @"i64.extend8_s" = defineUnOp("i64", intSignExtend(i64, i8));
+    pub const @"i64.extend16_s" = defineUnOp("i64", intSignExtend(i64, i16));
+    pub const @"i64.extend32_s" = defineUnOp("i64", intSignExtend(i64, i32));
 
     pub fn @"ref.null"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         _ = i.readByte() catch unreachable;
