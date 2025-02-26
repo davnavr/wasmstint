@@ -273,12 +273,21 @@ pub const ImportProvider = struct {
         ) !void {
             _ = fmt;
             _ = options;
+            try writer.writeByte('(');
             switch (desc.*) {
-                .func => |func| try writer.print("(func {})", .{func}),
-                .table => |table| try writer.print("(table {})", .{table}),
-                .mem => |mem| try writer.print("(memory {})", .{mem}),
-                .global => |global| try writer.print("(global {})", .{global}),
+                .func => |func| {
+                    try writer.writeAll("func");
+                    if (func.param_count > 0 or func.result_count > 0) {
+                        try writer.writeByte(' ');
+                    }
+
+                    try writer.print("{}", .{func});
+                },
+                .table => |table| try writer.print("table {}", .{table}),
+                .mem => |mem| try writer.print("memory {}", .{mem}),
+                .global => |global| try writer.print("global {}", .{global}),
             }
+            try writer.writeByte(')');
         }
     };
 
@@ -485,17 +494,28 @@ pub const ModuleAlloc = struct {
                 .externref => @sizeOf(ExternAddr),
             };
 
-            const space_idx = try arena_array.rawAlloc(size, switch (global_type.val_type) {
+            const raw_space_idx = try arena_array.rawAlloc(size, switch (global_type.val_type) {
                 .i32, .f32 => 4,
                 .i64, .f64 => @alignOf(u64),
                 .v128 => 16, // 8 if no SIMD
                 .funcref, .externref => @alignOf(*anyopaque),
             });
 
+            const space_idx = IndexedArena.Idx(IndexedArena.Word).fromInt(raw_space_idx);
+
+            // Instantiation is responsible for initializing defined globals
+            @memset(
+                @as(
+                    [*]align(IndexedArena.min_alignment) u8,
+                    @ptrCast(space_idx.getPtr(&arena_array)),
+                )[0..size],
+                undefined,
+            );
+
             globals.setAt(
                 i,
                 &arena_array,
-                GlobalFixup{ .idx = IndexedArena.Idx(IndexedArena.Word).fromInt(space_idx) },
+                GlobalFixup{ .idx = space_idx },
             );
         }
 
@@ -1188,6 +1208,32 @@ pub const GlobalAddr = extern struct {
             .v128 => unreachable,
         };
     }
+
+    pub fn format(
+        global: GlobalAddr,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("(global {} ", .{global.global_type});
+        switch (global.global_type.val_type) {
+            inline .i32, .f32, .i64, .f64 => |num| {
+                try writer.print(
+                    "(" ++ @tagName(num) ++ ".const {})",
+                    .{@as(*const Pointee(num), @alignCast(@ptrCast(global.value)))},
+                );
+            },
+            inline .funcref, .externref => |ref| {
+                try writer.print(
+                    "{}",
+                    .{@as(*const Pointee(ref), @alignCast(@ptrCast(global.value)))},
+                );
+            },
+            .v128 => unreachable,
+        }
+    }
 };
 
 pub const FuncAddr = extern struct {
@@ -1229,6 +1275,34 @@ pub const FuncAddr = extern struct {
                 .host => |*host| &host.func.signature,
                 .wasm => |*wasm| wasm.module.header().module.funcTypes()[@intFromEnum(wasm.idx)],
             };
+        }
+
+        pub fn format(
+            func: *const Expanded,
+            comptime fmt: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
+            _ = fmt;
+            _ = options;
+
+            try writer.writeAll("(func ");
+            switch (func.*) {
+                .wasm => |*wasm| try writer.print(
+                    "$f{} (;module@{X};)",
+                    .{ @intFromEnum(wasm.idx), @intFromPtr(wasm.module.header()) },
+                ),
+                .host => |*host| try writer.print(
+                    "(;host@{X};)",
+                    .{@intFromPtr(host.func)},
+                ),
+            }
+
+            const sig = func.signature();
+            if (sig.param_count > 0 or sig.result_count > 0)
+                try writer.print(" {}", .{sig});
+
+            try writer.writeByte(')');
         }
     };
 
@@ -1287,7 +1361,26 @@ pub const FuncAddr = extern struct {
             std.debug.assert(@bitSizeOf(FuncAddr) == @bitSizeOf(Nullable));
             std.debug.assert(Nullable.null.funcInst() == null);
         }
+
+        pub fn format(func: Nullable, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+            if (func.funcInst()) |addr| {
+                try writer.print("{}", .{addr});
+            } else {
+                try writer.writeAll("(ref.null func)");
+            }
+        }
     };
+
+    pub fn format(
+        func: FuncAddr,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("{}", .{func.expanded()});
+    }
 };
 
 pub const ExternVal = union(enum) {
@@ -1331,5 +1424,20 @@ pub const ExternAddr = packed union {
                 0,
             ),
         );
+    }
+
+    pub fn format(
+        func: ExternAddr,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        if (func.ptr == null) {
+            try writer.writeAll("(ref.null extern)");
+        } else {
+            try writer.print("(ref.extern 0x{X})", .{@intFromPtr(func.ptr)});
+        }
     }
 };

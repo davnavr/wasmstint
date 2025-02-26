@@ -28,8 +28,8 @@ pub const FuncType = extern struct {
     pub fn matches(a: *const FuncType, b: *const FuncType) bool {
         return @intFromPtr(a) == @intFromPtr(b) or
             (a.param_count == b.param_count and
-            a.result_count == b.result_count and
-            std.mem.eql(ValType, a.paramAndResultTypes(), b.paramAndResultTypes()));
+                a.result_count == b.result_count and
+                std.mem.eql(ValType, a.paramAndResultTypes(), b.paramAndResultTypes()));
     }
 
     pub fn format(
@@ -53,12 +53,12 @@ pub const FuncType = extern struct {
             try writer.writeByte(' ');
         }
 
-        for (0..func_type.param_count, func_type.parameters()) |i, param| {
+        for (0..func_type.result_count, func_type.results()) |i, result| {
             if (i > 0) {
                 try writer.writeByte(' ');
             }
 
-            try writer.print("(result {})", .{param});
+            try writer.print("(result {})", .{result});
         }
     }
 };
