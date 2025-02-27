@@ -1244,13 +1244,15 @@ pub const TableInst = extern struct {
         }
 
         // Rely on auto-vectorization to fill the table.
-        const dst_bytes = table.bytes();
+        const dst_bytes = table.base.ptr[@as(usize, idx) * stride .. @as(usize, end_idx) * stride];
         const dst_fat_bytes = dst_bytes[0 .. (dst_bytes.len / fat_size) * fat_size];
-        const dst_fat: []align(buffer_align) FatPtr = @ptrCast(dst_fat_bytes);
-
-        for (dst_fat) |*dst_elem| {
-            dst_elem.* = src_fat_buf;
-        }
+        @memset(
+            @as(
+                []align(buffer_align) FatPtr,
+                @ptrCast(@alignCast(dst_fat_bytes)),
+            ),
+            src_fat_buf,
+        );
 
         switch (table.stride) {
             .fat => {},
@@ -1266,7 +1268,7 @@ pub const TableInst = extern struct {
     pub fn fill(
         table: *const TableInst,
         len: u32,
-        elem: []align(*anyopaque) const u8,
+        elem: []align(@alignOf(*anyopaque)) const u8,
         idx: u32,
     ) OobError!void {
         const end_idx = std.math.add(u32, idx, len) catch

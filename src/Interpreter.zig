@@ -3240,6 +3240,27 @@ const opcode_handlers = struct {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
         }
     }
+
+    /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-fill
+    pub fn @"table.fill"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const table_idx = i.nextIdx(Module.TableIdx);
+        const table = int.currentFrame().function.expanded()
+            .wasm.module.header().tableAddr(table_idx).table;
+
+        const n: u32 = @bitCast(vals.pop().?.i32);
+        const dupe = vals.pop().?;
+        const d: u32 = @bitCast(vals.pop().?.i32);
+
+        table.fill(n, std.mem.asBytes(&dupe)[0..table.stride.toBytes()], d) catch {
+            int.state = .{ .trapped = Trap.init(.table_access_out_of_bounds, {}) };
+            return;
+        };
+
+        std.debug.assert(loc <= vals.items.len);
+        if (i.nextOpcodeHandler(fuel, int)) |next| {
+            @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
+        }
+    }
 };
 
 /// If the handler is not appearing in this table, make sure it is public first.
