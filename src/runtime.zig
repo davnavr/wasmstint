@@ -3,13 +3,27 @@ const Allocator = std.mem.Allocator;
 const IndexedArena = @import("IndexedArena.zig");
 const Module = @import("Module.zig");
 
-inline fn tableElementStride(elem_type: Module.ValType) u32 {
-    return switch (elem_type) {
-        .funcref => @sizeOf(FuncAddr.Nullable),
-        .externref => @sizeOf(ExternAddr),
-        else => unreachable,
-    };
-}
+pub const TableStride = enum(u32) {
+    ptr = @sizeOf(*anyopaque),
+    fat = @sizeOf([2]*anyopaque),
+
+    pub fn ofType(elem_type: Module.ValType) TableStride {
+        return switch (elem_type) {
+            .funcref => .fat,
+            .externref => .ptr,
+            else => unreachable,
+        };
+    }
+
+    pub inline fn toBytes(stride: TableStride) u32 {
+        return @intFromEnum(stride);
+    }
+
+    comptime {
+        std.debug.assert(ofType(.funcref).toBytes() == @sizeOf(FuncAddr.Nullable));
+        std.debug.assert(ofType(.externref).toBytes() == @sizeOf(ExternAddr));
+    }
+};
 
 pub const ModuleAllocator = struct {
     ctx: *anyopaque,
@@ -88,10 +102,12 @@ pub const ModuleAllocator = struct {
                 return false;
 
             const expected_type = &req.table_types[0];
-            const stride = tableElementStride(expected_type.elem_type);
+            const stride = TableStride.ofType(expected_type.elem_type);
 
-            const len = std.math.cast(u32, @divExact(buffer.len, stride)) orelse
-                return error.OutOfMemory;
+            const len = std.math.cast(
+                u32,
+                @divExact(buffer.len, stride.toBytes()),
+            ) orelse return error.OutOfMemory;
 
             if (len < expected_type.limits.min)
                 return error.OutOfMemory;
@@ -155,7 +171,7 @@ pub const ModuleAllocator = struct {
                         std.math.mul(
                             usize,
                             table_type.limits.min,
-                            tableElementStride(table_type.elem_type),
+                            TableStride.ofType(table_type.elem_type).toBytes(),
                         ) catch return error.OutOfMemory,
                     ),
                 ) catch unreachable;
@@ -238,7 +254,7 @@ pub const ModuleAllocator = struct {
                     std.math.mul(
                         usize,
                         table_type.limits.min,
-                        tableElementStride(table_type.elem_type),
+                        TableStride.ofType(table_type.elem_type).toBytes(),
                     ) catch return error.OutOfMemory,
                 );
 
@@ -999,7 +1015,7 @@ pub const MemInst = extern struct {
 
 pub const TableInst = extern struct {
     base: Base,
-    stride: u32,
+    stride: TableStride,
     /// The current size, in elements.
     len: u32,
     /// Indicates the amount that the tables's size, in elements, can grow without reallocating.
@@ -1008,6 +1024,10 @@ pub const TableInst = extern struct {
     limit: u32,
 
     pub const buffer_align = @max(@alignOf(FuncAddr.Nullable), @alignOf(ExternAddr));
+
+    comptime {
+        std.debug.assert(buffer_align == @alignOf(*anyopaque));
+    }
 
     pub const Base = packed union {
         func_ref: [*]FuncAddr.Nullable,
@@ -1139,16 +1159,17 @@ pub const TableInst = extern struct {
     }
 
     pub fn bytes(table: *const TableInst) []align(buffer_align) u8 {
-        return table.base.ptr[0..(@as(usize, table.len) * table.stride)];
+        return table.base.ptr[0..(@as(usize, table.len) * table.stride.toBytes())];
     }
 
     pub fn elementSlice(
         table: *const TableInst,
         idx: usize,
-    ) OobError![]align(@alignOf(usize)) u8 {
+    ) OobError![]align(@alignOf(*anyopaque)) u8 {
         if (table.len <= idx) return error.TableAccessOutOfBounds;
-        const base_addr = idx * table.stride;
-        return @alignCast(table.bytes()[base_addr .. base_addr + table.stride]);
+        const stride = table.stride.toBytes();
+        const base_addr = idx * stride;
+        return @alignCast(table.bytes()[base_addr .. base_addr + stride]);
     }
 
     /// Implements the [`table.copy`] instruction.
@@ -1178,11 +1199,12 @@ pub const TableInst = extern struct {
 
         if (len == 0) return;
 
-        const src_slice: []const u8 = src.bytes()[src_idx * src.stride .. src_end_idx * src.stride];
-        std.debug.assert(src_slice.len % src.stride == 0);
+        const stride = src.stride.toBytes();
+        const src_slice: []const u8 = src.bytes()[src_idx * stride .. src_end_idx * stride];
+        std.debug.assert(src_slice.len % stride == 0);
 
-        const dst_slice = dst.bytes()[dst_idx * dst.stride .. dst_end_idx * dst.stride];
-        std.debug.assert(dst_slice.len % dst.stride == 0);
+        const dst_slice = dst.bytes()[dst_idx * stride .. dst_end_idx * stride];
+        std.debug.assert(dst_slice.len % stride == 0);
 
         // This is duplicate code from the `memory.copy` helper
         if (@intFromPtr(src) == @intFromPtr(dst) and (dst_idx < src_end_idx or src_idx < dst_end_idx)) {
@@ -1196,6 +1218,66 @@ pub const TableInst = extern struct {
         } else {
             @memcpy(dst_slice, src_slice);
         }
+    }
+
+    pub fn fillWithinCapacity(
+        table: *const TableInst,
+        elem: []align(@alignOf(*anyopaque)) const u8,
+        idx: u32,
+        end_idx: u32,
+    ) void {
+        const stride = table.stride.toBytes();
+        std.debug.assert(elem.len == stride);
+        std.debug.assert(idx <= end_idx);
+        std.debug.assert(end_idx <= table.capacity);
+
+        const FatPtr = [2]*anyopaque;
+        const fat_size = @sizeOf(FatPtr);
+        comptime {
+            std.debug.assert(TableStride.fat.toBytes() == fat_size);
+        }
+
+        var src_fat_buf: FatPtr align(fat_size) = undefined;
+        switch (table.stride) {
+            .ptr => @memset(&src_fat_buf, @as(*const *anyopaque, @ptrCast(elem)).*),
+            .fat => @memcpy(&src_fat_buf, @as(*const FatPtr, @ptrCast(elem))),
+        }
+
+        // Rely on auto-vectorization to fill the table.
+        const dst_bytes = table.bytes();
+        const dst_fat_bytes = dst_bytes[0 .. (dst_bytes.len / fat_size) * fat_size];
+        const dst_fat: []align(buffer_align) FatPtr = @ptrCast(dst_fat_bytes);
+
+        for (dst_fat) |*dst_elem| {
+            dst_elem.* = src_fat_buf;
+        }
+
+        switch (table.stride) {
+            .fat => {},
+            .ptr => if (dst_bytes.len % fat_size != 0) {
+                @as(
+                    **anyopaque,
+                    @alignCast(@ptrCast(dst_bytes[dst_bytes.len - stride ..])),
+                ).* = src_fat_buf[0];
+            },
+        }
+    }
+
+    pub fn fill(
+        table: *const TableInst,
+        len: u32,
+        elem: []align(*anyopaque) const u8,
+        idx: u32,
+    ) OobError!void {
+        const end_idx = std.math.add(u32, idx, len) catch
+            return error.TableAccessOutOfBounds;
+
+        if (end_idx > table.len)
+            return error.TableAccessOutOfBounds;
+
+        if (len == 0) return;
+
+        return table.fillWithinCapacity(elem, idx, end_idx);
     }
 };
 

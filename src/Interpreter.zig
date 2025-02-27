@@ -392,23 +392,25 @@ pub const InterruptionCause = union(enum) {
             new: []align(runtime.TableInst.buffer_align) u8,
         ) ?[]align(runtime.TableInst.buffer_align) u8 {
             const table = grow.table.table;
-            const new_len: u32 = @intCast(@divExact(new.len, table.stride));
+            const stride = table.stride.toBytes();
+            const new_len: u32 = @intCast(@divExact(new.len, stride));
             std.debug.assert(new_len <= table.limit);
             std.debug.assert(table.capacity <= new_len);
 
             const prev_table = if (@intFromPtr(table.base.ptr) != @intFromPtr(new.ptr)) moved: {
-                @memcpy(new[0 .. table.len * table.stride], table.bytes());
-                const old_mem = table.base.ptr[0 .. @as(usize, table.capacity) * table.stride];
+                @memcpy(new[0 .. table.len * stride], table.bytes());
+                const old_mem = table.base.ptr[0 .. @as(usize, table.capacity) * stride];
                 table.base.ptr = new.ptr;
                 break :moved old_mem;
             } else null;
 
-            const src_elem = std.mem.asBytes(&grow.elem)[0..table.stride];
-            for (table.len..new_len) |idx| {
-                @memcpy(table.elementSlice(idx) catch unreachable, src_elem);
-            }
-
             table.capacity = @max(table.capacity, new_len);
+            table.fillWithinCapacity(
+                std.mem.asBytes(&grow.elem)[0..stride],
+                table.len,
+                table.capacity,
+            );
+
             return prev_table;
         }
     };
@@ -2673,7 +2675,7 @@ const opcode_handlers = struct {
         const dst = std.mem.asBytes(value);
 
         @memcpy(
-            dst[0..table.stride],
+            dst[0..table.stride.toBytes()],
             table.elementSlice(idx) catch {
                 int.state = .{
                     .trapped = Trap.init(
@@ -2686,7 +2688,7 @@ const opcode_handlers = struct {
         );
 
         // Fill ExternRef padding
-        @memset(dst[table.stride..], 0);
+        @memset(dst[table.stride.toBytes()..], 0);
 
         if (i.nextOpcodeHandler(fuel, int)) |next| {
             @call(.always_tail, next, .{ i, s, loc, vals, fuel, int });
@@ -2712,7 +2714,7 @@ const opcode_handlers = struct {
                 };
                 return;
             },
-            std.mem.asBytes(&ref)[0..table.stride],
+            std.mem.asBytes(&ref)[0..table.stride.toBytes()],
         );
 
         if (i.nextOpcodeHandler(fuel, int)) |next| {
@@ -3194,10 +3196,11 @@ const opcode_handlers = struct {
             const old_size: u32 = table.len;
             table.len = new_size;
 
-            const src_elem = std.mem.asBytes(&elem)[0..table.stride];
-            for (0..table.len) |idx| {
-                @memcpy(table.elementSlice(idx) catch unreachable, src_elem);
-            }
+            table.fillWithinCapacity(
+                std.mem.asBytes(&elem)[0..table.stride.toBytes()],
+                old_size,
+                new_size,
+            );
 
             break :result @bitCast(old_size);
         } else {
