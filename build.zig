@@ -127,7 +127,7 @@ pub fn build(b: *std.Build) void {
             "tests/spec/ref_is_null.wast",
             "tests/spec/ref_null.wast",
             "tests/spec/return.wast",
-            // "tests/spec/select.wast", // TODO: interpreter handling of typed select
+            "tests/spec/select.wast",
 
             // simd_*.wast tests are skipped as 128-bit SIMD is not yet supported
 
