@@ -1351,6 +1351,14 @@ pub fn rawValidate(
                     if (t_1 == .unknown) t_2 else t_1,
                 ) catch unreachable;
             },
+            .@"select t" => {
+                const type_count = try reader.readUleb128(u32);
+                if (type_count != 1) return error.InvalidWasm;
+
+                const t = try reader.readValType();
+                try val_stack.popManyExpecting(&ctrl_stack, &.{ t, t, .i32 });
+                try val_stack.push(undefined, t);
+            },
 
             .@"local.get" => {
                 const local_type = try readLocalIdx(&reader, locals.types);
@@ -1843,7 +1851,12 @@ pub fn rawValidate(
                 // else => |bad| std.debug.panic("TODO: handle 0xFC {s}\n", .{@tagName(bad)}),
             },
 
-            else => |bad| std.debug.panic("TODO: handle {s} (0x{X:0>2})\n", .{ @tagName(bad), @intFromEnum(bad) }),
+            // else => |bad| {
+            //     std.debug.panic(
+            //         "TODO: handle {s} (0x{X:0>2})\n",
+            //         .{ @tagName(bad), @intFromEnum(bad) },
+            //     );
+            // },
         }
     }
 
