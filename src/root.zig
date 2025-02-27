@@ -9,6 +9,7 @@ pub const runtime = @import("runtime.zig");
 pub const Interpreter = @import("Interpreter.zig");
 
 pub const LimitedAllocator = @import("LimitedAllocator.zig");
+pub const PageBufferAllocator = @import("PageBufferAllocator.zig");
 
 comptime {
     const std = @import("std");
@@ -20,4 +21,5 @@ comptime {
 test {
     _ = Wast;
     _ = @import("IndexedArena.zig");
+    _ = PageBufferAllocator;
 }
