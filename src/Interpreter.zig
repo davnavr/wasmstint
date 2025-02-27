@@ -1215,6 +1215,11 @@ const Instructions = extern struct {
         }
     }
 
+    inline fn skipValType(reader: *Instructions) void {
+        const b = reader.readByte() catch unreachable;
+        _ = @as(Module.ValType, @enumFromInt(b));
+    }
+
     inline fn skipBlockType(reader: *Instructions) void {
         _ = std.leb.readIleb128(i33, reader) catch unreachable;
     }
@@ -2569,7 +2574,21 @@ const opcode_handlers = struct {
         }
     }
 
-    // select t
+    pub fn @"select t"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
+        const type_count = i.readUleb128(u32) catch unreachable;
+        std.debug.assert(type_count == 1);
+
+        for (0..type_count) |_|
+            i.skipValType();
+
+        if (type_count == 1) {
+            @call(
+                if (builtin.mode == .Debug) .always_tail else .always_inline,
+                select,
+                .{ i, s, loc, vals, fuel, int },
+            );
+        } else unreachable;
+    }
 
     pub fn @"local.get"(i: *Instructions, s: *Stp, loc: u32, vals: *ValStack, fuel: *Fuel, int: *Interpreter) void {
         const n: u16 = @intCast(i.readUleb128(u32) catch unreachable);
