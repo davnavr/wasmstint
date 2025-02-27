@@ -732,28 +732,52 @@ const State = struct {
                 .interrupted => |*interrupt| {
                     switch (interrupt.cause) {
                         .out_of_fuel => return,
-                        .memory_grow => |info| {
-                            const new_size = @min(
-                                info.delta + info.memory.size,
-                                info.memory.limit,
+                        .memory_grow => |grow| {
+                            const new_cap = @min(
+                                @max(
+                                    grow.delta + grow.memory.size,
+                                    grow.memory.capacity *| 2,
+                                ),
+                                grow.memory.limit,
                             );
 
-                            const resized_in_place = state.store.arena.allocator().resize(
-                                info.memory.base[0..info.memory.capacity],
-                                new_size,
+                            const remapped = state.store.arena.allocator().remap(
+                                grow.memory.base[0..grow.memory.capacity],
+                                new_cap,
                             );
 
-                            if (resized_in_place) {
-                                _ = info.resize(info.memory.base[0..new_size]);
+                            if (remapped) |new_buf| {
+                                _ = grow.resize(new_buf);
                             } else resize_failed: {
-                                _ = info.resize(
+                                _ = grow.resize(
                                     state.store.arena.allocator().alignedAlloc(
                                         u8,
                                         wasmstint.runtime.MemInst.buffer_align,
-                                        @min(
-                                            @max(new_size, info.memory.capacity *| 2),
-                                            info.memory.limit,
-                                        ),
+                                        new_cap,
+                                    ) catch break :resize_failed,
+                                );
+                            }
+                        },
+                        .table_grow => |grow| resize_failed: {
+                            const table = grow.table.table;
+                            const new_cap = @min(
+                                @max(grow.delta + table.len, table.capacity *| 2),
+                                table.limit,
+                            ) * table.stride.toBytes();
+
+                            const remapped = state.store.arena.allocator().remap(
+                                table.base.ptr[0 .. table.capacity * table.stride.toBytes()],
+                                new_cap,
+                            );
+
+                            if (remapped) |new_buf| {
+                                _ = grow.resize(new_buf);
+                            } else {
+                                _ = grow.resize(
+                                    state.store.arena.allocator().alignedAlloc(
+                                        u8,
+                                        wasmstint.runtime.TableInst.buffer_align,
+                                        new_cap,
                                     ) catch break :resize_failed,
                                 );
                             }
@@ -800,7 +824,7 @@ const State = struct {
     ) Error {
         const msg = switch (cause) {
             .out_of_fuel => "unexpected error, execution ran out of fuel",
-            .memory_grow => unreachable,
+            .memory_grow, .table_grow => unreachable,
         };
 
         return scriptError(state.errors.errorAtToken(
