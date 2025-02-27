@@ -136,7 +136,7 @@ pub fn build(b: *std.Build) void {
             "tests/spec/start.wast",
             "tests/spec/store.wast",
             "tests/spec/switch.wast",
-            // "tests/spec/table_copy.wast", // TODO: Interpreter table operations
+            "tests/spec/table_copy.wast",
             "tests/spec/table_fill.wast",
             "tests/spec/table_get.wast",
             "tests/spec/table_set.wast",
