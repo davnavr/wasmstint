@@ -140,7 +140,7 @@ pub fn build(b: *std.Build) void {
             // "tests/spec/table_fill.wast", // TODO: Interpreter table operations
             "tests/spec/table_get.wast", // TODO: Interpreter table operations
             "tests/spec/table_set.wast", // TODO: Interpreter table operations
-            // "tests/spec/table_size.wast", // TODO: Interpreter does not support ref.null and other table instructions
+            "tests/spec/table_size.wast",
             "tests/spec/table-sub.wast", // Currently skipped
             "tests/spec/table.wast",
             "tests/spec/token.wast",
