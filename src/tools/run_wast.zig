@@ -108,32 +108,45 @@ pub fn main() !u8 {
     const initial_memory_limit = 16 * 1024; // 16 KiB
     var memory_limit: usize = initial_memory_limit;
 
-    var limited_page_allocator = wasmstint.LimitedAllocator.init(
+    var arguments_pages_limit = wasmstint.LimitedAllocator.init(
         &memory_limit,
         std.heap.page_allocator,
     );
-    const pages = limited_page_allocator.allocator();
 
-    var arguments_arena = ArenaAllocator.init(pages);
+    var arguments_arena = ArenaAllocator.init(arguments_pages_limit.allocator());
     defer arguments_arena.deinit();
 
-    var scratch = ArenaAllocator.init(pages);
-    defer scratch.deinit();
+    const arguments = args: {
+        var arguments_scratch = ArenaAllocator.init(arguments_pages_limit.allocator());
+        defer arguments_scratch.deinit();
+        break :args try Arguments.parse(&arguments_arena, &arguments_scratch);
+    };
+
+    memory_limit = arguments.soft_memory_limit -| (initial_memory_limit - memory_limit);
+
+    var buffer_pages = try wasmstint.PageBufferAllocator.init(memory_limit / 2);
+    defer buffer_pages.deinit();
+    var buffer_pages_limit = wasmstint.LimitedAllocator.init(
+        &memory_limit,
+        buffer_pages.allocator(),
+    );
+
+    var scratch_pages = try wasmstint.PageBufferAllocator.init(memory_limit / 2);
+    defer scratch_pages.deinit();
+    var scratch_pages_limit = wasmstint.LimitedAllocator.init(
+        &memory_limit,
+        scratch_pages.allocator(),
+    );
+
+    var main_pages = try wasmstint.PageBufferAllocator.init(memory_limit);
+    defer main_pages.deinit();
+    var main_pages_limit = wasmstint.LimitedAllocator.init(
+        &memory_limit,
+        main_pages.allocator(),
+    );
 
     var stack_trace_arena = ArenaAllocator.init(std.heap.page_allocator);
     defer stack_trace_arena.deinit();
-
-    const arguments = try Arguments.parse(&arguments_arena, &scratch);
-    memory_limit = arguments.soft_memory_limit -| (initial_memory_limit - memory_limit);
-
-    var file_buffer = std.ArrayList(u8).init(pages);
-    defer file_buffer.deinit();
-
-    var encoding_buffer = std.ArrayList(u8).init(pages);
-    defer encoding_buffer.deinit();
-
-    var parse_arena = ArenaAllocator.init(pages);
-    defer parse_arena.deinit();
 
     const color_config = std.io.tty.detectConfig(std.io.getStdErr());
     const cwd = std.fs.cwd();
@@ -159,7 +172,21 @@ pub fn main() !u8 {
 
     var fail = false;
     for (arguments.run) |script_path| {
-        defer progress_root.completeOne();
+        defer {
+            buffer_pages_limit.resetCount();
+            buffer_pages.reset();
+
+            main_pages_limit.resetCount();
+            main_pages.reset();
+
+            scratch_pages_limit.resetCount();
+            scratch_pages.reset();
+
+            progress_root.completeOne();
+        }
+
+        var buffer_arena = ArenaAllocator.init(buffer_pages_limit.allocator());
+        var file_buffer = std.ArrayList(u8).init(buffer_arena.allocator());
 
         const script_path_fmt = std.fs.path.fmtAsUtf8Lossy(script_path);
         const script_buf: []const u8 = buf: {
@@ -190,16 +217,11 @@ pub fn main() !u8 {
             break :buf file_buffer.items;
         };
 
-        _ = parse_arena.reset(.retain_capacity);
-        {
-            // Try to allocate some space upfront.
-            _ = parse_arena.allocator().alloc(u8, script_buf.len) catch {};
-            _ = parse_arena.reset(.retain_capacity);
-        }
+        var parse_arena = ArenaAllocator.init(main_pages_limit.allocator());
+        var scratch = ArenaAllocator.init(scratch_pages_limit.allocator());
 
         var errors = Wast.Errors.init(parse_arena.allocator());
 
-        _ = scratch.reset(.retain_capacity);
         const script_tree = try Wast.sexpr.Tree.parseFromSlice(
             script_buf,
             parse_arena.allocator(),
@@ -225,6 +247,7 @@ pub fn main() !u8 {
         var pass_count: u32 = 0;
         if (errors.list.len == 0) {
             var rng = initial_rng;
+            var encoding_buffer = std.ArrayList(u8).init(buffer_arena.allocator());
             pass_count = try runScript(
                 &script,
                 arguments.fuel,
