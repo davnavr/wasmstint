@@ -114,7 +114,7 @@ pub fn build(b: *std.Build) void {
             "tests/spec/loop.wast",
             "tests/spec/memory_copy.wast",
             "tests/spec/memory_fill.wast",
-            // "tests/spec/memory_grow.wast", // TODO: blocked on hardcoded memory page count limit
+            "tests/spec/memory_grow.wast",
             "tests/spec/memory_init.wast",
             "tests/spec/memory_redundancy.wast",
             "tests/spec/memory_size.wast",
