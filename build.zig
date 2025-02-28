@@ -1,4 +1,36 @@
 const std = @import("std");
+const Build = std.Build;
+const Step = Build.Step;
+
+const executable_paths = .{
+    .run_wast = .{ "wasmstint-wast", "src/wast_main.zig" },
+};
+
+const executable_paths_fields =
+    @typeInfo(@TypeOf(executable_paths)).@"struct".fields;
+
+const Executables = @Type(.{
+    .@"struct" = std.builtin.Type.Struct{
+        .backing_integer = null,
+        .layout = .auto,
+        .is_tuple = false,
+        .decls = &.{},
+        .fields = fields: {
+            var fields: [executable_paths_fields.len]std.builtin.Type.StructField = undefined;
+            for (&fields, executable_paths_fields) |*dst, *src| {
+                dst.* = std.builtin.Type.StructField{
+                    .name = src.name,
+                    .type = *Step.Compile,
+                    .alignment = 0,
+                    .default_value_ptr = null,
+                    .is_comptime = false,
+                };
+            }
+
+            break :fields &fields;
+        },
+    },
+});
 
 pub fn build(b: *std.Build) void {
     const proj_options = .{
@@ -10,46 +42,44 @@ pub fn build(b: *std.Build) void {
         .check = b.step("check", "Check for compilation errors"),
         .run_wast = b.step("run-wast", "Run the specification test interpreter"),
         // .run_wasip1 = b.step("run-wasip1", "Run the WASI (preview 1) application interpreter"),
-        // .@"test" = b.step("test", "Run all unit and specification tests"),
+        .@"test" = b.step("test", "Run all unit and specification tests"),
         .test_unit = b.step("test-unit", "Run unit tests"),
-        .test_spec = b.step("test-spec", "Run all specification tests (that are currently expected to pass)"),
+        .test_spec = b.step(
+            "test-spec",
+            "Run all specification tests (that are currently expected to pass)",
+        ),
     };
 
-    const root_mod = b.addModule(
+    const wasmstint_module = b.addModule(
         "wasmstint",
         .{ .root_source_file = b.path("src/root.zig") },
     );
 
-    const run_wast_exe = b.addExecutable(.{
-        .name = "wasmstint-wast",
-        .root_source_file = b.path("src/tools/run_wast.zig"),
-        .target = proj_options.target,
-        .optimize = proj_options.optimize,
-    });
+    const executables: Executables = exes: {
+        var exes_result: Executables = undefined;
 
-    run_wast_exe.root_module.addImport("wasmstint", root_mod);
+        inline for (executable_paths_fields) |*exe_field| {
+            const exe_spec: [2][]const u8 = @field(executable_paths, exe_field.name);
+            const exe = b.addExecutable(.{
+                .name = exe_spec[0],
+                .root_source_file = b.path(exe_spec[1]),
+                .target = proj_options.target,
+                .optimize = proj_options.optimize,
+            });
 
-    // const run_wasip1_exe = b.addExecutable(.{
-    //     .name = "wasmstint-wasip1",
-    //     .root_source_file = b.path("src/tools/wasip1.zig"),
-    //     .target = proj_options.target,
-    //     .optimize = proj_options.optimize,
-    // });
+            exe.root_module.addImport("wasmstint", wasmstint_module);
 
-    // run_wasip1_exe.root_module.addImport("wasmstint", root_mod);
+            const run = b.addRunArtifact(exe);
+            if (b.args) |args| {
+                run.addArgs(args);
+            }
 
-    const run_wast_cmd = b.addRunArtifact(run_wast_exe);
-    // const run_wasip1_cmd = b.addRunArtifact(run_wasip1_exe);
-    if (b.args) |args| {
-        run_wast_cmd.addArgs(args);
-        // run_wasip1_cmd.addArgs(args);
-    }
+            Step.dependOn(@field(steps, exe_field.name), &run.step);
+            @field(exes_result, exe_field.name) = exe;
+        }
 
-    steps.run_wast.dependOn(&run_wast_cmd.step);
-    // steps.run_wasip1.dependOn(&run_wasip1_cmd.step);
-
-    steps.check.dependOn(&run_wast_exe.step);
-    // steps.check.dependOn(&run_wasip1_exe.step);
+        break :exes exes_result;
+    };
 
     const unit_tests = b.addTest(.{
         .root_source_file = b.path("src/root.zig"),
@@ -61,7 +91,7 @@ pub fn build(b: *std.Build) void {
     steps.test_unit.dependOn(&unit_tests_run.step);
 
     {
-        const run_spec_tests_cmd = b.addRunArtifact(run_wast_exe);
+        const run_spec_tests_cmd = b.addRunArtifact(executables.run_wast);
         const tests = [_][]const u8{
             "tests/spec/address.wast",
             "tests/spec/align.wast",
@@ -161,8 +191,13 @@ pub fn build(b: *std.Build) void {
             run_spec_tests_cmd.addFileArg(b.path(path));
         }
 
-        if (b.args) |args| run_spec_tests_cmd.addArgs(args);
+        if (b.args) |args| {
+            run_spec_tests_cmd.addArgs(args);
+        }
 
         steps.test_spec.dependOn(&run_spec_tests_cmd.step);
     }
+
+    steps.@"test".dependOn(steps.test_unit);
+    steps.@"test".dependOn(steps.test_spec);
 }
