@@ -7,13 +7,14 @@ const Wast = wasmstint.Wast;
 
 const Arguments = struct {
     run: []const [:0]const u8 = &[0][:0]const u8{},
-    rng_seed: u256 = 42,
+    rng_seed: ?u256 = null,
     fuel: u64 = 2_500_000,
     call_stack_reserve: u32 = 100,
     soft_memory_limit: usize = 256 * (1024 * 1024), // MiB
 
     const Flag = enum {
         run,
+        rng_seed,
         wait_for_debugger,
         fuel,
         call_stack_reserve,
@@ -22,6 +23,7 @@ const Arguments = struct {
         const lookup = std.StaticStringMap(Flag).initComptime(.{
             .{ "--run", .run },
             .{ "-r", .run },
+            .{ "--rng-seed", .rng_seed },
             .{ "--wait-for-debugger", .wait_for_debugger },
             .{ "--fuel", .fuel },
             .{ "--call-stack-reserve", .call_stack_reserve },
@@ -49,27 +51,14 @@ const Arguments = struct {
                         iter.next() orelse return error.InvalidCommandLineArgument,
                     );
                 },
-                .wait_for_debugger => if (builtin.target.os.tag == .windows) {
-                    std.debug.print("Attach debugger to process {}\n", .{std.os.windows.GetCurrentProcessId()});
+                .rng_seed => {
+                    const amt_arg = iter.next() orelse
+                        return error.InvalidCommandLineArgument;
 
-                    const debugapi = struct {
-                        pub extern "kernel32" fn IsDebuggerPresent() callconv(.winapi) std.os.windows.BOOL;
-                    };
-
-                    while (debugapi.IsDebuggerPresent() == 0) {
-                        std.Thread.sleep(100);
-                    }
-                } else {
-                    if (builtin.target.os.tag == .linux) {
-                        std.debug.print("Attach debugger to process {}\n", .{std.os.linux.getpid()});
-                    }
-
-                    var dbg: usize = 0;
-                    const dbg_ptr: *volatile usize = &dbg;
-                    while (dbg_ptr.* == 0) {
-                        std.Thread.sleep(100);
-                    }
+                    arguments.rng_seed = std.fmt.parseUnsigned(u256, amt_arg, 0) catch
+                        return error.InvalidCommandLineArgument;
                 },
+                .wait_for_debugger => wasmstint.waitForDebugger(),
                 .fuel => {
                     const amt_arg = iter.next() orelse
                         return error.InvalidCommandLineArgument;
@@ -153,7 +142,11 @@ pub fn main() !u8 {
 
     const initial_rng = rng: {
         var init = std.Random.Xoshiro256{ .s = undefined };
-        init.s = @bitCast(arguments.rng_seed);
+        if (arguments.rng_seed) |seed|
+            init.s = @bitCast(seed)
+        else
+            try std.posix.getrandom(std.mem.asBytes(&init.s));
+
         break :rng init;
     };
 
