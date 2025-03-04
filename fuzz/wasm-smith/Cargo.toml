@@ -1,0 +1,20 @@
+[package]
+name = "wasmstint-fuzz"
+publish = false
+edition = "2024"
+rust-version = "1.85"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+wasm-smith = "0.226.0"
+arbitrary = "1.4.1"
+
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+panic = "abort"
+
+[profile.dev.package.wasm-smith]
+opt-level = 3

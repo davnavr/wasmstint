@@ -32,21 +32,52 @@ const Executables = @Type(.{
     },
 });
 
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) error{OutOfMemory}!void {
     const proj_options = .{
         .target = b.standardTargetOptions(.{}),
         .optimize = b.standardOptimizeOption(.{}),
     };
 
+    const path_options = .{
+        .cargo = b.option(
+            []const u8,
+            "cargo",
+            "Path to cargo executable",
+        ) orelse "cargo",
+        .afl_lto = b.option(
+            []const u8,
+            "afl-lto",
+            "Path to afl-clang-lto executable",
+        ) orelse "afl-clang-lto", // For some reason, afl-lto doesn't work
+        .afl_driver = b.option(
+            []const u8,
+            "afl-driver",
+            "Path to the AFLDriver library (e.g. libAFLDriver.a)",
+        ) orelse std.fs.realpathAlloc(
+            b.allocator,
+            "/usr/local/lib/afl/libAFLDriver.a",
+        ) catch |e| switch (e) {
+            error.OutOfMemory => |oom| return oom,
+            else => null,
+        },
+    };
+
     const steps = .{
         .check = b.step("check", "Check for compilation errors"),
+
         .run_wast = b.step("run-wast", "Run the specification test interpreter"),
         // .run_wasip1 = b.step("run-wasip1", "Run the WASI (preview 1) application interpreter"),
+
         .@"test" = b.step("test", "Run all unit and specification tests"),
         .test_unit = b.step("test-unit", "Run unit tests"),
         .test_spec = b.step(
             "test-spec",
             "Run all specification tests (that are currently expected to pass)",
+        ),
+
+        .build_rust_fuzz = b.step(
+            "build-rust-fuzz",
+            "Build the Rust fuzzing support library",
         ),
     };
 
@@ -62,9 +93,11 @@ pub fn build(b: *std.Build) void {
             const exe_spec: [2][]const u8 = @field(executable_paths, exe_field.name);
             const exe = b.addExecutable(.{
                 .name = exe_spec[0],
-                .root_source_file = b.path(exe_spec[1]),
-                .target = proj_options.target,
-                .optimize = proj_options.optimize,
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path(exe_spec[1]),
+                    .target = proj_options.target,
+                    .optimize = proj_options.optimize,
+                }),
             });
 
             exe.root_module.addImport("wasmstint", wasmstint_module);
@@ -82,9 +115,11 @@ pub fn build(b: *std.Build) void {
     };
 
     const unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = proj_options.target,
-        .optimize = proj_options.optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = proj_options.target,
+            .optimize = proj_options.optimize,
+        }),
     });
 
     const unit_tests_run = b.addRunArtifact(unit_tests);
@@ -200,4 +235,96 @@ pub fn build(b: *std.Build) void {
 
     steps.@"test".dependOn(steps.test_unit);
     steps.@"test".dependOn(steps.test_spec);
+
+    const rust_target: ?[]const u8 = b.option(
+        []const u8,
+        "rust-target",
+        "The Rust target triple",
+    );
+
+    const missing_rust_target = rust_target == null and
+        !proj_options.target.query.isNativeTriple();
+
+    const rust_fuzz_lib_name = try std.mem.concat(
+        b.allocator,
+        u8,
+        &.{
+            proj_options.target.result.libPrefix(),
+            "wasmstint_fuzz",
+            proj_options.target.result.staticLibSuffix(),
+        },
+    );
+
+    const cargo_build = b.addSystemCommand(&.{ path_options.cargo, "build" });
+    cargo_build.addFileInput(b.path("fuzz/wasm-smith/src/lib.rs")); // TODO: Prevent creation of multiple cargo target folders in zig cache
+    cargo_build.addFileInput(b.path("fuzz/wasm-smith/src/ffi.rs"));
+    cargo_build.addFileInput(b.path("fuzz/wasm-smith/Cargo.toml"));
+
+    cargo_build.addArg("--manifest-path");
+    cargo_build.addFileArg(b.path("fuzz/wasm-smith/Cargo.toml"));
+
+    // --artifact-dir is unstable: https://github.com/rust-lang/cargo/issues/6790
+    cargo_build.addArg("--target-dir");
+    const cargo_target_dir = cargo_build.addOutputDirectoryArg("target")
+        .path(b, "debug");
+
+    if (rust_target) |rust_triple| {
+        cargo_build.addArgs(&.{ "--target", rust_triple });
+    }
+
+    if (missing_rust_target) {
+        steps.build_rust_fuzz.dependOn(&b.addFail("-Drust-target=... is required").step);
+    } else {
+        steps.build_rust_fuzz.dependOn(&cargo_build.step);
+    }
+
+    const cargo_artifact_dir = if (rust_target) |rust_triple|
+        cargo_target_dir.path(b, rust_triple)
+    else
+        cargo_target_dir;
+
+    const rust_fuzz_lib = cargo_artifact_dir.path(b, rust_fuzz_lib_name);
+
+    const rust_fuzz_harness = b.createModule(.{
+        .root_source_file = b.path("fuzz/wasm-smith/src/harness.zig"),
+        .target = proj_options.target,
+        .optimize = proj_options.optimize,
+    });
+
+    const rust_fuzz_target_module = b.createModule(.{
+        .root_source_file = b.path("fuzz/wasm-smith/targets/execute.zig"),
+        .target = proj_options.target,
+        .optimize = proj_options.optimize,
+    });
+    rust_fuzz_target_module.addImport("harness", rust_fuzz_harness);
+
+    const rust_fuzz_target = b.addLibrary(.{
+        .name = "rust-fuzz-execute",
+        .root_module = rust_fuzz_target_module,
+        .linkage = .static,
+    });
+    rust_fuzz_target.sanitize_coverage_trace_pc_guard = true;
+
+    // https://www.ryanliptak.com/blog/fuzzing-zig-code/#treating-zig-code-as-a-static-library
+    rust_fuzz_target.want_lto = true;
+    rust_fuzz_target.bundle_compiler_rt = true;
+    rust_fuzz_target.pie = true;
+
+    steps.build_rust_fuzz.dependOn(&rust_fuzz_target.step);
+
+    const afl_rust_fuzz = b.addSystemCommand(&.{path_options.afl_lto});
+    afl_rust_fuzz.addArg("-o");
+    const rust_fuzz_target_exe = afl_rust_fuzz.addOutputFileArg(rust_fuzz_target.name);
+
+    afl_rust_fuzz.addFileArg(rust_fuzz_lib);
+    afl_rust_fuzz.addFileArg(rust_fuzz_target.getEmittedBin());
+
+    if (path_options.afl_driver) |afl_driver_lib| {
+        afl_rust_fuzz.addArg(afl_driver_lib);
+    } else {
+        steps.build_rust_fuzz.dependOn(&b.addFail("-Dafl-driver=... is required").step);
+    }
+
+    steps.build_rust_fuzz.dependOn(&afl_rust_fuzz.step);
+    _ = rust_fuzz_target_exe;
 }
