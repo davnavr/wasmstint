@@ -331,6 +331,30 @@ pub const ImportProvider = struct {
             type_mismatch,
             wrong_desc,
         };
+
+        pub fn format(
+            info: *const FailedRequest,
+            comptime fmt: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
+            _ = fmt;
+            _ = options;
+            try writer.print(
+                "could not provide import (import \"{s}\" \"{s}\" {}), ",
+                .{
+                    info.module.bytes,
+                    info.name.bytes,
+                    info.desc,
+                },
+            );
+
+            try writer.writeAll(switch (info.reason) {
+                .none_provided => "no value provided",
+                .type_mismatch => "type mismatch",
+                .wrong_desc => "wrong kind",
+            });
+        }
     };
 
     fn resolveTyped(

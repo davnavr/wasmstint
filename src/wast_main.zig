@@ -1657,12 +1657,8 @@ fn runScript(
                         },
                         error.ImportFailure => _ = try state.errors.errorFmtAtToken(
                             cmd.keyword,
-                            "could not provide import: (import \"{s}\" \"{s}\" {})",
-                            .{
-                                import_error.module.bytes,
-                                import_error.name.bytes,
-                                import_error.desc,
-                            },
+                            "{}",
+                            .{import_error},
                             @errorReturnTrace(),
                         ),
                     }
@@ -1869,11 +1865,8 @@ fn runScript(
                                 },
                                 error.ImportFailure => _ = try state.errors.errorFmtAtToken(
                                     cmd.keyword,
-                                    "could not provide import {s} {s}",
-                                    .{
-                                        import_error.module.bytes,
-                                        import_error.name.bytes,
-                                    },
+                                    "{}",
+                                    .{import_error},
                                     @errorReturnTrace(),
                                 ),
                             }
