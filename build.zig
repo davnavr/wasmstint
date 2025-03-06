@@ -32,7 +32,7 @@ const Executables = @Type(.{
     },
 });
 
-pub fn build(b: *std.Build) error{OutOfMemory}!void {
+pub fn build(b: *Build) error{OutOfMemory}!void {
     const proj_options = .{
         .target = b.standardTargetOptions(.{}),
         .optimize = b.standardOptimizeOption(.{}),
@@ -256,26 +256,17 @@ pub fn build(b: *std.Build) error{OutOfMemory}!void {
     );
 
     const cargo_build = b.addSystemCommand(&.{ path_options.cargo, "build" });
-    cargo_build.addFileInput(b.path("fuzz/wasm-smith/src/lib.rs")); // TODO: Prevent creation of multiple cargo target folders in zig cache
+    cargo_build.addFileInput(b.path("fuzz/wasm-smith/src/lib.rs"));
     cargo_build.addFileInput(b.path("fuzz/wasm-smith/src/ffi.rs"));
     cargo_build.addFileInput(b.path("fuzz/wasm-smith/Cargo.toml"));
 
     cargo_build.addArg("--manifest-path");
     cargo_build.addFileArg(b.path("fuzz/wasm-smith/Cargo.toml"));
 
-    // --artifact-dir is unstable: https://github.com/rust-lang/cargo/issues/6790
-    cargo_build.addArg("--target-dir");
-    const cargo_target_dir = cargo_build.addOutputDirectoryArg("target")
-        .path(b, "debug");
+    const cargo_target_dir = b.path("fuzz/wasm-smith/target/debug");
 
     if (rust_target) |rust_triple| {
         cargo_build.addArgs(&.{ "--target", rust_triple });
-    }
-
-    if (missing_rust_target) {
-        steps.build_rust_fuzz.dependOn(&b.addFail("-Drust-target=... is required").step);
-    } else {
-        steps.build_rust_fuzz.dependOn(&cargo_build.step);
     }
 
     const cargo_artifact_dir = if (rust_target) |rust_triple|
@@ -310,9 +301,14 @@ pub fn build(b: *std.Build) error{OutOfMemory}!void {
     rust_fuzz_target.bundle_compiler_rt = true;
     rust_fuzz_target.pie = true;
 
-    steps.build_rust_fuzz.dependOn(&rust_fuzz_target.step);
-
     const afl_rust_fuzz = b.addSystemCommand(&.{path_options.afl_lto});
+    afl_rust_fuzz.step.dependOn(&rust_fuzz_target.step);
+    if (missing_rust_target) {
+        afl_rust_fuzz.step.dependOn(&b.addFail("-Drust-target=... is required").step);
+    } else {
+        afl_rust_fuzz.step.dependOn(&cargo_build.step);
+    }
+
     afl_rust_fuzz.addArg("-o");
     const rust_fuzz_target_exe = afl_rust_fuzz.addOutputFileArg(rust_fuzz_target.name);
 
