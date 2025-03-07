@@ -37,11 +37,11 @@ pub fn FfiSlice(comptime constness: enum { @"const", mut }, comptime T: type) ty
             .@"const" => []const T,
         };
 
-        fn init(slice: Slice) Self {
+        pub fn init(slice: Slice) Self {
             return .{ .ptr = slice.ptr, .len = slice.len };
         }
 
-        fn toSlice(slice: Self) Slice {
+        pub fn toSlice(slice: Self) Slice {
             return slice.ptr[0..slice.len];
         }
     };
@@ -49,12 +49,12 @@ pub fn FfiSlice(comptime constness: enum { @"const", mut }, comptime T: type) ty
 
 pub fn FfiVec(comptime T: type) type {
     return extern struct {
-        const Items = FfiSlice(.mut, T);
+        pub const Items = FfiSlice(.mut, T);
 
         items: Items,
         capacity: usize,
 
-        const deinit: fn (*FfiVec(T)) void = if (T == u8)
+        pub const deinit: fn (*FfiVec(T)) callconv(.c) void = if (T == u8)
             wasmstint_fuzz_free_bytes
         else
             @compileError("no deinit method available for FfiVec containing " ++ @typeName(T));

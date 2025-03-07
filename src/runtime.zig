@@ -154,27 +154,29 @@ pub const ModuleAllocator = struct {
 
             // TODO: Reserve pages, create a helper module page_allocator.zig
             while (request.nextMemType()) |mem_type| {
-                _ = request.allocateMemory(
-                    try std.heap.page_allocator.alignedAlloc(
-                        u8,
-                        MemInst.buffer_align,
-                        mem_type.limits.min * MemInst.page_size,
-                    ),
-                ) catch unreachable;
+                const buf = try std.heap.page_allocator.alignedAlloc(
+                    u8,
+                    MemInst.buffer_align,
+                    mem_type.limits.min * MemInst.page_size,
+                );
+
+                @memset(buf, 0);
+                _ = request.allocateMemory(buf) catch unreachable;
             }
 
             while (request.nextTableType()) |table_type| {
-                _ = request.allocateTable(
-                    try std.heap.page_allocator.alignedAlloc(
-                        u8,
-                        TableInst.buffer_align,
-                        std.math.mul(
-                            usize,
-                            table_type.limits.min,
-                            TableStride.ofType(table_type.elem_type).toBytes(),
-                        ) catch return error.OutOfMemory,
-                    ),
-                ) catch unreachable;
+                const buf = try std.heap.page_allocator.alignedAlloc(
+                    u8,
+                    TableInst.buffer_align,
+                    std.math.mul(
+                        usize,
+                        table_type.limits.min,
+                        TableStride.ofType(table_type.elem_type).toBytes(),
+                    ) catch return error.OutOfMemory,
+                );
+
+                @memset(buf, 0);
+                _ = request.allocateTable(buf) catch unreachable;
             }
         }
 
@@ -186,7 +188,9 @@ pub const ModuleAllocator = struct {
             }
 
             for (info.tables) |table| {
-                std.heap.page_allocator.free(table.base.ptr[0 .. table.capacity * table.stride]);
+                std.heap.page_allocator.free(
+                    table.base.ptr[0 .. table.capacity * table.stride.toBytes()],
+                );
             }
         }
     };
@@ -882,7 +886,7 @@ pub const ModuleInst = extern struct {
     ///
     /// Additionally, callers are responsible for freeing any imported functions, memories, globals
     /// used by this module.
-    pub fn deinit(inst: ModuleInst, gpa: Allocator, store: ModuleAllocator) void {
+    pub fn deinit(inst: *ModuleInst, gpa: Allocator, store: ModuleAllocator) void {
         const instance = inst.header();
         store.free(ModuleAllocator.Free{
             .mems = instance.definedMemInsts(),

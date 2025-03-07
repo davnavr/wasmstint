@@ -288,6 +288,7 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
         .optimize = proj_options.optimize,
     });
     rust_fuzz_target_module.addImport("harness", rust_fuzz_harness);
+    rust_fuzz_target_module.addImport("wasmstint", wasmstint_module);
 
     const rust_fuzz_target = b.addLibrary(.{
         .name = "rust-fuzz-execute",

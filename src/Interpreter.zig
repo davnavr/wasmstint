@@ -297,6 +297,9 @@ pub const Trap = struct {
         indirect_call_to_null: struct {
             index: usize,
         },
+        lazy_validation_failure: struct {
+            function: Module.FuncIdx,
+        },
     };
 
     fn InformationType(comptime code: Code) type {
@@ -745,7 +748,7 @@ pub const State = union(enum) {
     /// Indicates that a function to call needs to be validated, and once successful, allocate
     /// space for their local variables and value stack.
     pub const AwaitingValidation = struct {
-        padding: enum(u8) { padding = 0 } = .padding,
+        padding: enum(usize) { padding = 0 } = .padding,
 
         const interpreter = State.stateInterpreterPtr;
 
@@ -757,7 +760,7 @@ pub const State = union(enum) {
             scratch: *std.heap.ArenaAllocator,
             fuel: *Fuel,
         ) *State {
-            const interp = self.interpreter();
+            const interp: *Interpreter = self.interpreter();
             const current_frame = interp.currentFrame();
 
             const function = current_frame.function.expanded().wasm;
@@ -766,18 +769,25 @@ pub const State = union(enum) {
                 allocator,
                 function.module.header().module,
                 scratch,
-            );
+            ) catch {
+                interp.state = .{
+                    .trapped = Trap.init(
+                        .lazy_validation_failure,
+                        .{ .function = function.idx },
+                    ),
+                };
 
-            if (finished != false) {
-                if (finished == true) {
-                    current_frame.wasm = .{
-                        .instructions = Instructions.init(
-                            code.inner.instructions_start,
-                            code.inner.instructions_end,
-                        ),
-                        .branch_table = code.inner.side_table_ptr,
-                    };
-                }
+                return &interp.state;
+            };
+
+            if (finished) {
+                current_frame.wasm = .{
+                    .instructions = Instructions.init(
+                        code.inner.instructions_start,
+                        code.inner.instructions_end,
+                    ),
+                    .branch_table = code.inner.side_table_ptr,
+                };
 
                 interp.enterMainLoop(fuel);
             }
@@ -3309,8 +3319,8 @@ fn enterMainLoop(interp: *Interpreter, fuel: *Fuel) void {
 pub fn reset(interp: *Interpreter) void {
     interp.value_stack.clearRetainingCapacity();
     interp.call_stack.clearRetainingCapacity();
-    interp.hash_stack.clearRetainingCapactity();
-    interp.state = .{ .awaiting_host = &[0]Module.ValType{} };
+    interp.hash_stack.clearRetainingCapacity();
+    interp.state = .{ .awaiting_host = .{ .types = &[0]Module.ValType{} } };
 }
 
 pub fn deinit(interp: *Interpreter, alloca: Allocator) void {
