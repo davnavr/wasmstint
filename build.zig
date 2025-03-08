@@ -44,11 +44,19 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
             "cargo",
             "Path to cargo executable",
         ) orelse "cargo",
-        .afl_lto = b.option(
+
+        // .afl_fuzz = b.option(
+        //     []const u8,
+        //     "afl-fuzz",
+        //     "Path to afl-fuzz executable",
+        // ) orelse "afl-fuzz",
+
+        .afl_clang_lto = b.option(
             []const u8,
-            "afl-lto",
+            "afl-clang-lto",
             "Path to afl-clang-lto executable",
-        ) orelse "afl-clang-lto", // For some reason, afl-lto doesn't work
+        ) orelse "afl-clang-lto",
+
         .afl_driver = b.option(
             []const u8,
             "afl-driver",
@@ -66,19 +74,13 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
         .check = b.step("check", "Check for compilation errors"),
 
         .run_wast = b.step("run-wast", "Run the specification test interpreter"),
-        // .run_wasip1 = b.step("run-wasip1", "Run the WASI (preview 1) application interpreter"),
+        // .run_wasip1 = b.step("run-wasip1", "Run the WASI (preview 1) application interpreter",),
 
         .@"test" = b.step("test", "Run all unit and specification tests"),
         .test_unit = b.step("test-unit", "Run unit tests"),
-        .test_spec = b.step(
-            "test-spec",
-            "Run all specification tests (that are currently expected to pass)",
-        ),
+        .test_spec = b.step("test-spec", "Run some specification tests"),
 
-        .build_rust_fuzz = b.step(
-            "build-rust-fuzz",
-            "Build the Rust fuzzing support library",
-        ),
+        .fuzz_rust_afl = b.step("fuzz-rust-afl", "Build wasm-smith fuzz tests using afl-clang-lto"),
     };
 
     const wasmstint_module = b.addModule(
@@ -256,9 +258,8 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
     );
 
     const cargo_build = b.addSystemCommand(&.{ path_options.cargo, "build" });
-    cargo_build.addFileInput(b.path("fuzz/wasm-smith/src/lib.rs"));
-    cargo_build.addFileInput(b.path("fuzz/wasm-smith/src/ffi.rs"));
-    cargo_build.addFileInput(b.path("fuzz/wasm-smith/Cargo.toml"));
+    cargo_build.disable_zig_progress = true;
+    cargo_build.addArgs(&.{ "--message-format", "short" });
 
     cargo_build.addArg("--manifest-path");
     cargo_build.addFileArg(b.path("fuzz/wasm-smith/Cargo.toml"));
@@ -291,7 +292,7 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
     rust_fuzz_target_module.addImport("wasmstint", wasmstint_module);
 
     const rust_fuzz_target = b.addLibrary(.{
-        .name = "rust-fuzz-execute",
+        .name = "execute",
         .root_module = rust_fuzz_target_module,
         .linkage = .static,
     });
@@ -302,26 +303,45 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
     rust_fuzz_target.bundle_compiler_rt = true;
     rust_fuzz_target.pie = true;
 
-    const afl_rust_fuzz = b.addSystemCommand(&.{path_options.afl_lto});
-    afl_rust_fuzz.step.dependOn(&rust_fuzz_target.step);
+    const build_rust_fuzz = b.addSystemCommand(&.{path_options.afl_clang_lto});
     if (missing_rust_target) {
-        afl_rust_fuzz.step.dependOn(&b.addFail("-Drust-target=... is required").step);
+        build_rust_fuzz.step.dependOn(&b.addFail("-Drust-target=... is required").step);
     } else {
-        afl_rust_fuzz.step.dependOn(&cargo_build.step);
+        build_rust_fuzz.step.dependOn(&rust_fuzz_target.step);
+        build_rust_fuzz.step.dependOn(&cargo_build.step);
     }
 
-    afl_rust_fuzz.addArg("-o");
-    const rust_fuzz_target_exe = afl_rust_fuzz.addOutputFileArg(rust_fuzz_target.name);
+    build_rust_fuzz.addArg("-o");
+    const rust_fuzz_target_exe = build_rust_fuzz.addOutputFileArg(rust_fuzz_target.name);
 
-    afl_rust_fuzz.addFileArg(rust_fuzz_lib);
-    afl_rust_fuzz.addFileArg(rust_fuzz_target.getEmittedBin());
+    build_rust_fuzz.addFileArg(rust_fuzz_lib);
+    build_rust_fuzz.addFileArg(rust_fuzz_target.getEmittedBin());
 
     if (path_options.afl_driver) |afl_driver_lib| {
-        afl_rust_fuzz.addArg(afl_driver_lib);
+        build_rust_fuzz.addArg(afl_driver_lib);
     } else {
-        steps.build_rust_fuzz.dependOn(&b.addFail("-Dafl-driver=... is required").step);
+        build_rust_fuzz.step.dependOn(&b.addFail("-Dafl-driver=... is required").step);
     }
 
-    steps.build_rust_fuzz.dependOn(&afl_rust_fuzz.step);
-    _ = rust_fuzz_target_exe;
+    const fuzz_exe_dir = Build.InstallDir{ .custom = "fuzz" };
+    const install_rust_fuzz = b.addInstallFileWithDir(
+        rust_fuzz_target_exe,
+        fuzz_exe_dir,
+        rust_fuzz_target.name,
+    );
+
+    steps.fuzz_rust_afl.dependOn(&install_rust_fuzz.step);
+
+    // const afl_fuzz = b.addSystemCommand(&.{path_options.afl_fuzz});
+    // if (path_options.afl_driver == null) {
+    //     afl_fuzz.step.dependOn(&b.addFail("-Dafl-driver=... is required").step);
+    // }
+    // // TODONT: -i and -o params
+    // if (b.args) |args| {
+    //     afl_fuzz.addArgs(args);
+    // } else {
+    //     afl_fuzz.addArgs(&.{ "-m", "4", "-V", "30", "-g", "16" });
+    // }
+    // afl_fuzz.addArg("--");
+    // afl_fuzz.addFileArg(rust_fuzz_target_exe);
 }
