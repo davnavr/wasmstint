@@ -1,6 +1,7 @@
 use std::ptr::NonNull;
 
 mod ffi;
+mod zig_smp;
 
 pub use ffi::{FfiSlice, FfiUnstructured, FfiVec};
 

@@ -1,5 +1,9 @@
 const std = @import("std");
 
+comptime {
+    _ = @import("rust_alloc.zig");
+}
+
 pub const Result = enum(c_int) {
     ok = 0,
     skip = -1,
