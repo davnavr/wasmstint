@@ -58,7 +58,10 @@ impl<T> FfiVec<T> {
     }
 
     pub fn to_vec(self) -> Vec<T> {
-        unsafe { Vec::<T>::from_raw_parts(self.items.ptr.as_ptr(), self.items.len, self.capacity) }
+        let moved = std::mem::ManuallyDrop::new(self);
+        unsafe {
+            Vec::<T>::from_raw_parts(moved.items.ptr.as_ptr(), moved.items.len, moved.capacity)
+        }
     }
 }
 
