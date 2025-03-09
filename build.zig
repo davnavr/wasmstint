@@ -81,6 +81,8 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
         .test_spec = b.step("test-spec", "Run some specification tests"),
 
         .fuzz_rust_afl = b.step("fuzz-rust-afl", "Build wasm-smith fuzz tests using afl-clang-lto"),
+
+        // .fuzz_rust_afl_debug = b.step("fuzz-rust-afl-debug", "Build runner for wasm-smith fuzz test"),
     };
 
     const wasmstint_module = b.addModule(
@@ -344,4 +346,28 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
     // }
     // afl_fuzz.addArg("--");
     // afl_fuzz.addFileArg(rust_fuzz_target_exe);
+
+    // const rust_fuzz_debug = b.addExecutable(.{
+    //     .name = "execute-debug",
+    //     .root_module = b.createModule(.{
+    //         .root_source_file = b.path("fuzz/wasm-smith/src/runner_main.zig"),
+    //         .target = proj_options.target,
+    //         .optimize = proj_options.optimize,
+    //         .link_libc = true,
+    //         .link_libcpp = true, // Required by Rust's panic infrastructure (libunwind)
+    //     }),
+    // });
+    // rust_fuzz_debug.bundle_compiler_rt = true;
+    // rust_fuzz_debug.linkLibrary(b.addLibrary(.{
+    //     .name = "execute-debug",
+    //     .root_module = rust_fuzz_target_module,
+    //     .linkage = .static,
+    // }));
+    // rust_fuzz_debug.addObjectFile(rust_fuzz_lib);
+    // rust_fuzz_debug.step.dependOn(&cargo_build.step);
+    // const install_rust_fuzz_debug = b.addInstallArtifact(
+    //     rust_fuzz_debug,
+    //     .{ .dest_dir = .{ .override = fuzz_exe_dir } },
+    // );
+    // steps.fuzz_rust_afl_debug.dependOn(&install_rust_fuzz_debug.step);
 }
