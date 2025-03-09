@@ -87,7 +87,11 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
 
     const wasmstint_module = b.addModule(
         "wasmstint",
-        .{ .root_source_file = b.path("src/root.zig") },
+        .{
+            .root_source_file = b.path("src/root.zig"),
+            .target = proj_options.target,
+            .optimize = proj_options.optimize,
+        },
     );
 
     const executables: Executables = exes: {
@@ -282,13 +286,13 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
     const rust_fuzz_harness = b.createModule(.{
         .root_source_file = b.path("fuzz/wasm-smith/src/harness.zig"),
         .target = proj_options.target,
-        .optimize = proj_options.optimize,
+        .optimize = .ReleaseSafe,
     });
 
     const rust_fuzz_target_module = b.createModule(.{
         .root_source_file = b.path("fuzz/wasm-smith/targets/execute.zig"),
         .target = proj_options.target,
-        .optimize = proj_options.optimize,
+        .optimize = .ReleaseSafe,
     });
     rust_fuzz_target_module.addImport("harness", rust_fuzz_harness);
     rust_fuzz_target_module.addImport("wasmstint", wasmstint_module);
@@ -299,6 +303,10 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
         .linkage = .static,
     });
     rust_fuzz_target.sanitize_coverage_trace_pc_guard = true;
+
+    if (proj_options.optimize == .Debug) {
+        rust_fuzz_target.step.dependOn(&b.addFail("--release is required for fuzzing").step);
+    }
 
     // https://www.ryanliptak.com/blog/fuzzing-zig-code/#treating-zig-code-as-a-static-library
     rust_fuzz_target.want_lto = true;

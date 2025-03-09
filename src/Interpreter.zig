@@ -1082,7 +1082,7 @@ fn setupStackFrame(
 ) Allocator.Error!SetupStackFrame {
     std.debug.assert(interp.value_stack.items[values_base..].len >= signature.param_count);
 
-    const saved_hash_stack_len = interp.hash_stack.inner.len;
+    const saved_hash_stack_len = if (HashStack.enabled) interp.hash_stack.inner.len;
 
     if (interp.call_stack.items.len > 0 and
         interp.currentFrame().function.expanded() == .wasm)
@@ -1095,7 +1095,9 @@ fn setupStackFrame(
         );
     }
 
-    errdefer interp.hash_stack.inner.len = saved_hash_stack_len;
+    errdefer if (HashStack.enabled) {
+        interp.hash_stack.inner.len = saved_hash_stack_len;
+    };
 
     switch (callee.expanded()) {
         .wasm => |wasm| {
