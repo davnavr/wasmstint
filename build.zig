@@ -265,7 +265,12 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
 
     const cargo_build = b.addSystemCommand(&.{ path_options.cargo, "build" });
     cargo_build.disable_zig_progress = true;
-    cargo_build.addArgs(&.{ "--message-format", "short" });
+
+    if (b.verbose) {
+        cargo_build.addArg("--verbose");
+    } else {
+        cargo_build.addArgs(&.{ "--message-format", "short" });
+    }
 
     cargo_build.addArg("--manifest-path");
     cargo_build.addFileArg(b.path("fuzz/wasm-smith/Cargo.toml"));
