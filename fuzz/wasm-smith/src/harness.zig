@@ -15,16 +15,102 @@ extern fn wasmstint_fuzz_free_bytes(bytes: *FfiVec(u8)) void;
 
 // TODO: Something about an oracle with wasmi or wasmtime (differential test)
 
-pub fn generateValidModule(input: *[]const u8) error{GenerateError}!FfiVec(u8) {
-    var ffi_input = FfiSlice(.@"const", u8).init(input.*);
-    defer input.* = ffi_input.toSlice();
+pub const Generator = struct {
+    src: Bytes,
 
-    var output: FfiVec(u8) = undefined;
-    return if (wasmstint_fuzz_arbitrary_module(&ffi_input, &output))
-        output
-    else
-        error.GenerateError;
-}
+    const Bytes = FfiSlice(.@"const", u8);
+
+    pub fn init(src: []const u8) Generator {
+        return .{ .src = Bytes.init(src) };
+    }
+
+    pub const Error = error{OutOfDataBytes};
+
+    pub fn validWasmModule(gen: *Generator) Error!FfiVec(u8) {
+        var output: FfiVec(u8) = undefined;
+        return if (wasmstint_fuzz_arbitrary_module(&gen.src, &output))
+            output
+        else
+            error.OutOfDataBytes;
+    }
+
+    pub fn bytes(gen: *Generator, size: usize) Error![]const u8 {
+        if (gen.src.len >= size) {
+            const src: []const u8 = gen.src.toSlice();
+            gen.src = Bytes.init(src[size..]);
+            return src[0..size];
+        } else return error.OutOfDataBytes;
+    }
+
+    pub fn byteArray(gen: *Generator, comptime size: usize) Error!*const [size]u8 {
+        return (try gen.bytes(size))[0..size];
+    }
+
+    pub fn int(gen: *Generator, comptime T: type) Error!T {
+        comptime {
+            std.debug.assert(@typeInfo(T) == .int);
+        }
+
+        return @truncate(
+            std.mem.readInt(
+                std.math.ByteAlignedInt(T),
+                try gen.byteArray(@sizeOf(T)),
+                .little,
+            ),
+        );
+    }
+
+    const Random = struct {
+        gen: *Generator,
+        err: ?Error = null,
+
+        fn fill(ptr: *anyopaque, dst: []u8) void {
+            const state: *Random = @ptrCast(@alignCast(ptr));
+            if (state.err != null) {
+                @memset(dst, 0);
+                return;
+            }
+
+            const src = state.gen.bytes(dst.len) catch |e| {
+                state.err = e;
+                @memset(dst, 0);
+                return;
+            };
+
+            @memcpy(dst, src);
+        }
+
+        fn random(state: *Random) std.Random {
+            return .{
+                .fillFn = fill,
+                .ptr = @ptrCast(state),
+            };
+        }
+
+        fn checkForError(state: Random) Error!void {
+            if (state.err) |err|
+                return err;
+        }
+    };
+
+    fn random(gen: *Generator) Random {
+        return .{ .gen = gen };
+    }
+
+    pub fn intRangeAtMost(gen: *Generator, comptime T: type, at_least: T, at_most: T) Error!T {
+        var r = gen.random();
+        const value = r.random().intRangeAtMost(T, at_least, at_most);
+        try r.checkForError();
+        return value;
+    }
+
+    pub fn uintLessThan(gen: *Generator, comptime T: type, less_than: T) Error!T {
+        var r = gen.random();
+        const value = r.random().uintLessThan(T, less_than);
+        try r.checkForError();
+        return value;
+    }
+};
 
 pub fn FfiSlice(comptime constness: enum { @"const", mut }, comptime T: type) type {
     return extern struct {
@@ -122,7 +208,7 @@ pub fn defineFuzzTarget(comptime target: anytype) void {
                 target,
                 .{data[0..size]},
             ) catch |e| switch (@as(anyerror, e)) {
-                error.GenerateError => .skip,
+                error.OutOfDataBytes, error.OutOfMemory => .skip,
                 else => |err| std.debug.panic("target failed with error: {!}", .{err}),
             };
 

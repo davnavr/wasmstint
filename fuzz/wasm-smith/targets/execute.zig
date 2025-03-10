@@ -1,14 +1,15 @@
 const std = @import("std");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const harness = @import("harness");
+const Generator = harness.Generator;
 const wasmstint = @import("wasmstint");
 
-fn randomExternRef(rng: *std.Random.Xoshiro256) wasmstint.runtime.ExternAddr {
-    return if (rng.random().int(u3) == 0)
+fn randomExternRef(gen: *Generator) Generator.Error!wasmstint.runtime.ExternAddr {
+    return if (try gen.int(u3) == 0)
         .null
     else
         .{
-            .nat = @enumFromInt(rng.random().intRangeAtMost(
+            .nat = @enumFromInt(try gen.intRangeAtMost(
                 usize,
                 1,
                 std.math.maxInt(usize),
@@ -18,9 +19,9 @@ fn randomExternRef(rng: *std.Random.Xoshiro256) wasmstint.runtime.ExternAddr {
 
 const HostFuncList = std.SegmentedList(wasmstint.runtime.FuncAddr.Host, 8);
 
-fn randomHostFuncRef(rng: *std.Random.Xoshiro256, list: *const HostFuncList) wasmstint.runtime.FuncAddr {
+fn randomHostFuncRef(gen: *Generator, list: *const HostFuncList) Generator.Error!wasmstint.runtime.FuncAddr {
     std.debug.assert(list.len > 0);
-    const idx = rng.random().uintLessThan(usize, list.len);
+    const idx = try gen.uintLessThan(usize, list.len);
     return wasmstint.runtime.FuncAddr.init(.{
         .host = .{
             .func = @constCast(list.at(idx)),
@@ -31,31 +32,27 @@ fn randomHostFuncRef(rng: *std.Random.Xoshiro256, list: *const HostFuncList) was
 
 const ImportProvider = struct {
     arena: ArenaAllocator,
-    rng: *std.Random.Xoshiro256,
+    gen: *Generator,
+    gen_err: ?Generator.Error = null,
     host_funcs: HostFuncList = .{},
     mems: std.SegmentedList(wasmstint.runtime.MemInst, 1) = .{},
     tables: std.SegmentedList(wasmstint.runtime.TableInst, 2) = .{},
+    // reuse_funcs = std.HashMapUnmanaged(*const FuncType, std.SegmentedList(*const wasmstint.runtime.FuncAddr.Host, 1));
 
-    fn randomNullableFuncRef(self: *const ImportProvider) wasmstint.runtime.FuncAddr.Nullable {
-        return if (self.rng.random().int(u3) == 0 or self.host_funcs.len == 0)
+    fn randomNullableFuncRef(self: *const ImportProvider) Generator.Error!wasmstint.runtime.FuncAddr.Nullable {
+        return if (self.host_funcs.len == 0 or try self.gen.int(u3) == 0)
             .null
         else
-            @bitCast(randomHostFuncRef(self.rng, &self.host_funcs));
+            @bitCast(try randomHostFuncRef(self.gen, &self.host_funcs));
     }
 
-    fn resolve(
-        ctx: *anyopaque,
-        module: std.unicode.Utf8View,
-        name: std.unicode.Utf8View,
+    fn resolveImpl(
+        self: *ImportProvider,
         desc: wasmstint.runtime.ImportProvider.Desc,
-    ) ?wasmstint.runtime.ExternVal {
-        const self: *ImportProvider = @ptrCast(@alignCast(ctx));
-        _ = module;
-        _ = name;
+    ) (error{OutOfMemory} || Generator.Error)!wasmstint.runtime.ExternVal {
         switch (desc) {
             .func => |func_type| {
-                const func = self.host_funcs.addOne(self.arena.allocator()) catch
-                    @panic("TODO: consider allowing OOM error in import provider");
+                const func = try self.host_funcs.addOne(self.arena.allocator());
 
                 func.* = .{ .signature = func_type.* };
                 return .{
@@ -68,20 +65,19 @@ const ImportProvider = struct {
                 };
             },
             .mem => |mem_type| {
-                const buf = std.heap.page_allocator.alignedAlloc(
+                const buf = try std.heap.page_allocator.alignedAlloc(
                     u8,
                     std.heap.page_size_min,
                     mem_type.limits.min * wasmstint.runtime.MemInst.page_size,
-                ) catch @panic("TODO: consider allowing OOM error in import provider");
+                );
 
-                if (self.rng.random().int(u3) == 0) {
-                    self.rng.random().bytes(buf);
+                if (try self.gen.int(u3) == 0) {
+                    @memcpy(buf, try self.gen.bytes(buf.len));
                 } else {
                     @memset(buf, 0);
                 }
 
-                const mem = self.mems.addOne(self.arena.allocator()) catch
-                    @panic("TODO: consider allowing OOM error in import provider");
+                const mem = try self.mems.addOne(self.arena.allocator());
 
                 mem.* = .{
                     .base = buf.ptr,
@@ -95,14 +91,13 @@ const ImportProvider = struct {
             .table => |table_type| {
                 const table_stride = wasmstint.runtime.TableStride.ofType(table_type.elem_type);
                 const len: u32 = @intCast(table_type.limits.min);
-                const buf = std.heap.page_allocator.alignedAlloc(
+                const buf = try std.heap.page_allocator.alignedAlloc(
                     u8,
                     std.heap.page_size_min,
                     len * table_stride.toBytes(),
-                ) catch @panic("TODO: consider allowing OOM error in import provider");
+                );
 
-                const table_inst = self.tables.addOne(self.arena.allocator()) catch
-                    @panic("TODO: consider allowing OOM error in import provider");
+                const table_inst = try self.tables.addOne(self.arena.allocator());
 
                 table_inst.* = wasmstint.runtime.TableInst{
                     .base = .{ .ptr = buf.ptr },
@@ -112,13 +107,13 @@ const ImportProvider = struct {
                     .limit = len,
                 };
 
-                if (self.rng.random().int(u3) == 0) {
+                if (try self.gen.int(u3) == 0) {
                     switch (table_type.elem_type) {
                         .externref => for (table_inst.base.extern_ref[0..len]) |*ref| {
-                            ref.* = randomExternRef(self.rng);
+                            ref.* = try randomExternRef(self.gen);
                         },
                         .funcref => for (table_inst.base.func_ref[0..len]) |*ref| {
-                            ref.* = self.randomNullableFuncRef();
+                            ref.* = try self.randomNullableFuncRef();
                         },
                         else => unreachable,
                     }
@@ -136,31 +131,23 @@ const ImportProvider = struct {
             .global => |global_type| {
                 const value: *anyopaque = value: switch (global_type.val_type) {
                     .i32, .f32 => {
-                        const n32 = self.arena.allocator().create(u32) catch
-                            @panic("TODO: consider allowing OOM error in import provider");
-
-                        n32.* = self.rng.random().int(u32);
+                        const n32 = try self.arena.allocator().create(u32);
+                        n32.* = try self.gen.int(u32);
                         break :value @ptrCast(n32);
                     },
                     .i64, .f64 => {
-                        const n32 = self.arena.allocator().create(u32) catch
-                            @panic("TODO: consider allowing OOM error in import provider");
-
-                        n32.* = self.rng.random().int(u32);
-                        break :value @ptrCast(n32);
+                        const n64 = try self.arena.allocator().create(u64);
+                        n64.* = try self.gen.int(u64);
+                        break :value @ptrCast(n64);
                     },
                     .externref => {
-                        const ref = self.arena.allocator().create(wasmstint.runtime.ExternAddr) catch
-                            @panic("TODO: consider allowing OOM error in import provider");
-
-                        ref.* = randomExternRef(self.rng);
+                        const ref = try self.arena.allocator().create(wasmstint.runtime.ExternAddr);
+                        ref.* = try randomExternRef(self.gen);
                         break :value @ptrCast(ref);
                     },
                     .funcref => {
-                        const ref = self.arena.allocator().create(wasmstint.runtime.FuncAddr.Nullable) catch
-                            @panic("TODO: consider allowing OOM error in import provider");
-
-                        ref.* = self.randomNullableFuncRef();
+                        const ref = try self.arena.allocator().create(wasmstint.runtime.FuncAddr.Nullable);
+                        ref.* = try self.randomNullableFuncRef();
                         break :value @ptrCast(ref);
                     },
                     .v128 => unreachable,
@@ -174,6 +161,24 @@ const ImportProvider = struct {
                 };
             },
         }
+    }
+
+    fn resolve(
+        ctx: *anyopaque,
+        module: std.unicode.Utf8View,
+        name: std.unicode.Utf8View,
+        desc: wasmstint.runtime.ImportProvider.Desc,
+    ) ?wasmstint.runtime.ExternVal {
+        const self: *ImportProvider = @ptrCast(@alignCast(ctx));
+        _ = module;
+        _ = name;
+        return self.resolveImpl(desc) catch |e| switch (e) {
+            error.OutOfMemory => @panic("TODO: allowing OOM error in import provider"),
+            error.OutOfDataBytes => |err| {
+                self.gen_err = err;
+                return null;
+            },
+        };
     }
 
     fn provider(self: *ImportProvider) wasmstint.runtime.ImportProvider {
@@ -198,26 +203,26 @@ const ImportProvider = struct {
 const FuncAddrList = []align(@sizeOf([2]usize)) const wasmstint.runtime.FuncAddr;
 
 fn randomTaggedValues(
-    rng: *std.Random.Xoshiro256,
+    gen: *Generator,
     funcs: FuncAddrList,
     host_funcs: *const HostFuncList,
     types: []const wasmstint.Module.ValType,
     values: []wasmstint.Interpreter.TaggedValue,
-) void {
+) Generator.Error!void {
     for (types, values) |ty, *val| {
         val.* = switch (ty) {
-            .i32 => .{ .i32 = rng.random().int(i32) },
-            .i64 => .{ .i64 = rng.random().int(i64) },
-            .f32 => .{ .f32 = @bitCast(rng.random().int(u32)) },
-            .f64 => .{ .f64 = @bitCast(rng.random().int(u64)) },
-            .externref => .{ .externref = randomExternRef(rng) },
+            .i32 => .{ .i32 = try gen.int(i32) },
+            .i64 => .{ .i64 = try gen.int(i64) },
+            .f32 => .{ .f32 = @bitCast(try gen.int(u32)) },
+            .f64 => .{ .f64 = @bitCast(try gen.int(u64)) },
+            .externref => .{ .externref = try randomExternRef(gen) },
             .funcref => .{
-                .funcref = if (rng.random().int(u4) == 0)
+                .funcref = if (try gen.int(u4) == 0)
                     .null
-                else if (host_funcs.len > 0 and rng.random().int(u2) == 0)
-                    @bitCast(randomHostFuncRef(rng, host_funcs))
+                else if (host_funcs.len > 0 and try gen.int(u2) == 0)
+                    @bitCast(try randomHostFuncRef(gen, host_funcs))
                 else if (funcs.len > 0)
-                    @bitCast(funcs[rng.random().uintLessThan(usize, funcs.len)])
+                    @bitCast(funcs[try gen.uintLessThan(usize, funcs.len)])
                 else
                     .null,
             },
@@ -230,11 +235,11 @@ fn driveInterpreter(
     funcs: FuncAddrList,
     interp: *wasmstint.Interpreter,
     fuel: *wasmstint.Interpreter.Fuel,
-    rng: *std.Random.Xoshiro256,
+    gen: *Generator,
     host_funcs: *const HostFuncList,
     arena: *ArenaAllocator,
     scratch: *ArenaAllocator,
-) void {
+) Generator.Error!void {
     while (true) {
         switch (interp.state) {
             .awaiting_host => |*awaiting| if (awaiting.currentHostFunction()) |host_func| {
@@ -247,7 +252,7 @@ fn driveInterpreter(
 
                 // TODO: random chance to trap
 
-                randomTaggedValues(rng, funcs, host_funcs, result_types, results);
+                try randomTaggedValues(gen, funcs, host_funcs, result_types, results);
 
                 _ = awaiting.returnFromHost(results, fuel) catch unreachable;
             } else return,
@@ -270,15 +275,6 @@ fn driveInterpreter(
 
 /// Instantiates a randomly generated WebAssembly module, then invokes its exported functions.
 pub fn target(input_bytes: []const u8) !harness.Result {
-    var input = input_bytes;
-    var wasm = try harness.generateValidModule(&input);
-    defer wasm.deinit();
-
-    if (input.len < 32) return .skip;
-
-    var rng = std.Random.Xoshiro256{ .s = @bitCast(input[0..32].*) };
-    input = input[32..];
-
     // comptime {
     //     std.debug.assert(@import("builtin").fuzz);
     // }
@@ -289,6 +285,14 @@ pub fn target(input_bytes: []const u8) !harness.Result {
     var scratch_pages = try wasmstint.PageBufferAllocator.init(512 * 1024);
     var scratch = ArenaAllocator.init(scratch_pages.allocator());
     defer scratch_pages.deinit();
+
+    var gen = Generator.init(input_bytes);
+
+    var rng = std.Random.Xoshiro256{ .s = undefined };
+    std.mem.asBytes(&rng.s).* = (try gen.byteArray(32)).*;
+
+    var wasm = try gen.validWasmModule();
+    defer wasm.deinit();
 
     var wasm_parse: []const u8 = wasm.items.toSlice();
     var module = try wasmstint.Module.parse(
@@ -302,7 +306,7 @@ pub fn target(input_bytes: []const u8) !harness.Result {
 
     var import_provider = ImportProvider{
         .arena = ArenaAllocator.init(main_pages.allocator()),
-        .rng = &rng,
+        .gen = &gen,
     };
     defer import_provider.deinit();
 
@@ -314,7 +318,11 @@ pub fn target(input_bytes: []const u8) !harness.Result {
         wasmstint.runtime.ModuleAllocator.page_allocator,
         &import_failure,
     ) catch |e| switch (e) {
-        error.ImportFailure => std.debug.panic("{}", .{import_failure}),
+        error.ImportFailure => if (import_provider.gen_err) |err| {
+            return err;
+        } else {
+            std.debug.panic("{}", .{import_failure});
+        },
         else => |err| return err,
     };
 
@@ -341,15 +349,17 @@ pub fn target(input_bytes: []const u8) !harness.Result {
             &fuel,
         );
 
-        driveInterpreter(
+        try driveInterpreter(
             &.{}, // Exported functions are not yet available!
             &interp,
             &fuel,
-            &rng,
+            &gen,
             &import_provider.host_funcs,
             &code_arena,
             &scratch,
         );
+
+        interp.reset();
     }
 
     if (!module_alloc.instantiated) {
@@ -388,47 +398,50 @@ pub fn target(input_bytes: []const u8) !harness.Result {
     };
     defer main_pages.allocator().free(exported_funcs);
 
-    for (exported_funcs) |callee| {
-        interp.reset();
+    if (exported_funcs.len > 0) {
+        const invoke_count = try gen.intRangeAtMost(u32, 1, @intCast(exported_funcs.len));
+        for (0..invoke_count) |_| {
+            defer interp.reset();
 
-        _ = scratch.reset(.retain_capacity);
-        const arg_types = callee.signature().parameters();
-        const args = try scratch.allocator().alloc(
-            wasmstint.Interpreter.TaggedValue,
-            arg_types.len,
-        );
+            const callee = exported_funcs[try gen.uintLessThan(usize, exported_funcs.len)];
 
-        randomTaggedValues(
-            &rng,
-            exported_funcs,
-            &import_provider.host_funcs,
-            arg_types,
-            args,
-        );
+            _ = scratch.reset(.retain_capacity);
+            const arg_types = callee.signature().parameters();
+            const args = scratch.allocator().alloc(
+                wasmstint.Interpreter.TaggedValue,
+                arg_types.len,
+            ) catch break;
 
-        var fuel = init_fuel;
-        _ = interp.state.awaiting_host.beginCall(
-            std.heap.page_allocator,
-            callee,
-            args,
-            &fuel,
-        ) catch |e| switch (e) {
-            error.ValueTypeOrCountMismatch => unreachable,
-            else => |oom| return oom,
-        };
+            randomTaggedValues(
+                &gen,
+                exported_funcs,
+                &import_provider.host_funcs,
+                arg_types,
+                args,
+            ) catch break;
 
-        driveInterpreter(
-            exported_funcs,
-            &interp,
-            &fuel,
-            &rng,
-            &import_provider.host_funcs,
-            &code_arena,
-            &scratch,
-        );
+            var fuel = init_fuel;
+            _ = interp.state.awaiting_host.beginCall(
+                std.heap.page_allocator,
+                callee,
+                args,
+                &fuel,
+            ) catch |e| switch (e) {
+                error.ValueTypeOrCountMismatch => unreachable,
+                error.OutOfMemory => break,
+            };
+
+            driveInterpreter(
+                exported_funcs,
+                &interp,
+                &fuel,
+                &gen,
+                &import_provider.host_funcs,
+                &code_arena,
+                &scratch,
+            ) catch break;
+        }
     }
-
-    interp.reset();
 
     return .ok;
 }
