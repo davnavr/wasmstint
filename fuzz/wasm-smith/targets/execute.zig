@@ -358,14 +358,14 @@ pub fn target(input_bytes: []const u8) !harness.Result {
             &code_arena,
             &scratch,
         );
-
-        interp.reset();
     }
 
     if (!module_alloc.instantiated) {
         std.debug.assert(interp.state != .awaiting_host);
         return .ok;
     }
+
+    interp.reset();
 
     const module_inst = module_alloc.expectInstantiated();
 
