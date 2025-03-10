@@ -314,6 +314,21 @@ pub fn target(input_bytes: []const u8) !harness.Result {
     };
     defer import_provider.deinit();
 
+    var code_arena = ArenaAllocator.init(main_pages.allocator());
+    defer code_arena.deinit();
+
+    if (try gen.int(u3) == 0) {
+        std.debug.print("validating all {} functions...\n", .{module.inner.code_count});
+
+        _ = module.finishCodeValidation(
+            code_arena.allocator(),
+            &scratch,
+        ) catch |e| switch (e) {
+            error.OutOfMemory => |oom| return oom,
+            else => {},
+        };
+    }
+
     std.debug.print("allocating module...\n", .{});
 
     var import_failure: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
@@ -344,9 +359,6 @@ pub fn target(input_bytes: []const u8) !harness.Result {
         .{},
     );
     defer interp.deinit(std.heap.page_allocator);
-
-    var code_arena = ArenaAllocator.init(main_pages.allocator());
-    defer code_arena.deinit();
 
     std.debug.print("instantiating module...\n", .{});
 
