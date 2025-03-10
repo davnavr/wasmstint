@@ -169,9 +169,12 @@ const ImportProvider = struct {
         name: std.unicode.Utf8View,
         desc: wasmstint.runtime.ImportProvider.Desc,
     ) ?wasmstint.runtime.ExternVal {
-        const self: *ImportProvider = @ptrCast(@alignCast(ctx));
         _ = module;
         _ = name;
+
+        std.debug.print("providing import {}\n", .{desc});
+
+        const self: *ImportProvider = @ptrCast(@alignCast(ctx));
         return self.resolveImpl(desc) catch |e| switch (e) {
             error.OutOfMemory => @panic("TODO: allowing OOM error in import provider"),
             error.OutOfDataBytes => |err| {
@@ -279,10 +282,10 @@ pub fn target(input_bytes: []const u8) !harness.Result {
     //     std.debug.assert(@import("builtin").fuzz);
     // }
 
-    var main_pages = try wasmstint.PageBufferAllocator.init(16 * (1024 * 1024));
+    var main_pages = try wasmstint.PageBufferAllocator.init(64 * (1024 * 1024));
     defer main_pages.deinit();
 
-    var scratch_pages = try wasmstint.PageBufferAllocator.init(512 * 1024);
+    var scratch_pages = try wasmstint.PageBufferAllocator.init(4 * (1024 * 1024));
     var scratch = ArenaAllocator.init(scratch_pages.allocator());
     defer scratch_pages.deinit();
 

@@ -59,10 +59,12 @@ fn arbitrary_module(u: &mut arbitrary::Unstructured) -> arbitrary::Result<wasm_s
         InstructionKind::Control,
     ];
 
-    const MAX_SMALL: usize = 10;
-    const MAX_MEDIUM: usize = 100;
-    const MAX_LARGE: usize = 500;
-    const MAX_HUGE: usize = 1_000;
+    const MAX_SMALL: usize = 5;
+    const MAX_MEDIUM: usize = 50;
+    const MAX_LARGE: usize = 100;
+    const MAX_HUGE: usize = 500;
+
+    const MIN_FUNCS: usize = 5;
 
     let config = wasm_smith::Config {
         allow_start_export: true,
@@ -89,10 +91,9 @@ fn arbitrary_module(u: &mut arbitrary::Unstructured) -> arbitrary::Result<wasm_s
         max_data_segments: u.int_in_range(0..=MAX_MEDIUM)?,
         max_element_segments: u.int_in_range(0..=MAX_MEDIUM)?,
         max_elements: u.int_in_range(0..=MAX_HUGE)?,
-        max_exports: u.int_in_range(0..=MAX_LARGE)?,
-        max_funcs: u.int_in_range(0..=MAX_LARGE)?,
+        max_funcs: u.int_in_range(MIN_FUNCS..=MAX_LARGE)?,
         max_globals: u.int_in_range(0..=MAX_LARGE)?,
-        max_imports: u.int_in_range(0..=MAX_MEDIUM)?,
+        max_imports: u.int_in_range(0..=MAX_SMALL)?,
         max_instructions: u.int_in_range(0..=MAX_LARGE)?,
         max_memories: 1,
         max_memory32_bytes: u.int_in_range(0..=0x1_0000_0000)?,
