@@ -208,7 +208,14 @@ pub fn defineFuzzTarget(comptime target: anytype) void {
                 target,
                 .{data[0..size]},
             ) catch |e| switch (@as(anyerror, e)) {
-                error.OutOfDataBytes, error.OutOfMemory => .skip,
+                error.OutOfDataBytes, error.OutOfMemory => |err| skip: {
+                    std.debug.print("skipping results: {!}\n", .{err});
+                    if (@errorReturnTrace()) |trace| {
+                        std.debug.dumpStackTrace(trace.*);
+                    }
+
+                    break :skip .skip;
+                },
                 else => |err| std.debug.panic("target failed with error: {!}", .{err}),
             };
 

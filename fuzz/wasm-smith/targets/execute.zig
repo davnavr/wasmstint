@@ -279,7 +279,7 @@ pub fn target(input_bytes: []const u8) !harness.Result {
     //     std.debug.assert(@import("builtin").fuzz);
     // }
 
-    var main_pages = try wasmstint.PageBufferAllocator.init(1 * (1024 * 1024));
+    var main_pages = try wasmstint.PageBufferAllocator.init(16 * (1024 * 1024));
     defer main_pages.deinit();
 
     var scratch_pages = try wasmstint.PageBufferAllocator.init(512 * 1024);
@@ -294,6 +294,8 @@ pub fn target(input_bytes: []const u8) !harness.Result {
     var wasm = try gen.validWasmModule();
     defer wasm.deinit();
 
+    std.debug.print("parsing module...\n", .{});
+
     var wasm_parse: []const u8 = wasm.items.toSlice();
     var module = try wasmstint.Module.parse(
         main_pages.allocator(),
@@ -304,11 +306,15 @@ pub fn target(input_bytes: []const u8) !harness.Result {
     );
     defer module.deinit(main_pages.allocator());
 
+    std.debug.print("module parsed!\n", .{});
+
     var import_provider = ImportProvider{
         .arena = ArenaAllocator.init(main_pages.allocator()),
         .gen = &gen,
     };
     defer import_provider.deinit();
+
+    std.debug.print("allocating module...\n", .{});
 
     var import_failure: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
     var module_alloc = wasmstint.runtime.ModuleAlloc.allocate(
@@ -331,6 +337,8 @@ pub fn target(input_bytes: []const u8) !harness.Result {
         wasmstint.runtime.ModuleAllocator.page_allocator,
     );
 
+    std.debug.print("module allocated!\n", .{});
+
     var interp = try wasmstint.Interpreter.init(
         std.heap.page_allocator,
         .{},
@@ -339,6 +347,8 @@ pub fn target(input_bytes: []const u8) !harness.Result {
 
     var code_arena = ArenaAllocator.init(main_pages.allocator());
     defer code_arena.deinit();
+
+    std.debug.print("instantiating module...\n", .{});
 
     const init_fuel = wasmstint.Interpreter.Fuel{ .remaining = 2_500_000 };
     {
@@ -362,28 +372,38 @@ pub fn target(input_bytes: []const u8) !harness.Result {
 
     if (!module_alloc.instantiated) {
         std.debug.assert(interp.state != .awaiting_host);
+        std.debug.print("module instantiation failed: ({s})\n", .{@tagName(interp.state)});
         return .ok;
     }
 
     interp.reset();
 
     const module_inst = module_alloc.expectInstantiated();
+    const exports = module_inst.exports();
 
+    std.debug.print("module instantiated with {} exports!\n", .{exports.len});
+
+    // var exported_funcs_names: []const []const u8 = undefined;
     const exported_funcs: FuncAddrList = funcs: {
         _ = scratch.reset(.retain_capacity);
+
         var funcs = std.ArrayListAlignedUnmanaged(
             wasmstint.runtime.FuncAddr,
             @sizeOf([2]usize),
         ).empty;
 
-        const exports = module_inst.exports();
         try funcs.ensureTotalCapacity(scratch.allocator(), exports.len);
 
         for (0..exports.len) |i| {
             const export_val = exports.at(i);
             switch (export_val.val) {
                 .func => |func| try funcs.append(scratch.allocator(), func),
-                else => {},
+                .mem => std.debug.print("ignoring exported memory...\n", .{}),
+                .table => std.debug.print("ignoring exported table...\n", .{}),
+                .global => |global| std.debug.print(
+                    "ignoring exported global: {}\n",
+                    .{global},
+                ),
             }
         }
 
@@ -400,6 +420,12 @@ pub fn target(input_bytes: []const u8) !harness.Result {
 
     if (exported_funcs.len > 0) {
         const invoke_count = try gen.intRangeAtMost(u32, 1, @intCast(exported_funcs.len));
+
+        std.debug.print(
+            "will invoke {} functions, chosen from {} exports\n",
+            .{ invoke_count, exported_funcs.len },
+        );
+
         for (0..invoke_count) |_| {
             defer interp.reset();
 
@@ -419,6 +445,8 @@ pub fn target(input_bytes: []const u8) !harness.Result {
                 arg_types,
                 args,
             ) catch break;
+
+            std.debug.print("invoking {}\n", .{callee});
 
             var fuel = init_fuel;
             _ = interp.state.awaiting_host.beginCall(
