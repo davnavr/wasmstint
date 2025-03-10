@@ -140,6 +140,7 @@ pub const Code = extern struct {
         scratch: *ArenaAllocator,
     ) Error!bool {
         check: {
+            // TODO: Should this be cmpxchgStrong? or maybe fetchMax should be used instead?
             const current_flag = code.status.cmpxchgWeak(
                 .not_started,
                 .in_progress,
@@ -584,15 +585,8 @@ const BranchFixup = packed struct(u32) {
             len: u32,
             capacity: u32,
 
-            const empty = Header{
-                // Zig doesn't like `List.empty` here, "dependency loop detected"
-                .prev = List{ .header = @constCast(&empty_fallback) },
-                .len = 0,
-                .capacity = 0,
-            };
-
-            const empty_fallback = Header{
-                .prev = undefined,
+            const empty: Header = .{
+                .prev = List.empty,
                 .len = 0,
                 .capacity = 0,
             };
@@ -602,7 +596,7 @@ const BranchFixup = packed struct(u32) {
 
         const header_size_in_elems = @divExact(@sizeOf(Header), @sizeOf(BranchFixup));
 
-        const empty = List{ .header = @constCast(&Header.empty) };
+        const empty: List = .{ .header = @constCast(&Header.empty) };
 
         fn allocatedHeaderAndEntries(list: List) []align(@alignOf(Header)) BranchFixup {
             const base: [*]align(@alignOf(Header)) BranchFixup = @ptrCast(list.header);
@@ -699,7 +693,7 @@ const SideTableBuilder = struct {
     active: std.SegmentedList(ActiveList, 4) = .{},
     /// Separate stack used to fixup branches in `if`/`else` blocks.
     alternate: std.SegmentedList(BranchFixup, 4) = .{},
-    free: BranchFixup.List = BranchFixup.List.empty,
+    free: BranchFixup.List = .empty,
 
     fn nextEntryIdx(table: *const SideTableBuilder) Module.LimitError!u32 {
         return std.math.cast(u32, table.entries.len) orelse return error.WasmImplementationLimit;
@@ -711,18 +705,21 @@ const SideTableBuilder = struct {
         block_offset: ActiveList.BlockOffset,
         allocation: enum { reuse, empty },
     ) Allocator.Error!void {
-        const fixups = if (allocation == .reuse and table.free.header.capacity > 0) reused: {
-            const used = table.free;
-            std.debug.assert(used.header.capacity > 0);
-            table.free = used.header.prev;
-            std.debug.assert(@intFromPtr(used.header) != @intFromPtr(table.free.header));
-            used.header.prev = BranchFixup.List.empty;
-            break :reused used;
-        } else BranchFixup.List.empty;
+        const fixups: BranchFixup.List = switch (allocation) {
+            .reuse => reused: {
+                const used = table.free;
+                table.free = table.free.header.prev;
+                if (used.header.capacity > 0) {
+                    used.header.prev = .empty;
+                }
+
+                break :reused used;
+            },
+            .empty => .empty,
+        };
 
         std.debug.assert(fixups.header.len == 0);
         std.debug.assert(fixups.header.prev.header.capacity == 0);
-        std.debug.assert(@intFromPtr(fixups.header) != @intFromPtr(&BranchFixup.List.Header.empty_fallback));
 
         try table.active.append(
             arena.allocator(),

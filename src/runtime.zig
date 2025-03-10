@@ -366,7 +366,7 @@ pub const ImportProvider = struct {
         module: std.unicode.Utf8View,
         name: std.unicode.Utf8View,
         comptime desc_tag: std.meta.FieldEnum(Module.Export.Desc),
-        desc: std.meta.FieldType(Desc, desc_tag),
+        desc: @FieldType(Desc, @tagName(desc_tag)),
         failed: ?*FailedRequest,
     ) Error!@FieldType(ExternVal, @tagName(desc_tag)) {
         const import_desc = @unionInit(
