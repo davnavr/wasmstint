@@ -313,7 +313,8 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
     rust_fuzz_target.bundle_compiler_rt = true;
     rust_fuzz_target.pie = true;
 
-    const build_rust_fuzz = b.addSystemCommand(&.{path_options.afl_clang_lto});
+    const build_rust_fuzz = b.addSystemCommand(&.{ path_options.afl_clang_lto, "-g", "-Wall" });
+    build_rust_fuzz.disable_zig_progress = true;
     if (missing_rust_target) {
         build_rust_fuzz.step.dependOn(&b.addFail("-Drust-target=... is required").step);
     } else {
@@ -325,7 +326,7 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
     const rust_fuzz_target_exe = build_rust_fuzz.addOutputFileArg(rust_fuzz_target.name);
 
     build_rust_fuzz.addFileArg(rust_fuzz_lib);
-    build_rust_fuzz.addFileArg(rust_fuzz_target.getEmittedBin());
+    build_rust_fuzz.addArtifactArg(rust_fuzz_target);
 
     if (path_options.afl_driver) |afl_driver_lib| {
         build_rust_fuzz.addArg(afl_driver_lib);
