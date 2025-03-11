@@ -318,13 +318,17 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
     rust_fuzz_target.bundle_compiler_rt = true;
     rust_fuzz_target.pie = true;
 
-    const build_rust_fuzz = b.addSystemCommand(&.{ path_options.afl_clang_lto, "-g", "-Wall" });
+    const build_rust_fuzz = b.addSystemCommand(&.{ path_options.afl_clang_lto, "-g", "-Wall", "-fsanitize=fuzzer" });
     build_rust_fuzz.disable_zig_progress = true;
     if (missing_rust_target) {
         build_rust_fuzz.step.dependOn(&b.addFail("-Drust-target=... is required").step);
     } else {
         build_rust_fuzz.step.dependOn(&rust_fuzz_target.step);
         build_rust_fuzz.step.dependOn(&cargo_build.step);
+    }
+
+    if (b.verbose) {
+        build_rust_fuzz.addArg("-v");
     }
 
     build_rust_fuzz.addArg("-o");
