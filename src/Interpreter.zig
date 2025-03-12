@@ -344,6 +344,18 @@ pub const Trap = struct {
             error.NotANumber => Trap.init(.invalid_conversion_to_integer, {}),
         };
     }
+
+    fn initHostCode(code: u31) Trap {
+        return .{
+            .code = @enumFromInt(-@as(i32, code) - 1),
+            .information = undefined,
+        };
+    }
+
+    fn toHostCode(trap: *const Trap) ?u31 {
+        const code: i32 = @intFromEnum(trap.code);
+        return if (code < 0) @intCast(-(code + 1)) else null;
+    }
 };
 
 pub const InterruptionCause = union(enum) {
@@ -742,6 +754,12 @@ pub const State = union(enum) {
             }
 
             return self.returnFromHost(&result_array, fuel);
+        }
+
+        pub fn trapWithHostCode(self: *AwaitingHost, code: u31) *State {
+            const interp: *Interpreter = self.interpreter();
+            interp.state = .{ .trapped = Trap.initHostCode(code) };
+            return &interp.state;
         }
     };
 

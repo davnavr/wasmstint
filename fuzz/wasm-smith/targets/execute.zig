@@ -241,7 +241,7 @@ fn driveInterpreter(
     host_funcs: *const HostFuncList,
     arena: *ArenaAllocator,
     scratch: *ArenaAllocator,
-) Generator.Error!void {
+) !void {
     while (true) {
         switch (interp.state) {
             .awaiting_host => |*awaiting| if (awaiting.currentHostFunction()) |host_func| {
@@ -250,13 +250,18 @@ fn driveInterpreter(
                 const results = scratch.allocator().alloc(
                     wasmstint.Interpreter.TaggedValue,
                     result_types.len,
-                ) catch @panic("TODO: trap on OOM");
+                ) catch {
+                    _ = awaiting.trapWithHostCode(0);
+                    continue;
+                };
 
-                // TODO: random chance to trap
+                if (try gen.int(u5) == 0) {
+                    _ = awaiting.trapWithHostCode(1);
+                } else {
+                    try randomTaggedValues(gen, funcs, host_funcs, result_types, results);
 
-                try randomTaggedValues(gen, funcs, host_funcs, result_types, results);
-
-                _ = try awaiting.returnFromHost(results, fuel);
+                    _ = try awaiting.returnFromHost(results, fuel);
+                }
             } else return,
             .awaiting_validation => |*validation| {
                 _ = scratch.reset(.retain_capacity);
@@ -481,7 +486,10 @@ pub fn target(input_bytes: []const u8) !harness.Result {
                 &import_provider.host_funcs,
                 &code_arena,
                 &scratch,
-            ) catch break;
+            ) catch |e| switch (e) {
+                error.OutOfDataBytes => break,
+                else => |err| return err,
+            };
         }
     }
 
