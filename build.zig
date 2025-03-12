@@ -56,18 +56,6 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
             "afl-clang-lto",
             "Path to afl-clang-lto executable",
         ) orelse "afl-clang-lto",
-
-        .afl_driver = b.option(
-            []const u8,
-            "afl-driver",
-            "Path to the AFLDriver library (e.g. libAFLDriver.a)",
-        ) orelse std.fs.realpathAlloc(
-            b.allocator,
-            "/usr/local/lib/afl/libAFLDriver.a",
-        ) catch |e| switch (e) {
-            error.OutOfMemory => |oom| return oom,
-            else => null,
-        },
     };
 
     const steps = .{
@@ -250,9 +238,6 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
         "The Rust target triple",
     );
 
-    const missing_rust_target = rust_target == null and
-        !proj_options.target.query.isNativeTriple();
-
     const rust_fuzz_lib_name = try std.mem.concat(
         b.allocator,
         u8,
@@ -263,7 +248,7 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
         },
     );
 
-    const cargo_build = b.addSystemCommand(&.{ path_options.cargo, "build" });
+    const cargo_build = b.addSystemCommand(&.{ path_options.cargo, "build", "--profile", "dev" });
     cargo_build.disable_zig_progress = true;
 
     if (b.verbose) {
@@ -275,16 +260,20 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
     cargo_build.addArg("--manifest-path");
     cargo_build.addFileArg(b.path("fuzz/wasm-smith/Cargo.toml"));
 
-    const cargo_target_dir = b.path("fuzz/wasm-smith/target/debug");
+    const cargo_target_dir = b.path("fuzz/wasm-smith/target");
+    cargo_build.addArg("--target-dir"); // TODO: Allow overriding target directory in options
+    cargo_build.addDirectoryArg(cargo_target_dir);
+
+    const cargo_profile_dir = cargo_target_dir.path(b, "debug");
 
     if (rust_target) |rust_triple| {
         cargo_build.addArgs(&.{ "--target", rust_triple });
     }
 
     const cargo_artifact_dir = if (rust_target) |rust_triple|
-        cargo_target_dir.path(b, rust_triple)
+        cargo_profile_dir.path(b, rust_triple)
     else
-        cargo_target_dir;
+        cargo_profile_dir;
 
     const rust_fuzz_lib = cargo_artifact_dir.path(b, rust_fuzz_lib_name);
 
@@ -298,6 +287,8 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
         .root_source_file = b.path("fuzz/wasm-smith/targets/execute.zig"),
         .target = proj_options.target,
         .optimize = .ReleaseSafe,
+        .omit_frame_pointer = false,
+        .error_tracing = true,
     });
     rust_fuzz_target_module.addImport("harness", rust_fuzz_harness);
     rust_fuzz_target_module.addImport("wasmstint", wasmstint_module);
@@ -306,8 +297,8 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
         .name = "execute",
         .root_module = rust_fuzz_target_module,
         .linkage = .static,
+        .use_llvm = true,
     });
-    rust_fuzz_target.sanitize_coverage_trace_pc_guard = true;
 
     if (proj_options.optimize == .Debug) {
         rust_fuzz_target.step.dependOn(&b.addFail("--release is required for fuzzing").step);
@@ -317,11 +308,12 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
     rust_fuzz_target.want_lto = true;
     rust_fuzz_target.bundle_compiler_rt = true;
     rust_fuzz_target.pie = true;
+    // rust_fuzz_target.sanitize_coverage_trace_pc_guard = true; // Not needed in AFL LTO mode?
 
     const build_rust_fuzz = b.addSystemCommand(&.{ path_options.afl_clang_lto, "-g", "-Wall", "-fsanitize=fuzzer" });
     build_rust_fuzz.disable_zig_progress = true;
-    if (missing_rust_target) {
-        build_rust_fuzz.step.dependOn(&b.addFail("-Drust-target=... is required").step);
+    if (!proj_options.target.query.isNativeTriple()) {
+        build_rust_fuzz.step.dependOn(&b.addFail("cannot build AFL fuzz executable for non-native target").step);
     } else {
         build_rust_fuzz.step.dependOn(&rust_fuzz_target.step);
         build_rust_fuzz.step.dependOn(&cargo_build.step);
@@ -336,12 +328,6 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
 
     build_rust_fuzz.addFileArg(rust_fuzz_lib);
     build_rust_fuzz.addArtifactArg(rust_fuzz_target);
-
-    if (path_options.afl_driver) |afl_driver_lib| {
-        build_rust_fuzz.addArg(afl_driver_lib);
-    } else {
-        build_rust_fuzz.step.dependOn(&b.addFail("-Dafl-driver=... is required").step);
-    }
 
     const fuzz_exe_dir = Build.InstallDir{ .custom = "fuzz" };
     const install_rust_fuzz = b.addInstallFileWithDir(

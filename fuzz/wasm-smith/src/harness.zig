@@ -151,58 +151,11 @@ pub fn FfiVec(comptime T: type) type {
     };
 }
 
-const SegfaultHandler = enum(u32) {
-    starting = 0,
-    installing = 1,
-    attached = 2,
-
-    // TODO: Figure out if AFL++ calls LLVMFuzzerTestOneInput in a multi-threaded environment
-    var current = std.atomic.Value(SegfaultHandler).init(.starting);
-
-    inline fn currentAsInt() *std.atomic.Value(u32) {
-        return @ptrCast(&current);
-    }
-
-    fn installSlowPath() void {
-        @branchHint(.cold);
-        perform_install: {
-            const previous: SegfaultHandler = @enumFromInt(
-                currentAsInt().fetchMax(
-                    @intFromEnum(SegfaultHandler.installing),
-                    .acq_rel,
-                ),
-            );
-
-            switch (previous) {
-                .starting => break :perform_install,
-                .attached => return,
-                .installing => while (true) {
-                    std.Thread.Futex.wait(currentAsInt(), @intFromEnum(SegfaultHandler.installing));
-
-                    if (current.load(.acquire) == .attached)
-                        return;
-                },
-            }
-        }
-
-        std.debug.attachSegfaultHandler();
-    }
-
-    inline fn install() void {
-        if (std.debug.have_segfault_handling_support and current.load(.acquire) != .attached) {
-            @branchHint(.cold);
-            @call(.never_inline, installSlowPath, .{});
-        }
-    }
-};
-
 pub fn defineFuzzTarget(comptime target: anytype) void {
     // const TargetFn = @typeInfo(@TypeOf(target)).@"fn";
 
     const Fuzzer = struct {
-        fn fuzzer(data: [*]const u8, size: usize) callconv(.c) c_int {
-            SegfaultHandler.install();
-
+        fn fuzzer(data: [*]const u8, size: usize) callconv(.c) Result {
             const result: Result = @call(
                 .never_inline,
                 target,
@@ -219,7 +172,7 @@ pub fn defineFuzzTarget(comptime target: anytype) void {
                 else => |err| std.debug.panic("target failed with error: {!}", .{err}),
             };
 
-            return @intFromEnum(result);
+            return result;
         }
     };
 
