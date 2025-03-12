@@ -31,9 +31,11 @@ fn randomHostFuncRef(gen: *Generator, list: *const HostFuncList) Generator.Error
 }
 
 const ImportProvider = struct {
+    const Error = std.mem.Allocator.Error || Generator.Error;
+
     arena: ArenaAllocator,
     gen: *Generator,
-    gen_err: ?Generator.Error = null,
+    err: ?Error = null,
     host_funcs: HostFuncList = .{},
     mems: std.SegmentedList(wasmstint.runtime.MemInst, 1) = .{},
     tables: std.SegmentedList(wasmstint.runtime.TableInst, 2) = .{},
@@ -49,7 +51,7 @@ const ImportProvider = struct {
     fn resolveImpl(
         self: *ImportProvider,
         desc: wasmstint.runtime.ImportProvider.Desc,
-    ) (error{OutOfMemory} || Generator.Error)!wasmstint.runtime.ExternVal {
+    ) Error!wasmstint.runtime.ExternVal {
         switch (desc) {
             .func => |func_type| {
                 const func = try self.host_funcs.addOne(self.arena.allocator());
@@ -175,12 +177,9 @@ const ImportProvider = struct {
         std.debug.print("providing import {}\n", .{desc});
 
         const self: *ImportProvider = @ptrCast(@alignCast(ctx));
-        return self.resolveImpl(desc) catch |e| switch (e) {
-            error.OutOfMemory => @panic("TODO: allowing OOM error in import provider"),
-            error.OutOfDataBytes => |err| {
-                self.gen_err = err;
-                return null;
-            },
+        return self.resolveImpl(desc) catch |err| {
+            self.err = err;
+            return null;
         };
     }
 
@@ -257,7 +256,7 @@ fn driveInterpreter(
 
                 try randomTaggedValues(gen, funcs, host_funcs, result_types, results);
 
-                _ = awaiting.returnFromHost(results, fuel) catch unreachable;
+                _ = try awaiting.returnFromHost(results, fuel);
             } else return,
             .awaiting_validation => |*validation| {
                 _ = scratch.reset(.retain_capacity);
@@ -342,7 +341,7 @@ pub fn target(input_bytes: []const u8) !harness.Result {
         wasmstint.runtime.ModuleAllocator.page_allocator,
         &import_failure,
     ) catch |e| switch (e) {
-        error.ImportFailure => if (import_provider.gen_err) |err| {
+        error.ImportFailure => if (import_provider.err) |err| {
             return err;
         } else {
             std.debug.panic("{}", .{import_failure});
@@ -470,7 +469,7 @@ pub fn target(input_bytes: []const u8) !harness.Result {
                 args,
                 &fuel,
             ) catch |e| switch (e) {
-                error.ValueTypeOrCountMismatch => unreachable,
+                error.ValueTypeOrCountMismatch => |err| return err,
                 error.OutOfMemory => break,
             };
 
