@@ -37,6 +37,7 @@ const ProjectOptions = struct {
     target: Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     rust_target: ?[]const u8,
+    // fuzz_targets: ?[]const FuzzTarget, // Use an std.enums.EnumMap?
 
     fn init(b: *Build) ProjectOptions {
         return .{
@@ -47,6 +48,11 @@ const ProjectOptions = struct {
                 "rust-target",
                 "Sets the Rust target triple",
             ),
+            // .fuzz_targets = b.option(
+            //     []const FuzzTarget,
+            //     "fuzz-targets",
+            //     "Which fuzz targets will be built",
+            // ),
         };
     }
 };
@@ -144,9 +150,14 @@ const RustFuzzLib = struct {
         };
     }
 
-    fn addRunFileArg(lib: *const RustFuzzLib, run: *Build.Step.Run) void {
+    fn addRunFileArgTo(lib: *const RustFuzzLib, run: *Build.Step.Run) void {
         run.step.dependOn(lib.step);
         run.addFileArg(lib.path);
+    }
+
+    fn addObjectFileToCompile(lib: *const RustFuzzLib, compile: *Build.Step.Compile) void {
+        compile.step.dependOn(lib.step);
+        compile.addObjectFile(lib.path);
     }
 };
 
@@ -158,7 +169,10 @@ const RustFuzzTargetHarness = struct {
             .module = b.createModule(.{
                 .root_source_file = b.path("fuzz/wasm-smith/src/harness.zig"),
                 .target = proj_opts.target,
-                .optimize = .ReleaseSafe,
+                .optimize = switch (proj_opts.optimize) {
+                    .Debug, .ReleaseSafe => |same| same,
+                    else => .ReleaseSafe,
+                },
                 .error_tracing = true,
             }),
         };
@@ -175,7 +189,7 @@ const RustFuzzTargetHarness = struct {
         const target_module = b.createModule(.{
             .root_source_file = root_source_file,
             .target = proj_opts.target,
-            .optimize = .ReleaseSafe,
+            .optimize = harness.module.optimize,
             .omit_frame_pointer = false,
             .error_tracing = true,
         });
@@ -207,7 +221,7 @@ const RustFuzzTargetHarness = struct {
 const RustFuzzTarget = struct {
     lib: *Build.Step.Compile,
 
-    fn installTargetExecutable(
+    fn installAflExecutable(
         target: *const RustFuzzTarget,
         b: *Build,
         proj_opts: *const ProjectOptions,
@@ -221,7 +235,7 @@ const RustFuzzTarget = struct {
             afl_lto.step.dependOn(&b.addFail("cannot build AFL fuzz executable for non-native target").step);
         } else {
             // afl_lto.step.dependOn(&target.lib.step);
-            rust_fuzz_lib.addRunFileArg(afl_lto);
+            rust_fuzz_lib.addRunFileArgTo(afl_lto);
         }
 
         afl_lto.addArtifactArg(target.lib);
@@ -239,6 +253,44 @@ const RustFuzzTarget = struct {
             target.lib.name,
         );
     }
+
+    fn installDebugExecutable(
+        target: *const RustFuzzTarget,
+        b: *Build,
+        proj_opts: *const ProjectOptions,
+        rust_fuzz_lib: *const RustFuzzLib,
+        install_dir: Build.InstallDir,
+    ) OomError!*Build.Step.InstallArtifact {
+        const exe = b.addExecutable(.{
+            .name = try std.mem.concat(
+                b.allocator,
+                u8,
+                &.{ target.lib.name, "-debug" },
+            ),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("fuzz/wasm-smith/src/runner_main.zig"),
+                .target = proj_opts.target,
+                .optimize = proj_opts.optimize,
+                // This seems to interfere with Zig's panic handler when Zig code is not in one exe/lib
+                // The workaround is to put all Zig code in the one exe
+                .link_libcpp = true, // Required by Rust's panic infrastructure (libunwind)
+            }),
+        });
+
+        exe.bundle_compiler_rt = true;
+        exe.root_module.addImport("target", target.lib.root_module);
+
+        if (!proj_opts.target.query.isNativeTriple() and proj_opts.rust_target == null) {
+            exe.step.dependOn(&b.addFail("-Drust-target=... is required when cross compiling").step);
+        }
+
+        rust_fuzz_lib.addObjectFileToCompile(exe);
+
+        return b.addInstallArtifact(
+            exe,
+            .{ .dest_dir = .{ .override = install_dir } },
+        );
+    }
 };
 
 pub fn build(b: *Build) OomError!void {
@@ -246,7 +298,7 @@ pub fn build(b: *Build) OomError!void {
     const path_options = PathOptions.init(b);
 
     const steps = .{
-        .check = b.step("check", "Check for compilation errors"),
+        // .check = b.step("check", "Check for compilation errors"),
 
         .run_wast = b.step("run-wast", "Run the specification test interpreter"),
         // .run_wasip1 = b.step("run-wasip1", "Run the WASI (preview 1) application interpreter",),
@@ -256,8 +308,7 @@ pub fn build(b: *Build) OomError!void {
         .test_spec = b.step("test-spec", "Run some specification tests"),
 
         .fuzz_rust_afl = b.step("fuzz-rust-afl", "Build wasm-smith fuzz tests using afl-clang-lto"),
-
-        // .fuzz_rust_afl_debug = b.step("fuzz-rust-afl-debug", "Build runner for wasm-smith fuzz test"),
+        .fuzz_rust_debug = b.step("fuzz-rust-debug", "Build runners for wasm-smith fuzz tests"),
     };
 
     const wasmstint_module = WasmstintModule.build(b, &project_options);
@@ -419,13 +470,22 @@ pub fn build(b: *Build) OomError!void {
 
     const fuzz_exe_dir = Build.InstallDir{ .custom = "fuzz" };
     steps.fuzz_rust_afl.dependOn(
-        &fuzz_execute_target.installTargetExecutable(
+        &fuzz_execute_target.installAflExecutable(
             b,
             &project_options,
             &path_options,
             &rust_fuzz_lib,
             fuzz_exe_dir,
         ).step,
+    );
+
+    steps.fuzz_rust_debug.dependOn(
+        &(try fuzz_execute_target.installDebugExecutable(
+            b,
+            &project_options,
+            &rust_fuzz_lib,
+            fuzz_exe_dir,
+        )).step,
     );
 
     // const afl_fuzz = b.addSystemCommand(&.{path_options.afl_fuzz});
@@ -440,28 +500,4 @@ pub fn build(b: *Build) OomError!void {
     // }
     // afl_fuzz.addArg("--");
     // afl_fuzz.addFileArg(rust_fuzz_target_exe);
-
-    // const rust_fuzz_debug = b.addExecutable(.{
-    //     .name = "execute-debug",
-    //     .root_module = b.createModule(.{
-    //         .root_source_file = b.path("fuzz/wasm-smith/src/runner_main.zig"),
-    //         .target = proj_options.target,
-    //         .optimize = proj_options.optimize,
-    //         .link_libc = true,
-    //         .link_libcpp = true, // Required by Rust's panic infrastructure (libunwind)
-    //     }),
-    // });
-    // rust_fuzz_debug.bundle_compiler_rt = true;
-    // rust_fuzz_debug.linkLibrary(b.addLibrary(.{
-    //     .name = "execute-debug",
-    //     .root_module = rust_fuzz_target_module,
-    //     .linkage = .static,
-    // }));
-    // rust_fuzz_debug.addObjectFile(rust_fuzz_lib);
-    // rust_fuzz_debug.step.dependOn(&cargo_build.step);
-    // const install_rust_fuzz_debug = b.addInstallArtifact(
-    //     rust_fuzz_debug,
-    //     .{ .dest_dir = .{ .override = fuzz_exe_dir } },
-    // );
-    // steps.fuzz_rust_afl_debug.dependOn(&install_rust_fuzz_debug.step);
 }

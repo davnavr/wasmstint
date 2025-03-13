@@ -1,7 +1,5 @@
 const std = @import("std");
 
-extern fn LLVMFuzzerTestOneInput(data: [*]const u8, size: usize) callconv(.c) c_int;
-
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const file: std.fs.File = input: {
@@ -9,10 +7,15 @@ pub fn main() !void {
         defer args.deinit();
         _ = args.next();
 
-        break :input try std.fs.cwd().openFileZ(
+        const input = try std.fs.cwd().openFileZ(
             args.next() orelse @panic("no input file provided"),
             .{},
         );
+
+        if (args.next() != null)
+            @panic("cannot execute more than one file");
+
+        break :input input;
     };
 
     _ = arena.reset(.retain_capacity);
@@ -32,5 +35,14 @@ pub fn main() !void {
         }
     }
 
-    _ = LLVMFuzzerTestOneInput(bytes.ptr, bytes.len);
+    std.debug.print(
+        "{s}\n",
+        .{@tagName(
+            try @call(
+                .never_inline,
+                @import("target").target,
+                .{bytes},
+            ),
+        )},
+    );
 }

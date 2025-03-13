@@ -13,8 +13,6 @@ extern fn wasmstint_fuzz_arbitrary_module(input: *FfiSlice(.@"const", u8), outpu
 
 extern fn wasmstint_fuzz_free_bytes(bytes: *FfiVec(u8)) void;
 
-// TODO: Something about an oracle with wasmi or wasmtime (differential test)
-
 pub const Generator = struct {
     src: Bytes,
 
