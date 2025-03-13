@@ -1,4 +1,5 @@
 const std = @import("std");
+const OomError = std.mem.Allocator.Error;
 const Build = std.Build;
 const Step = Build.Step;
 
@@ -32,31 +33,217 @@ const Executables = @Type(.{
     },
 });
 
-pub fn build(b: *Build) error{OutOfMemory}!void {
-    const proj_options = .{
-        .target = b.standardTargetOptions(.{}),
-        .optimize = b.standardOptimizeOption(.{}),
-    };
+const ProjectOptions = struct {
+    target: Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    rust_target: ?[]const u8,
 
-    const path_options = .{
-        .cargo = b.option(
-            []const u8,
-            "cargo",
-            "Path to cargo executable",
-        ) orelse "cargo",
+    fn init(b: *Build) ProjectOptions {
+        return .{
+            .target = b.standardTargetOptions(.{}),
+            .optimize = b.standardOptimizeOption(.{}),
+            .rust_target = b.option(
+                []const u8,
+                "rust-target",
+                "Sets the Rust target triple",
+            ),
+        };
+    }
+};
 
-        // .afl_fuzz = b.option(
-        //     []const u8,
-        //     "afl-fuzz",
-        //     "Path to afl-fuzz executable",
-        // ) orelse "afl-fuzz",
+const PathOptions = struct {
+    cargo: []const u8,
+    @"afl-clang-lto": []const u8,
 
-        .afl_clang_lto = b.option(
-            []const u8,
-            "afl-clang-lto",
-            "Path to afl-clang-lto executable",
-        ) orelse "afl-clang-lto",
-    };
+    fn init(b: *Build) PathOptions {
+        var options: PathOptions = undefined;
+
+        inline for (@typeInfo(PathOptions).@"struct".fields) |field| {
+            @field(options, field.name) = b.option(
+                []const u8,
+                field.name,
+                "Path to " ++ field.name ++ " executable",
+            ) orelse field.name;
+        }
+
+        return options;
+    }
+};
+
+const WasmstintModule = struct {
+    module: *Build.Module,
+
+    fn build(b: *Build, proj_opts: *const ProjectOptions) WasmstintModule {
+        return .{
+            .module = b.addModule(
+                "wasmstint",
+                .{
+                    .root_source_file = b.path("src/root.zig"),
+                    .target = proj_opts.target,
+                    .optimize = proj_opts.optimize,
+                },
+            ),
+        };
+    }
+
+    fn addAsImportTo(wasmstint: *const WasmstintModule, to: *Build.Module) void {
+        to.addImport("wasmstint", wasmstint.module);
+    }
+};
+
+const RustFuzzLib = struct {
+    step: *Build.Step,
+    path: Build.LazyPath,
+
+    fn build(
+        b: *Build,
+        proj_opts: *const ProjectOptions,
+        path_opts: *const PathOptions,
+    ) OomError!RustFuzzLib {
+        const cargo = b.addSystemCommand(&.{ path_opts.cargo, "build", "--profile", "dev" });
+        cargo.disable_zig_progress = true;
+
+        const lib_name = try std.mem.concat(
+            b.allocator,
+            u8,
+            &.{
+                proj_opts.target.result.libPrefix(),
+                "wasmstint_fuzz",
+                proj_opts.target.result.staticLibSuffix(),
+            },
+        );
+
+        if (proj_opts.rust_target) |rust_target| {
+            cargo.addArgs(&.{ "--target", rust_target });
+        } else if (!proj_opts.target.query.isNativeTriple()) {
+            cargo.step.dependOn(&b.addFail("-Drust-target=... is required when cross compiling").step);
+        }
+
+        if (b.verbose) {
+            cargo.addArg("--verbose");
+        } else {
+            cargo.addArgs(&.{ "--message-format", "short" });
+        }
+
+        cargo.addArg("--manifest-path");
+        cargo.addFileArg(b.path("fuzz/wasm-smith/Cargo.toml"));
+
+        const target_dir = b.path("fuzz/wasm-smith/target");
+        cargo.addArg("--target-dir"); // TODO: Allow overriding target directory in options
+        cargo.addDirectoryArg(target_dir);
+
+        const profile_dir = target_dir.path(b, "debug");
+        const artifact_dir = if (proj_opts.rust_target) |rust_target|
+            profile_dir.path(b, rust_target)
+        else
+            profile_dir;
+
+        return .{
+            .step = &cargo.step,
+            .path = artifact_dir.path(b, lib_name),
+        };
+    }
+
+    fn addRunFileArg(lib: *const RustFuzzLib, run: *Build.Step.Run) void {
+        run.step.dependOn(lib.step);
+        run.addFileArg(lib.path);
+    }
+};
+
+const RustFuzzTargetHarness = struct {
+    module: *Build.Module,
+
+    fn build(b: *Build, proj_opts: *const ProjectOptions) RustFuzzTargetHarness {
+        return .{
+            .module = b.createModule(.{
+                .root_source_file = b.path("fuzz/wasm-smith/src/harness.zig"),
+                .target = proj_opts.target,
+                .optimize = .ReleaseSafe,
+                .error_tracing = true,
+            }),
+        };
+    }
+
+    fn buildTarget(
+        harness: RustFuzzTargetHarness,
+        b: *Build,
+        proj_opts: *const ProjectOptions,
+        wasmstint: WasmstintModule,
+        name: []const u8,
+        root_source_file: Build.LazyPath,
+    ) RustFuzzTarget {
+        const target_module = b.createModule(.{
+            .root_source_file = root_source_file,
+            .target = proj_opts.target,
+            .optimize = .ReleaseSafe,
+            .omit_frame_pointer = false,
+            .error_tracing = true,
+        });
+
+        target_module.addImport("harness", harness.module);
+        wasmstint.addAsImportTo(target_module);
+
+        const target_lib = b.addLibrary(.{
+            .name = name,
+            .root_module = target_module,
+            .linkage = .static,
+            .use_llvm = true,
+        });
+
+        if (proj_opts.optimize == .Debug) {
+            target_lib.step.dependOn(&b.addFail("--release[=mode] is required for fuzz targets").step);
+        }
+
+        // https://www.ryanliptak.com/blog/fuzzing-zig-code/#treating-zig-code-as-a-static-library
+        target_lib.want_lto = true;
+        target_lib.bundle_compiler_rt = true;
+        target_lib.pie = true;
+        // target_lib.sanitize_coverage_trace_pc_guard = true; // Not needed in AFL LTO mode?
+
+        return .{ .lib = target_lib };
+    }
+};
+
+const RustFuzzTarget = struct {
+    lib: *Build.Step.Compile,
+
+    fn installTargetExecutable(
+        target: *const RustFuzzTarget,
+        b: *Build,
+        proj_opts: *const ProjectOptions,
+        path_opts: *const PathOptions,
+        rust_fuzz_lib: *const RustFuzzLib,
+        install_dir: Build.InstallDir,
+    ) *Build.Step.InstallFile {
+        const afl_lto = b.addSystemCommand(&.{ path_opts.@"afl-clang-lto", "-g", "-Wall", "-fsanitize=fuzzer" });
+        afl_lto.disable_zig_progress = true;
+        if (!proj_opts.target.query.isNativeTriple()) {
+            afl_lto.step.dependOn(&b.addFail("cannot build AFL fuzz executable for non-native target").step);
+        } else {
+            // afl_lto.step.dependOn(&target.lib.step);
+            rust_fuzz_lib.addRunFileArg(afl_lto);
+        }
+
+        afl_lto.addArtifactArg(target.lib);
+
+        if (b.verbose) {
+            afl_lto.addArg("-v");
+        }
+
+        afl_lto.addArg("-o");
+        const target_exe = afl_lto.addOutputFileArg(target.lib.name);
+
+        return b.addInstallFileWithDir(
+            target_exe,
+            install_dir,
+            target.lib.name,
+        );
+    }
+};
+
+pub fn build(b: *Build) OomError!void {
+    const project_options = ProjectOptions.init(b);
+    const path_options = PathOptions.init(b);
 
     const steps = .{
         .check = b.step("check", "Check for compilation errors"),
@@ -73,14 +260,7 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
         // .fuzz_rust_afl_debug = b.step("fuzz-rust-afl-debug", "Build runner for wasm-smith fuzz test"),
     };
 
-    const wasmstint_module = b.addModule(
-        "wasmstint",
-        .{
-            .root_source_file = b.path("src/root.zig"),
-            .target = proj_options.target,
-            .optimize = proj_options.optimize,
-        },
-    );
+    const wasmstint_module = WasmstintModule.build(b, &project_options);
 
     const executables: Executables = exes: {
         var exes_result: Executables = undefined;
@@ -91,12 +271,12 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
                 .name = exe_spec[0],
                 .root_module = b.createModule(.{
                     .root_source_file = b.path(exe_spec[1]),
-                    .target = proj_options.target,
-                    .optimize = proj_options.optimize,
+                    .target = project_options.target,
+                    .optimize = project_options.optimize,
                 }),
             });
 
-            exe.root_module.addImport("wasmstint", wasmstint_module);
+            wasmstint_module.addAsImportTo(exe.root_module);
 
             const run = b.addRunArtifact(exe);
             if (b.args) |args| {
@@ -110,13 +290,7 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
         break :exes exes_result;
     };
 
-    const unit_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/root.zig"),
-            .target = proj_options.target,
-            .optimize = proj_options.optimize,
-        }),
-    });
+    const unit_tests = b.addTest(.{ .root_module = wasmstint_module.module });
 
     const unit_tests_run = b.addRunArtifact(unit_tests);
     steps.test_unit.dependOn(&unit_tests_run.step);
@@ -232,111 +406,27 @@ pub fn build(b: *Build) error{OutOfMemory}!void {
     steps.@"test".dependOn(steps.test_unit);
     steps.@"test".dependOn(steps.test_spec);
 
-    const rust_target: ?[]const u8 = b.option(
-        []const u8,
-        "rust-target",
-        "The Rust target triple",
+    const rust_fuzz_lib = try RustFuzzLib.build(b, &project_options, &path_options);
+    const rust_fuzz_harness = RustFuzzTargetHarness.build(b, &project_options);
+
+    const fuzz_execute_target = rust_fuzz_harness.buildTarget(
+        b,
+        &project_options,
+        wasmstint_module,
+        "execute",
+        b.path("fuzz/wasm-smith/targets/execute.zig"),
     );
-
-    const rust_fuzz_lib_name = try std.mem.concat(
-        b.allocator,
-        u8,
-        &.{
-            proj_options.target.result.libPrefix(),
-            "wasmstint_fuzz",
-            proj_options.target.result.staticLibSuffix(),
-        },
-    );
-
-    const cargo_build = b.addSystemCommand(&.{ path_options.cargo, "build", "--profile", "dev" });
-    cargo_build.disable_zig_progress = true;
-
-    if (b.verbose) {
-        cargo_build.addArg("--verbose");
-    } else {
-        cargo_build.addArgs(&.{ "--message-format", "short" });
-    }
-
-    cargo_build.addArg("--manifest-path");
-    cargo_build.addFileArg(b.path("fuzz/wasm-smith/Cargo.toml"));
-
-    const cargo_target_dir = b.path("fuzz/wasm-smith/target");
-    cargo_build.addArg("--target-dir"); // TODO: Allow overriding target directory in options
-    cargo_build.addDirectoryArg(cargo_target_dir);
-
-    const cargo_profile_dir = cargo_target_dir.path(b, "debug");
-
-    if (rust_target) |rust_triple| {
-        cargo_build.addArgs(&.{ "--target", rust_triple });
-    }
-
-    const cargo_artifact_dir = if (rust_target) |rust_triple|
-        cargo_profile_dir.path(b, rust_triple)
-    else
-        cargo_profile_dir;
-
-    const rust_fuzz_lib = cargo_artifact_dir.path(b, rust_fuzz_lib_name);
-
-    const rust_fuzz_harness = b.createModule(.{
-        .root_source_file = b.path("fuzz/wasm-smith/src/harness.zig"),
-        .target = proj_options.target,
-        .optimize = .ReleaseSafe,
-    });
-
-    const rust_fuzz_target_module = b.createModule(.{
-        .root_source_file = b.path("fuzz/wasm-smith/targets/execute.zig"),
-        .target = proj_options.target,
-        .optimize = .ReleaseSafe,
-        .omit_frame_pointer = false,
-        .error_tracing = true,
-    });
-    rust_fuzz_target_module.addImport("harness", rust_fuzz_harness);
-    rust_fuzz_target_module.addImport("wasmstint", wasmstint_module);
-
-    const rust_fuzz_target = b.addLibrary(.{
-        .name = "execute",
-        .root_module = rust_fuzz_target_module,
-        .linkage = .static,
-        .use_llvm = true,
-    });
-
-    if (proj_options.optimize == .Debug) {
-        rust_fuzz_target.step.dependOn(&b.addFail("--release is required for fuzzing").step);
-    }
-
-    // https://www.ryanliptak.com/blog/fuzzing-zig-code/#treating-zig-code-as-a-static-library
-    rust_fuzz_target.want_lto = true;
-    rust_fuzz_target.bundle_compiler_rt = true;
-    rust_fuzz_target.pie = true;
-    // rust_fuzz_target.sanitize_coverage_trace_pc_guard = true; // Not needed in AFL LTO mode?
-
-    const build_rust_fuzz = b.addSystemCommand(&.{ path_options.afl_clang_lto, "-g", "-Wall", "-fsanitize=fuzzer" });
-    build_rust_fuzz.disable_zig_progress = true;
-    if (!proj_options.target.query.isNativeTriple()) {
-        build_rust_fuzz.step.dependOn(&b.addFail("cannot build AFL fuzz executable for non-native target").step);
-    } else {
-        build_rust_fuzz.step.dependOn(&rust_fuzz_target.step);
-        build_rust_fuzz.step.dependOn(&cargo_build.step);
-    }
-
-    if (b.verbose) {
-        build_rust_fuzz.addArg("-v");
-    }
-
-    build_rust_fuzz.addArg("-o");
-    const rust_fuzz_target_exe = build_rust_fuzz.addOutputFileArg(rust_fuzz_target.name);
-
-    build_rust_fuzz.addFileArg(rust_fuzz_lib);
-    build_rust_fuzz.addArtifactArg(rust_fuzz_target);
 
     const fuzz_exe_dir = Build.InstallDir{ .custom = "fuzz" };
-    const install_rust_fuzz = b.addInstallFileWithDir(
-        rust_fuzz_target_exe,
-        fuzz_exe_dir,
-        rust_fuzz_target.name,
+    steps.fuzz_rust_afl.dependOn(
+        &fuzz_execute_target.installTargetExecutable(
+            b,
+            &project_options,
+            &path_options,
+            &rust_fuzz_lib,
+            fuzz_exe_dir,
+        ).step,
     );
-
-    steps.fuzz_rust_afl.dependOn(&install_rust_fuzz.step);
 
     // const afl_fuzz = b.addSystemCommand(&.{path_options.afl_fuzz});
     // if (path_options.afl_driver == null) {
