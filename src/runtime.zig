@@ -1012,8 +1012,8 @@ pub const MemInst = extern struct {
                 std.mem.copyBackwards(u8, dst_slice, src_slice);
             } else if (dst_idx < src_idx) {
                 std.mem.copyForwards(u8, dst_slice, src_slice);
-            } else {
-                unreachable;
+            } else if (src_idx == dst_idx) {
+                // Do nothing!
             }
         } else {
             @memcpy(dst_slice, src_slice);
