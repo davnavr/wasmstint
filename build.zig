@@ -258,6 +258,8 @@ const RustFuzzTarget = struct {
         target: *const RustFuzzTarget,
         b: *Build,
         proj_opts: *const ProjectOptions,
+        wasmstint: WasmstintModule,
+        rust_fuzz_harness: RustFuzzTargetHarness,
         rust_fuzz_lib: *const RustFuzzLib,
         install_dir: Build.InstallDir,
     ) OomError!*Build.Step.InstallArtifact {
@@ -279,6 +281,8 @@ const RustFuzzTarget = struct {
 
         exe.bundle_compiler_rt = true;
         exe.root_module.addImport("target", target.lib.root_module);
+        exe.root_module.addImport("harness", rust_fuzz_harness.module);
+        wasmstint.addAsImportTo(exe.root_module);
 
         if (!proj_opts.target.query.isNativeTriple() and proj_opts.rust_target == null) {
             exe.step.dependOn(&b.addFail("-Drust-target=... is required when cross compiling").step);
@@ -483,6 +487,8 @@ pub fn build(b: *Build) OomError!void {
         &(try fuzz_execute_target.installDebugExecutable(
             b,
             &project_options,
+            wasmstint_module,
+            rust_fuzz_harness,
             &rust_fuzz_lib,
             fuzz_exe_dir,
         )).step,

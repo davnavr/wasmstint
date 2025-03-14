@@ -1,10 +1,17 @@
+//! A simple CLI for running fuzz targets w/o instrumentation or linking to AFL's runtime libraries.
+
 const std = @import("std");
+const wasmstint = @import("wasmstint");
+const harness = @import("harness");
 
 pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    const max_file_size = 2 * (1024 * 1024);
+    var main_pages = try wasmstint.PageBufferAllocator.init(max_file_size);
+    defer main_pages.deinit();
+    var main_arena = std.heap.ArenaAllocator.init(main_pages.allocator());
+
     const file: std.fs.File = input: {
-        var args = try std.process.argsWithAllocator(arena.allocator());
-        defer args.deinit();
+        var args = try std.process.argsWithAllocator(main_arena.allocator());
         _ = args.next();
 
         const input = try std.fs.cwd().openFileZ(
@@ -18,31 +25,18 @@ pub fn main() !void {
         break :input input;
     };
 
-    _ = arena.reset(.retain_capacity);
+    _ = main_arena.reset(.retain_capacity);
 
-    const bytes = try file.readToEndAlloc(arena.allocator(), 2 * (1024 * 1024));
-
-    if (false) {
-        if (@import("builtin").os.tag == .linux) {
-            std.debug.print("Attach debugger to process {}\n", .{std.os.linux.getpid()});
-        }
-
-        var i: u32 = 0;
-        for (0..100) |_| {
-            std.Thread.sleep(1 * std.time.ns_per_s);
-
-            if (@volatileCast(&i).* != 0) break;
-        }
-    }
-
-    std.debug.print(
-        "{s}\n",
-        .{@tagName(
-            try @call(
-                .never_inline,
-                @import("target").target,
-                .{bytes},
-            ),
-        )},
+    const bytes: []const u8 = try file.readToEndAlloc(
+        main_arena.allocator(),
+        max_file_size,
     );
+
+    const result: harness.Result = try @call(
+        .never_inline,
+        @import("target").target,
+        .{bytes},
+    );
+
+    std.debug.print("{s}\n", .{@tagName(result)});
 }
