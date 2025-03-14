@@ -645,9 +645,7 @@ pub const State = union(enum) {
                 errdefer comptime unreachable;
 
                 switch (setup) {
-                    .wasm_validate => interp.state = .{
-                        .awaiting_validation = .{},
-                    },
+                    .wasm_validate => interp.state = .{ .awaiting_validation = .{} },
                     .wasm_ready => interp.enterMainLoop(fuel),
                     .host_ready => self.types = &[0]Module.ValType{},
                 }
@@ -774,17 +772,19 @@ pub const State = union(enum) {
 
         pub fn validate(
             self: *AwaitingValidation,
-            allocator: Allocator,
+            code_allocator: Allocator,
             scratch: *std.heap.ArenaAllocator,
+            alloca: Allocator,
             fuel: *Fuel,
         ) *State {
             const interp: *Interpreter = self.interpreter();
             const current_frame = interp.currentFrame();
 
-            const function = current_frame.function.expanded().wasm;
+            const callee = current_frame.function;
+            const function = callee.expanded().wasm;
             const code = function.code();
             const finished = code.validate(
-                allocator,
+                code_allocator,
                 function.module.header().module,
                 scratch,
             ) catch {
@@ -807,6 +807,19 @@ pub const State = union(enum) {
                     .branch_table = code.inner.side_table_ptr,
                 };
 
+                _ = interp.allocateValueStackSpace(alloca, &code.inner) catch {
+                    interp.state = .{
+                        .call_stack_exhaustion = .{
+                            .callee = callee,
+                            .values_base = @intCast(interp.value_stack.items.len),
+                            .signature = callee.signature(),
+                        },
+                    };
+
+                    return &interp.state;
+                };
+
+                interp.state = .{ .awaiting_host = .{ .types = &.{} } };
                 interp.enterMainLoop(fuel);
             }
 

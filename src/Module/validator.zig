@@ -170,6 +170,8 @@ pub const Code = extern struct {
             ),
         ));
 
+        // std.debug.print("validating {}\n", .{@intFromEnum(func_idx)});
+
         defer code.status.store(.finished, .release);
         const result = rawValidate(
             allocator,
@@ -179,6 +181,8 @@ pub const Code = extern struct {
                 .contents.slice(module.inner.code_section, module.wasm),
             scratch,
         );
+
+        // std.debug.print("validation finished {!any}\n", .{result});
 
         code.inner = result catch validation_failed;
         _ = result catch |err| return err;

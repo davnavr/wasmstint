@@ -265,7 +265,12 @@ fn driveInterpreter(
             } else return,
             .awaiting_validation => |*validation| {
                 _ = scratch.reset(.retain_capacity);
-                _ = validation.validate(arena.allocator(), scratch, fuel);
+                _ = validation.validate(
+                    arena.allocator(),
+                    scratch,
+                    std.heap.page_allocator,
+                    fuel,
+                );
             },
             .interrupted => |*interrupt| {
                 switch (interrupt.cause) {
@@ -488,7 +493,7 @@ pub fn target(input_bytes: []const u8) !harness.Result {
                 &scratch,
             ) catch |e| switch (e) {
                 error.OutOfDataBytes => break,
-                else => |err| return err,
+                error.ValueTypeOrCountMismatch => |err| return err,
             };
         }
     }
