@@ -2218,19 +2218,30 @@ fn floatOpcodeHandlers(comptime F: type) type {
 const f32_opcode_handlers = floatOpcodeHandlers(f32);
 const f64_opcode_handlers = floatOpcodeHandlers(f64);
 
-fn dispatchTableLength(comptime Opcode: type) comptime_int {
+fn dispatchTableLength(comptime Opcode: type, comptime length_override: ?usize) comptime_int {
     var maximum = 0;
     for (@typeInfo(Opcode).@"enum".fields) |op| {
         maximum = @max(maximum, op.value);
     }
-    return maximum + 1;
+
+    const actual_len = maximum + 1;
+
+    if (length_override) |manual_len| {
+        std.debug.assert(actual_len <= manual_len);
+        return manual_len;
+    } else {
+        return actual_len;
+    }
 }
 
 fn dispatchTable(
     comptime Opcode: type,
     comptime invalid: OpcodeHandler,
-) [dispatchTableLength(Opcode)]*const OpcodeHandler {
-    var table = [_]*const OpcodeHandler{invalid} ** dispatchTableLength(Opcode);
+    comptime length_override: ?usize,
+) [dispatchTableLength(Opcode, length_override)]*const OpcodeHandler {
+    var table = [_]*const OpcodeHandler{invalid} **
+        dispatchTableLength(Opcode, length_override);
+
     for (@typeInfo(Opcode).@"enum".fields) |op| {
         if (@hasDecl(opcode_handlers, op.name)) {
             table[op.value] = @as(
@@ -2269,7 +2280,7 @@ fn prefixDispatchTable(comptime prefix: opcodes.ByteOpcode, comptime Opcode: typ
             .ReleaseFast, .ReleaseSmall => undefined,
         };
 
-        const entries = dispatchTable(Opcode, invalid);
+        const entries = dispatchTable(Opcode, invalid, null);
 
         pub fn handler(
             i: *Instructions,
@@ -2406,6 +2417,29 @@ inline fn takeBranch(
 
     std.debug.assert(vals.items.len == vals_base + target.copy_count - target.pop_count);
     std.debug.assert(current_frame.values_base <= vals.items.len);
+}
+
+fn functionValidationFailure(
+    i: *Instructions,
+    s: *Stp,
+    loc: u32,
+    vals: *ValStack,
+    fuel: *Fuel,
+    int: *Interpreter,
+) void {
+    _ = i;
+    _ = s;
+    _ = loc;
+    _ = vals;
+    _ = fuel;
+    int.state = .{
+        .trapped = Trap.init(
+            .lazy_validation_failure,
+            .{
+                .function = int.currentFrame().function.expanded().wasm.idx,
+            },
+        ),
+    };
 }
 
 const opcode_handlers = struct {
@@ -3326,7 +3360,17 @@ const opcode_handlers = struct {
 };
 
 /// If the handler is not appearing in this table, make sure it is public first.
-const byte_dispatch_table = dispatchTable(opcodes.ByteOpcode, opcode_handlers.invalid);
+const byte_dispatch_table = table: {
+    var handlers: [256]*const OpcodeHandler = dispatchTable(
+        opcodes.ByteOpcode,
+        opcode_handlers.invalid,
+        256,
+    );
+
+    handlers[@intFromEnum(opcodes.IllegalOpcode.@"wasmstint.validation_fail")] = functionValidationFailure;
+
+    break :table handlers;
+};
 
 /// Given a WASM function at the top of the call stack, resumes execution.
 fn enterMainLoop(interp: *Interpreter, fuel: *Fuel) void {
