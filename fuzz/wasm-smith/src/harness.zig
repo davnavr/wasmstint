@@ -4,6 +4,12 @@ comptime {
     _ = @import("rust_alloc.zig");
 }
 
+pub export fn wasmstint_fuzz_rust_hash_bytes(seed: u64, bytes_ptr: [*]const u8, bytes_len: usize) u64 {
+    var hasher = std.hash.XxHash3.init(seed);
+    hasher.update(bytes_ptr[0..bytes_len]);
+    return hasher.final();
+}
+
 pub const Result = enum(c_int) {
     ok = 0,
     skip = -1,
@@ -60,18 +66,21 @@ pub const Generator = struct {
 
     const Random = struct {
         gen: *Generator,
+        /// Rather than filling buffers with dummy values/zero on `Error`, use
+        /// pseudo-random values that don't hang Lemire's algorithm.
+        err_rng: std.Random.Xoroshiro128,
         err: ?Error = null,
 
         fn fill(ptr: *anyopaque, dst: []u8) void {
             const state: *Random = @ptrCast(@alignCast(ptr));
             if (state.err != null) {
-                @memset(dst, 0);
+                state.err_rng.fill(dst);
                 return;
             }
 
             const src = state.gen.bytes(dst.len) catch |e| {
                 state.err = e;
-                @memset(dst, 0);
+                state.err_rng.fill(dst);
                 return;
             };
 
@@ -92,7 +101,10 @@ pub const Generator = struct {
     };
 
     fn random(gen: *Generator) Random {
-        return .{ .gen = gen };
+        return .{
+            .gen = gen,
+            .err_rng = .init(@truncate(@returnAddress())),
+        };
     }
 
     pub fn intRangeAtMost(gen: *Generator, comptime T: type, at_least: T, at_most: T) Error!T {
