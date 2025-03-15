@@ -114,3 +114,42 @@ impl Drop for FfiUnstructured<'_> {
         }
     }
 }
+
+pub struct WritebackPtr<T> {
+    ptr: NonNull<T>,
+    temp: std::mem::ManuallyDrop<T>,
+}
+
+impl<T> WritebackPtr<T> {
+    /// # Safety
+    ///
+    /// See [`NonNull::read()`] and [`NonNull::write()`].
+    pub unsafe fn new(ptr: NonNull<T>) -> Self {
+        Self {
+            ptr,
+            temp: std::mem::ManuallyDrop::new(unsafe { ptr.read() }),
+        }
+    }
+}
+
+impl<T> std::ops::Deref for WritebackPtr<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.temp
+    }
+}
+
+impl<T> std::ops::DerefMut for WritebackPtr<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.temp
+    }
+}
+
+impl<T> Drop for WritebackPtr<T> {
+    fn drop(&mut self) {
+        unsafe {
+            self.ptr.write(std::mem::ManuallyDrop::take(&mut self.temp));
+        }
+    }
+}

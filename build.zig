@@ -114,7 +114,7 @@ const RustFuzzLib = struct {
             u8,
             &.{
                 proj_opts.target.result.libPrefix(),
-                "wasmstint_fuzz",
+                "wasmstint_rust_fuzz",
                 proj_opts.target.result.staticLibSuffix(),
             },
         );
@@ -189,7 +189,7 @@ const RustFuzzTargetHarness = struct {
         const target_module = b.createModule(.{
             .root_source_file = root_source_file,
             .target = proj_opts.target,
-            .optimize = harness.module.optimize,
+            .optimize = harness.module.optimize orelse proj_opts.optimize,
             .omit_frame_pointer = false,
             .error_tracing = true,
         });

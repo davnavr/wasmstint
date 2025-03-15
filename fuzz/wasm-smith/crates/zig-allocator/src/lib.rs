@@ -1,6 +1,6 @@
 use std::alloc::Layout;
 
-pub struct ZigSmpAllocator {}
+struct ZigSmpAllocator {}
 
 #[global_allocator]
 static GLOBAL: ZigSmpAllocator = ZigSmpAllocator {};

@@ -1,48 +1,9 @@
 use std::ptr::NonNull;
 
-mod ffi;
-mod zig_smp;
+mod hash;
+// mod wasmi_diff;
 
-pub use ffi::{FfiSlice, FfiUnstructured, FfiVec};
-
-pub struct WritebackPtr<T> {
-    ptr: NonNull<T>,
-    temp: std::mem::ManuallyDrop<T>,
-}
-
-impl<T> WritebackPtr<T> {
-    /// # Safety
-    ///
-    /// See [`NonNull::read()`] and [`NonNull::write()`].
-    pub unsafe fn new(ptr: NonNull<T>) -> Self {
-        Self {
-            ptr,
-            temp: std::mem::ManuallyDrop::new(unsafe { ptr.read() }),
-        }
-    }
-}
-
-impl<T> std::ops::Deref for WritebackPtr<T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        &self.temp
-    }
-}
-
-impl<T> std::ops::DerefMut for WritebackPtr<T> {
-    fn deref_mut(&mut self) -> &mut T {
-        &mut self.temp
-    }
-}
-
-impl<T> Drop for WritebackPtr<T> {
-    fn drop(&mut self) {
-        unsafe {
-            self.ptr.write(std::mem::ManuallyDrop::take(&mut self.temp));
-        }
-    }
-}
+use ffi::{FfiSlice, FfiUnstructured, FfiVec};
 
 fn arbitrary_module(u: &mut arbitrary::Unstructured) -> arbitrary::Result<wasm_smith::Module> {
     use wasm_smith::InstructionKind;
@@ -122,11 +83,11 @@ fn arbitrary_module(u: &mut arbitrary::Unstructured) -> arbitrary::Result<wasm_s
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn wasmstint_fuzz_arbitrary_module(
+extern "C" fn wasmstint_fuzz_arbitrary_module(
     input: NonNull<FfiSlice<u8>>,
     output: NonNull<std::mem::MaybeUninit<FfiVec<u8>>>,
 ) -> bool {
-    let mut output = unsafe { WritebackPtr::new(output) };
+    let mut output = unsafe { ffi::WritebackPtr::new(output) };
     let mut u = unsafe { FfiUnstructured::new(input) };
     match arbitrary_module(&mut u) {
         Ok(module) => {
@@ -138,7 +99,7 @@ pub extern "C" fn wasmstint_fuzz_arbitrary_module(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn wasmstint_fuzz_free_bytes(bytes: NonNull<FfiVec<u8>>) {
+extern "C" fn wasmstint_fuzz_free_bytes(bytes: NonNull<FfiVec<u8>>) {
     let mut to_drop = FfiVec::new(Vec::new());
     unsafe {
         bytes.swap(NonNull::from(&mut to_drop));

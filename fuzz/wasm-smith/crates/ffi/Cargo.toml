@@ -1,0 +1,10 @@
+[package]
+name = "ffi"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+
+[dependencies]
+arbitrary = { workspace = true }

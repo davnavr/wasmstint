@@ -1,0 +1,16 @@
+[package]
+name = "wasmstint_rust_fuzz"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+ffi = { path = "../ffi" }
+zig-allocator = { path = "../zig-allocator" }
+
+arbitrary = { workspace = true }
+wasm-smith = { workspace = true }
+wasmi = { workspace = true }
