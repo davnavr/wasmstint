@@ -11,11 +11,12 @@ edition = "2024"
 rust-version = "1.85"
 
 [workspace.dependencies]
-arbitrary = "1.4.1"
-wasm-smith = "0.226.0"
+arbitrary = "1.4.1" # Already a dependency of wasm-smith
+bitvec = { version = "1.0.1", default-features = false }
+wasm-smith = "0.228.0"
 
 [workspace.dependencies.wasmi]
-version = "0.42.0"
+version = "0.44.0"
 default-features = false
 features = ["std"]
 

@@ -12,5 +12,10 @@ ffi = { path = "../ffi" }
 zig-allocator = { path = "../zig-allocator" }
 
 arbitrary = { workspace = true }
+bitvec = { workspace = true }
 wasm-smith = { workspace = true }
 wasmi = { workspace = true }
+
+arrayvec = "0.7.6" # Already a dependency of wasmi
+cranelift-entity = "0.118.0"
+wasmi_collections = "0.44.0" # Already a dependency of wasmi

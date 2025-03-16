@@ -65,10 +65,49 @@ impl<T> FfiVec<T> {
     }
 }
 
+impl<T> Default for FfiVec<T> {
+    fn default() -> Self {
+        Self::new(Vec::default())
+    }
+}
+
 impl<T> Drop for FfiVec<T> {
     fn drop(&mut self) {
         let to_drop: Self = std::mem::replace(self, Self::new(Vec::new()));
         _ = to_drop.to_vec();
+    }
+}
+
+impl<T> AsRef<[T]> for FfiVec<T> {
+    fn as_ref(&self) -> &[T] {
+        unsafe { self.items.as_slice() }
+    }
+}
+
+impl<T> std::ops::Deref for FfiVec<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        self.as_ref()
+    }
+}
+
+#[repr(C)]
+pub struct OwnedSlice<T> {
+    items: FfiSlice<T>,
+    _phantom: std::marker::PhantomData<Box<[T]>>,
+}
+
+impl<T> OwnedSlice<T> {
+    pub fn new(items: Box<[T]>) -> Self {
+        Self {
+            items: FfiSlice::from_slice(Box::leak(items)),
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    pub fn to_boxed_slice(self) -> Box<[T]> {
+        unsafe { Box::from_raw(self.items.as_non_null_slice().as_ptr()) }
     }
 }
 

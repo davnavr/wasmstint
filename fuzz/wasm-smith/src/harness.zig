@@ -1,5 +1,7 @@
 const std = @import("std");
 
+pub const wasmi_differential = @import("wasmi_differential.zig");
+
 comptime {
     _ = @import("rust_alloc.zig");
 }
@@ -19,6 +21,7 @@ extern fn wasmstint_fuzz_arbitrary_module(input: *FfiSlice(.@"const", u8), outpu
 
 extern fn wasmstint_fuzz_free_bytes(bytes: *FfiVec(u8)) void;
 
+// TODO: https://github.com/rust-fuzz/libfuzzer-sys/blob/0c450753/libfuzzer/utils/FuzzedDataProvider.h#L92-L97
 pub const Generator = struct {
     src: Bytes,
 

@@ -271,14 +271,14 @@ pub const Trap = struct {
         ///
         /// See <https://webassembly.github.io/spec/core/appendix/implementation.html#validation> for more
         /// information.
-        lazy_validation_failure,
-        integer_division_by_zero,
-        integer_overflow,
-        invalid_conversion_to_integer,
-        memory_access_out_of_bounds,
-        table_access_out_of_bounds,
-        indirect_call_to_null,
-        indirect_call_signature_mismatch,
+        lazy_validation_failure = 1,
+        integer_division_by_zero = 2,
+        integer_overflow = 3,
+        invalid_conversion_to_integer = 4,
+        memory_access_out_of_bounds = 5,
+        table_access_out_of_bounds = 6,
+        indirect_call_to_null = 7,
+        indirect_call_signature_mismatch = 8,
         _,
 
         pub fn initHost(code: u31) Code {

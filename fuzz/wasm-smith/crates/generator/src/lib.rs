@@ -1,14 +1,16 @@
 use std::ptr::NonNull;
 
-mod hash;
-// mod wasmi_diff;
+pub mod hash;
+pub mod wasmi_differential;
 
 use ffi::{FfiSlice, FfiUnstructured, FfiVec};
 
-fn arbitrary_module(u: &mut arbitrary::Unstructured) -> arbitrary::Result<wasm_smith::Module> {
+fn arbitrary_instruction_kinds(
+    u: &mut arbitrary::Unstructured,
+) -> arbitrary::Result<wasm_smith::InstructionKinds> {
     use wasm_smith::InstructionKind;
 
-    const ALLOWED_INSTRUCTION_KINDS: [InstructionKind; 9] = [
+    const ALLOWED: [InstructionKind; 9] = [
         InstructionKind::NumericInt,
         InstructionKind::Numeric,
         InstructionKind::Reference,
@@ -20,6 +22,19 @@ fn arbitrary_module(u: &mut arbitrary::Unstructured) -> arbitrary::Result<wasm_s
         InstructionKind::Control,
     ];
 
+    let mut selected = arrayvec::ArrayVec::<InstructionKind, { ALLOWED.len() }>::new();
+    // let random_bits = u.arbitrary::<u16>()?;
+
+    for kind in ALLOWED.into_iter() {
+        if u.arbitrary()? {
+            selected.push(kind);
+        }
+    }
+
+    Ok(wasm_smith::InstructionKinds::new(&selected))
+}
+
+fn arbitrary_module(u: &mut arbitrary::Unstructured) -> arbitrary::Result<wasm_smith::Module> {
     const MAX_SMALL: usize = 5;
     const MAX_MEDIUM: usize = 50;
     const MAX_LARGE: usize = 100;
@@ -29,17 +44,7 @@ fn arbitrary_module(u: &mut arbitrary::Unstructured) -> arbitrary::Result<wasm_s
 
     let config = wasm_smith::Config {
         allow_start_export: true,
-        allowed_instructions: {
-            let mut selected =
-                Vec::<InstructionKind>::with_capacity(ALLOWED_INSTRUCTION_KINDS.len());
-            for kind in ALLOWED_INSTRUCTION_KINDS {
-                if u.arbitrary()? {
-                    selected.push(kind);
-                }
-            }
-
-            wasm_smith::InstructionKinds::new(&selected)
-        },
+        allowed_instructions: arbitrary_instruction_kinds(u)?,
         allow_floats: u.arbitrary()?,
         bulk_memory_enabled: u.arbitrary()?,
         canonicalize_nans: u.arbitrary()?,
@@ -76,7 +81,7 @@ fn arbitrary_module(u: &mut arbitrary::Unstructured) -> arbitrary::Result<wasm_s
         allow_invalid_funcs: u.arbitrary()?,
         wide_arithmetic_enabled: false,
         extended_const_enabled: false,
-        ..wasm_smith::Config::default()
+        ..Default::default()
     };
 
     wasm_smith::Module::new(config, u)
