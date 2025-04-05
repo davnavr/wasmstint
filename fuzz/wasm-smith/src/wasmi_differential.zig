@@ -25,15 +25,15 @@ fn FfiTagged(comptime T: type) type {
                 .decls = &.{},
                 .tag_type = Tag,
                 .fields = fields: {
-                    var fields: [payload_fields]std.builtin.Type.UnionField = undefined;
+                    var fields: [payload_fields.len]std.builtin.Type.UnionField = undefined;
                     for (&fields, payload_fields) |*dst, *src| {
-                        dst = std.builtin.Type.UnionField{
+                        dst.* = std.builtin.Type.UnionField{
                             .name = src.name,
                             .alignment = 0,
                             .type = *const src.type,
                         };
                     }
-                    break :fields fields;
+                    break :fields &fields;
                 },
             },
         });
@@ -185,12 +185,15 @@ pub const Action = extern struct {
     tag: enum(u32) {
         invoke = 0,
         check_memory_contents = 1,
-        compare_global_value = 3,
+        check_global_value = 3,
     },
     payload: extern union {
         invoke: Invoke,
         check_memory_contents: CheckMemoryContents,
+        check_global_value: CheckGlobalValue,
     },
+
+    pub const tagForSwitch = FfiTagged(Action).tagForSwitch;
 
     pub const Invoke = enum(u32) {
         _,
@@ -224,12 +227,29 @@ pub const Action = extern struct {
             memory: String,
         };
     };
+
+    pub const CheckGlobalValue = enum(u32) {
+        _,
+
+        pub const Inner = extern struct {
+            global: String,
+            expected: ResultVal,
+        };
+
+        extern fn wasmstint_fuzz_differential_wasmi_get_check_global_value(
+            exec: *const Execution.Inner,
+            idx: CheckGlobalValue,
+        ) callconv(.c) *const Inner;
+
+        pub fn inner(check: CheckGlobalValue, exec: Execution) *const Inner {
+            return wasmstint_fuzz_differential_wasmi_get_check_global_value(exec.inner, check);
+        }
+    };
 };
 
 pub const Execution = struct {
     const Inner = extern struct {
         wasm: harness.FfiVec(u8),
-        provided_imports: harness.FfiVec(ProvidedImport),
         instantiation: InstantiationResult,
         // @"opaque": opaque{},
     };
@@ -264,6 +284,10 @@ pub const Execution = struct {
 
     pub fn wasmBinaryModule(exec: *const Execution) []const u8 {
         return exec.inner.wasm.items.toSlice();
+    }
+
+    pub fn instantiationResult(exec: *const Execution) FfiTagged(InstantiationResult).Union {
+        return exec.inner.instantiation.tagForSwitch();
     }
 
     pub fn deinit(exec: *const Execution) void {

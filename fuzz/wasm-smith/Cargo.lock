@@ -42,6 +42,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bumpalo"
+version = "3.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1628fb46dfa0b37568d12e5edd512553eccf6a22a78e8bde00bb4aed84d5bdbf"
+
+[[package]]
 name = "cranelift-bitset"
 version = "0.118.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -323,6 +329,7 @@ dependencies = [
  "arbitrary",
  "arrayvec",
  "bitvec",
+ "bumpalo",
  "cranelift-entity",
  "ffi",
  "wasm-smith",

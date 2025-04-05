@@ -157,10 +157,20 @@ pub fn FfiVec(comptime T: type) type {
         items: Items,
         capacity: usize,
 
-        pub const deinit: fn (*FfiVec(T)) callconv(.c) void = if (T == u8)
+        const Self = @This();
+
+        pub const deinit: fn (*Self) callconv(.c) void = if (T == u8)
             wasmstint_fuzz_free_bytes
         else
             @compileError("no deinit method available for FfiVec containing " ++ @typeName(T));
+
+        pub fn slice(v: anytype) (switch (@TypeOf(v)) {
+            *const Self => []const T,
+            *Self => []T,
+            else => unreachable,
+        }) {
+            return @constCast(v.items.toSlice());
+        }
     };
 }
 

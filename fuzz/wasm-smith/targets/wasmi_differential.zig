@@ -3,112 +3,42 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const harness = @import("harness");
 const wasmstint = @import("wasmstint");
 
-const Imports = struct {
-    const ProvidedImport = harness.wasmi_differential.ProvidedImport;
-
-    arena: ArenaAllocator,
-    exec: harness.wasmi_differential.Execution,
-    oom: ?error{OutOfMemory} = null,
-    // host_funcs: []const ?,
-    remaining: []const ProvidedImport,
-
-    fn init(
-        gpa: std.mem.Allocator,
-        exec: harness.wasmi_differential.Execution,
-    ) error{OutOfMemory}!Imports {
-        var arena = ArenaAllocator.init(gpa);
-        errdefer arena.deinit();
-
-        return .{
-            .exec = exec,
-            .remaining = exec.inner.provided_imports.items.toSlice(),
-            .arena = arena,
-        };
-    }
-
-    fn resolveInner(
-        imports: *Imports,
-        module: []const u8,
-        name: []const u8,
-    ) error{ OutOfMemory, ImportFailure }!wasmstint.runtime.ExternVal {
-        const expected: *const ProvidedImport = if (imports.remaining.len > 0) provided: {
-            imports.remaining = imports.remaining[1..];
-            break :provided &imports.remaining[0];
-        } else return error.ImportFailure;
-
-        if (!std.mem.eql(u8, module, expected.module.contents(imports.exec)) or
-            !std.mem.eql(u8, name, expected.name.contents(imports.exec)))
-        {
-            return error.ImportFailure;
-        }
-
-        return switch (expected.kind.tagForSwitch()) {
-            // .func
-            .global => |global| .{
-                .global = wasmstint.runtime.GlobalAddr{
-                    .global_type = .{
-                        .mut = if (global.mutable) .@"var" else .@"const",
-                        .val_type = global.value.valType(),
-                    },
-                    .value = value: switch (global.value.tagForSwitch()) {
-                        .i32 => |i| {
-                            const dst = try imports.arena.allocator().create(i32);
-                            dst.* = i;
-                            break :value @ptrCast(dst);
-                        },
-                        .i64 => |i| {
-                            const dst = try imports.arena.allocator().create(i64);
-                            dst.* = i;
-                            break :value @ptrCast(dst);
-                        },
-                        .f32 => |i| {
-                            const dst = try imports.arena.allocator().create(u32);
-                            dst.* = i;
-                            break :value @ptrCast(dst);
-                        },
-                        .f64 => |i| {
-                            const dst = try imports.arena.allocator().create(u64);
-                            dst.* = i;
-                            break :value @ptrCast(dst);
-                        },
-                    },
-                },
-            },
-        };
-    }
-
-    fn resolve(
-        ctx: *anyopaque,
-        module: std.unicode.Utf8View,
-        name: std.unicode.Utf8View,
-        desc: wasmstint.runtime.ImportProvider.Desc,
-    ) ?wasmstint.runtime.ExternVal {
-        _ = desc;
-        var imports: *Imports = @ptrCast(@alignCast(ctx));
-
-        // TODO: Could collect expected.module, name, and type to use when mismatch is detected
-        return imports.resolveInner(module.bytes, name.bytes) catch |e| {
-            switch (e) {
-                error.OutOfMemory => |oom| imports.oom = oom,
-                else => imports.remaining.len = 0,
-            }
-
-            return null;
-        };
-    }
-
-    fn provider(imports: *Imports) wasmstint.runtime.ImportProvider {
-        return .{
-            .ctx = imports,
-            .resolve = resolve,
-        };
-    }
-
-    fn deinit(imports: Imports) void {
-        std.debug.assert(imports.oom == null);
-        imports.arena.deinit();
-    }
+const InterpreterResult = union(enum) {
+    trapped: wasmstint.Interpreter.Trap.Code,
+    results: []wasmstint.Interpreter.TaggedValue,
 };
+
+fn driveInterpreter(
+    interp: *wasmstint.Interpreter,
+    fuel: *wasmstint.Interpreter.Fuel,
+    code_arena: *ArenaAllocator,
+    scratch: *ArenaAllocator,
+) error{ OutOfMemory, ResourceExhaustion }!InterpreterResult {
+    while (true) {
+        _ = scratch.reset(.retain_capacity);
+        switch (interp.state) {
+            .awaiting_host => |*host| {
+                std.debug.assert(interp.call_stack.items.len == 0);
+                return .{ .results = try host.copyValues(scratch) };
+            },
+            .awaiting_validation => |*validate| {
+                _ = validate.validate(
+                    code_arena.allocator(),
+                    scratch,
+                    std.heap.page_allocator,
+                    fuel,
+                );
+            },
+            .call_stack_exhaustion => return error.ResourceExhaustion,
+            .interrupted => |*interruption| {
+                switch (interruption.cause) {
+                    .out_of_fuel, .memory_grow, .table_grow => return error.ResourceExhaustion,
+                }
+            },
+            .trapped => |trap| return .{ .trapped = trap.code },
+        }
+    }
+}
 
 pub fn target(input_bytes: []const u8) !harness.Result {
     var gen = harness.Generator.init(input_bytes);
@@ -124,7 +54,7 @@ pub fn target(input_bytes: []const u8) !harness.Result {
 
     std.debug.print("parsing module...\n", .{});
 
-    var rng = std.Random.Xoshiro256{ .s = @bitCast(try gen.byteArray(32)) };
+    var rng = std.Random.Xoshiro256{ .s = @bitCast((try gen.byteArray(32)).*) };
     var wasm_parse = wasmi_exec.wasmBinaryModule();
     var module = try wasmstint.Module.parse(
         main_pages.allocator(),
@@ -136,23 +66,18 @@ pub fn target(input_bytes: []const u8) !harness.Result {
 
     defer module.deinit(main_pages.allocator());
 
-    std.debug.print("constructing import values...\n", .{});
-
-    var imports = try Imports.init(main_pages.allocator(), wasmi_exec);
-    defer imports.deinit();
-
     std.debug.print("allocating module...\n", .{});
 
     var import_failure: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
     var module_alloc = wasmstint.runtime.ModuleAlloc.allocate(
         &module,
-        imports.provider(),
+        wasmstint.runtime.ImportProvider.no_imports.provider,
         main_pages.allocator(),
         wasmstint.runtime.ModuleAllocator.page_allocator,
         &import_failure,
     ) catch |e| switch (e) {
         error.OutOfMemory => |oom| return oom,
-        // TODO: Check imports.oom
+        error.ImportFailure => std.debug.panic("module should not have imports: {}", .{import_failure}),
     };
 
     defer module_alloc.requiring_instantiation.deinit(
@@ -162,6 +87,58 @@ pub fn target(input_bytes: []const u8) !harness.Result {
 
     var code_arena = ArenaAllocator.init(main_pages.allocator());
     defer code_arena.deinit();
+
+    const init_fuel = wasmstint.Interpreter.Fuel{ .remaining = 5_000_000 };
+    var interp = try wasmstint.Interpreter.init(
+        std.heap.page_allocator,
+        .{},
+    );
+    defer interp.deinit(std.heap.page_allocator);
+
+    const init_result = init: {
+        var fuel = init_fuel;
+        _ = try interp.state.awaiting_host.instantiateModule(
+            std.heap.page_allocator,
+            &module_alloc,
+            &fuel,
+        );
+        break :init driveInterpreter(&interp, &fuel, &code_arena, &scratch) catch |e| switch (e) {
+            error.OutOfMemory => |oom| return oom,
+            error.ResourceExhaustion => return .skip,
+        };
+    };
+
+    const actions: *const harness.FfiVec(harness.wasmi_differential.Action) = switch (wasmi_exec.instantiationResult()) {
+        .trapped => |wasmi_trap| switch (init_result) {
+            .results => |results| std.debug.panic(
+                "expected trap {s}, but got {}",
+                .{
+                    @tagName(wasmi_trap.*),
+                    wasmstint.Interpreter.TaggedValue.sliceFormatter(results),
+                },
+            ),
+            .trapped => |actual_trap| if (actual_trap != wasmi_trap.*) std.debug.panic(
+                "expected trap {s}, but got trap {s}",
+                .{ @tagName(wasmi_trap.*), @tagName(actual_trap) },
+            ) else return .ok,
+        },
+        .instantiated => |actions| actions,
+    };
+
+    std.debug.print("will execute {} actions...\n", .{actions.items.len});
+
+    for (0.., actions.slice()) |i, act| {
+        std.debug.print("[{}]: {s}\n", .{ i, @tagName(act.tag) });
+        switch (act.tagForSwitch()) {
+            .check_global_value => |check_idx| {
+                const check = check_idx.inner(wasmi_exec);
+                _ = check;
+            },
+            else => @panic("TODO!"),
+        }
+    }
+
+    return .ok;
 }
 
 comptime {

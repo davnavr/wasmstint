@@ -56,71 +56,6 @@ fn arbitrary_module(u: &mut arbitrary::Unstructured) -> arbitrary::Result<Vec<u8
     Ok(wasm_smith::Module::new(config, u)?.to_bytes())
 }
 
-#[repr(transparent)]
-pub struct EntityRef<T> {
-    idx: u32,
-    _marker: std::marker::PhantomData<T>,
-}
-
-impl<T> EntityRef<T> {
-    fn from_raw(idx: u32) -> Self {
-        assert_ne!(idx, u32::MAX, "reserved value");
-        Self {
-            idx,
-            _marker: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<T> Copy for EntityRef<T> {}
-
-impl<T> Clone for EntityRef<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T> PartialEq for EntityRef<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.idx == other.idx
-    }
-}
-
-impl<T> Eq for EntityRef<T> {}
-
-impl<T> std::fmt::Debug for EntityRef<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&self.idx, f)
-    }
-}
-
-impl<T> cranelift_entity::EntityRef for EntityRef<T> {
-    fn new(idx: usize) -> Self {
-        Self::from_raw(u32::try_from(idx).unwrap())
-    }
-
-    fn index(self) -> usize {
-        self.idx as usize
-    }
-}
-
-impl<T> cranelift_entity::packed_option::ReservedValue for EntityRef<T> {
-    fn reserved_value() -> Self {
-        Self {
-            idx: u32::MAX,
-            _marker: std::marker::PhantomData,
-        }
-    }
-
-    fn is_reserved_value(&self) -> bool {
-        self.idx == u32::MAX
-    }
-}
-
-// type EntityList<T> = cranelift_entity::EntityList<EntityRef<T>>;
-// type EntityListPool<T> = cranelift_entity::ListPool<EntityRef<T>>;
-type EntityPrimaryMap<T> = cranelift_entity::PrimaryMap<EntityRef<T>, T>;
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(transparent)]
 pub struct StringRef(u32);
@@ -353,10 +288,18 @@ val_type! {
 
 #[derive(Clone, Copy)]
 #[repr(C)]
+pub struct Invoke {
+    name: StringRef,
+    arguments: ArgumentList,
+    results: InvokeResult,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
 pub struct CheckMemoryContents {
+    memory: StringRef,
     hash: crate::hash::Hash,
     length: usize,
-    memory: StringRef,
 }
 
 impl CheckMemoryContents {
@@ -401,12 +344,67 @@ pub enum InvokeResult<Results = ResultList> {
     Trap(TrapCode) = 1,
 }
 
+trait Action {
+    type Tag: Clone + Copy;
+
+    const TAG: Self::Tag;
+}
+
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub struct Invoke {
-    name: StringRef,
-    arguments: ArgumentList,
-    results: InvokeResult,
+pub struct TaggedAction<T: Action> {
+    tag: T::Tag,
+    value: T,
+}
+
+impl<T: Action> TaggedAction<T> {
+    const fn new(value: T) -> Self {
+        Self { tag: T::TAG, value }
+    }
+}
+
+macro_rules! actions {
+    ($($name:ident = $value:literal,)+) => {
+        #[derive(Clone, Copy)]
+        #[repr(u32)]
+        pub enum ActionTag {$(
+            $name = $value,
+        )+}
+
+        pub mod action_tags {$(
+            #[derive(Clone, Copy)]
+            #[repr(u32)]
+            pub enum $name {
+                Value = $value,
+            }
+
+
+        )+}
+
+        $(
+            impl Action for $name {
+                type Tag = action_tags::$name;
+
+                const TAG: Self::Tag = Self::Tag::Value;
+            }
+        )+
+
+        $(impl $name {
+            fn alloc(self, arena: &bumpalo::Bump) -> NonNull<ActionTag> {
+                NonNull::from(arena.alloc(TaggedAction::<$name>::new(self))).cast()
+            }
+        })+
+    };
+}
+
+actions! {
+    Invoke = 0,
+    CheckMemoryContents = 1,
+    CheckTableElement = 2,
+    CheckGlobalValue = 3,
+    // WriteToMemory
+    // WriteToTable
+    // MutateGlobal
 }
 
 // #[derive(Clone, Copy)]
@@ -451,33 +449,10 @@ pub struct Invoke {
 //     kind: ProvidedImportKind,
 // }
 
-#[derive(Clone, Copy)]
-#[repr(u32)]
-pub enum Action {
-    Invoke(EntityRef<Invoke>) = 0,
-    CheckMemoryContents(EntityRef<CheckMemoryContents>) = 1,
-    CheckTableElement(EntityRef<CheckTableElement>) = 2,
-    CheckGlobalValue(EntityRef<CheckGlobalValue>) = 3,
-    // WriteToMemory
-    // WriteToTable
-    // MutateGlobal
-}
-
-/// # Safety
-///
-/// `exec` must be a valid reference.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn wasmstint_fuzz_differential_wasmi_get_invoke(
-    exec: &Execution,
-    invoke: EntityRef<Invoke>,
-) -> &Invoke {
-    exec.pools.invokes.get(invoke).unwrap()
-}
-
 // #[derive(Clone, Copy)]
 // #[repr(C)]
 // struct RecordedHostCall {
-//     func: EntityRef<HostFunc>,
+//     func: NonNull<HostFunc>,
 //     arguments: ResultList,
 //     results: InvokeResult<ArgumentList>,
 // }
@@ -488,11 +463,7 @@ struct ExecutionPools {
     result_vals: cranelift_entity::ListPool<ResultVal>,
 
     strings: wasmi_collections::StringInterner,
-    invokes: EntityPrimaryMap<Invoke>,
-    // host_funcs: EntityPrimaryMap<HostFunc>,
-    check_memory_contents: EntityPrimaryMap<CheckMemoryContents>,
-    check_table_elements: EntityPrimaryMap<CheckTableElement>,
-    check_global_values: EntityPrimaryMap<CheckGlobalValue>,
+    arena: bumpalo::Bump,
 }
 
 // #[derive(Clone, Copy)]
@@ -506,7 +477,7 @@ struct ExecutionPools {
 pub struct Execution {
     wasm: FfiVec<u8>,
     // counts: Counts,
-    // provided_imports: ffi::OwnedSlice<ProvidedImport>,
+    // provided_imports: FfiSlice<ProvidedImport>,
     instantiation: ExecutionInstantiateResult,
     // recorded_host_calls: FfiVec<RecordedHostCall>,
 
@@ -517,7 +488,7 @@ pub struct Execution {
 #[repr(u32)]
 pub enum ExecutionInstantiateResult {
     Trapped(TrapCode) = 0,
-    Instantiated(FfiVec<Action>) = 1,
+    Instantiated(FfiSlice<NonNull<ActionTag>>) = 1,
 }
 
 struct ExecutionState<'u, 'a> {
@@ -663,7 +634,7 @@ impl ResultVal {
 // }
 
 // fn host_func_closure(
-//     host_func: EntityRef<HostFunc>,
+//     host_func: &HostFunc,
 // ) -> impl Fn(
 //     wasmi::Caller<'_, ExecutionState>,
 //     &[wasmi::Val],
@@ -867,13 +838,13 @@ impl ResultVal {
 //     })
 // }
 
-impl Action {
+impl ActionTag {
     fn generate(
         store: &mut wasmi::Store<ExecutionState>,
         instance: &wasmi::Instance,
         hasher: crate::hash::Seed,
         wasmi_val_buf: &mut Vec<wasmi::Val>,
-    ) -> arbitrary::Result<Self> {
+    ) -> arbitrary::Result<NonNull<Self>> {
         Ok(match store.data_mut().u.int_in_range(0u8..=9u8)? {
             0..=4 => {
                 let func_name = {
@@ -949,11 +920,12 @@ impl Action {
                     },
                 };
 
-                Self::Invoke(store.data_mut().pools.invokes.push(Invoke {
+                Invoke {
                     name: func_name,
                     arguments,
                     results,
-                }))
+                }
+                .alloc(&store.data().pools.arena)
             }
             5..=6 => {
                 let mem_name = {
@@ -961,14 +933,13 @@ impl Action {
                     *u.choose(mems)?
                 };
 
-                let check = CheckMemoryContents::from_exported_memory(
+                CheckMemoryContents::from_exported_memory(
                     wasmi::AsContext::as_context(&*store),
                     instance,
                     hasher,
                     mem_name,
-                );
-
-                Self::CheckMemoryContents(store.data_mut().pools.check_memory_contents.push(check))
+                )
+                .alloc(&store.data().pools.arena)
             }
             7 => {
                 let table_name = {
@@ -992,13 +963,12 @@ impl Action {
                     .get(wasmi::AsContext::as_context(&*store), index.into())
                     .unwrap();
 
-                let check = CheckTableElement {
+                CheckTableElement {
                     table: table_name,
                     index,
                     expected: ResultVal::from_wasmi(elem, wasmi::AsContext::as_context(&*store)),
-                };
-
-                Self::CheckTableElement(store.data_mut().pools.check_table_elements.push(check))
+                }
+                .alloc(&store.data().pools.arena)
             }
             8 => {
                 let global_name = {
@@ -1012,12 +982,11 @@ impl Action {
 
                 let value = global.get(wasmi::AsContext::as_context(&*store));
 
-                let check = CheckGlobalValue {
+                CheckGlobalValue {
                     name: global_name,
                     expected: ResultVal::from_wasmi(value, wasmi::AsContext::as_context(&*store)),
-                };
-
-                Self::CheckGlobalValue(store.data_mut().pools.check_global_values.push(check))
+                }
+                .alloc(&store.data().pools.arena)
             }
             _ => unreachable!(),
         })
@@ -1137,38 +1106,34 @@ fn execute(u: &mut arbitrary::Unstructured) -> arbitrary::Result<Option<Box<Exec
         store.data_mut().u.arbitrary_len::<[u8; 32]>()?
     };
 
-    let mut actions = Vec::<Action>::with_capacity(action_count + usize::from(has_memory));
+    let mut actions = bumpalo::collections::Vec::with_capacity_in(
+        action_count + usize::from(has_memory),
+        &store.data().pools.arena,
+    );
     let mut wasmi_val_buf = Vec::<wasmi::Val>::new();
 
     // TODO: If arbitrary error occurs here, just end the loop early
     for _ in 0..action_count {
-        actions.push(
-            match Action::generate(&mut store, &instance, hasher, &mut wasmi_val_buf) {
-                Ok(action) => action,
-                Err(arbitrary::Error::NotEnoughData) => break,
-                Err(err) => return Err(err),
-            },
-        );
+        let act = match ActionTag::generate(&mut store, &instance, hasher, &mut wasmi_val_buf) {
+            Ok(action) => action,
+            Err(arbitrary::Error::NotEnoughData) => break,
+            Err(err) => return Err(err),
+        };
+
+        actions.push(act);
     }
 
     // Always include a memory hash check if a memory is present
     if let Some(memory) = store.data().mems.first().copied() {
-        store
-            .data_mut()
-            .pools
-            .check_memory_contents
-            .reserve_exact(1);
-
-        let check = CheckMemoryContents::from_exported_memory(
-            wasmi::AsContext::as_context(&store),
-            &instance,
-            hasher,
-            memory,
+        actions.push(
+            CheckMemoryContents::from_exported_memory(
+                wasmi::AsContext::as_context(&store),
+                &instance,
+                hasher,
+                memory,
+            )
+            .alloc(&store.data().pools.arena),
         );
-
-        actions.push(Action::CheckMemoryContents(
-            store.data_mut().pools.check_memory_contents.push(check),
-        ));
     }
 
     let exec_state = store.into_data();
@@ -1179,7 +1144,9 @@ fn execute(u: &mut arbitrary::Unstructured) -> arbitrary::Result<Option<Box<Exec
         //     funcs: exec_state.funcs.len().try_into().unwrap(),
         //     ..counts
         // },
-        instantiation: ExecutionInstantiateResult::Instantiated(FfiVec::new(actions)),
+        instantiation: ExecutionInstantiateResult::Instantiated(FfiSlice::from_slice(
+            actions.as_slice(),
+        )),
         // provided_imports: ffi::OwnedSlice::new(imports.ffi),
         // recorded_host_calls: FfiVec::new(exec_state.recorded_host_calls),
         pools: exec_state.pools,

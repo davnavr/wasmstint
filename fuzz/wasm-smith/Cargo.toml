@@ -13,6 +13,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 arbitrary = "1.4.1" # Already a dependency of wasm-smith
 bitvec = { version = "1.0.1", default-features = false }
+bumpalo = "3.17.0"
 wasm-smith = "0.228.0"
 
 [workspace.dependencies.wasmi]

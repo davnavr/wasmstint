@@ -33,11 +33,36 @@ const Executables = @Type(.{
     },
 });
 
+const fuzz_target_paths = [_][:0]const u8{
+    "fuzz/wasm-smith/targets/execute.zig",
+    "fuzz/wasm-smith/targets/wasmi_differential.zig",
+    // "fuzz/wasm-smith/targets/raw_validate.zig",
+};
+
+const FuzzTarget = @Type(.{
+    .@"enum" = std.builtin.Type.Enum{
+        .tag_type = std.math.IntFittingRange(0, fuzz_target_paths.len),
+        .decls = &.{},
+        .is_exhaustive = true,
+        .fields = fields: {
+            var fields: [fuzz_target_paths.len]std.builtin.Type.EnumField = undefined;
+            for (0.., &fields, fuzz_target_paths) |i, *dst, src| {
+                dst.* = std.builtin.Type.EnumField{
+                    .name = std.fs.path.stem(src) ++ "\x00",
+                    .value = i,
+                };
+            }
+
+            break :fields &fields;
+        },
+    },
+});
+
 const ProjectOptions = struct {
     target: Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     rust_target: ?[]const u8,
-    // fuzz_targets: ?[]const FuzzTarget, // Use an std.enums.EnumMap?
+    fuzz_targets: std.enums.EnumSet(FuzzTarget),
 
     fn init(b: *Build) ProjectOptions {
         return .{
@@ -48,11 +73,11 @@ const ProjectOptions = struct {
                 "rust-target",
                 "Sets the Rust target triple",
             ),
-            // .fuzz_targets = b.option(
-            //     []const FuzzTarget,
-            //     "fuzz-targets",
-            //     "Which fuzz targets will be built",
-            // ),
+            .fuzz_targets = if (b.option(
+                []const FuzzTarget,
+                "fuzz-targets",
+                "Which fuzz targets will be built",
+            )) |targets| .initMany(targets) else .initFull(),
         };
     }
 };
@@ -164,18 +189,22 @@ const RustFuzzLib = struct {
 const RustFuzzTargetHarness = struct {
     module: *Build.Module,
 
-    fn build(b: *Build, proj_opts: *const ProjectOptions) RustFuzzTargetHarness {
-        return .{
-            .module = b.createModule(.{
-                .root_source_file = b.path("fuzz/wasm-smith/src/harness.zig"),
-                .target = proj_opts.target,
-                .optimize = switch (proj_opts.optimize) {
-                    .Debug, .ReleaseSafe => |same| same,
-                    else => .ReleaseSafe,
-                },
-                .error_tracing = true,
-            }),
-        };
+    fn build(
+        b: *Build,
+        proj_opts: *const ProjectOptions,
+        wasmstint: WasmstintModule,
+    ) RustFuzzTargetHarness {
+        const module = b.createModule(.{
+            .root_source_file = b.path("fuzz/wasm-smith/src/harness.zig"),
+            .target = proj_opts.target,
+            .optimize = switch (proj_opts.optimize) {
+                .Debug, .ReleaseSafe => |same| same,
+                else => .ReleaseSafe,
+            },
+            .error_tracing = true,
+        });
+        wasmstint.addAsImportTo(module);
+        return .{ .module = module };
     }
 
     fn buildTarget(
@@ -462,37 +491,40 @@ pub fn build(b: *Build) OomError!void {
     steps.@"test".dependOn(steps.test_spec);
 
     const rust_fuzz_lib = try RustFuzzLib.build(b, &project_options, &path_options);
-    const rust_fuzz_harness = RustFuzzTargetHarness.build(b, &project_options);
-
-    const fuzz_execute_target = rust_fuzz_harness.buildTarget(
-        b,
-        &project_options,
-        wasmstint_module,
-        "execute",
-        b.path("fuzz/wasm-smith/targets/execute.zig"),
-    );
+    const rust_fuzz_harness = RustFuzzTargetHarness.build(b, &project_options, wasmstint_module);
 
     const fuzz_exe_dir = Build.InstallDir{ .custom = "fuzz" };
-    steps.fuzz_rust_afl.dependOn(
-        &fuzz_execute_target.installAflExecutable(
-            b,
-            &project_options,
-            &path_options,
-            &rust_fuzz_lib,
-            fuzz_exe_dir,
-        ).step,
-    );
-
-    steps.fuzz_rust_debug.dependOn(
-        &(try fuzz_execute_target.installDebugExecutable(
+    var fuzz_targets_iter = project_options.fuzz_targets.iterator();
+    while (fuzz_targets_iter.next()) |fuzz_target| {
+        const fuzz_execute_target = rust_fuzz_harness.buildTarget(
             b,
             &project_options,
             wasmstint_module,
-            rust_fuzz_harness,
-            &rust_fuzz_lib,
-            fuzz_exe_dir,
-        )).step,
-    );
+            @tagName(fuzz_target),
+            b.path(fuzz_target_paths[@intFromEnum(fuzz_target)]),
+        );
+
+        steps.fuzz_rust_afl.dependOn(
+            &fuzz_execute_target.installAflExecutable(
+                b,
+                &project_options,
+                &path_options,
+                &rust_fuzz_lib,
+                fuzz_exe_dir,
+            ).step,
+        );
+
+        steps.fuzz_rust_debug.dependOn(
+            &(try fuzz_execute_target.installDebugExecutable(
+                b,
+                &project_options,
+                wasmstint_module,
+                rust_fuzz_harness,
+                &rust_fuzz_lib,
+                fuzz_exe_dir,
+            )).step,
+        );
+    }
 
     // const afl_fuzz = b.addSystemCommand(&.{path_options.afl_fuzz});
     // if (path_options.afl_driver == null) {
