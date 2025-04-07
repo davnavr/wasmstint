@@ -95,7 +95,7 @@ pub fn uninterpretedInteger(comptime T: type, token: []const u8) error{Overflow}
         @bitCast(std.math.cast(Signed, signed_value) orelse return error.Overflow);
 }
 
-pub fn float(comptime F: type, token: []const u8) error{InvalidNanPayload}!floating_point.Bits(F) {
+pub fn float(comptime F: type, token: []const u8) error{InvalidNanPayload}!floating_point.Bits(F) { // TODO: Needs Overflow error
     comptime switch (F) {
         f32, f64 => {},
         else => @compileError("unsupported float type: " ++ @typeName(F)),
@@ -142,10 +142,15 @@ pub fn float(comptime F: type, token: []const u8) error{InvalidNanPayload}!float
         }
     }
 
+    // https://ziglang.org/documentation/master/std/#std.fmt.parseFloat might do `mantissa + 1` in some cases?
+
     // Zig' floating point parser works with the same syntax used in WASM.
     const f: F = std.fmt.parseFloat(F, token) catch |e| switch (e) {
         error.InvalidCharacter => unreachable,
     };
+
+    // if (std.math.isNan(f) or std.math.isInf(f))
+    //     return error.Overflow;
 
     return @bitCast(f);
 }
@@ -335,6 +340,9 @@ test float {
     try std.testing.expectEqual(0x7FC0_0000, float(f32, "nan"));
     try std.testing.expectEqual(0xFFC0_0000, float(f32, "-nan"));
     try std.testing.expectEqual(0x7F80_CAFE, float(f32, "nan:0xCAFE"));
+
+    // ./tests/spec/const.wast:441:40
+    // try std.testing.expectEqual(0x2680_0000, float(f32, "+0x1.00000100000000000p-50"));
 }
 
 test string {
