@@ -1,7 +1,0 @@
-[package]
-name = "zig-allocator"
-publish = false
-edition.workspace = true
-rust-version.workspace = true
-
-[lib]
