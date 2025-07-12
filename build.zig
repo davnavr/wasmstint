@@ -2,36 +2,6 @@ const std = @import("std");
 const Build = std.Build;
 const Step = Build.Step;
 
-const executable_paths = .{
-    .run_wast = .{ "wasmstint-wast", "src/wast_main.zig" },
-};
-
-const executable_paths_fields =
-    @typeInfo(@TypeOf(executable_paths)).@"struct".fields;
-
-const Executables = @Type(.{
-    .@"struct" = std.builtin.Type.Struct{
-        .backing_integer = null,
-        .layout = .auto,
-        .is_tuple = false,
-        .decls = &.{},
-        .fields = fields: {
-            var fields: [executable_paths_fields.len]std.builtin.Type.StructField = undefined;
-            for (&fields, executable_paths_fields) |*dst, *src| {
-                dst.* = std.builtin.Type.StructField{
-                    .name = src.name,
-                    .type = *Step.Compile,
-                    .alignment = 0,
-                    .default_value_ptr = null,
-                    .is_comptime = false,
-                };
-            }
-
-            break :fields &fields;
-        },
-    },
-});
-
 const ProjectOptions = struct {
     target: Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
@@ -63,27 +33,6 @@ const ToolPaths = struct {
     }
 };
 
-const WasmstintModule = struct {
-    module: *Build.Module,
-
-    fn build(b: *Build, proj_opts: *const ProjectOptions) WasmstintModule {
-        return .{
-            .module = b.addModule(
-                "wasmstint",
-                .{
-                    .root_source_file = b.path("src/root.zig"),
-                    .target = proj_opts.target,
-                    .optimize = proj_opts.optimize,
-                },
-            ),
-        };
-    }
-
-    fn addAsImportTo(wasmstint: *const WasmstintModule, to: *Build.Module) void {
-        to.addImport("wasmstint", wasmstint.module);
-    }
-};
-
 pub fn build(b: *Build) void {
     const project_options = ProjectOptions.init(b);
     const tool_paths = ToolPaths.init(b);
@@ -105,47 +54,39 @@ pub fn build(b: *Build) void {
     };
 
     const wasmstint_module = WasmstintModule.build(b, &project_options);
-
-    const executables: Executables = exes: {
-        var exes_result: Executables = undefined;
-
-        inline for (executable_paths_fields) |*exe_field| {
-            const exe_spec: [2][]const u8 = @field(executable_paths, exe_field.name);
-            const exe = b.addExecutable(.{
-                .name = exe_spec[0],
-                .root_module = b.createModule(.{
-                    .root_source_file = b.path(exe_spec[1]),
-                    .target = project_options.target,
-                    .optimize = project_options.optimize,
-                }),
-            });
-
-            wasmstint_module.addAsImportTo(exe.root_module);
-
-            const run = b.addRunArtifact(exe);
-            if (b.args) |args| {
-                run.addArgs(args);
-            }
-
-            Step.dependOn(@field(steps, exe_field.name), &run.step);
-            @field(exes_result, exe_field.name) = exe;
-        }
-
-        break :exes exes_result;
-    };
+    // Executables.build(b);
 
     const unit_tests = b.addTest(.{ .root_module = wasmstint_module.module });
     const unit_tests_run = b.addRunArtifact(unit_tests);
     steps.test_unit.dependOn(&unit_tests_run.step);
     steps.@"test".dependOn(steps.test_unit);
 
-    _ = executables;
-
     const translate_spectests = TranslateSpectests.build(b, steps.install_spectest, &tool_paths);
 
     _ = translate_spectests;
     // steps.@"test".dependOn(steps.test_spec);
 }
+
+const WasmstintModule = struct {
+    module: *Build.Module,
+
+    fn build(b: *Build, proj_opts: *const ProjectOptions) WasmstintModule {
+        return .{
+            .module = b.addModule(
+                "wasmstint",
+                .{
+                    .root_source_file = b.path("src/root.zig"),
+                    .target = proj_opts.target,
+                    .optimize = proj_opts.optimize,
+                },
+            ),
+        };
+    }
+
+    fn addAsImportTo(wasmstint: *const WasmstintModule, to: *Build.Module) void {
+        to.addImport("wasmstint", wasmstint.module);
+    }
+};
 
 const TranslateSpectests = struct {
     translate_step: *Step,
