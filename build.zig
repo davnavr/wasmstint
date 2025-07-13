@@ -38,7 +38,7 @@ pub fn build(b: *Build) void {
     const tool_paths = ToolPaths.init(b);
 
     const steps = .{
-        // .check = b.step("check", "Check for compilation errors"),
+        .check = b.step("check", "Check for compilation errors"),
 
         .install_spectest = b.step(
             "install-spectest",
@@ -54,11 +54,15 @@ pub fn build(b: *Build) void {
     };
 
     const wasmstint_module = WasmstintModule.build(b, &project_options);
+    const cli_args_module = CliArgsModule.build(b, &project_options);
+
+    steps.check.dependOn(&wasmstint_module.unit_tests.step);
+    // steps.check.dependOn(&cli_args_module.unit_tests.step);
+
     // Executables.build(b);
 
-    const unit_tests = b.addTest(.{ .root_module = wasmstint_module.module });
-    const unit_tests_run = b.addRunArtifact(unit_tests);
-    steps.test_unit.dependOn(&unit_tests_run.step);
+    steps.test_unit.dependOn(&b.addRunArtifact(wasmstint_module.unit_tests).step);
+    steps.test_unit.dependOn(&b.addRunArtifact(cli_args_module.unit_tests).step);
     steps.@"test".dependOn(steps.test_unit);
 
     const translate_spectests = TranslateSpectests.build(b, steps.install_spectest, &tool_paths);
@@ -67,26 +71,38 @@ pub fn build(b: *Build) void {
     // steps.@"test".dependOn(steps.test_spec);
 }
 
-const WasmstintModule = struct {
-    module: *Build.Module,
+fn NamedModule(
+    comptime name: []const u8,
+    comptime root_source_file: []const u8,
+) type {
+    return struct {
+        module: *Build.Module,
+        unit_tests: *Step.Compile,
 
-    fn build(b: *Build, proj_opts: *const ProjectOptions) WasmstintModule {
-        return .{
-            .module = b.addModule(
-                "wasmstint",
+        fn build(b: *Build, proj_opts: *const ProjectOptions) WasmstintModule {
+            const module = b.addModule(
+                name,
                 .{
-                    .root_source_file = b.path("src/root.zig"),
+                    .root_source_file = b.path(root_source_file),
                     .target = proj_opts.target,
                     .optimize = proj_opts.optimize,
                 },
-            ),
-        };
-    }
+            );
 
-    fn addAsImportTo(wasmstint: *const WasmstintModule, to: *Build.Module) void {
-        to.addImport("wasmstint", wasmstint.module);
-    }
-};
+            return .{
+                .module = module,
+                .unit_tests = b.addTest(.{ .name = name, .root_module = module }),
+            };
+        }
+
+        fn addAsImportTo(wasmstint: *const WasmstintModule, to: *Build.Module) void {
+            to.addImport(name, wasmstint.module);
+        }
+    };
+}
+
+const WasmstintModule = NamedModule("wasmstint", "src/root.zig");
+const CliArgsModule = NamedModule("cli_args", "src/cli_args.zig");
 
 const TranslateSpectests = struct {
     translate_step: *Step,
