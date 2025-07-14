@@ -56,10 +56,17 @@ pub fn build(b: *Build) void {
     const wasmstint_module = WasmstintModule.build(b, &project_options);
     const cli_args_module = CliArgsModule.build(b, &project_options);
 
+    const spectest_exe = SpectestInterp.build(
+        b,
+        &project_options,
+        &wasmstint_module,
+        &cli_args_module,
+    );
+    steps.run_wast.dependOn(&spectest_exe.run.step);
+
     steps.check.dependOn(&wasmstint_module.unit_tests.step);
     // steps.check.dependOn(&cli_args_module.unit_tests.step);
-
-    // Executables.build(b);
+    steps.check.dependOn(&spectest_exe.exe.step);
 
     steps.test_unit.dependOn(&b.addRunArtifact(wasmstint_module.unit_tests).step);
     steps.test_unit.dependOn(&b.addRunArtifact(cli_args_module.unit_tests).step);
@@ -76,10 +83,12 @@ fn NamedModule(
     comptime root_source_file: []const u8,
 ) type {
     return struct {
+        const Self = @This();
+
         module: *Build.Module,
         unit_tests: *Step.Compile,
 
-        fn build(b: *Build, proj_opts: *const ProjectOptions) WasmstintModule {
+        fn build(b: *Build, proj_opts: *const ProjectOptions) Self {
             const module = b.addModule(
                 name,
                 .{
@@ -95,14 +104,46 @@ fn NamedModule(
             };
         }
 
-        fn addAsImportTo(wasmstint: *const WasmstintModule, to: *Build.Module) void {
-            to.addImport(name, wasmstint.module);
+        fn addAsImportTo(self: *const Self, to: *Build.Module) void {
+            to.addImport(name, self.module);
         }
     };
 }
 
 const WasmstintModule = NamedModule("wasmstint", "src/root.zig");
 const CliArgsModule = NamedModule("cli_args", "src/cli_args.zig");
+
+const SpectestInterp = struct {
+    exe: *Step.Compile,
+    run: *Step.Run,
+
+    fn build(
+        b: *Build,
+        proj_opts: *const ProjectOptions,
+        wasmstint_module: *const WasmstintModule,
+        cli_args_module: *const CliArgsModule,
+    ) SpectestInterp {
+        const module = b.createModule(.{
+            .root_source_file = b.path("src/spectest_main.zig"),
+            .target = proj_opts.target,
+            .optimize = proj_opts.optimize,
+        });
+        wasmstint_module.addAsImportTo(module);
+        cli_args_module.addAsImportTo(module);
+
+        const exe = b.addExecutable(.{
+            .name = "wasmstint-spectest",
+            .root_module = module,
+        });
+
+        const run = b.addRunArtifact(exe);
+        if (b.args) |args| {
+            run.addArgs(args);
+        }
+
+        return .{ .exe = exe, .run = run };
+    }
+};
 
 const TranslateSpectests = struct {
     translate_step: *Step,
