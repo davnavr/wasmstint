@@ -65,14 +65,13 @@ pub fn main() u8 {
         wasmstint.waitForDebugger();
     }
 
+    const fmt_json_path = std.unicode.fmtUtf8(arguments.run);
+
     const cwd = std.fs.cwd();
     const json_file = wasmstint.FileContent.readFileZ(cwd, arguments.run) catch |e| switch (e) {
         error.OutOfMemory => |err| oom(err),
         else => |io_err| {
-            std.debug.print(
-                "Failed to open file {f}: {t}\n",
-                .{ std.unicode.fmtUtf8(arguments.run), io_err },
-            );
+            std.debug.print("Failed to open file {f}: {t}\n", .{ fmt_json_path, io_err });
             return 1;
         },
     };
@@ -92,10 +91,26 @@ pub fn main() u8 {
     _ = initial_rng;
 
     var json_script: Parser = undefined;
-    json_script.init(arena.allocator(), json_file.contents) catch |e|
+    json_script.init(&arena, json_file.contents, &scratch) catch |e|
         handleJsonError(arguments.run, &json_script, tty_config, e);
 
-    std.log.debug("TODO: made from {f}\n", .{std.unicode.fmtUtf8(json_script.source_filename)});
+    _ = scratch.reset(.retain_capacity);
+    std.log.debug("TODO: made from {f}", .{fmt_json_path});
+
+    while (true) {
+        // TODO: Separate method for command processing
+        const command = (json_script.next(&arena, &scratch) catch |e|
+            handleJsonError(arguments.run, &json_script, tty_config, e)) orelse break;
+
+        std.log.debug(
+            "TODO: process {s} from {f}:{}",
+            .{
+                @tagName(command.type),
+                std.unicode.fmtUtf8(json_script.source_filename),
+                command.line,
+            },
+        );
+    }
 
     return 0;
 }
@@ -104,7 +119,7 @@ fn handleJsonError(
     path: [:0]const u8,
     parser: *const Parser,
     color: std.Io.tty.Config,
-    err: Parser.InitError,
+    err: Parser.Error,
 ) noreturn {
     var stderr_buffer: [1024]u8 = undefined;
     const fmt_path = std.unicode.fmtUtf8(path);
@@ -124,6 +139,12 @@ fn handleJsonError(
                 stderr.writeAll("error: ") catch {};
                 color.setColor(stderr, .reset) catch {};
                 stderr.writeAll("JSON input was malformed\n") catch {};
+
+                if (builtin.mode == .Debug) {
+                    if (@errorReturnTrace()) |trace| {
+                        trace.format(stderr) catch {};
+                    }
+                }
             },
         }
     }
