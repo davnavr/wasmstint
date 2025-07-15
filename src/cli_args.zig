@@ -610,20 +610,18 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
                 });
             };
 
-            std.debug.lockStdErr();
-            defer std.debug.unlockStdErr();
+            var stderr_buffer: [1024]u8 = undefined;
+            {
+                const stderr = std.debug.lockStderrWriter(&stderr_buffer);
+                defer std.debug.unlockStderrWriter();
 
-            const stderr = std.fs.File.stderr();
-            const color = std.Io.tty.detectConfig(stderr);
+                const color = std.Io.tty.detectConfig(std.fs.File.stderr());
 
-            var write_buffer: [1024]u8 = undefined;
-            var writer = stderr.writer(&write_buffer);
-            defer writer.flush() catch {};
-
-            if (has_diagnostics) {
-                diagnostics.print(&writer.interface, color) catch {};
-            } else {
-                printUsage(&writer.interface, color) catch {};
+                if (has_diagnostics) {
+                    diagnostics.print(stderr, color) catch {};
+                } else {
+                    printUsage(stderr, color) catch {};
+                }
             }
 
             std.process.exit(1);

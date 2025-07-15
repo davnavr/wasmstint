@@ -59,20 +59,23 @@ pub fn main() u8 {
     defer arena.deinit();
 
     const arguments = parseProgramArguments(&scratch, &arena);
+    _ = scratch.reset(.retain_capacity);
 
     if (arguments.@"wait-for-debugger") {
         wasmstint.waitForDebugger();
     }
 
     const cwd = std.fs.cwd();
-    const json_file = cwd.openFileZ(arguments.run, .{ .mode = .read_only }) catch |e| {
-        std.debug.print(
-            "Failed to open file {f}: {t}\n",
-            .{ std.unicode.fmtUtf8(arguments.run), e },
-        );
-        return 1;
+    const json_file = wasmstint.FileContent.readFileZ(cwd, arguments.run) catch |e| switch (e) {
+        error.OutOfMemory => |err| oom(err),
+        else => |io_err| {
+            std.debug.print(
+                "Failed to open file {f}: {t}\n",
+                .{ std.unicode.fmtUtf8(arguments.run), io_err },
+            );
+            return 1;
+        },
     };
-    defer json_file.close();
 
     const initial_rng = rng: {
         var init = std.Random.Xoshiro256{ .s = undefined };
@@ -84,12 +87,48 @@ pub fn main() u8 {
         break :rng init;
     };
 
-    const color_config = std.Io.tty.detectConfig(std.fs.File.stderr());
-    _ = color_config;
+    const tty_config = std.Io.tty.detectConfig(std.fs.File.stderr());
 
     _ = initial_rng;
 
+    var json_script: Parser = undefined;
+    json_script.init(arena.allocator(), json_file.contents) catch |e|
+        handleJsonError(arguments.run, &json_script, tty_config, e);
+
+    std.log.debug("TODO: made from {f}\n", .{std.unicode.fmtUtf8(json_script.source_filename)});
+
     return 0;
+}
+
+fn handleJsonError(
+    path: [:0]const u8,
+    parser: *const Parser,
+    color: std.Io.tty.Config,
+    err: Parser.InitError,
+) noreturn {
+    var stderr_buffer: [1024]u8 = undefined;
+    const fmt_path = std.unicode.fmtUtf8(path);
+    {
+        const stderr = std.debug.lockStderrWriter(&stderr_buffer);
+        defer std.debug.unlockStderrWriter();
+
+        switch (err) {
+            error.OutOfMemory => |e| oom(e),
+            error.MalformedJson => {
+                const diagnostics = parser.diagnostics;
+                stderr.print(
+                    "{f}:{}:{}: ",
+                    .{ fmt_path, diagnostics.getLine(), diagnostics.getColumn() },
+                ) catch {};
+                color.setColor(stderr, .bright_red) catch {};
+                stderr.writeAll("error: ") catch {};
+                color.setColor(stderr, .reset) catch {};
+                stderr.writeAll("JSON input was malformed\n") catch {};
+            },
+        }
+    }
+
+    std.process.exit(1);
 }
 
 const SpectestImports = struct {
@@ -468,3 +507,4 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const wasmstint = @import("wasmstint");
 const cli_args = @import("cli_args");
+const Parser = @import("Parser.zig");

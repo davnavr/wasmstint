@@ -7,14 +7,14 @@ contents: []align(page_size_min) const u8,
 /// at once, and cannot be partially freed.
 allocated_size: if (builtin.os.tag == .windows) usize else void,
 
-const ReadError = Oom || fs.File.OpenError || fs.File.ReadError || fs.File.MetadataError;
+const ReadError = Oom || fs.File.OpenError || fs.File.ReadError || fs.File.StatError;
 
 pub fn readFileZ(dir: Dir, path: [:0]const u8) ReadError!FileContent {
     const file = try dir.openFileZ(path, .{ .mode = .read_only });
     defer file.close();
 
     const page_size = pageSize();
-    const indicated_size = std.math.cast(usize, (try file.metadata()).size()) orelse
+    const indicated_size = std.math.cast(usize, (try file.stat()).size) orelse
         return Oom.OutOfMemory;
     const allocated_size = std.mem.alignBackward(
         usize,
@@ -66,6 +66,12 @@ pub fn readFileZ(dir: Dir, path: [:0]const u8) ReadError!FileContent {
         return .{ .contents = allocated[0..actual_size], .allocated_size = {} };
     }
 }
+
+// pub fn deinit(contents: *FileContent) void {
+//     std.heap.PageAllocator.unmap(
+//         @alignCast(@constCast(contents.contents.ptr[0..contents.allocated_size])),
+//     );
+// }
 
 const std = @import("std");
 const builtin = @import("builtin");

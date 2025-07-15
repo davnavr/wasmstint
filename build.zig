@@ -124,7 +124,7 @@ const SpectestInterp = struct {
         cli_args_module: *const CliArgsModule,
     ) SpectestInterp {
         const module = b.createModule(.{
-            .root_source_file = b.path("src/spectest_main.zig"),
+            .root_source_file = b.path("src/spectest/main.zig"),
             .target = proj_opts.target,
             .optimize = proj_opts.optimize,
         });
