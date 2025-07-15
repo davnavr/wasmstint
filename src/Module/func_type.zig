@@ -32,21 +32,20 @@ pub const FuncType = extern struct {
                 std.mem.eql(ValType, a.paramAndResultTypes(), b.paramAndResultTypes()));
     }
 
-    pub fn format(
-        func_type: FuncType,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
+    pub fn format(func_type: FuncType, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        // Not an accurate count, just an estimate
+        const params_capacity =
+            (@as(usize, func_type.param_count) *% 11) + (func_type.param_count -| 1);
+        const results_capacity =
+            (@as(usize, func_type.result_count) *% 11) + (func_type.result_count -| 1);
+        try writer.ensureUnusedCapacity(params_capacity +% results_capacity);
 
         for (0..func_type.param_count, func_type.parameters()) |i, param| {
             if (i > 0) {
                 try writer.writeByte(' ');
             }
 
-            try writer.print("(param {})", .{param});
+            try writer.print("(param {t})", .{param});
         }
 
         if (func_type.param_count > 0 and func_type.result_count > 0) {
@@ -58,7 +57,7 @@ pub const FuncType = extern struct {
                 try writer.writeByte(' ');
             }
 
-            try writer.print("(result {})", .{result});
+            try writer.print("(result {t})", .{result});
         }
     }
 };

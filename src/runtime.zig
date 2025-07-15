@@ -1,7 +1,4 @@
-const std = @import("std");
-const Allocator = std.mem.Allocator;
-const IndexedArena = @import("IndexedArena.zig");
-const Module = @import("Module.zig");
+//! WASM runtime structure.
 
 pub const TableStride = enum(u32) {
     ptr = @sizeOf(*anyopaque),
@@ -285,14 +282,7 @@ pub const ImportProvider = struct {
         mem: *const Module.MemType,
         global: *const Module.GlobalType,
 
-        pub fn format(
-            desc: *const Desc,
-            comptime fmt: []const u8,
-            options: std.fmt.FormatOptions,
-            writer: anytype,
-        ) !void {
-            _ = fmt;
-            _ = options;
+        pub fn format(desc: *const Desc, writer: *Writer) Writer.Error!void {
             try writer.writeByte('(');
             switch (desc.*) {
                 .func => |func| {
@@ -301,11 +291,11 @@ pub const ImportProvider = struct {
                         try writer.writeByte(' ');
                     }
 
-                    try writer.print("{}", .{func});
+                    try writer.print("{f}", .{func});
                 },
-                .table => |table| try writer.print("table {}", .{table}),
-                .mem => |mem| try writer.print("memory {}", .{mem}),
-                .global => |global| try writer.print("global {}", .{global}),
+                .table => |table| try writer.print("table {f}", .{table}),
+                .mem => |mem| try writer.print("memory {f}", .{mem}),
+                .global => |global| try writer.print("global {f}", .{global}),
             }
             try writer.writeByte(')');
         }
@@ -336,16 +326,9 @@ pub const ImportProvider = struct {
             wrong_desc,
         };
 
-        pub fn format(
-            info: *const FailedRequest,
-            comptime fmt: []const u8,
-            options: std.fmt.FormatOptions,
-            writer: anytype,
-        ) !void {
-            _ = fmt;
-            _ = options;
+        pub fn format(info: *const FailedRequest, writer: *Writer) Writer.Error!void {
             try writer.print(
-                "could not provide import (import \"{s}\" \"{s}\" {}), ",
+                "could not provide import (import \"{s}\" \"{s}\" {f}), ",
                 .{
                     info.module.bytes,
                     info.name.bytes,
@@ -1359,15 +1342,8 @@ pub const GlobalAddr = extern struct {
         };
     }
 
-    pub fn format(
-        global: GlobalAddr,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-        try writer.print("(global {} ", .{global.global_type});
+    pub fn format(global: GlobalAddr, writer: *Writer) Writer.Error!void {
+        try writer.print("(global {t} ", .{global.global_type});
         switch (global.global_type.val_type) {
             inline .i32, .f32, .i64, .f64 => |num| {
                 try writer.print(
@@ -1377,7 +1353,7 @@ pub const GlobalAddr = extern struct {
             },
             inline .funcref, .externref => |ref| {
                 try writer.print(
-                    "{}",
+                    "{f}",
                     .{@as(*const Pointee(ref), @alignCast(@ptrCast(global.value)))},
                 );
             },
@@ -1427,15 +1403,7 @@ pub const FuncAddr = extern struct {
             };
         }
 
-        pub fn format(
-            func: *const Expanded,
-            comptime fmt: []const u8,
-            options: std.fmt.FormatOptions,
-            writer: anytype,
-        ) !void {
-            _ = fmt;
-            _ = options;
-
+        pub fn format(func: *const Expanded, writer: *Writer) Writer.Error!void {
             try writer.writeAll("(func ");
             switch (func.*) {
                 .wasm => |*wasm| try writer.print(
@@ -1449,8 +1417,9 @@ pub const FuncAddr = extern struct {
             }
 
             const sig = func.signature();
-            if (sig.param_count > 0 or sig.result_count > 0)
-                try writer.print(" {}", .{sig});
+            if (sig.param_count > 0 or sig.result_count > 0) {
+                try writer.print(" {f}", .{sig});
+            }
 
             try writer.writeByte(')');
         }
@@ -1512,24 +1481,17 @@ pub const FuncAddr = extern struct {
             std.debug.assert(Nullable.null.funcInst() == null);
         }
 
-        pub fn format(func: Nullable, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        pub fn format(func: Nullable, writer: *Writer) Writer.Error!void {
             if (func.funcInst()) |addr| {
-                try writer.print("{}", .{addr});
+                try writer.print("{f}", .{addr});
             } else {
                 try writer.writeAll("(ref.null func)");
             }
         }
     };
 
-    pub fn format(
-        func: FuncAddr,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-        try writer.print("{}", .{func.expanded()});
+    pub fn format(func: FuncAddr, writer: *Writer) Writer.Error!void {
+        try writer.print("{f}", .{func.expanded()});
     }
 };
 
@@ -1576,14 +1538,7 @@ pub const ExternAddr = packed union {
         );
     }
 
-    pub fn format(
-        func: ExternAddr,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
+    pub fn format(func: ExternAddr, writer: *Writer) Writer.Error!void {
         if (func.ptr == null) {
             try writer.writeAll("(ref.null extern)");
         } else {
@@ -1591,3 +1546,9 @@ pub const ExternAddr = packed union {
         }
     }
 };
+
+const std = @import("std");
+const Writer = std.Io.Writer;
+const Allocator = std.mem.Allocator;
+const IndexedArena = @import("IndexedArena.zig");
+const Module = @import("Module.zig");

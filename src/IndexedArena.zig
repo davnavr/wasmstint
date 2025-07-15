@@ -3,7 +3,7 @@ const Error = std.mem.Allocator.Error;
 
 pub const Word = enum(u32) { _ };
 
-data: std.ArrayListAligned(Word, max_alignment),
+data: std.ArrayListAligned(Word, .fromByteUnits(max_alignment)),
 
 const IndexedArena = @This();
 
@@ -18,7 +18,7 @@ pub const Data = []align(max_alignment) Word;
 pub const ConstData = []align(max_alignment) const Word;
 
 pub fn init(allocator: std.mem.Allocator) IndexedArena {
-    return .{ .data = std.ArrayListAligned(Word, max_alignment).init(allocator) };
+    return .{ .data = .init(allocator) };
 }
 
 pub fn byteSizeToWordCount(size: usize) Error!usize {

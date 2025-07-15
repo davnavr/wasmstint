@@ -64,16 +64,15 @@ pub fn main() u8 {
         wasmstint.waitForDebugger();
     }
 
-    const color_config = std.io.tty.detectConfig(std.io.getStdErr());
     const cwd = std.fs.cwd();
-
-    const json_bytes = wasmstint.FileContent.readFileZ(cwd, arguments.run) catch |e| switch (e) {
-        error.OutOfMemory => |err| oom(err),
-        else => {
-            std.debug.print("Failed to open file {}\n", .{std.unicode.fmtUtf8(arguments.run)});
-            return 1;
-        },
+    const json_file = cwd.openFileZ(arguments.run, .{ .mode = .read_only }) catch |e| {
+        std.debug.print(
+            "Failed to open file {f}: {t}\n",
+            .{ std.unicode.fmtUtf8(arguments.run), e },
+        );
+        return 1;
     };
+    defer json_file.close();
 
     const initial_rng = rng: {
         var init = std.Random.Xoshiro256{ .s = undefined };
@@ -85,9 +84,10 @@ pub fn main() u8 {
         break :rng init;
     };
 
-    _ = json_bytes;
-    _ = initial_rng;
+    const color_config = std.Io.tty.detectConfig(std.fs.File.stderr());
     _ = color_config;
+
+    _ = initial_rng;
 
     return 0;
 }
@@ -329,7 +329,7 @@ const State = struct {
                     defer std.Progress.unlockStdErr();
 
                     var stderr_buf = std.io.BufferedWriter(128, std.fs.File.Writer){
-                        .unbuffered_writer = std.io.getStdErr().writer(),
+                        .unbuffered_writer = std.Io.getStdErr().writer(),
                     };
                     defer stderr_buf.flush() catch {};
 

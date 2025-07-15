@@ -60,7 +60,7 @@ pub const Flag = struct {
     type: type,
 
     pub const Diagnostics = struct {
-        message: [:0]const u8,
+        message: []const u8,
 
         pub fn report(diag: ?*Diagnostics, message: [:0]const u8) InvalidError {
             if (diag) |diagnostics| {
@@ -77,9 +77,16 @@ pub const Flag = struct {
             args: anytype,
         ) (InvalidError || Oom) {
             if (diag) |diagnostics| {
-                diagnostics.* = .{
-                    .message = try std.fmt.allocPrintZ(arena.allocator(), fmt, args),
+                var writer = try Writer.Allocating.initCapacity(
+                    arena.allocator(),
+                    comptime fmt.len * 2,
+                );
+
+                writer.writer.print(fmt, args) catch |e| switch (e) {
+                    Writer.Error.WriteFailed => return Oom.OutOfMemory,
                 };
+
+                diagnostics.* = .{ .message = writer.toArrayList().items };
             }
 
             return InvalidError.InvalidCliFlag;
@@ -87,13 +94,14 @@ pub const Flag = struct {
 
         pub fn print(
             diag: *const Diagnostics,
-            writer: anytype,
-            color: std.io.tty.Config,
-        ) !void {
+            writer: *Writer,
+            color: std.Io.tty.Config,
+        ) std.Io.tty.Config.SetColorError!void {
             try color.setColor(writer, .bright_red);
             try writer.writeAll("error: ");
             try color.setColor(writer, .reset);
             try writer.writeAll(diag.message);
+            try writer.writeByte('\n');
         }
     };
 
@@ -282,7 +290,7 @@ pub const Flag = struct {
                     error.InvalidCharacter => Diagnostics.reportFmt(
                         diagnostics,
                         arena,
-                        "'{}' is not a valid integer argument for flag " ++ flag_names,
+                        "'{f}' is not a valid integer argument for flag " ++ flag_names,
                         .{std.unicode.fmtUtf8(int_string)},
                     ),
                 };
@@ -497,7 +505,7 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
                     return Flag.Diagnostics.reportFmt(
                         diagnostics,
                         arena,
-                        "unknown flag '{}'",
+                        "unknown flag '{f}'",
                         .{std.unicode.fmtUtf8(flag_arg)},
                     );
 
@@ -549,7 +557,10 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             return self.parseRemaining(&args_iter, arena, diagnostics);
         }
 
-        pub fn printUsage(writer: anytype, color: std.io.tty.Config) !void {
+        pub fn printUsage(
+            writer: *Writer,
+            color: std.Io.tty.Config,
+        ) std.Io.tty.Config.SetColorError!void {
             if (comptime app_info.description.len > 0) {
                 try writer.writeAll(app_info.description ++ "\n\n");
             }
@@ -602,21 +613,19 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             std.debug.lockStdErr();
             defer std.debug.unlockStdErr();
 
-            const stderr = std.io.getStdErr();
-            const color = std.io.tty.detectConfig(stderr);
-            var buffered = std.io.BufferedWriter(1024, std.fs.File.Writer){
-                .unbuffered_writer = stderr.writer(),
-            };
-            const buffered_writer = buffered.writer();
+            const stderr = std.fs.File.stderr();
+            const color = std.Io.tty.detectConfig(stderr);
+
+            var write_buffer: [1024]u8 = undefined;
+            var writer = stderr.writer(&write_buffer);
+            defer writer.flush() catch {};
 
             if (has_diagnostics) {
-                diagnostics.print(buffered_writer, color) catch {};
-                buffered_writer.writeByte('\n') catch {};
+                diagnostics.print(&writer.interface, color) catch {};
             } else {
-                printUsage(buffered_writer, color) catch {};
+                printUsage(&writer.interface, color) catch {};
             }
 
-            buffered.flush() catch {};
             std.process.exit(1);
         }
     };
@@ -728,6 +737,7 @@ test "required" {
 }
 
 const std = @import("std");
+const Writer = std.Io.Writer;
 const Type = std.builtin.Type;
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;

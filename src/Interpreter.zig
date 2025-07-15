@@ -94,69 +94,47 @@ pub const TaggedValue = union(enum) {
         };
     }
 
-    pub fn format(
-        value: *const TaggedValue,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
+    pub fn format(value: *const TaggedValue, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.writeByte('(');
         switch (value.*) {
             inline .i32, .i64 => |i| {
                 try writer.writeAll(@tagName(value.*));
-                try writer.writeAll(".const ");
-                try std.fmt.formatIntValue(i, fmt, options, writer);
+                // TODO: Config for hex formatting and signed/unsigned integer values
+                try writer.print(".const {i}", i);
             },
             inline .f32, .f64 => |z| {
                 try writer.writeAll(@tagName(value.*));
                 try writer.writeAll(".const ");
-                if (fmt.len == 0) {
-                    if (std.math.isPositiveZero(z) or
-                        std.math.isNegativeZero(z) or
-                        std.math.isInf(z))
-                    {
-                        try writer.print("{}", .{z});
-                    } else {
-                        try writer.print("{} (;{};)", .{
-                            z,
-                            @as(
-                                std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(z))),
-                                @bitCast(z),
-                            ),
-                        });
-                    }
-                } else {
-                    try std.fmt.formatFloatValue(z.*, fmt, options, writer);
-                }
+                // TODO: Config for hex representation for float values
+                try writer.print("{} (; 0x{X} ;)", .{
+                    z,
+                    @as(
+                        std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(z))),
+                        @bitCast(z),
+                    ),
+                });
             },
-            inline .funcref, .externref => |*ref| {
-                try ref.format(fmt, options, writer);
-            },
+            inline .funcref, .externref => |*ref| try ref.format(writer),
         }
+
         try writer.writeByte(')');
     }
 
-    fn formatSlice(
-        values: []const TaggedValue,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        if (values.len == 1) {
-            try values[0].format(fmt, options, writer);
-        } else {
-            for (0.., values) |i, val| {
-                if (i > 0) {
-                    try writer.writeByte(' ');
-                }
-
-                try val.format(fmt, options, writer);
+    fn formatSlice(values: []const TaggedValue, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        for (0.., values) |i, val| {
+            if (i > 0) {
+                try writer.writeByte(' ');
             }
+
+            try val.format(writer);
         }
     }
 
-    pub fn sliceFormatter(values: []const TaggedValue) std.fmt.Formatter(formatSlice) {
-        return std.fmt.Formatter(formatSlice){ .data = values };
+    pub fn sliceFormatter(values: []const TaggedValue) std.fmt.Alt(
+        []const TaggedValue,
+        formatSlice,
+    ) {
+        return std.fmt.Alt([]const TaggedValue, formatSlice){ .data = values };
     }
 };
 

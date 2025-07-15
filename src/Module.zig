@@ -1,10 +1,3 @@
-const std = @import("std");
-const Allocator = std.mem.Allocator;
-const ArenaAllocator = std.heap.ArenaAllocator;
-const IndexedArena = @import("IndexedArena.zig");
-const opcodes = @import("opcodes.zig");
-const validator = @import("Module/validator.zig");
-
 pub const ValType = @import("Module/val_type.zig").ValType;
 pub const FuncType = @import("Module/func_type.zig").FuncType;
 
@@ -300,14 +293,7 @@ pub const Limits = extern struct {
         return a.min >= b.min and a.max <= b.max;
     }
 
-    pub fn format(
-        limits: *const Limits,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
+    pub fn format(limits: *const Limits, writer: *Writer) Writer.Error!void {
         try writer.print("{} {}", .{ limits.min, limits.max });
     }
 };
@@ -323,15 +309,8 @@ pub const TableType = extern struct {
         return a.limits.matches(&b.limits) and a.elem_type.eql(b.elem_type);
     }
 
-    pub fn format(
-        table_type: *const TableType,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-        try writer.print("{} {}", .{ table_type.limits, table_type.elem_type });
+    pub fn format(table_type: *const TableType, writer: *Writer) Writer.Error!void {
+        try writer.print("{} {t}", .{ table_type.limits, table_type.elem_type });
     }
 };
 
@@ -348,15 +327,8 @@ pub const MemType = extern struct {
         return a.limits.matches(&b.limits);
     }
 
-    pub fn format(
-        mem_type: *const MemType,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-        try writer.print("{}", .{mem_type.limits});
+    pub fn format(mem_type: *const MemType, writer: *Writer) Writer.Error!void {
+        try mem_type.limits.format(writer);
     }
 };
 
@@ -380,17 +352,10 @@ pub const GlobalType = extern struct {
         return a.val_type.eql(b.val_type) and a.mut == b.mut;
     }
 
-    pub fn format(
-        global_type: *const GlobalType,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
+    pub fn format(global_type: *const GlobalType, writer: *Writer) Writer.Error!void {
         switch (global_type.mut) {
-            .@"const" => try writer.print("{}", .{global_type.val_type}),
-            .@"var" => try writer.print("(mut {})", .{global_type.val_type}),
+            .@"const" => try writer.print("{t}", .{global_type.val_type}),
+            .@"var" => try writer.print("(mut {t})", .{global_type.val_type}),
         }
     }
 };
@@ -1766,3 +1731,11 @@ pub fn deinit(module: *Module, gpa: Allocator) void {
     gpa.free(module.arena_data);
     module.* = undefined;
 }
+
+const std = @import("std");
+const Writer = std.Io.Writer;
+const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
+const IndexedArena = @import("IndexedArena.zig");
+const opcodes = @import("opcodes.zig");
+const validator = @import("Module/validator.zig");
