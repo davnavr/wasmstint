@@ -205,7 +205,7 @@ pub const Command = struct {
         f32: u32,
         f64: u64,
         funcref, // ?u32
-        externref: ?u32,
+        externref: ?u31,
 
         pub const Vec = std.SegmentedList(Const, 1);
     };
@@ -282,7 +282,7 @@ pub const Command = struct {
                     .externref = if (std.mem.eql(u8, "null", value_string))
                         null
                     else
-                        std.fmt.parseInt(u32, value_string, 10) catch
+                        std.fmt.parseInt(u31, value_string, 10) catch
                             return error.MalformedJson, // bad externref number
                 },
                 .funcref => if (std.mem.eql(u8, "null", value_string))
@@ -373,7 +373,7 @@ pub const Command = struct {
         f32_nan: Nan,
         f64_nan: Nan,
         funcref, // ?u32
-        externref: ?u32,
+        externref: ?u31,
 
         pub const Vec = std.SegmentedList(Expected, 1);
 

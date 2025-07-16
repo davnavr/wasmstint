@@ -291,7 +291,7 @@ pub const ImportProvider = struct {
                         try writer.writeByte(' ');
                     }
 
-                    try writer.print("{f}", .{func});
+                    try func.format(writer);
                 },
                 .table => |table| try writer.print("table {f}", .{table}),
                 .mem => |mem| try writer.print("memory {f}", .{mem}),
@@ -1042,6 +1042,10 @@ pub const MemInst = extern struct {
 
         @memset(inst.bytes()[start_idx..end_idx], val);
     }
+
+    pub fn format(inst: *const MemInst, writer: *Writer) Writer.Error!void {
+        try writer.print("(module {f})", .{inst.memType()});
+    }
 };
 
 pub const TableInst = extern struct {
@@ -1324,6 +1328,10 @@ pub const TableAddr = extern struct {
             .limits = .{ .min = addr.table.len, .max = addr.table.limit },
         };
     }
+
+    pub fn format(addr: *const TableAddr, writer: *Writer) Writer.Error!void {
+        try writer.print("(table {f})", .{addr.tableType()});
+    }
 };
 
 pub const GlobalAddr = extern struct {
@@ -1343,7 +1351,7 @@ pub const GlobalAddr = extern struct {
     }
 
     pub fn format(global: GlobalAddr, writer: *Writer) Writer.Error!void {
-        try writer.print("(global {t} ", .{global.global_type});
+        try writer.print("(global {f} ", .{global.global_type});
         switch (global.global_type.val_type) {
             inline .i32, .f32, .i64, .f64 => |num| {
                 try writer.print(
@@ -1483,7 +1491,7 @@ pub const FuncAddr = extern struct {
 
         pub fn format(func: Nullable, writer: *Writer) Writer.Error!void {
             if (func.funcInst()) |addr| {
-                try writer.print("{f}", .{addr});
+                try addr.format(writer);
             } else {
                 try writer.writeAll("(ref.null func)");
             }
@@ -1491,7 +1499,7 @@ pub const FuncAddr = extern struct {
     };
 
     pub fn format(func: FuncAddr, writer: *Writer) Writer.Error!void {
-        try writer.print("{f}", .{func.expanded()});
+        try func.expanded().format(writer);
     }
 };
 
@@ -1502,6 +1510,15 @@ pub const ExternVal = union(enum) {
     global: GlobalAddr,
 
     // @sizeOf(ExternVal) ~= @sizeOf([3]usize), but this is fine as it is not expected to be stored in slices
+
+    pub fn format(val: *const ExternVal, writer: *Writer) Writer.Error!void {
+        switch (val.*) {
+            .func => |*func| try func.format(writer),
+            .mem => |mem| try mem.format(writer),
+            .table => |*table| try table.format(writer),
+            .global => |*global| try global.format(writer),
+        }
+    }
 };
 
 pub const ExternAddr = packed union {

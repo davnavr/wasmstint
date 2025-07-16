@@ -100,7 +100,7 @@ pub const TaggedValue = union(enum) {
             inline .i32, .i64 => |i| {
                 try writer.writeAll(@tagName(value.*));
                 // TODO: Config for hex formatting and signed/unsigned integer values
-                try writer.print(".const {i}", i);
+                try writer.print(".const {}", .{i});
             },
             inline .f32, .f64 => |z| {
                 try writer.writeAll(@tagName(value.*));
@@ -120,7 +120,10 @@ pub const TaggedValue = union(enum) {
         try writer.writeByte(')');
     }
 
-    fn formatSlice(values: []const TaggedValue, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    pub fn formatSlice(
+        values: []const TaggedValue,
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
         for (0.., values) |i, val| {
             if (i > 0) {
                 try writer.writeByte(' ');

@@ -89,6 +89,11 @@ pub fn processCommand(
 ) Error!void {
     switch (command.type) {
         .module => try state.processModuleCommand(command, output, scratch),
+        .assert_return => |*assert_return| try state.processAssertReturn(
+            assert_return,
+            output,
+            scratch,
+        ),
         inline else => |_, bad_tag| return failFmt(output, "TODO: handle command '{t}'", .{bad_tag}),
     }
 }
@@ -178,7 +183,7 @@ fn processModuleCommand(
         &fuel,
     ) catch @panic("oom");
 
-    try state.expectResultValues(&fuel, &Parser.Command.Expected.Vec{}, output, scratch);
+    _ = try state.expectResultValues(&fuel, &Parser.Command.Expected.Vec{}, output, scratch);
 
     const module_inst = module_alloc.expectInstantiated();
     state.current_module = module_inst;
@@ -187,7 +192,23 @@ fn processModuleCommand(
         entry.value_ptr.* = .{ .instance = module_inst, .line = command.line };
     }
 
-    output.print("passed: instantiated \"{f}\"\n", .{fmt_filename});
+    output.print("instantiated \"{f}\"\n", .{fmt_filename});
+}
+
+/// Gets the module with the given `name`, or returns the most recent module if `name` is `null`.
+fn findModuleInst(state: *const State, name: ?[]const u8, output: Output) Error!ModuleInst {
+    if (name) |find_name| {
+        const named = state.module_lookup.get(find_name) orelse return failFmt(
+            output,
+            "no module with name \"{s}\" has been instantiated at this point",
+            .{find_name},
+        );
+        return named.instance;
+    } else if (state.current_module) |module| {
+        return module;
+    } else {
+        return fail(output, "no module has been instantiated at this point");
+    }
 }
 
 fn failCallStackExhausted(state: *const State, output: Output) Error {
@@ -217,13 +238,86 @@ fn failInterpreterInterrupted(
     return fail(output, message);
 }
 
+fn checkResultIntegerMatches(
+    expected: anytype,
+    actual: std.meta.Int(.signed, @typeInfo(@TypeOf(expected)).int.bits),
+    index: usize,
+    output: Output,
+) Error!void {
+    const actual_unsigned: @TypeOf(expected) = @bitCast(actual);
+    if (expected != actual_unsigned) return failFmt(
+        output,
+        "expected 0x{[expected_u]X:0>[width]} " ++
+            "({[expected_s]} signed, {[expected_u]} unsigned)" ++
+            ", but got 0x{[actual_u]X:0>[width]} " ++
+            "({[actual_s]} signed, {[actual_u]} unsigned) at position {[pos]}",
+        .{
+            .expected_s = @as(@TypeOf(actual), @bitCast(expected)),
+            .expected_u = expected,
+            .actual_s = actual,
+            .actual_u = actual_unsigned,
+            .width = @sizeOf(@TypeOf(expected)) * 2,
+            .pos = index,
+        },
+    );
+}
+
+fn expectTypedValue(
+    value: *const Interpreter.TaggedValue,
+    comptime tag: std.meta.Tag(Interpreter.TaggedValue),
+    index: usize,
+    output: Output,
+) Error!@FieldType(Interpreter.TaggedValue, @tagName(tag)) {
+    return if (value.* != tag)
+        failFmt(
+            output,
+            "expected " ++ @tagName(tag) ++ " at position {}, but got a {t}",
+            .{ index, value.* },
+        )
+    else
+        @field(value, @tagName(tag));
+}
+
+fn checkResultValueMatches(
+    actual: *const Interpreter.TaggedValue,
+    expected: *const Parser.Command.Expected,
+    index: usize,
+    output: Output,
+) Error!void {
+    switch (expected.*) {
+        .i32 => |expected_i| try checkResultIntegerMatches(
+            expected_i,
+            try expectTypedValue(actual, .i32, index, output),
+            index,
+            output,
+        ),
+        .i64 => |expected_i| try checkResultIntegerMatches(
+            expected_i,
+            try expectTypedValue(actual, .i64, index, output),
+            index,
+            output,
+        ),
+        .funcref => {
+            const actual_ref = (try expectTypedValue(actual, .funcref, index, output)).funcInst();
+            if (actual_ref) |non_null| {
+                return failFmt(
+                    output,
+                    "expected null, got {f} at position {}",
+                    .{ non_null, index },
+                );
+            }
+        },
+        else => return failFmt(output, "TODO: check {t}", .{expected.*}),
+    }
+}
+
 fn expectResultValues(
     state: *State,
     fuel: *Interpreter.Fuel,
     expected: *const Parser.Command.Expected.Vec,
     output: Output,
     scratch: *ArenaAllocator,
-) Error!void {
+) Error![]const Interpreter.TaggedValue {
     state.runToCompletion(fuel, output);
     switch (state.interpreter.state) {
         .awaiting_validation => unreachable,
@@ -244,13 +338,11 @@ fn expectResultValues(
 
     for (0.., actual_results) |i, *actual_val| {
         const expected_val: *const Parser.Command.Expected = expected.at(i);
-        _ = expected_val;
-        _ = actual_val;
-        output.writeAll("TODO: actually check results\n");
+        try checkResultValueMatches(actual_val, expected_val, i, output);
     }
-}
 
-// TODO: What if arguments could be allocated directly in the Interpreter's value_stack?
+    return actual_results;
+}
 
 fn runToCompletion(state: *State, fuel: *Interpreter.Fuel, output: Output) void {
     for (0..1234) |_| {
@@ -333,10 +425,8 @@ fn runToCompletion(state: *State, fuel: *Interpreter.Fuel, output: Output) void 
                         //     );
                         // }
                     },
-                    .table_grow => |grow| resize_failed: {
+                    .table_grow => |grow| {
                         _ = grow; // TODO: Should ModuleAllocator API handle resizing?
-                        break :resize_failed;
-
                         // const table = grow.table.table;
                         // const new_cap = @min(
                         //     @max(grow.delta + table.len, table.capacity *| 2),
@@ -350,7 +440,7 @@ fn runToCompletion(state: *State, fuel: *Interpreter.Fuel, output: Output) void 
 
                         // if (remapped) |new_buf| {
                         //     _ = grow.resize(new_buf);
-                        // } else {
+                        // } else resize_failed: {
                         //     _ = grow.resize(
                         //         state.store.arena.allocator().alignedAlloc(
                         //             u8,
@@ -383,6 +473,201 @@ const trap_code_lookup = std.StaticStringMap(Interpreter.Trap.Code).initComptime
     .{ "indirect call type mismatch", .indirect_call_signature_mismatch },
     .{ "undefined element", .table_access_out_of_bounds },
 });
+
+const Action = union(enum) {
+    invoke,
+    get: Interpreter.TaggedValue,
+};
+
+fn formatModuleName(name: ?[]const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    if (name) |s| {
+        try writer.print("module \"{s}\"", .{s});
+    } else {
+        try writer.writeAll("current module");
+    }
+}
+
+fn fmtModuleName(name: ?[]const u8) std.fmt.Alt(?[]const u8, formatModuleName) {
+    return .{ .data = name };
+}
+
+// TODO: What if arguments could be allocated directly in the Interpreter's value_stack?
+fn allocateFunctionArguments(
+    arguments: *const Parser.Command.Const.Vec,
+    arena: *ArenaAllocator,
+) []const Interpreter.TaggedValue {
+    const dst_values = arena.allocator().alloc(Interpreter.TaggedValue, arguments.len) catch
+        @panic("oom");
+
+    for (dst_values, 0..) |*dst, i| {
+        const src: *const Parser.Command.Const = arguments.at(i);
+        dst.* = switch (src.*) {
+            inline .i32, .i64, .f32, .f64 => |c, tag| @unionInit(
+                Interpreter.TaggedValue,
+                @tagName(tag),
+                @bitCast(c),
+            ),
+            .funcref => .{ .funcref = wasmstint.runtime.FuncAddr.Nullable.null },
+            .externref => |extern_ref| .{
+                .externref = .{
+                    .nat = if (extern_ref) |addr| .fromInt(addr) else .null,
+                },
+            },
+        };
+    }
+
+    return dst_values;
+}
+
+fn processActionCommand(
+    state: *State,
+    command: *const Parser.Command.Action,
+    output: Output,
+    fuel: *Interpreter.Fuel,
+    scratch: *ArenaAllocator,
+) Error!Action {
+    const module = try state.findModuleInst(command.module, output);
+    const fmt_module = fmtModuleName(command.module);
+    const target_export = module.findExport(command.field) catch |e| switch (e) {
+        error.ExportNotFound => return failFmt(
+            output,
+            "{f} does not provide export with name \"{s}\"",
+            .{ fmt_module, command.field },
+        ),
+    };
+
+    switch (command.type) {
+        .invoke => |*invoke| {
+            const callee = switch (target_export) {
+                .func => |f| f,
+                else => return failFmt(
+                    output,
+                    "expected function export \"{s}\" from {f}, got {f}",
+                    .{ command.field, fmt_module, target_export },
+                ),
+            };
+
+            _ = state.interpreter.state.awaiting_host.beginCall(
+                state.interpreter_allocator,
+                callee,
+                allocateFunctionArguments(&invoke.args, scratch),
+                fuel,
+            ) catch |e| switch (e) {
+                error.OutOfMemory => @panic("oom"),
+                error.ValueTypeOrCountMismatch => {
+                    const signature = callee.signature();
+                    return if (signature.param_count != invoke.args.len) failFmt(
+                        output,
+                        "(export \"{s}\" {f}) from {f} expected {} arguments, got {}",
+                        .{
+                            command.field,
+                            fmt_module,
+                            callee,
+                            signature.param_count,
+                            invoke.args.len,
+                        },
+                    ) else failFmt(
+                        output,
+                        "argument type mismatch calling (export \"{s}\" {f}) from {f}",
+                        .{ command.field, fmt_module, callee },
+                    );
+                },
+            };
+            _ = scratch.reset(.retain_capacity);
+
+            return .invoke;
+        },
+        .get => {
+            const global: wasmstint.runtime.GlobalAddr = switch (target_export) {
+                .global => |g| g,
+                else => return failFmt(
+                    output,
+                    "expected global export \"{s}\" from {f}, got {f}",
+                    .{ command.field, fmt_module, target_export },
+                ),
+            };
+
+            const value: Interpreter.TaggedValue = switch (global.global_type.val_type) {
+                .i32 => .{
+                    .i32 = @as(*const i32, @ptrCast(@alignCast(global.value))).*,
+                },
+                .f32 => .{
+                    .f32 = @as(*const f32, @ptrCast(@alignCast(global.value))).*,
+                },
+                .i64 => .{
+                    .i64 = @as(*const i64, @ptrCast(@alignCast(global.value))).*,
+                },
+                .f64 => .{
+                    .f64 = @as(*const f64, @ptrCast(@alignCast(global.value))).*,
+                },
+                .externref => .{
+                    .externref = @as(
+                        *const wasmstint.runtime.ExternAddr,
+                        @ptrCast(@alignCast(global.value)),
+                    ).*,
+                },
+                .funcref => .{
+                    .funcref = @as(
+                        *const wasmstint.runtime.FuncAddr.Nullable,
+                        @ptrCast(@alignCast(global.value)),
+                    ).*,
+                },
+                .v128 => unreachable,
+            };
+
+            return .{ .get = value };
+        },
+    }
+}
+
+fn processAssertReturn(
+    state: *State,
+    command: *const Parser.Command.AssertReturn,
+    output: Output,
+    scratch: *ArenaAllocator,
+) Error!void {
+    var fuel = state.starting_fuel;
+    const action = try state.processActionCommand(&command.action, output, &fuel, scratch);
+    switch (action) {
+        .invoke => {
+            const results = try state.expectResultValues(
+                &fuel,
+                &command.expected,
+                output,
+                scratch,
+            );
+
+            if (results.len > 0) {
+                output.print(
+                    "invoke \"{s}\" returned {f}\n",
+                    .{
+                        command.action.field,
+                        std.fmt.Alt(
+                            []const Interpreter.TaggedValue,
+                            Interpreter.TaggedValue.formatSlice,
+                        ){ .data = results },
+                    },
+                );
+            }
+        },
+        .get => |actual_value| {
+            if (command.expected.len != 1) {
+                return failFmt(
+                    output,
+                    "'get' yields one value, but {} were expected",
+                    .{command.expected.len},
+                );
+            }
+
+            try checkResultValueMatches(&actual_value, command.expected.at(0), 0, output);
+
+            output.print(
+                "get \"{s}\" yielded {f}\n",
+                .{ command.action.field, actual_value },
+            );
+        },
+    }
+}
 
 const std = @import("std");
 const builtin = @import("builtin");
