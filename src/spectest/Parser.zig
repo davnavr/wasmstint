@@ -140,6 +140,15 @@ pub const Command = struct {
         const LookupKey = @typeInfo(Type).@"union".tag_type.?;
     };
 
+    fn skipExpectedArray(parser: *Parser, scratch: *ArenaAllocator) Error!void {
+        // Not documented
+        try parser.expectNextTokenStringEql(scratch, "expected");
+        parser.scanner.skipValue() catch |e| switch (e) {
+            Oom.OutOfMemory => |oom| return oom,
+            error.SyntaxError, error.UnexpectedEndOfInput => return error.MalformedJson,
+        };
+    }
+
     fn parseInner(
         parser: *Parser,
         arena: *ArenaAllocator,
@@ -147,6 +156,11 @@ pub const Command = struct {
         scratch: *ArenaAllocator,
     ) Error!Type {
         return switch (command_type) {
+            .action => action: {
+                const action = try Action.parseInner(parser, arena, scratch);
+                try skipExpectedArray(parser, scratch);
+                break :action .{ .action = action };
+            },
             inline else => |tag| @unionInit(
                 Type,
                 @tagName(tag),
@@ -413,12 +427,7 @@ pub const Command = struct {
             try parser.expectNextTokenStringEql(scratch, "text");
             const text = try parser.expectNextTokenString(arena);
 
-            // Not documented
-            try parser.expectNextTokenStringEql(scratch, "expected");
-            parser.scanner.skipValue() catch |e| switch (e) {
-                Oom.OutOfMemory => |oom| return oom,
-                error.SyntaxError, error.UnexpectedEndOfInput => return error.MalformedJson,
-            };
+            try skipExpectedArray(parser, scratch);
 
             return .{ .action = action, .text = text };
         }
