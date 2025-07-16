@@ -50,7 +50,7 @@ pub fn build(b: *Build) void {
 
         .@"test" = b.step("test", "Run all unit and specification tests"),
         .test_unit = b.step("test-unit", "Run unit tests"),
-        // .test_spec = b.step("test-spec", "Run some specification tests"),
+        .test_spec = b.step("test-spec", "Run some specification tests"),
     };
 
     const wasmstint_module = WasmstintModule.build(b, &project_options);
@@ -73,9 +73,16 @@ pub fn build(b: *Build) void {
     steps.@"test".dependOn(steps.test_unit);
 
     const translate_spectests = TranslateSpectests.build(b, steps.install_spectest, &tool_paths);
+    for (translate_spectests.tests) |test_spec| {
+        const run_test_spec = b.addRunArtifact(spectest_exe.exe);
+        run_test_spec.setName(b.fmt("spectest/{s}.wast", .{test_spec.name}));
+        run_test_spec.addArg("--run");
+        run_test_spec.addFileArg(test_spec.json_path);
+        run_test_spec.step.dependOn(translate_spectests.translate_step);
+        steps.test_spec.dependOn(&run_test_spec.step);
+    }
 
-    _ = translate_spectests;
-    // steps.@"test".dependOn(steps.test_spec);
+    steps.@"test".dependOn(steps.test_spec);
 }
 
 fn NamedModule(
