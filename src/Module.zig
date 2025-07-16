@@ -310,7 +310,7 @@ pub const TableType = extern struct {
     }
 
     pub fn format(table_type: *const TableType, writer: *Writer) Writer.Error!void {
-        try writer.print("{} {t}", .{ table_type.limits, table_type.elem_type });
+        try writer.print("{f} {t}", .{ table_type.limits, table_type.elem_type });
     }
 };
 
@@ -1615,7 +1615,11 @@ pub fn parse(
 
     const arena_data = if (options.realloc_contents) realloc: {
         const src = arena.data.items;
-        const dupe = try gpa.alignedAlloc(IndexedArena.Word, IndexedArena.max_alignment, src.len);
+        const dupe = try gpa.alignedAlloc(
+            IndexedArena.Word,
+            .fromByteUnits(IndexedArena.max_alignment),
+            src.len,
+        );
         @memcpy(dupe, src);
         break :realloc dupe;
     } else contents: {

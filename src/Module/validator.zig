@@ -642,7 +642,7 @@ const BranchFixup = packed struct(u32) {
                     @branchHint(.likely);
                     const new_alloc: []align(@alignOf(Header)) BranchFixup = try arena.allocator().alignedAlloc(
                         BranchFixup,
-                        @alignOf(Header),
+                        .fromByteUnits(@alignOf(Header)),
                         std.math.add(
                             usize,
                             header_size_in_elems,

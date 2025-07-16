@@ -29,7 +29,7 @@ pub fn readFileZ(dir: Dir, path: [:0]const u8) ReadError!FileContent {
         @panic("TODO: Windows VirtualAlloc(reserve and allocate) and then decommit");
     } else {
         const allocated: []align(page_size_min) u8 = posix.mmap(
-            std.heap.next_mmap_addr_hint,
+            std.heap.next_mmap_addr_hint, // TODO: Fix need atomic operations
             allocated_size,
             posix.system.PROT.WRITE,
             .{ .TYPE = .PRIVATE, .ANONYMOUS = true },

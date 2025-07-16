@@ -5,6 +5,8 @@ const Step = Build.Step;
 const ProjectOptions = struct {
     target: Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    // TODO(zig): https://github.com/ziglang/zig/issues/24044
+    comptime use_llvm: bool = true,
 
     fn init(b: *Build) ProjectOptions {
         return .{
@@ -141,6 +143,7 @@ const SpectestInterp = struct {
         const exe = b.addExecutable(.{
             .name = "wasmstint-spectest",
             .root_module = module,
+            .use_llvm = proj_opts.use_llvm,
         });
 
         const run = b.addRunArtifact(exe);

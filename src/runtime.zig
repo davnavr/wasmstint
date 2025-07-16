@@ -153,7 +153,7 @@ pub const ModuleAllocator = struct {
             while (request.nextMemType()) |mem_type| {
                 const buf = try std.heap.page_allocator.alignedAlloc(
                     u8,
-                    MemInst.buffer_align,
+                    .fromByteUnits(MemInst.buffer_align),
                     mem_type.limits.min * MemInst.page_size,
                 );
 
@@ -164,7 +164,7 @@ pub const ModuleAllocator = struct {
             while (request.nextTableType()) |table_type| {
                 const buf = try std.heap.page_allocator.alignedAlloc(
                     u8,
-                    TableInst.buffer_align,
+                    .fromByteUnits(TableInst.buffer_align),
                     std.math.mul(
                         usize,
                         table_type.limits.min,
@@ -232,7 +232,7 @@ pub const ModuleAllocator = struct {
 
                 const buf = try into_arena.alignedAlloc(
                     u8,
-                    MemInst.buffer_align,
+                    .fromByteUnits(MemInst.buffer_align),
                     request: switch (self.mem_limit) {
                         .allocate_minimum => minimum_len,
                         .up_to_amount => |limit| {
@@ -251,7 +251,7 @@ pub const ModuleAllocator = struct {
             while (request.nextTableType()) |table_type| {
                 const buf = try into_arena.alignedAlloc(
                     u8,
-                    TableInst.buffer_align,
+                    .fromByteUnits(TableInst.buffer_align),
                     std.math.mul(
                         usize,
                         table_type.limits.min,

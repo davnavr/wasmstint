@@ -451,7 +451,7 @@ pub const Command = struct {
 
     pub const AssertWithModule = struct {
         /// Path to the module, relative to the JSON file.
-        filename: []const u8,
+        filename: [:0]const u8,
         /// The error message to expect.
         text: []const u8,
         module_type: ModuleType,
@@ -463,7 +463,11 @@ pub const Command = struct {
         ) Error!AssertWithModule {
             try parser.expectNextTokenStringEql(scratch, "filename");
             _ = scratch.reset(.retain_capacity);
-            const filename = try parser.expectNextTokenString(arena);
+            const filename = try arena.allocator().dupeZ(
+                u8,
+                try parser.expectNextTokenString(scratch),
+            );
+            _ = scratch.reset(.retain_capacity);
 
             try parser.expectNextTokenStringEql(scratch, "text");
             _ = scratch.reset(.retain_capacity);
@@ -549,6 +553,7 @@ pub fn next(parser: *Parser, arena: *ArenaAllocator, scratch: *ArenaAllocator) E
     const @"type" = try Command.parseInner(parser, arena, command_type, scratch);
     try parser.expectNextToken(.object_end);
 
+    parser.command_count += 1;
     return .{ .line = line, .type = @"type" };
 }
 
