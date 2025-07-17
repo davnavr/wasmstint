@@ -110,7 +110,11 @@ pub fn processCommand(
             output,
             scratch,
         ),
-        // .assert_uninstantiable
+        .assert_uninstantiable => |*assert_uninstantiable| try state.processAssertUninstantiable(
+            assert_uninstantiable,
+            output,
+            scratch,
+        ),
         .assert_unlinkable => |*assert_unlinkable| try state.processAssertUnlinkable(
             assert_unlinkable,
             output,
@@ -1005,6 +1009,67 @@ fn processAssertMalformed(
     output.writeAll("TODO: actually check the message for assert_malformed\n");
 }
 
+fn processAssertUninstantiable(
+    state: *State,
+    command: *const Parser.Command.AssertWithModule,
+    output: Output,
+    arena: *ArenaAllocator,
+) Error!void {
+    const fmt_filename = std.unicode.fmtUtf8(command.filename);
+    const module_binary = (try state.openAssertionModuleContents(command, output)) orelse {
+        output.print("skipping text module \"{f}\"\n", .{fmt_filename});
+        return;
+    };
+
+    var scratch = std.heap.ArenaAllocator.init(arena.allocator());
+    var wasm: []const u8 = module_binary.contents;
+    var module = wasmstint.Module.parse(
+        arena.allocator(),
+        &wasm,
+        &scratch,
+        state.rng.random(),
+        .{ .realloc_contents = true },
+    ) catch |e| return switch (e) {
+        error.OutOfMemory => @panic("oom"),
+        error.InvalidWasm => failFmt(output, "failed to validate module {f}", .{fmt_filename}),
+        else => failFmt(output, "module parse error: {t}", .{e}),
+    };
+    _ = scratch.reset(.retain_capacity);
+
+    const validation_finished = module.finishCodeValidation(
+        arena.allocator(),
+        &scratch,
+    ) catch |e| switch (e) {
+        error.OutOfMemory => @panic("oom"),
+        else => return failFmt(output, "module code validation error: {t}", .{e}),
+    };
+    _ = scratch.reset(.retain_capacity);
+
+    std.debug.assert(validation_finished);
+
+    var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
+    var module_alloc = wasmstint.runtime.ModuleAlloc.allocate(
+        &module,
+        state.imports.provider(),
+        arena.allocator(),
+        state.store, // TODO: Use temporary store
+        &import_error,
+    ) catch |e| switch (e) {
+        error.OutOfMemory => @panic("oom"),
+        error.ImportFailure => return failFmt(output, "{f}", .{import_error}),
+    };
+
+    var fuel = state.starting_fuel;
+    _ = state.interpreter.state.awaiting_host.instantiateModule(
+        state.module_arena.allocator(),
+        &module_alloc,
+        &fuel,
+    ) catch @panic("oom");
+
+    const message = try state.expectTrap(&fuel, command.text, &scratch, output);
+    output.print("module instantiation \"{f}\" trapped: \"{s}\"\n", .{ fmt_filename, message });
+}
+
 fn processAssertUnlinkable(
     state: *State,
     command: *const Parser.Command.AssertWithModule,
@@ -1047,7 +1112,7 @@ fn processAssertUnlinkable(
         &module,
         state.imports.provider(),
         arena.allocator(),
-        state.store,
+        state.store, // TODO: Use temporary store
         &import_error,
     ) catch |e| switch (e) {
         error.OutOfMemory => @panic("oom"),

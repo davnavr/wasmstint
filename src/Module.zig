@@ -1663,7 +1663,6 @@ pub fn parse(
         const start_signature: *const FuncType = func_types
             .getAt(@intFromEnum(start_idx), arena_data).final;
 
-        std.log.debug("HEY {} {f}", .{ @intFromEnum(start_idx), start_signature });
         if (start_signature.param_count != 0 or start_signature.result_count != 0) {
             return error.InvalidWasm; // bad start function signature
         }
