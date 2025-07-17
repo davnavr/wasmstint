@@ -87,15 +87,49 @@ pub fn processCommand(
     output: Output,
     scratch: *ArenaAllocator,
 ) Error!void {
+    state.interpreter.reset();
     switch (command.type) {
         .module => try state.processModuleCommand(command, output, scratch),
+        .action => |*act| {
+            var fuel = state.starting_fuel;
+            _ = try state.processActionCommand(act, output, &fuel, scratch);
+        },
         .assert_return => |*assert_return| try state.processAssertReturn(
             assert_return,
             output,
             scratch,
         ),
+        // .assert_exhaustion => |*assert_exhaustion| try state.processAssertExhaustion(),
+        .assert_trap => |*assert_trap| try state.processAssertTrap(assert_trap, output, scratch),
+        .assert_invalid => |*assert_invalid| try state.processAssertInvalid(
+            assert_invalid,
+            output,
+            scratch,
+        ),
+        // .assert_malformed => |*assert_malformed| try state.processAssertMalformed(assert_malformed, output, scratch,),
+        // .assert_uninstantiable
+        // .assert_unlinkable
+        // .register
         inline else => |_, bad_tag| return failFmt(output, "TODO: handle command '{t}'", .{bad_tag}),
     }
+}
+
+fn openModuleContents(
+    state: *State,
+    filename: [:0]const u8,
+    output: Output,
+) Error!wasmstint.FileContent {
+    return wasmstint.FileContent.readFileZ(
+        state.script_dir,
+        filename,
+    ) catch |e| switch (e) {
+        error.OutOfMemory => @panic("oom"),
+        else => |io_err| failFmt(
+            output,
+            "I/O error while reading file \"{f}\": {t}",
+            .{ std.unicode.fmtUtf8(filename), io_err },
+        ),
+    };
 }
 
 fn processModuleCommand(
@@ -118,18 +152,8 @@ fn processModuleCommand(
         break :has_name entry;
     } else null;
 
+    const module_binary = try state.openModuleContents(module.filename, output);
     const fmt_filename = std.unicode.fmtUtf8(module.filename);
-    const module_binary = wasmstint.FileContent.readFileZ(
-        state.script_dir,
-        module.filename,
-    ) catch |e| switch (e) {
-        error.OutOfMemory => @panic("oom"),
-        else => |io_err| return failFmt(
-            output,
-            "I/O error while reading file \"{f}\": {t}",
-            .{ fmt_filename, io_err },
-        ),
-    };
     // errdefer module_binary.deinit();
 
     var parsed_module = state.module_arena.allocator().create(wasmstint.Module) catch
@@ -176,7 +200,6 @@ fn processModuleCommand(
     };
 
     var fuel = state.starting_fuel;
-    state.interpreter.reset();
     _ = state.interpreter.state.awaiting_host.instantiateModule(
         state.module_arena.allocator(),
         &module_alloc,
@@ -461,19 +484,6 @@ fn runToCompletion(state: *State, fuel: *Interpreter.Fuel, output: Output) void 
     @panic("Possible infinite loop in interpreter handler");
 }
 
-const trap_code_lookup = std.StaticStringMap(Interpreter.Trap.Code).initComptime(.{
-    .{ "unreachable", .unreachable_code_reached },
-    .{ "integer divide by zero", .integer_division_by_zero },
-    .{ "integer overflow", .integer_overflow },
-    .{ "invalid conversion to integer", .invalid_conversion_to_integer },
-    .{ "out of bounds memory access", .memory_access_out_of_bounds },
-    .{ "out of bounds table access", .table_access_out_of_bounds },
-    .{ "uninitialized element", .indirect_call_to_null },
-    .{ "indirect call type mismatch element", .indirect_call_signature_mismatch },
-    .{ "indirect call type mismatch", .indirect_call_signature_mismatch },
-    .{ "undefined element", .table_access_out_of_bounds },
-});
-
 const Action = union(enum) {
     invoke,
     get: Interpreter.TaggedValue,
@@ -620,6 +630,60 @@ fn processActionCommand(
     }
 }
 
+fn failInterpreterResults(state: *State, scratch: *ArenaAllocator, output: Output) Error {
+    const results = state.interpreter.state.awaiting_host.copyValues(scratch) catch
+        @panic("oom");
+
+    return if (results.len > 0)
+        failFmt(
+            output,
+            "call unexpectedly returned {f}",
+            .{Interpreter.TaggedValue.sliceFormatter(results)},
+        )
+    else
+        fail(output, "call unexpectedly succeeded");
+}
+
+fn expectTrap(
+    state: *State,
+    fuel: *Interpreter.Fuel,
+    expected: []const u8,
+    arena: *ArenaAllocator,
+    output: Output,
+) Error![]const u8 {
+    state.runToCompletion(fuel, output);
+
+    const trap: *const Interpreter.Trap = switch (state.interpreter.state) {
+        .awaiting_validation => unreachable,
+        .trapped => |*trapped| trapped,
+        .call_stack_exhaustion => return state.failCallStackExhausted(output),
+        .interrupted => |interrupt| return failInterpreterInterrupted(
+            interrupt.cause,
+            output,
+        ),
+        .awaiting_host => return state.failInterpreterResults(arena, output),
+    };
+
+    // Recreate spec test interpreter trap message
+    const actual: []const u8 = switch (trap.code) {
+        .unreachable_code_reached => "unreachable executed",
+        .integer_division_by_zero => "integer divide by zero",
+        .integer_overflow => "integer overflow",
+        .invalid_conversion_to_integer => "invalid conversion to integer",
+        // .memory_access_out_of_bounds
+        // .table_access_out_of_bounds
+        .indirect_call_to_null => "uninitialized table element",
+        // .indirect_call_signature_mismatch
+        else => |bad| return failFmt(output, "TODO: trap message recreation for {t}", .{bad}),
+    };
+
+    if (std.mem.indexOf(u8, actual, expected) == null) {
+        // TODO: error
+    }
+
+    return actual;
+}
+
 fn processAssertReturn(
     state: *State,
     command: *const Parser.Command.AssertReturn,
@@ -642,10 +706,7 @@ fn processAssertReturn(
                     "invoke \"{s}\" returned {f}\n",
                     .{
                         command.action.field,
-                        std.fmt.Alt(
-                            []const Interpreter.TaggedValue,
-                            Interpreter.TaggedValue.formatSlice,
-                        ){ .data = results },
+                        Interpreter.TaggedValue.sliceFormatter(results),
                     },
                 );
             }
@@ -667,6 +728,87 @@ fn processAssertReturn(
             );
         },
     }
+}
+
+fn processAssertTrap(
+    state: *State,
+    command: *const Parser.Command.AssertWithMessage,
+    output: Output,
+    scratch: *ArenaAllocator,
+) Error!void {
+    var fuel = state.starting_fuel;
+    const finished_action = try state.processActionCommand(
+        &command.action,
+        output,
+        &fuel,
+        scratch,
+    );
+
+    if (finished_action != .invoke) {
+        return failFmt(output, "cannot check '{t}' for traps", .{finished_action});
+    }
+
+    const message = try state.expectTrap(&fuel, command.text, scratch, output);
+    output.print("invoke \"{s}\" trapped: \"{s}\"\n", .{ command.action.field, message });
+}
+
+fn openAssertionModuleContents(
+    state: *State,
+    command: *const Parser.Command.AssertWithModule,
+    output: Output,
+) Error!?wasmstint.FileContent {
+    return switch (command.module_type) {
+        .binary => try state.openModuleContents(command.filename, output),
+        .text => null,
+    };
+}
+
+fn processAssertInvalid(
+    state: *State,
+    command: *const Parser.Command.AssertWithModule,
+    output: Output,
+    arena: *ArenaAllocator,
+) Error!void {
+    const fmt_filename = std.unicode.fmtUtf8(command.filename);
+    const module_binary = (try state.openAssertionModuleContents(command, output)) orelse {
+        output.print("skipping text module \"{f}\"\n", .{fmt_filename});
+        return;
+    };
+
+    var scratch = std.heap.ArenaAllocator.init(arena.allocator());
+    var wasm: []const u8 = module_binary.contents;
+    const code = validation_failed: {
+        var parsed_module = wasmstint.Module.parse(
+            arena.allocator(),
+            &wasm,
+            &scratch,
+            state.rng.random(),
+            .{ .realloc_contents = false },
+        ) catch |e| switch (e) {
+            error.OutOfMemory => @panic("oom"),
+            else => |err| break :validation_failed err,
+        };
+
+        _ = scratch.reset(.retain_capacity);
+
+        const validation_finished = parsed_module.finishCodeValidation(
+            state.module_arena.allocator(),
+            &scratch,
+        ) catch |e| switch (e) {
+            error.OutOfMemory => @panic("oom"),
+            else => |err| break :validation_failed err,
+        };
+
+        std.debug.assert(validation_finished);
+
+        return failFmt(
+            output,
+            "module \"{f}\" unexpectedly passed validation",
+            .{fmt_filename},
+        );
+    };
+
+    output.print("TODO: actually check the message for assert_invalid ({t})\n", .{code});
 }
 
 const std = @import("std");
