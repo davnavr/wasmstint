@@ -111,7 +111,11 @@ pub fn processCommand(
             scratch,
         ),
         // .assert_uninstantiable
-        // .assert_unlinkable
+        .assert_unlinkable => |*assert_unlinkable| try state.processAssertUnlinkable(
+            assert_unlinkable,
+            output,
+            scratch,
+        ),
         .register => |*register| try state.processRegisterCommand(register, output),
         inline else => |_, bad_tag| return failFmt(output, "TODO: handle command '{t}'", .{bad_tag}),
     }
@@ -999,6 +1003,72 @@ fn processAssertMalformed(
     }
 
     output.writeAll("TODO: actually check the message for assert_malformed\n");
+}
+
+fn processAssertUnlinkable(
+    state: *State,
+    command: *const Parser.Command.AssertWithModule,
+    output: Output,
+    arena: *ArenaAllocator,
+) Error!void {
+    const fmt_filename = std.unicode.fmtUtf8(command.filename);
+    const module_binary = (try state.openAssertionModuleContents(command, output)) orelse {
+        output.print("skipping text module \"{f}\"\n", .{fmt_filename});
+        return;
+    };
+
+    var scratch = std.heap.ArenaAllocator.init(arena.allocator());
+    var wasm: []const u8 = module_binary.contents;
+    var module = wasmstint.Module.parse(
+        arena.allocator(),
+        &wasm,
+        &scratch,
+        state.rng.random(),
+        .{ .realloc_contents = true },
+    ) catch |e| return switch (e) {
+        error.OutOfMemory => @panic("oom"),
+        error.InvalidWasm => failFmt(output, "failed to validate module {f}", .{fmt_filename}),
+        else => failFmt(output, "module parse error: {t}", .{e}),
+    };
+    _ = scratch.reset(.retain_capacity);
+
+    const validation_finished = module.finishCodeValidation(
+        arena.allocator(),
+        &scratch,
+    ) catch |e| switch (e) {
+        error.OutOfMemory => @panic("oom"),
+        else => return failFmt(output, "module code validation error: {t}", .{e}),
+    };
+
+    std.debug.assert(validation_finished);
+
+    var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
+    _ = wasmstint.runtime.ModuleAlloc.allocate(
+        &module,
+        state.imports.provider(),
+        arena.allocator(),
+        state.store,
+        &import_error,
+    ) catch |e| switch (e) {
+        error.OutOfMemory => @panic("oom"),
+        error.ImportFailure => {
+            const expected_message = switch (import_error.reason) {
+                .none_provided => "unknown import",
+                .type_mismatch, .wrong_desc => "incompatible import type",
+            };
+
+            if (std.mem.eql(u8, expected_message, command.text)) {
+                output.print("module linking failed: {f}\n", .{import_error});
+                return;
+            } else return failFmt(
+                output,
+                "could not match expected error \"{s}\" with \"{f}\"",
+                .{ command.text, import_error },
+            );
+        },
+    };
+
+    return failFmt(output, "expected linker error for module \"{f}\"", .{fmt_filename});
 }
 
 const std = @import("std");
