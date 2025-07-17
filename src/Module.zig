@@ -296,6 +296,27 @@ pub const Limits = extern struct {
     pub fn format(limits: *const Limits, writer: *Writer) Writer.Error!void {
         try writer.print("{} {}", .{ limits.min, limits.max });
     }
+
+    fn read(reader: Reader) ParseError!Limits {
+        const LimitsFlag = enum(u8) {
+            no_maximum = 0x00,
+            has_maximum = 0x01,
+        };
+
+        const flag = try reader.readByteTag(LimitsFlag);
+
+        // When 64-bit memories are supported, parsed type needs to conditionally change to u64.
+        const min = try reader.readUleb128(u32);
+        const max: u32 = switch (flag) {
+            .no_maximum => std.math.maxInt(u32),
+            .has_maximum => try reader.readUleb128(u32),
+        };
+
+        return if (min <= max)
+            .{ .min = min, .max = max }
+        else
+            error.InvalidWasm;
+    }
 };
 
 pub const TableType = extern struct {
@@ -311,6 +332,15 @@ pub const TableType = extern struct {
 
     pub fn format(table_type: *const TableType, writer: *Writer) Writer.Error!void {
         try writer.print("{f} {t}", .{ table_type.limits, table_type.elem_type });
+    }
+
+    fn read(reader: Reader) ParseError!TableType {
+        const elem_type = try ValType.read(reader);
+        if (!elem_type.isRefType()) return error.MalformedWasm;
+        return .{
+            .elem_type = elem_type,
+            .limits = try Limits.read(reader),
+        };
     }
 };
 
@@ -329,6 +359,11 @@ pub const MemType = extern struct {
 
     pub fn format(mem_type: *const MemType, writer: *Writer) Writer.Error!void {
         try mem_type.limits.format(writer);
+    }
+
+    fn read(reader: Reader) ParseError!MemType {
+        const limits = try Limits.read(reader);
+        return .{ .limits = limits };
     }
 };
 
@@ -358,6 +393,14 @@ pub const GlobalType = extern struct {
             .@"var" => try writer.print("(mut {t})", .{global_type.val_type}),
         }
     }
+
+    fn read(reader: Reader) Reader.Error!GlobalType {
+        const val_type = try ValType.read(reader);
+        return .{
+            .val_type = val_type,
+            .mut = try reader.readByteTag(GlobalType.Mut),
+        };
+    }
 };
 
 pub const ConstExpr = union(enum) {
@@ -369,6 +412,58 @@ pub const ConstExpr = union(enum) {
 
     comptime {
         std.debug.assert(@sizeOf(ConstExpr) == 8);
+    }
+
+    fn read(
+        reader: Reader,
+        expected_type: ValType,
+        func_count: u32,
+        /// Should refer to global imports only.
+        global_types: IndexedArena.Slice(GlobalType),
+        arena: *IndexedArena,
+    ) ParseError!ConstExpr {
+        const const_opcode = try reader.readByteTag(opcodes.ByteOpcode);
+        const expr: ConstExpr = expr: switch (const_opcode) {
+            .@"i32.const" => {
+                if (!expected_type.eql(ValType.i32)) return error.InvalidWasm;
+                break :expr .{ .i32_or_f32 = @bitCast(try reader.readIleb128(i32)) };
+            },
+            .@"f32.const" => {
+                if (!expected_type.eql(ValType.f32)) return error.InvalidWasm;
+                break :expr .{ .i32_or_f32 = std.mem.readInt(u32, try reader.readArray(4), .little) };
+            },
+            .@"i64.const" => {
+                const n = try arena.create(u64);
+                n.set(arena, @bitCast(try reader.readIleb128(i64)));
+                break :expr .{ .i64_or_f64 = n };
+            },
+            .@"f64.const" => {
+                const n = try arena.create(u64);
+                n.set(arena, std.mem.readInt(u64, try reader.readArray(8), .little));
+                break :expr .{ .i64_or_f64 = n };
+            },
+            .@"ref.null" => ref_null: {
+                const actual_type = try ValType.read(reader);
+                if (!actual_type.isRefType()) return error.InvalidWasm;
+                if (actual_type != expected_type) return error.InvalidWasm;
+                break :ref_null .{ .@"ref.null" = expected_type };
+            },
+            .@"ref.func" => .{ .@"ref.func" = try reader.readIdx(FuncIdx, func_count) },
+            .@"global.get" => {
+                const global_idx = try reader.readIdx(GlobalIdx, global_types);
+                const actual_type: *const GlobalType = global_types.ptrAt(@intFromEnum(global_idx), arena);
+                if (!actual_type.val_type.eql(expected_type))
+                    return error.InvalidWasm;
+
+                break :expr .{ .@"global.get" = global_idx };
+            },
+            else => return ParseError.InvalidWasm,
+        };
+
+        const end_opcode = try reader.readByteTag(opcodes.ByteOpcode);
+        if (end_opcode != .end) return ParseError.InvalidWasm;
+
+        return expr;
     }
 };
 
@@ -496,226 +591,9 @@ const ImportExportDesc = enum(u8) {
     global = 3,
 };
 
-pub const NoEofError = error{EndOfStream};
-
-pub const ReaderError = error{
-    /// An error occurred while parsing the WebAssembly module.
-    MalformedWasm,
-} || NoEofError;
-
-pub const LimitError = error{
-    /// See <https://webassembly.github.io/spec/core/appendix/implementation.html>.
-    WasmImplementationLimit,
-};
-
-pub const ParseError = error{
-    /// The input did not start with the WebAssembly preamble.
-    NotWasm,
-    InvalidWasm,
-} || ReaderError || LimitError || Allocator.Error;
-
-pub const Reader = struct {
-    bytes: *[]const u8,
-
-    const Error = ReaderError;
-
-    pub fn init(bytes: *[]const u8) Reader {
-        return .{ .bytes = bytes };
-    }
-
-    pub fn isEmpty(reader: Reader) bool {
-        return reader.bytes.len == 0;
-    }
-
-    pub fn expectEndOfStream(reader: Reader) ReaderError!void {
-        if (!reader.isEmpty()) return error.MalformedWasm;
-    }
-
-    pub fn readAssumeLength(reader: Reader, len: usize) []const u8 {
-        const skipped = reader.bytes.*[0..len];
-        reader.bytes.* = reader.bytes.*[len..];
-        return skipped;
-    }
-
-    pub fn read(reader: Reader, len: usize) NoEofError![]const u8 {
-        if (reader.bytes.len < len) return error.EndOfStream;
-        return reader.readAssumeLength(len);
-    }
-
-    pub fn readArray(reader: Reader, comptime len: usize) NoEofError!*const [len]u8 {
-        const s = try reader.read(len);
-        return s[0..len];
-    }
-
-    pub fn readByte(reader: Reader) NoEofError!u8 {
-        if (reader.isEmpty()) return error.EndOfStream;
-        return (try reader.readArray(1))[0];
-    }
-
-    pub fn readByteTag(reader: Reader, comptime Tag: type) Error!Tag {
-        comptime {
-            std.debug.assert(@bitSizeOf(@typeInfo(Tag).@"enum".tag_type) <= 8);
-        }
-
-        return std.meta.intToEnum(Tag, try reader.readByte()) catch |e| switch (e) {
-            std.meta.IntToEnumError.InvalidEnumTag => return error.MalformedWasm,
-        };
-    }
-
-    pub fn readUleb128(reader: Reader, comptime T: type) Error!T {
-        return std.leb.readUleb128(T, reader) catch |e| switch (e) {
-            error.Overflow => ReaderError.MalformedWasm,
-            NoEofError.EndOfStream => |eof| eof,
-        };
-    }
-
-    pub fn readUleb128Casted(reader: Reader, comptime T: type, comptime U: type) (Error || LimitError)!U {
-        comptime std.debug.assert(@bitSizeOf(U) < @bitSizeOf(T));
-        return std.math.cast(U, try reader.readUleb128(T)) orelse LimitError.WasmImplementationLimit;
-    }
-
-    pub fn readUleb128Enum(reader: Reader, comptime T: type, comptime E: type) Error!E {
-        return std.meta.intToEnum(E, try reader.readUleb128(T)) catch |e| switch (e) {
-            std.meta.IntToEnumError.InvalidEnumTag => return error.MalformedWasm,
-        };
-    }
-
-    pub fn readIleb128(reader: Reader, comptime T: type) Error!T {
-        return std.leb.readIleb128(T, reader) catch |e| switch (e) {
-            error.Overflow => ReaderError.MalformedWasm,
-            NoEofError.EndOfStream => |eof| eof,
-        };
-    }
-
-    pub fn readByteVec(reader: Reader) Error![]const u8 {
-        const len = try reader.readUleb128(u32);
-        return reader.read(len);
-    }
-
-    pub fn readName(reader: Reader) Error!std.unicode.Utf8View {
-        const contents = try reader.readByteVec();
-        return if (std.unicode.utf8ValidateSlice(contents))
-            .{ .bytes = contents }
-        else
-            error.MalformedWasm;
-    }
-
-    pub fn readValType(reader: Reader) Error!ValType {
-        // Code has to change if ValType becomes a pointer to support typed function references/GC proposal.
-        comptime std.debug.assert(@typeInfo(ValType).@"enum".tag_type == u8);
-
-        return reader.readByteTag(ValType);
-    }
-
-    fn readLimits(reader: Reader) ParseError!Limits {
-        const LimitsFlag = enum(u8) {
-            no_maximum = 0x00,
-            has_maximum = 0x01,
-        };
-
-        const flag = try reader.readByteTag(LimitsFlag);
-
-        // When 64-bit memories are supported, parsed type needs to conditionally change to u64.
-        const min = try reader.readUleb128(u32);
-        const max: u32 = switch (flag) {
-            .no_maximum => std.math.maxInt(u32),
-            .has_maximum => try reader.readUleb128(u32),
-        };
-
-        return if (min <= max)
-            .{ .min = min, .max = max }
-        else
-            error.InvalidWasm;
-    }
-
-    fn readTableType(reader: Reader) ParseError!TableType {
-        const elem_type = try reader.readValType();
-        if (!elem_type.isRefType()) return error.MalformedWasm;
-        return .{
-            .elem_type = elem_type,
-            .limits = try reader.readLimits(),
-        };
-    }
-
-    fn readMemType(reader: Reader) ParseError!MemType {
-        const limits = try reader.readLimits();
-        return .{ .limits = limits };
-    }
-
-    fn readGlobalType(reader: Reader) Error!GlobalType {
-        const val_type = try reader.readValType();
-        return .{
-            .val_type = val_type,
-            .mut = try reader.readByteTag(GlobalType.Mut),
-        };
-    }
-
-    pub fn readIdx(reader: Reader, comptime I: type, bounds: anytype) !I {
-        const idx = try reader.readUleb128(u32);
-        const len = switch (@typeInfo(@TypeOf(bounds))) {
-            .@"struct" => bounds.len,
-            .int => bounds,
-            else => comptime unreachable,
-        };
-
-        return if (idx < len)
-            @enumFromInt(std.math.cast(@typeInfo(I).@"enum".tag_type, idx) orelse return error.WasmImplementationLimit)
-        else
-            error.InvalidWasm;
-    }
-
-    fn readConstExpr(
-        reader: Reader,
-        expected_type: ValType,
-        func_count: u32,
-        /// Should refer to global imports only.
-        global_types: IndexedArena.Slice(GlobalType),
-        arena: *IndexedArena,
-    ) ParseError!ConstExpr {
-        const const_opcode = try reader.readByteTag(opcodes.ByteOpcode);
-        const expr: ConstExpr = expr: switch (const_opcode) {
-            .@"i32.const" => {
-                if (!expected_type.eql(ValType.i32)) return error.InvalidWasm;
-                break :expr .{ .i32_or_f32 = @bitCast(try reader.readIleb128(i32)) };
-            },
-            .@"f32.const" => {
-                if (!expected_type.eql(ValType.f32)) return error.InvalidWasm;
-                break :expr .{ .i32_or_f32 = std.mem.readInt(u32, try reader.readArray(4), .little) };
-            },
-            .@"i64.const" => {
-                const n = try arena.create(u64);
-                n.set(arena, @bitCast(try reader.readIleb128(i64)));
-                break :expr .{ .i64_or_f64 = n };
-            },
-            .@"f64.const" => {
-                const n = try arena.create(u64);
-                n.set(arena, std.mem.readInt(u64, try reader.readArray(8), .little));
-                break :expr .{ .i64_or_f64 = n };
-            },
-            .@"ref.null" => ref_null: {
-                const actual_type = try reader.readValType();
-                if (!actual_type.isRefType()) return error.InvalidWasm;
-                if (actual_type != expected_type) return error.InvalidWasm;
-                break :ref_null .{ .@"ref.null" = expected_type };
-            },
-            .@"ref.func" => .{ .@"ref.func" = try reader.readIdx(FuncIdx, func_count) },
-            .@"global.get" => {
-                const global_idx = try reader.readIdx(GlobalIdx, global_types);
-                const actual_type: *const GlobalType = global_types.ptrAt(@intFromEnum(global_idx), arena);
-                if (!actual_type.val_type.eql(expected_type))
-                    return error.InvalidWasm;
-
-                break :expr .{ .@"global.get" = global_idx };
-            },
-            else => return ParseError.InvalidWasm,
-        };
-
-        const end_opcode = try reader.readByteTag(opcodes.ByteOpcode);
-        if (end_opcode != .end) return ParseError.InvalidWasm;
-
-        return expr;
-    }
-};
+pub const NoEofError = Reader.NoEofError;
+pub const LimitError = Reader.LimitError;
+pub const ParseError = Reader.ParseError;
 
 pub const ParseOptions = struct {
     /// If true, module data is initially allocated in a scratch allocator as it is resized.
@@ -880,7 +758,7 @@ pub fn parse(
             const param_count = try type_reader.readUleb128Casted(u32, u16);
             const param_types = try scratch.allocator().alloc(ValType, param_count);
             for (param_types) |*param_ty| {
-                param_ty.* = try type_reader.readValType();
+                param_ty.* = try ValType.read(type_reader);
             }
 
             const result_count = try type_reader.readUleb128Casted(u32, u16);
@@ -888,7 +766,7 @@ pub fn parse(
             @memcpy(types_buf.items(&arena)[0..param_count], param_types);
 
             for (param_count..(param_count + result_count)) |result_i| {
-                types_buf.setAt(result_i, &arena, try type_reader.readValType());
+                types_buf.setAt(result_i, &arena, try ValType.read(type_reader));
             }
 
             type_sec.setAt(
@@ -989,21 +867,21 @@ pub fn parse(
                     try table_imports.append(scratch.allocator(), import_name);
                     try table_import_types.append(
                         scratch.allocator(),
-                        try import_reader.readTableType(),
+                        try TableType.read(import_reader),
                     );
                 },
                 .mem => {
                     try mem_imports.append(scratch.allocator(), import_name);
                     try mem_import_types.append(
                         scratch.allocator(),
-                        try import_reader.readMemType(),
+                        try MemType.read(import_reader),
                     );
                 },
                 .global => {
                     try global_imports.append(scratch.allocator(), import_name);
                     try global_import_types.append(
                         scratch.allocator(),
-                        try import_reader.readGlobalType(),
+                        try GlobalType.read(import_reader),
                     );
                 },
             }
@@ -1083,7 +961,7 @@ pub fn parse(
         table_import_types.writeToSlice(table_types_dst[0..table_import_len], 0);
 
         for (table_types_dst[table_import_len..]) |*tt|
-            tt.* = try table_reader.readTableType();
+            tt.* = try TableType.read(table_reader);
 
         try table_reader.expectEndOfStream();
         known_sections.table = undefined;
@@ -1114,7 +992,7 @@ pub fn parse(
         mem_import_types.writeToSlice(mem_types_dst[0..mem_import_len], 0);
 
         for (mem_types_dst[mem_import_len..]) |*mem|
-            mem.* = try mem_reader.readMemType();
+            mem.* = try MemType.read(mem_reader);
 
         try mem_reader.expectEndOfStream();
         known_sections.mem = undefined;
@@ -1151,8 +1029,9 @@ pub fn parse(
         global_import_types.writeToSlice(import_types_slice.items(&arena), 0);
 
         for (0..global_len) |def_idx| {
-            const ty = try global_reader.readGlobalType();
-            const expr = try global_reader.readConstExpr(
+            const ty = try GlobalType.read(global_reader);
+            const expr = try ConstExpr.read(
+                global_reader,
                 ty.val_type,
                 func_types.len,
                 globals.types.slice(0, global_import_len),
@@ -1325,7 +1204,8 @@ pub fn parse(
                 if (table_types.len <= @intFromEnum(table_idx))
                     return error.InvalidWasm;
 
-                const offset = try elems_reader.readConstExpr(
+                const offset = try ConstExpr.read(
+                    elems_reader,
                     .i32,
                     func_types.len,
                     global_types_in_const,
@@ -1391,7 +1271,7 @@ pub fn parse(
                     std.debug.assert(elem_kind == .funcref);
                     break :func_type ValType.funcref;
                 },
-                .reftype => try elems_reader.readValType(),
+                .reftype => try ValType.read(elems_reader),
             };
 
             if (!ref_type.isRefType()) return error.InvalidWasm;
@@ -1404,7 +1284,8 @@ pub fn parse(
                 );
 
                 for (0..expr_count) |_| {
-                    const e = try elems_reader.readConstExpr(
+                    const e = try ConstExpr.read(
+                        elems_reader,
                         ref_type,
                         func_types.len,
                         global_types_in_const,
@@ -1565,7 +1446,8 @@ pub fn parse(
                 else
                     MemIdx.default;
 
-                const offset = try datas_reader.readConstExpr(
+                const offset = try ConstExpr.read(
+                    datas_reader,
                     .i32,
                     func_types.len,
                     global_types_in_const,
@@ -1755,5 +1637,6 @@ const Writer = std.Io.Writer;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const IndexedArena = @import("IndexedArena.zig");
+const Reader = @import("Module/Reader.zig");
 const opcodes = @import("opcodes.zig");
 const validator = @import("Module/validator.zig");

@@ -8,7 +8,7 @@
 //! ["A fast in-place interpreter for WebAssembly"]: https://doi.org/10.48550/arXiv.2205.01183
 
 pub const Error = error{InvalidWasm} ||
-    Module.ReaderError ||
+    Reader.Error ||
     Module.LimitError ||
     Allocator.Error;
 
@@ -233,13 +233,13 @@ const BlockType = union(enum) {
         }
     }
 
-    fn read(reader: Module.Reader, module: *const Module) Error!BlockType {
+    fn read(reader: Reader, module: *const Module) Error!BlockType {
         var int_bytes = reader.bytes.*;
-        const int_reader = Module.Reader{ .bytes = &int_bytes };
+        const int_reader = Reader{ .bytes = &int_bytes };
         const tag_int = try int_reader.readIleb128(i33);
 
         var byte_bytes = reader.bytes.*;
-        const byte_reader = Module.Reader{ .bytes = &byte_bytes };
+        const byte_reader = Reader{ .bytes = &byte_bytes };
         const byte_tag = byte_reader.readByte() catch unreachable;
 
         if (byte_tag == 0x40) {
@@ -407,14 +407,14 @@ const ValStack = struct {
     }
 };
 
-fn readMemIdx(reader: *Module.Reader, module: *const Module) Error!void {
+fn readMemIdx(reader: *Reader, module: *const Module) Error!void {
     if (module.inner.mem_count == 0) return Error.InvalidWasm;
     const idx = try reader.readUleb128(u32);
     if (idx != 0) return Error.InvalidWasm;
 }
 
 fn readMemArg(
-    reader: *Module.Reader,
+    reader: *Reader,
     natural_alignment: u3,
     module: *const Module,
 ) Error!void {
@@ -426,7 +426,7 @@ fn readMemArg(
     _ = try reader.readUleb128(u32); // offset
 }
 
-fn readTableIdx(reader: *Module.Reader, module: *const Module) Error!ValType {
+fn readTableIdx(reader: *Reader, module: *const Module) Error!ValType {
     const idx = try reader.readUleb128(u32);
     return if (idx < module.tableTypes().len)
         module.tableTypes()[idx].elem_type
@@ -434,13 +434,13 @@ fn readTableIdx(reader: *Module.Reader, module: *const Module) Error!ValType {
         Error.InvalidWasm;
 }
 
-fn readDataIdx(reader: *Module.Reader, module: *const Module) Error!void {
+fn readDataIdx(reader: *Reader, module: *const Module) Error!void {
     if (!module.inner.has_data_count_section) return Error.InvalidWasm;
     const idx = try reader.readUleb128(u32);
     if (idx >= module.inner.datas_count) return Error.InvalidWasm;
 }
 
-fn readElemIdx(reader: *Module.Reader, module: *const Module) Error!ValType {
+fn readElemIdx(reader: *Reader, module: *const Module) Error!ValType {
     const idx = try reader.readUleb128(u32);
     return if (idx < module.elementSegments().len)
         module.elementSegments()[idx].elementType()
@@ -448,7 +448,7 @@ fn readElemIdx(reader: *Module.Reader, module: *const Module) Error!ValType {
         Error.InvalidWasm;
 }
 
-fn readLocalIdx(reader: *Module.Reader, locals: []const ValType) Error!ValType {
+fn readLocalIdx(reader: *Reader, locals: []const ValType) Error!ValType {
     const idx = try reader.readUleb128(u32);
     return if (idx < locals.len) locals[idx] else Error.InvalidWasm;
 }
@@ -488,7 +488,7 @@ const Label = struct {
     }
 
     fn read(
-        reader: *Module.Reader,
+        reader: *Reader,
         ctrl_stack: *const CtrlStack,
         current_height: u16,
         module: *const Module,
@@ -904,7 +904,7 @@ fn appendSideTableEntry(
 }
 
 fn validateLoadInstr(
-    reader: *Module.Reader,
+    reader: *Reader,
     val_stack: *ValStack,
     ctrl_stack: *const CtrlStack,
     natural_alignment: u3,
@@ -918,7 +918,7 @@ fn validateLoadInstr(
 }
 
 fn validateStoreInstr(
-    reader: *Module.Reader,
+    reader: *Reader,
     val_stack: *ValStack,
     ctrl_stack: *const CtrlStack,
     natural_alignment: u3,
@@ -940,7 +940,7 @@ pub fn rawValidate(
     _ = scratch.reset(.retain_capacity);
 
     var code_ptr = code;
-    var reader = Module.Reader.init(&code_ptr);
+    var reader = Reader.init(&code_ptr);
 
     const func_type = signature.funcType(module);
 
@@ -968,7 +968,7 @@ pub fn rawValidate(
 
         for (0..local_group_count) |_| {
             const local_count = try reader.readUleb128(u32);
-            const local_type = try reader.readValType();
+            const local_type = try ValType.read(reader);
             const new_local_len = std.math.add(u32, @intCast(local_vars.len), local_count) catch
                 return error.WasmImplementationLimit;
 
@@ -1324,7 +1324,7 @@ pub fn rawValidate(
                 const type_count = try reader.readUleb128(u32);
                 if (type_count != 1) return error.InvalidWasm;
 
-                const t = try reader.readValType();
+                const t = try ValType.read(reader);
                 try val_stack.popManyExpecting(&ctrl_stack, &.{ t, t, .i32 });
                 try val_stack.push(undefined, t);
             },
@@ -1738,7 +1738,7 @@ pub fn rawValidate(
             .@"f64.promote_f32" => try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f32, .f64),
 
             .@"ref.null" => {
-                const ref_type = try reader.readValType();
+                const ref_type = try ValType.read(reader);
                 if (!ref_type.isRefType()) return error.InvalidWasm;
                 try val_stack.push(scratch, ref_type);
             },
@@ -1880,5 +1880,6 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Module = @import("../Module.zig");
+const Reader = @import("Reader.zig");
 const ValType = Module.ValType;
 const opcodes = @import("../opcodes.zig");

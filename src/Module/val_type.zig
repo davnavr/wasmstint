@@ -1,5 +1,3 @@
-const std = @import("std");
-
 pub const ValType = enum(u8) { // packed union
     // primitive: enum,
     // thing: *align(@max(@alignOf(Thing), 4)) const Thing,
@@ -22,8 +20,18 @@ pub const ValType = enum(u8) { // packed union
         };
     }
 
+    pub fn read(reader: Reader) Reader.Error!ValType {
+        // Code has to change if ValType becomes a pointer to support typed function references/GC proposal.
+        comptime std.debug.assert(@typeInfo(ValType).@"enum".tag_type == u8);
+
+        return reader.readByteTag(ValType);
+    }
+
     // comptime {
     //     std.debug.assert(@sizeOf(ValType) == @sizeOf(usize));
     //     std.debug.assert(@sizeOf(ValType) == @sizeOf(*const anytype));
     // }
 };
+
+const std = @import("std");
+const Reader = @import("Reader.zig");
