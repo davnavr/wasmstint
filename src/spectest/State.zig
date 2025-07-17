@@ -98,7 +98,11 @@ pub fn processCommand(
             output,
             scratch,
         ),
-        // .assert_exhaustion => |*assert_exhaustion| try state.processAssertExhaustion(),
+        .assert_exhaustion => |*assert_exhaustion| try state.processAssertExhaustion(
+            assert_exhaustion,
+            output,
+            scratch,
+        ),
         .assert_trap => |*assert_trap| try state.processAssertTrap(assert_trap, output, scratch),
         .assert_invalid => |*assert_invalid| try state.processAssertInvalid(
             assert_invalid,
@@ -121,7 +125,6 @@ pub fn processCommand(
             scratch,
         ),
         .register => |*register| try state.processRegisterCommand(register, output),
-        inline else => |_, bad_tag| return failFmt(output, "TODO: handle command '{t}'", .{bad_tag}),
     }
 }
 
@@ -880,6 +883,48 @@ fn processAssertTrap(
 
     const message = try state.expectTrap(&fuel, command.text, scratch, output);
     output.print("invoke \"{s}\" trapped: \"{s}\"\n", .{ command.action.field, message });
+}
+
+fn processAssertExhaustion(
+    state: *State,
+    command: *const Parser.Command.AssertWithMessage,
+    output: Output,
+    scratch: *ArenaAllocator,
+) Error!void {
+    var fuel = state.starting_fuel;
+    const finished_action = try state.processActionCommand(
+        &command.action,
+        output,
+        &fuel,
+        scratch,
+    );
+
+    if (finished_action != .invoke) {
+        return failFmt(output, "cannot check '{t}' for resource exhaustion", .{finished_action});
+    }
+
+    state.runToCompletion(&fuel, output);
+
+    switch (state.interpreter.state) {
+        .awaiting_validation => unreachable,
+        .call_stack_exhaustion => {},
+        .trapped => |*trap| return failInterpreterTrap(trap.code, output),
+        .interrupted => |*interrupt| if (interrupt.cause != .out_of_fuel) {
+            return failInterpreterInterrupted(interrupt.cause, output);
+        },
+        .awaiting_host => return state.failInterpreterResults(scratch, output),
+    }
+
+    const expected_msg = "call stack exhausted";
+    if (!std.mem.eql(u8, command.text, expected_msg)) {
+        return failFmt(
+            output,
+            "expected error message \"{s}\", got \"" ++ expected_msg ++ "\"",
+            .{command.text},
+        );
+    }
+
+    output.print("invoke \"{s}\" exhausted call stack\n", .{command.action.field});
 }
 
 fn openAssertionModuleContents(
