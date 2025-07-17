@@ -265,7 +265,7 @@ fn failInterpreterInterrupted(
     return fail(output, message);
 }
 
-fn checkResultIntegerMatches(
+fn resultIntegerMatches(
     expected: anytype,
     actual: std.meta.Int(.signed, @typeInfo(@TypeOf(expected)).int.bits),
     index: usize,
@@ -276,7 +276,7 @@ fn checkResultIntegerMatches(
         output,
         "expected 0x{[expected_u]X:0>[width]} " ++
             "({[expected_s]} signed, {[expected_u]} unsigned)" ++
-            ", but got 0x{[actual_u]X:0>[width]} " ++
+            ", got 0x{[actual_u]X:0>[width]} " ++
             "({[actual_s]} signed, {[actual_u]} unsigned) at position {[pos]}",
         .{
             .expected_s = @as(@TypeOf(actual), @bitCast(expected)),
@@ -284,6 +284,71 @@ fn checkResultIntegerMatches(
             .actual_s = actual,
             .actual_u = actual_unsigned,
             .width = @sizeOf(@TypeOf(expected)) * 2,
+            .pos = index,
+        },
+    );
+}
+
+fn resultFloatMatchesBits(
+    expected_bits: anytype,
+    actual: std.meta.Float(@typeInfo(@TypeOf(expected_bits)).int.bits),
+    index: usize,
+    output: Output,
+) Error!void {
+    const actual_bits: @TypeOf(expected_bits) = @bitCast(actual);
+    if (expected_bits != actual_bits) return failFmt(
+        output,
+        "expected 0x{[expected_b]X:0>[width]} ({[expected_f]}), " ++
+            "got 0x{[actual_b]X:0>[width]} ({[actual_f]}) at position {[pos]}",
+        .{
+            .expected_b = expected_bits,
+            .expected_f = @as(@TypeOf(actual), @bitCast(expected_bits)),
+            .actual_b = actual_bits,
+            .actual_f = actual,
+            .width = @sizeOf(@TypeOf(actual)) * 2,
+            .pos = index,
+        },
+    );
+}
+
+pub fn resultFloatMatchesNan(
+    expected: Parser.Command.Expected.Nan,
+    actual: anytype,
+    index: usize,
+    output: Output,
+) Error!void {
+    const print_width = @sizeOf(@TypeOf(actual)) * 2;
+
+    const Bits = std.meta.Int(.unsigned, @typeInfo(@TypeOf(actual)).float.bits);
+
+    const PayloadInt = std.meta.Int(.unsigned, std.math.floatMantissaBits(@TypeOf(actual)));
+    const nan_payload_mask = std.math.maxInt(PayloadInt);
+    const canonical_nan_payload: PayloadInt = 1 << (@bitSizeOf(PayloadInt) - 1);
+
+    const actual_bits: Bits = @bitCast(actual);
+    const actual_nan_payload: PayloadInt = @intCast(actual_bits & nan_payload_mask);
+
+    bad: {
+        if (!std.math.isNan(actual)) break :bad;
+
+        switch (expected) {
+            .canonical => if (actual_nan_payload != canonical_nan_payload)
+                break :bad,
+            .arithmetic => if ((actual_nan_payload & canonical_nan_payload) == 0)
+                break :bad,
+        }
+
+        return;
+    }
+
+    return failFmt(
+        output,
+        "expected {[nan]t:} NaN, got 0x{[bits]X:0>[width]} ({[float]}) at position {[pos]}",
+        .{
+            .nan = expected,
+            .bits = actual_bits,
+            .width = print_width,
+            .float = actual,
             .pos = index,
         },
     );
@@ -305,22 +370,46 @@ fn expectTypedValue(
         @field(value, @tagName(tag));
 }
 
-fn checkResultValueMatches(
+fn resultValueMatches(
     actual: *const Interpreter.TaggedValue,
     expected: *const Parser.Command.Expected,
     index: usize,
     output: Output,
 ) Error!void {
     switch (expected.*) {
-        .i32 => |expected_i| try checkResultIntegerMatches(
+        .i32 => |expected_i| try resultIntegerMatches(
             expected_i,
             try expectTypedValue(actual, .i32, index, output),
             index,
             output,
         ),
-        .i64 => |expected_i| try checkResultIntegerMatches(
+        .i64 => |expected_i| try resultIntegerMatches(
             expected_i,
             try expectTypedValue(actual, .i64, index, output),
+            index,
+            output,
+        ),
+        .f32 => |expected_f| try resultFloatMatchesBits(
+            expected_f,
+            try expectTypedValue(actual, .f32, index, output),
+            index,
+            output,
+        ),
+        .f64 => |expected_f| try resultFloatMatchesBits(
+            expected_f,
+            try expectTypedValue(actual, .f64, index, output),
+            index,
+            output,
+        ),
+        .f32_nan => |nan| try resultFloatMatchesNan(
+            nan,
+            try expectTypedValue(actual, .f32, index, output),
+            index,
+            output,
+        ),
+        .f64_nan => |nan| try resultFloatMatchesNan(
+            nan,
+            try expectTypedValue(actual, .f64, index, output),
             index,
             output,
         ),
@@ -334,6 +423,7 @@ fn checkResultValueMatches(
                 );
             }
         },
+        // .externref => {},
         else => return failFmt(output, "TODO: check {t}", .{expected.*}),
     }
 }
@@ -365,7 +455,7 @@ fn expectResultValues(
 
     for (0.., actual_results) |i, *actual_val| {
         const expected_val: *const Parser.Command.Expected = expected.at(i);
-        try checkResultValueMatches(actual_val, expected_val, i, output);
+        try resultValueMatches(actual_val, expected_val, i, output);
     }
 
     return actual_results;
@@ -724,7 +814,7 @@ fn processAssertReturn(
                 );
             }
 
-            try checkResultValueMatches(&actual_value, command.expected.at(0), 0, output);
+            try resultValueMatches(&actual_value, command.expected.at(0), 0, output);
 
             output.print(
                 "get \"{s}\" yielded {f}\n",
