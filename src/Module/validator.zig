@@ -7,52 +7,10 @@
 //! [validation algorithm]: https://webassembly.github.io/spec/core/appendix/algorithm.html
 //! ["A fast in-place interpreter for WebAssembly"]: https://doi.org/10.48550/arXiv.2205.01183
 
-const std = @import("std");
-const builtin = @import("builtin");
-const Allocator = std.mem.Allocator;
-const ArenaAllocator = std.heap.ArenaAllocator;
-
-const Module = @import("../Module.zig");
-const ValType = Module.ValType;
-const opcodes = @import("../opcodes.zig");
-
-const validator = @This();
-
 pub const Error = error{InvalidWasm} ||
     Module.ReaderError ||
     Module.LimitError ||
     Allocator.Error;
-
-const DebugSideTableEntry = struct {
-    delta_ip: union {
-        done: i32,
-        /// Offset from the first byte of the first instruction to the first byte of the
-        /// branch instruction.
-        fixup_origin: u32,
-    },
-    delta_stp: i16,
-    copy_count: u8,
-    pop_count: u8,
-    /// Set to the same value as `fixup_origin`.
-    origin: u32,
-
-    comptime {
-        std.debug.assert(@sizeOf(DebugSideTableEntry) == 16);
-    }
-};
-
-pub const ReleaseSideTableEntry = packed struct(u64) {
-    delta_ip: packed union {
-        done: i32,
-        /// Offset from the first byte of the first instruction to the first byte of the
-        /// branch instruction.
-        fixup_origin: u32,
-    },
-    delta_stp: i16,
-    copy_count: u8,
-    pop_count: u8,
-    origin: void = {},
-};
 
 pub const Code = extern struct {
     /// Code entries are stored in a separate array, optimizing for the case where `Code`
@@ -78,10 +36,20 @@ pub const Code = extern struct {
     pub const Ip = [*:@intFromEnum(End.end)]const u8;
 
     /// Describes the changes to interpreter state should occur if its corresponding branch is taken.
-    pub const SideTableEntry = if (builtin.mode == .Debug)
-        DebugSideTableEntry
-    else
-        ReleaseSideTableEntry;
+    pub const SideTableEntry = packed struct(if (builtin.mode == .Debug) u128 else u64) {
+        delta_ip: packed union {
+            done: i32,
+            /// Offset from the first byte of the first instruction to the first byte of the
+            /// branch instruction.
+            fixup_origin: u32,
+        },
+        delta_stp: i16,
+        copy_count: u8,
+        pop_count: u8,
+        /// Set to the same value as `fixup_origin` to catch bugs during side table construction.
+        origin: if (builtin.mode == .Debug) u32 else void,
+        padding: if (builtin.mode == .Debug) u32 else u0 = undefined,
+    };
 
     pub const Inner = extern struct {
         instructions_start: Ip,
@@ -1906,3 +1874,11 @@ pub fn rawValidate(
         .side_table_ptr = final_side_table.ptr,
     };
 }
+
+const std = @import("std");
+const builtin = @import("builtin");
+const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
+const Module = @import("../Module.zig");
+const ValType = Module.ValType;
+const opcodes = @import("../opcodes.zig");
