@@ -1260,6 +1260,8 @@ pub fn parse(
         try start_reader.expectEndOfStream();
         known_sections.start = undefined;
 
+        // TODO: Unknown bug prevents checking of start signature here.
+
         break :start Start.init(func_idx);
     } else .none;
 
@@ -1633,9 +1635,9 @@ pub fn parse(
         break :contents arena.data.toOwnedSlice() catch unreachable;
     };
 
-    errdefer comptime unreachable;
-
     for (type_sec.items(arena_data)) |*ty| {
+        errdefer comptime unreachable;
+
         const fixup = ty.*.fixup;
         const type_slice = IndexedArena.Slice(ValType){
             .idx = fixup.types.idx,
@@ -1652,9 +1654,22 @@ pub fn parse(
     }
 
     for (func_types.items(arena_data)) |*ty| {
+        errdefer comptime unreachable;
         const func_type_idx: IndexedArena.Idx(FuncType) = ty.*.fixup.idx;
         ty.* = FuncSecEntry{ .final = func_type_idx.getPtr(arena_data) };
     }
+
+    if (start.get()) |start_idx| {
+        const start_signature: *const FuncType = func_types
+            .getAt(@intFromEnum(start_idx), arena_data).final;
+
+        std.log.debug("HEY {} {f}", .{ @intFromEnum(start_idx), start_signature });
+        if (start_signature.param_count != 0 or start_signature.result_count != 0) {
+            return error.InvalidWasm; // bad start function signature
+        }
+    }
+
+    errdefer comptime unreachable;
 
     return Module{
         .wasm = original_wasm,
