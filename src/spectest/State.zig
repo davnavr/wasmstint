@@ -106,7 +106,11 @@ pub fn processCommand(
             output,
             scratch,
         ),
-        // .assert_malformed => |*assert_malformed| try state.processAssertMalformed(assert_malformed, output, scratch,),
+        .assert_malformed => |*assert_malformed| try state.processAssertMalformed(
+            assert_malformed,
+            output,
+            scratch,
+        ),
         // .assert_uninstantiable
         // .assert_unlinkable
         // .register
@@ -777,7 +781,7 @@ fn processAssertInvalid(
 
     var scratch = std.heap.ArenaAllocator.init(arena.allocator());
     var wasm: []const u8 = module_binary.contents;
-    const code = validation_failed: {
+    validation_failed: {
         var parsed_module = wasmstint.Module.parse(
             arena.allocator(),
             &wasm,
@@ -786,7 +790,12 @@ fn processAssertInvalid(
             .{ .realloc_contents = false },
         ) catch |e| switch (e) {
             error.OutOfMemory => @panic("oom"),
-            else => |err| break :validation_failed err,
+            error.InvalidWasm => break :validation_failed,
+            else => |err| return failFmt(
+                output,
+                "expected validation error for module \"{f}\", got syntax error {t}",
+                .{ fmt_filename, err },
+            ),
         };
 
         _ = scratch.reset(.retain_capacity);
@@ -796,7 +805,12 @@ fn processAssertInvalid(
             &scratch,
         ) catch |e| switch (e) {
             error.OutOfMemory => @panic("oom"),
-            else => |err| break :validation_failed err,
+            error.InvalidWasm => break :validation_failed,
+            else => |err| return failFmt(
+                output,
+                "expected code validation error for module \"{f}\", got syntax error {t}",
+                .{ fmt_filename, err },
+            ),
         };
 
         std.debug.assert(validation_finished);
@@ -806,9 +820,67 @@ fn processAssertInvalid(
             "module \"{f}\" unexpectedly passed validation",
             .{fmt_filename},
         );
+    }
+
+    output.writeAll("TODO: actually check the message for assert_invalid\n");
+}
+
+fn processAssertMalformed(
+    state: *State,
+    command: *const Parser.Command.AssertWithModule,
+    output: Output,
+    arena: *ArenaAllocator,
+) Error!void {
+    const fmt_filename = std.unicode.fmtUtf8(command.filename);
+    const module_binary = (try state.openAssertionModuleContents(command, output)) orelse {
+        output.print("skipping text module \"{f}\"\n", .{fmt_filename});
+        return;
     };
 
-    output.print("TODO: actually check the message for assert_invalid ({t})\n", .{code});
+    var scratch = std.heap.ArenaAllocator.init(arena.allocator());
+    var wasm: []const u8 = module_binary.contents;
+    validation_failed: {
+        var parsed_module = wasmstint.Module.parse(
+            arena.allocator(),
+            &wasm,
+            &scratch,
+            state.rng.random(),
+            .{ .realloc_contents = false },
+        ) catch |e| switch (e) {
+            error.OutOfMemory => @panic("oom"),
+            error.InvalidWasm => return failFmt(
+                output,
+                "expected parse error for module \"{f}\", but got validation error",
+                .{fmt_filename},
+            ),
+            else => break :validation_failed,
+        };
+
+        _ = scratch.reset(.retain_capacity);
+
+        const validation_finished = parsed_module.finishCodeValidation(
+            state.module_arena.allocator(),
+            &scratch,
+        ) catch |e| switch (e) {
+            error.OutOfMemory => @panic("oom"),
+            error.InvalidWasm => return failFmt(
+                output,
+                "expected code parse error for module \"{f}\", but got validation error",
+                .{fmt_filename},
+            ),
+            else => break :validation_failed,
+        };
+
+        std.debug.assert(validation_finished);
+
+        return failFmt(
+            output,
+            "module \"{f}\" unexpectedly parsed successfully",
+            .{fmt_filename},
+        );
+    }
+
+    output.writeAll("TODO: actually check the message for assert_malformed\n");
 }
 
 const std = @import("std");
