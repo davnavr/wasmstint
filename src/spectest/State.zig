@@ -462,8 +462,21 @@ fn resultValueMatches(
                 );
             }
         },
-        // .externref => {},
-        else => return failFmt(output, "TODO: check {t}", .{expected.*}),
+        .externref => |extern_ref| {
+            const actual_ref = (try expectTypedValue(actual, .externref, index, output)).nat;
+            const expected_ref = if (extern_ref) |n|
+                wasmstint.runtime.ExternAddr.Nat.fromInt(n)
+            else
+                .null;
+
+            if (!actual_ref.eql(expected_ref)) {
+                return failFmt(
+                    output,
+                    "expected {f}, got {f}",
+                    .{ expected_ref, actual_ref },
+                );
+            }
+        },
     }
 }
 

@@ -1542,7 +1542,19 @@ pub const ExternAddr = packed union {
         pub fn toInt(nat: Nat) ?Size {
             return if (nat == .null) null else @intCast(@as(usize, @intFromEnum(nat)) - 1);
         }
+
+        pub fn eql(a: Nat, b: Nat) bool {
+            return @intFromEnum(a) == @intFromEnum(b);
+        }
+
+        pub fn format(ref: Nat, writer: *Writer) Writer.Error!void {
+            return (ExternAddr{ .nat = ref }).format(writer);
+        }
     };
+
+    pub fn eql(a: ExternAddr, b: ExternAddr) bool {
+        return a.nat.eql(b.nat);
+    }
 
     comptime {
         std.debug.assert(@sizeOf(ExternAddr) == @sizeOf(?*anyopaque));
@@ -1555,11 +1567,11 @@ pub const ExternAddr = packed union {
         );
     }
 
-    pub fn format(func: ExternAddr, writer: *Writer) Writer.Error!void {
-        if (func.ptr == null) {
+    pub fn format(ref: ExternAddr, writer: *Writer) Writer.Error!void {
+        if (ref.ptr == null) {
             try writer.writeAll("(ref.null extern)");
         } else {
-            try writer.print("(ref.extern 0x{X})", .{@intFromPtr(func.ptr)});
+            try writer.print("(ref.extern 0x{X})", .{@intFromPtr(ref.ptr)});
         }
     }
 };
