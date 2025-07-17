@@ -13,7 +13,7 @@ registered: Registered,
 registered_context: RegisteredContext,
 
 const Registered = std.HashMapUnmanaged(
-    ImportName,
+    Name,
     wasmstint.runtime.ExternVal,
     RegisteredContext,
     std.hash_map.default_max_load_percentage,
@@ -22,7 +22,7 @@ const Registered = std.HashMapUnmanaged(
 const RegisteredContext = struct {
     seed: u32,
 
-    pub fn hash(ctx: RegisteredContext, key: ImportName) u64 {
+    pub fn hash(ctx: RegisteredContext, key: Name) u64 {
         var hasher = std.hash.Wyhash.init(ctx.seed);
         hasher.update(key.module());
         hasher.update("\xFF");
@@ -30,19 +30,19 @@ const RegisteredContext = struct {
         return hasher.final();
     }
 
-    pub fn eql(_: RegisteredContext, a: ImportName, b: ImportName) bool {
+    pub fn eql(_: RegisteredContext, a: Name, b: Name) bool {
         return std.mem.eql(u8, a.module(), b.module()) and
             std.mem.eql(u8, a.name(), b.name());
     }
 };
 
-const ImportName = struct {
+pub const Name = struct {
     module_ptr: [*]const u8,
     module_len: u32,
     name_len: u32,
     name_ptr: [*]const u8,
 
-    fn init(module_bytes: []const u8, name_bytes: []const u8) ImportName {
+    pub fn init(module_bytes: []const u8, name_bytes: []const u8) Name {
         return .{
             .module_ptr = module_bytes.ptr,
             .module_len = @intCast(module_bytes.len),
@@ -51,11 +51,11 @@ const ImportName = struct {
         };
     }
 
-    fn module(self: *const ImportName) []const u8 {
+    fn module(self: *const Name) []const u8 {
         return self.module_ptr[0..self.module_len];
     }
 
-    fn name(self: *const ImportName) []const u8 {
+    fn name(self: *const Name) []const u8 {
         return self.name_ptr[0..self.name_len];
     }
 };
@@ -237,7 +237,7 @@ fn resolve(
         host.lookup.get(name.bytes)
     else
         host.registered.getContext(
-            ImportName.init(module.bytes, name.bytes),
+            Name.init(module.bytes, name.bytes),
             host.registered_context,
         );
 }

@@ -5,7 +5,6 @@ const NamedModule = struct {
     instance: ModuleInst,
 };
 
-/// Allocated in the `run_arena`.
 module_arena: ArenaAllocator,
 /// Allocated in `std.heap.page_allocator`.
 module_lookup: std.StringHashMapUnmanaged(NamedModule),
@@ -113,7 +112,7 @@ pub fn processCommand(
         ),
         // .assert_uninstantiable
         // .assert_unlinkable
-        // .register
+        .register => |*register| try state.processRegisterCommand(register, output),
         inline else => |_, bad_tag| return failFmt(output, "TODO: handle command '{t}'", .{bad_tag}),
     }
 }
@@ -236,6 +235,35 @@ fn findModuleInst(state: *const State, name: ?[]const u8, output: Output) Error!
     } else {
         return fail(output, "no module has been instantiated at this point");
     }
+}
+
+fn processRegisterCommand(
+    state: *State,
+    command: *const Parser.Command.Register,
+    output: Output,
+) Error!void {
+    const target_module: ModuleInst = try state.findModuleInst(command.name, output);
+    const export_vals = target_module.exports();
+
+    state.imports.registered.ensureUnusedCapacityContext(
+        std.heap.page_allocator,
+        export_vals.len,
+        state.imports.registered_context,
+    ) catch @panic("oom");
+
+    for (0..export_vals.len) |i| {
+        const val = export_vals.at(i);
+        state.imports.registered.putAssumeCapacityContext(
+            Imports.Name.init(command.as, val.name),
+            val.val,
+            state.imports.registered_context,
+        );
+    }
+
+    output.print(
+        "registered module \"{f}\" exports under \"{s}\"\n",
+        .{ fmtModuleName(command.name), command.as },
+    );
 }
 
 fn failCallStackExhausted(state: *const State, output: Output) Error {
