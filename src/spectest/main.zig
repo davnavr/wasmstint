@@ -159,6 +159,8 @@ pub fn main() u8 {
         _ = scratch.reset(.retain_capacity);
     }
 
+    stderr.print("{} tests passed\n", .{json_script.command_count});
+
     return 0;
 }
 
