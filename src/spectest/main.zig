@@ -61,10 +61,14 @@ pub fn main() u8 {
         wasmstint.waitForDebugger();
     }
 
-    var stderr_buffer: [1024]u8 align(16) = undefined;
+    const stderr_buffer = std.heap.page_allocator.alignedAlloc(
+        u8,
+        .fromByteUnits(std.heap.page_size_min),
+        8192,
+    ) catch @panic("oom");
     const stderr = State.Output{
         .tty_config = std.Io.tty.detectConfig(std.fs.File.stderr()),
-        .writer = std.debug.lockStderrWriter(&stderr_buffer),
+        .writer = std.debug.lockStderrWriter(stderr_buffer),
     };
     // Flush happens even if error occurs
     defer std.debug.unlockStderrWriter();
