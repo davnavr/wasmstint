@@ -106,7 +106,7 @@ pub fn readIdx(reader: Reader, comptime I: type, bounds: anytype) !I {
     const len = switch (@typeInfo(@TypeOf(bounds))) {
         .@"struct" => bounds.len,
         .int => bounds,
-        else => comptime unreachable,
+        else => @compileError(@typeName(@TypeOf(bounds)) ++ " cannot be used as index bounds"),
     };
 
     return if (idx < len)
