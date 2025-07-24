@@ -104,7 +104,7 @@ pub const Code = extern struct {
     pub fn validate(
         code: *Code,
         allocator: Allocator,
-        module: *const Module,
+        module: Module,
         scratch: *ArenaAllocator,
     ) Error!bool {
         check: {
@@ -124,14 +124,14 @@ pub const Code = extern struct {
         }
 
         const code_addr = @intFromPtr(code);
-        const code_sec_ptr = module.inner.code;
+        const code_sec_ptr = module.inner.raw.code;
         std.debug.assert(@intFromPtr(code_sec_ptr) <= code_addr);
-        std.debug.assert(code_addr < @intFromPtr(code_sec_ptr + module.inner.code_count));
+        std.debug.assert(code_addr < @intFromPtr(code_sec_ptr + module.inner.raw.code_count));
 
         const func_idx: Module.FuncIdx = @enumFromInt(@as(
             @typeInfo(Module.FuncIdx).@"enum".tag_type,
             @intCast(
-                module.inner.func_import_count + @divExact(
+                module.inner.raw.func_import_count + @divExact(
                     code_addr - @intFromPtr(code_sec_ptr),
                     @sizeOf(Code),
                 ),
@@ -145,8 +145,8 @@ pub const Code = extern struct {
             allocator,
             module,
             module.funcTypeIdx(func_idx),
-            module.codeEntries()[@intFromEnum(func_idx) - module.inner.func_import_count]
-                .contents.slice(module.inner.code_section, module.wasm),
+            module.codeEntries()[@intFromEnum(func_idx) - module.inner.raw.func_import_count]
+                .contents.slice(module.inner.raw.code_section, module.inner.wasm),
             scratch,
         );
 
@@ -214,7 +214,7 @@ const BlockType = union(enum) {
     single_result: ValType,
     void,
 
-    fn funcType(block_type: *const BlockType, module: *const Module) Module.FuncType {
+    fn funcType(block_type: *const BlockType, module: Module) Module.FuncType {
         switch (block_type.*) {
             .type => |@"type"| {
                 const copied = @"type".idx.funcType(module).*;
@@ -233,7 +233,7 @@ const BlockType = union(enum) {
         }
     }
 
-    fn read(reader: Reader, module: *const Module) Error!BlockType {
+    fn read(reader: Reader, module: Module) Error!BlockType {
         var int_bytes = reader.bytes.*;
         const int_reader = Reader{ .bytes = &int_bytes };
         const tag_int = try int_reader.readIleb128(i33);
@@ -250,7 +250,7 @@ const BlockType = union(enum) {
                 return Error.WasmImplementationLimit;
 
             reader.bytes.* = int_bytes;
-            return if (idx < module.inner.types_count)
+            return if (idx < module.inner.raw.types_count)
                 BlockType{ .type = .{ .idx = @enumFromInt(idx) } }
             else
                 Error.InvalidWasm;
@@ -291,7 +291,7 @@ const CtrlFrame = struct {
         //@"catch",
     };
 
-    fn labelTypes(frame: *const CtrlFrame, module: *const Module) []const ValType {
+    fn labelTypes(frame: *const CtrlFrame, module: Module) []const ValType {
         const types = frame.types.funcType(module);
         return if (frame.info.opcode != .loop) types.results() else types.parameters();
     }
@@ -407,8 +407,8 @@ const ValStack = struct {
     }
 };
 
-fn readMemIdx(reader: *Reader, module: *const Module) Error!void {
-    if (module.inner.mem_count == 0) return Error.InvalidWasm;
+fn readMemIdx(reader: *Reader, module: Module) Error!void {
+    if (module.inner.raw.mem_count == 0) return Error.InvalidWasm;
     const idx = try reader.readUleb128(u32);
     if (idx != 0) return Error.InvalidWasm;
 }
@@ -416,17 +416,17 @@ fn readMemIdx(reader: *Reader, module: *const Module) Error!void {
 fn readMemArg(
     reader: *Reader,
     natural_alignment: u3,
-    module: *const Module,
+    module: Module,
 ) Error!void {
     const a = try reader.readUleb128(u32);
 
     if (a > natural_alignment) return Error.InvalidWasm;
-    if (module.inner.mem_count == 0) return Error.InvalidWasm;
+    if (module.inner.raw.mem_count == 0) return Error.InvalidWasm;
 
     _ = try reader.readUleb128(u32); // offset
 }
 
-fn readTableIdx(reader: *Reader, module: *const Module) Error!ValType {
+fn readTableIdx(reader: *Reader, module: Module) Error!ValType {
     const idx = try reader.readUleb128(u32);
     return if (idx < module.tableTypes().len)
         module.tableTypes()[idx].elem_type
@@ -434,13 +434,13 @@ fn readTableIdx(reader: *Reader, module: *const Module) Error!ValType {
         Error.InvalidWasm;
 }
 
-fn readDataIdx(reader: *Reader, module: *const Module) Error!void {
-    if (!module.inner.has_data_count_section) return Error.InvalidWasm;
+fn readDataIdx(reader: *Reader, module: Module) Error!void {
+    if (!module.inner.raw.has_data_count_section) return Error.InvalidWasm;
     const idx = try reader.readUleb128(u32);
-    if (idx >= module.inner.datas_count) return Error.InvalidWasm;
+    if (idx >= module.inner.raw.datas_count) return Error.InvalidWasm;
 }
 
-fn readElemIdx(reader: *Reader, module: *const Module) Error!ValType {
+fn readElemIdx(reader: *Reader, module: Module) Error!ValType {
     const idx = try reader.readUleb128(u32);
     return if (idx < module.elementSegments().len)
         module.elementSegments()[idx].elementType()
@@ -467,7 +467,12 @@ const Label = struct {
             Error.WasmImplementationLimit;
     }
 
-    fn init(depth: u32, ctrl_stack: *const CtrlStack, current_height: u16, module: *const Module) Error!Label {
+    fn init(
+        depth: u32,
+        ctrl_stack: *const CtrlStack,
+        current_height: u16,
+        module: Module,
+    ) Error!Label {
         const frame: *const CtrlFrame = if (depth < ctrl_stack.len)
             ctrl_stack.at(ctrl_stack.len - 1 - depth)
         else
@@ -491,14 +496,14 @@ const Label = struct {
         reader: *Reader,
         ctrl_stack: *const CtrlStack,
         current_height: u16,
-        module: *const Module,
+        module: Module,
     ) Error!Label {
         const depth = try reader.readUleb128(u32);
         return Label.init(depth, ctrl_stack, current_height, module);
     }
 };
 
-//fn readDataIdx(module: *const Module) // TODO: Check data count sec value
+//fn readDataIdx(module: Module) // TODO: Check data count sec value
 
 fn pushCtrlFrame(
     arena: *ArenaAllocator,
@@ -508,7 +513,7 @@ fn pushCtrlFrame(
     opcode: CtrlFrame.Opcode,
     offset: u32,
     block_type: BlockType,
-    module: *const Module,
+    module: Module,
 ) Error!void {
     try ctrl_stack.append(
         arena.allocator(),
@@ -530,7 +535,7 @@ fn pushCtrlFrame(
 fn popCtrlFrame(
     ctrl_stack: *CtrlStack,
     val_stack: *ValStack,
-    module: *const Module,
+    module: Module,
 ) Error!CtrlFrame {
     if (ctrl_stack.len == 0) return Error.InvalidWasm;
 
@@ -909,7 +914,7 @@ fn validateLoadInstr(
     ctrl_stack: *const CtrlStack,
     natural_alignment: u3,
     loaded: ValType,
-    module: *const Module,
+    module: Module,
     arena: *ArenaAllocator,
 ) Error!void {
     // Pop index, push loaded value.
@@ -923,7 +928,7 @@ fn validateStoreInstr(
     ctrl_stack: *const CtrlStack,
     natural_alignment: u3,
     stored: ValType,
-    module: *const Module,
+    module: Module,
 ) Error!void {
     try val_stack.popManyExpecting(ctrl_stack, &[_]ValType{ .i32, stored });
     try readMemArg(reader, natural_alignment, module);
@@ -931,7 +936,7 @@ fn validateStoreInstr(
 
 pub fn rawValidate(
     allocator: Allocator,
-    module: *const Module,
+    module: Module,
     signature: Module.TypeIdx,
     code: []const u8,
     scratch: *ArenaAllocator,

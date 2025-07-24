@@ -170,22 +170,19 @@ fn processModuleCommand(
     const fmt_filename = std.unicode.fmtUtf8(module.filename);
     // errdefer module_binary.deinit();
 
-    var parsed_module = state.module_arena.allocator().create(wasmstint.Module) catch
-        @panic("oom");
-    {
+    const parsed_module = module: {
         var wasm: []const u8 = module_binary.contents;
-        parsed_module.* = wasmstint.Module.parse(
+        break :module wasmstint.Module.parse(
             state.module_arena.allocator(),
             &wasm,
             scratch,
-            state.rng.random(),
-            .{ .realloc_contents = true },
+            .{ .random_seed = state.rng.random().int(u64) },
         ) catch |e| return switch (e) {
             error.OutOfMemory => @panic("oom"),
             error.InvalidWasm => failFmt(output, "failed to validate module {f}", .{fmt_filename}),
             else => failFmt(output, "module parse error: {t}", .{e}),
         };
-    }
+    };
     _ = scratch.reset(.retain_capacity);
 
     // `assert_invalid` commands mean lazy validation won't work
@@ -970,8 +967,7 @@ fn processAssertInvalid(
             arena.allocator(),
             &wasm,
             &scratch,
-            state.rng.random(),
-            .{ .realloc_contents = false },
+            .{ .random_seed = state.rng.random().int(u64) },
         ) catch |e| switch (e) {
             error.OutOfMemory => @panic("oom"),
             error.InvalidWasm => break :validation_failed,
@@ -1028,8 +1024,7 @@ fn processAssertMalformed(
             arena.allocator(),
             &wasm,
             &scratch,
-            state.rng.random(),
-            .{ .realloc_contents = false },
+            .{ .random_seed = state.rng.random().int(u64) },
         ) catch |e| switch (e) {
             error.OutOfMemory => @panic("oom"),
             error.InvalidWasm => return failFmt(
@@ -1081,12 +1076,11 @@ fn processAssertUninstantiable(
 
     var scratch = std.heap.ArenaAllocator.init(arena.allocator());
     var wasm: []const u8 = module_binary.contents;
-    var module = wasmstint.Module.parse(
+    const module = wasmstint.Module.parse(
         arena.allocator(),
         &wasm,
         &scratch,
-        state.rng.random(),
-        .{ .realloc_contents = true },
+        .{ .random_seed = state.rng.random().int(u64) },
     ) catch |e| return switch (e) {
         error.OutOfMemory => @panic("oom"),
         error.InvalidWasm => failFmt(output, "failed to validate module {f}", .{fmt_filename}),
@@ -1107,7 +1101,7 @@ fn processAssertUninstantiable(
 
     var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
     var module_alloc = wasmstint.runtime.ModuleAlloc.allocate(
-        &module,
+        module,
         state.imports.provider(),
         arena.allocator(),
         state.store, // TODO: Use temporary store
@@ -1146,8 +1140,7 @@ fn processAssertUnlinkable(
         arena.allocator(),
         &wasm,
         &scratch,
-        state.rng.random(),
-        .{ .realloc_contents = true },
+        .{ .random_seed = state.rng.random().int(u64) },
     ) catch |e| return switch (e) {
         error.OutOfMemory => @panic("oom"),
         error.InvalidWasm => failFmt(output, "failed to validate module {f}", .{fmt_filename}),
@@ -1167,7 +1160,7 @@ fn processAssertUnlinkable(
 
     var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
     _ = wasmstint.runtime.ModuleAlloc.allocate(
-        &module,
+        module,
         state.imports.provider(),
         arena.allocator(),
         state.store, // TODO: Use temporary store

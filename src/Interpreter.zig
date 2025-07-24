@@ -996,9 +996,9 @@ fn moduleInstantiationSetup(
 ) (runtime.MemInst.OobError || runtime.TableInst.OobError)!FuncRef {
     const module_inst = module.requiring_instantiation.header();
     const wasm = module_inst.module;
-    const global_types = wasm.globalTypes()[wasm.inner.global_import_count..];
+    const global_types = wasm.globalTypes()[wasm.inner.raw.global_import_count..];
     for (
-        wasm.inner.global_exprs[0..global_types.len],
+        wasm.inner.raw.global_exprs[0..global_types.len],
         module_inst.definedGlobalValues(),
         global_types,
     ) |*init_expr, global_value, *global_type| {
@@ -1009,7 +1009,7 @@ fn moduleInstantiationSetup(
             },
             .i64_or_f64 => |n64| {
                 std.debug.assert(global_type.val_type == .i64 or global_type.val_type == .f64);
-                @as(*u64, @ptrCast(@alignCast(global_value))).* = n64.get(wasm.arena_data);
+                @as(*u64, @ptrCast(@alignCast(global_value))).* = n64;
             },
             .@"ref.null" => |ref_type| {
                 std.debug.assert(ref_type == global_type.val_type);
@@ -1055,7 +1055,7 @@ fn moduleInstantiationSetup(
         }
     }
 
-    for (wasm.inner.active_elems[0..wasm.inner.active_elems_count]) |*active_elem| {
+    for (wasm.inner.raw.active_elems[0..wasm.inner.raw.active_elems_count]) |*active_elem| {
         const offset: u32 = offset: switch (active_elem.header.offset_tag) {
             .@"i32.const" => active_elem.offset.@"i32.const",
             .@"global.get" => {
@@ -1077,7 +1077,7 @@ fn moduleInstantiationSetup(
         module_inst.elemSegmentDropFlag(active_elem.header.elements).drop();
     }
 
-    for (wasm.inner.active_datas[0..wasm.inner.active_datas_count]) |*active_data| {
+    for (wasm.inner.raw.active_datas[0..wasm.inner.raw.active_datas_count]) |*active_data| {
         const mem = module_inst.memAddr(active_data.header.memory);
 
         const offset: u32 = switch (active_data.header.offset_tag) {
@@ -1097,7 +1097,7 @@ fn moduleInstantiationSetup(
 
     errdefer comptime unreachable;
 
-    if (wasm.inner.start.get()) |start_idx|
+    if (wasm.inner.raw.start.get()) |start_idx|
         return @bitCast(module_inst.funcAddr(start_idx))
     else {
         module.instantiated = true;
@@ -2387,7 +2387,7 @@ inline fn takeBranch(
     const current_frame = interp.currentFrame();
     const code = current_frame.function.expanded().wasm.code();
     const wasm_base_ptr = @intFromPtr(current_frame.function.expanded().wasm
-        .module.header().module.wasm.ptr);
+        .module.header().module.inner.wasm.ptr);
 
     const side_table_end = @intFromPtr(code.inner.side_table_ptr + code.inner.side_table_len);
     std.debug.assert(@intFromPtr(s.* + branch) < side_table_end);

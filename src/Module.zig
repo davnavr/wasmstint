@@ -656,7 +656,7 @@ pub const ParseOptions = struct {
 };
 
 const Sections = struct {
-    known: Known,
+    known: *Known,
     readers: Readers,
 
     const Known = Struct([]const u8, &[0]u8{});
@@ -728,14 +728,15 @@ const Sections = struct {
 
     fn parse(
         reader: Reader,
+        known_sections: *Known,
         arena: *ArenaAllocator,
         custom_sections: *std.SegmentedList(CustomSection, 2),
         options: *const ParseOptions,
     ) ParseError!Sections {
         var section_order = Order.any;
-        var known_sections = Known{};
+        known_sections.* = Known{};
         var section_readers: Readers = undefined;
-        inline for (@typeInfo(Known).@"struct".fields) |f| {
+        inline for (@typeInfo(Readers).@"struct".fields) |f| {
             @field(section_readers, f.name) = Reader.init(&@field(known_sections, f.name));
         }
 
@@ -994,11 +995,18 @@ pub fn parse(
 
     var custom_sections_buf = std.SegmentedList(CustomSection, 2){}; // in `alloca`
 
+    var known_sections: Sections.Known = undefined;
     var sections = sections: {
         const wasm_reader = Reader.init(wasm);
         errdefer wasm.* = wasm_reader.bytes.*;
         _ = try wasm_reader.readArray(wasm_preamble.len);
-        break :sections try Sections.parse(wasm_reader, alloca, &custom_sections_buf, &options);
+        break :sections try Sections.parse(
+            wasm_reader,
+            &known_sections,
+            alloca,
+            &custom_sections_buf,
+            &options,
+        );
     };
 
     if (custom_sections_buf.len > std.math.maxInt(u32)) {
@@ -1032,7 +1040,7 @@ pub fn parse(
         return error.MalformedWasm; // # of func section must match # of code
     }
 
-    if (counts.data_count != counts.data) {
+    if (has_data_count_section and counts.data_count != counts.data) {
         return error.MalformedWasm; // data count mismatch
     }
 
@@ -1271,7 +1279,6 @@ const ImportSec = struct {
         ) Allocator.Error![]const ImportName {
             const names = dst.addManyAsSliceAssumeCapacity(src.len);
             src.writeToSlice(names, 0);
-            src.* = undefined;
             return names;
         }
     };
@@ -1409,7 +1416,7 @@ fn parseImportSec(
                 const src_types = &@field(import_types, f.name);
                 const dst_types = try types_alloc.allocator().alloc(
                     @typeInfo(@FieldType(ImportSec.Types, f.name)).pointer.child,
-                    src_types.len,
+                    src_types.len + @field(counts, f.name[0 .. f.name.len - 1]),
                 );
 
                 src_types.writeToSlice(dst_types[0..src_types.len], 0);
@@ -1420,7 +1427,7 @@ fn parseImportSec(
             {
                 const dst_types = try types_alloc.allocator().alloc(
                     *const FuncType,
-                    import_types.funcs.len,
+                    import_types.funcs.len + counts.func,
                 );
 
                 for (dst_types[0..import_types.funcs.len], 0..) |*func_ty, i| {

@@ -444,7 +444,7 @@ pub const ModuleAlloc = struct {
     pub const Error = ImportProvider.Error || Allocator.Error;
 
     pub fn allocate(
-        module: *const Module,
+        module: Module,
         import_provider: ImportProvider,
         gpa: Allocator,
         store: ModuleAllocator,
@@ -457,7 +457,7 @@ pub const ModuleAlloc = struct {
         var header = try arena_array.create(ModuleInst.Header);
         std.debug.assert(header == ModuleInst.Header.index);
 
-        const func_imports = try arena_array.alloc(FuncAddr, module.inner.func_import_count);
+        const func_imports = try arena_array.alloc(FuncAddr, module.inner.raw.func_import_count);
         for (
             func_imports.items(&arena_array),
             module.funcImportNames(),
@@ -472,9 +472,9 @@ pub const ModuleAlloc = struct {
             );
         }
 
-        const tables = try arena_array.alloc(*TableInst, module.inner.table_count);
+        const tables = try arena_array.alloc(*TableInst, module.inner.raw.table_count);
         for (
-            tables.items(&arena_array)[0..module.inner.table_import_count],
+            tables.items(&arena_array)[0..module.inner.raw.table_import_count],
             module.tableImportNames(),
             module.tableImportTypes(),
         ) |*import, name, *table_type| {
@@ -489,12 +489,12 @@ pub const ModuleAlloc = struct {
 
         const table_definitions = try arena_array.alloc(
             TableInst,
-            module.inner.table_count - module.inner.table_import_count,
+            module.inner.raw.table_count - module.inner.raw.table_import_count,
         );
 
-        const mems = try arena_array.alloc(*MemInst, module.inner.mem_count);
+        const mems = try arena_array.alloc(*MemInst, module.inner.raw.mem_count);
         for (
-            mems.items(&arena_array)[0..module.inner.mem_import_count],
+            mems.items(&arena_array)[0..module.inner.raw.mem_import_count],
             module.memImportNames(),
             module.memImportTypes(),
         ) |*import, name, *mem_type| {
@@ -509,14 +509,14 @@ pub const ModuleAlloc = struct {
 
         const mem_definitions = try arena_array.alloc(
             MemInst,
-            module.inner.mem_count - module.inner.mem_import_count,
+            module.inner.raw.mem_count - module.inner.raw.mem_import_count,
         );
 
         {
             var request = ModuleAllocator.Request.init(
-                module.tableTypes()[module.inner.table_import_count..],
+                module.tableTypes()[module.inner.raw.table_import_count..],
                 table_definitions.items(&arena_array),
-                module.memTypes()[module.inner.mem_import_count..],
+                module.memTypes()[module.inner.raw.mem_import_count..],
                 mem_definitions.items(&arena_array),
             );
 
@@ -530,9 +530,9 @@ pub const ModuleAlloc = struct {
             idx: IndexedArena.Idx(IndexedArena.Word),
         };
 
-        const globals = try arena_array.alloc(GlobalFixup, module.inner.global_count);
+        const globals = try arena_array.alloc(GlobalFixup, module.inner.raw.global_count);
         for (
-            globals.items(&arena_array)[0..module.inner.global_import_count],
+            globals.items(&arena_array)[0..module.inner.raw.global_import_count],
             module.globalImportNames(),
             module.globalImportTypes(),
         ) |*import, name, *global_type| {
@@ -548,8 +548,8 @@ pub const ModuleAlloc = struct {
         }
 
         for (
-            module.inner.global_import_count..,
-            module.globalTypes()[module.inner.global_import_count..],
+            module.inner.raw.global_import_count..,
+            module.globalTypes()[module.inner.raw.global_import_count..],
         ) |i, *global_type| {
             const size: u5 = switch (global_type.val_type) {
                 .i32, .f32 => 4,
@@ -588,7 +588,7 @@ pub const ModuleAlloc = struct {
             u32,
             std.math.divCeil(
                 u32,
-                module.inner.datas_count,
+                module.inner.raw.datas_count,
                 32,
             ) catch unreachable,
         );
@@ -596,31 +596,31 @@ pub const ModuleAlloc = struct {
 
         const elems_drop_mask_len = std.math.divCeil(
             u32,
-            module.inner.elems_count,
+            module.inner.raw.elems_count,
             32,
         ) catch unreachable;
         const elems_drop_mask = try arena_array.dupe(
             u32,
-            module.inner.non_declarative_elems_mask[0..elems_drop_mask_len],
+            module.inner.raw.non_declarative_elems_mask[0..elems_drop_mask_len],
         );
 
         errdefer comptime unreachable;
 
         for (
-            tables.items(&arena_array)[module.inner.table_import_count..],
+            tables.items(&arena_array)[module.inner.raw.table_import_count..],
             table_definitions.items(&arena_array),
         ) |*table_addr, *table_inst| {
             table_addr.* = table_inst;
         }
 
         for (
-            mems.items(&arena_array)[module.inner.mem_import_count..],
+            mems.items(&arena_array)[module.inner.raw.mem_import_count..],
             mem_definitions.items(&arena_array),
         ) |*mem_addr, *mem_inst| {
             mem_addr.* = mem_inst;
         }
 
-        for (globals.items(&arena_array)[module.inner.global_import_count..]) |*global| {
+        for (globals.items(&arena_array)[module.inner.raw.global_import_count..]) |*global| {
             const value_ptr: *IndexedArena.Word = global.idx.getPtr(&arena_array);
             global.* = GlobalFixup{ .ptr = @ptrCast(value_ptr) };
         }
@@ -632,7 +632,7 @@ pub const ModuleAlloc = struct {
         header.getPtr(module_data).* = ModuleInst.Header{
             .data_len = module_data.len,
             .module = module,
-            .func_import_count = module.inner.func_import_count,
+            .func_import_count = module.inner.raw.func_import_count,
             .func_imports = func_imports.items(module_data).ptr,
             .mems = mems.items(module_data).ptr,
             .tables = tables.items(module_data).ptr,
@@ -662,7 +662,7 @@ pub const ModuleInst = extern struct {
     /// Internal API.
     pub const Header = struct {
         data_len: usize,
-        module: *const Module,
+        module: Module,
         // /// Used to detect multi-threaded usage of a module instance.
         // ///
         // /// Currently, the WASM specification focuses only on single-threaded usage, with
@@ -692,7 +692,7 @@ pub const ModuleInst = extern struct {
 
         pub fn funcAddr(inst: *const Header, idx: Module.FuncIdx) FuncAddr {
             const i: usize = @intFromEnum(idx);
-            std.debug.assert(i < inst.module.inner.func_count);
+            std.debug.assert(i < inst.module.funcCount());
             return if (i < inst.func_import_count)
                 inst.func_imports[i]
             else
@@ -705,11 +705,11 @@ pub const ModuleInst = extern struct {
         }
 
         inline fn tableInsts(inst: *const Header) []const *TableInst {
-            return inst.tables[0..inst.module.inner.table_count];
+            return inst.tables[0..inst.module.inner.raw.table_count];
         }
 
         inline fn definedTableInsts(inst: *const Header) []const *TableInst {
-            return inst.tableInsts()[inst.module.inner.table_import_count..];
+            return inst.tableInsts()[inst.module.inner.raw.table_import_count..];
         }
 
         pub fn tableAddr(inst: *const Header, idx: Module.TableIdx) TableAddr {
@@ -721,11 +721,11 @@ pub const ModuleInst = extern struct {
         }
 
         inline fn memInsts(inst: *const Header) []const *MemInst {
-            return inst.mems[0..inst.module.inner.mem_count];
+            return inst.mems[0..inst.module.inner.raw.mem_count];
         }
 
         inline fn definedMemInsts(inst: *const Header) []const *MemInst {
-            return inst.memInsts()[inst.module.inner.mem_import_count..];
+            return inst.memInsts()[inst.module.inner.raw.mem_import_count..];
         }
 
         /// Internal API.
@@ -736,11 +736,11 @@ pub const ModuleInst = extern struct {
         }
 
         pub inline fn globalValues(inst: *const Header) []const *anyopaque {
-            return inst.globals[0..inst.module.inner.global_count];
+            return inst.globals[0..inst.module.inner.raw.global_count];
         }
 
         pub inline fn definedGlobalValues(inst: *const Header) []const *anyopaque {
-            return inst.globalValues()[inst.module.inner.global_import_count..];
+            return inst.globalValues()[inst.module.inner.raw.global_import_count..];
         }
 
         pub fn globalAddr(inst: *const Header, idx: Module.GlobalIdx) GlobalAddr {
@@ -783,7 +783,7 @@ pub const ModuleInst = extern struct {
         pub fn dataSegmentDropFlag(inst: *const Header, idx: Module.DataIdx) DropFlag {
             const drop_mask_len = std.math.divCeil(
                 u32,
-                inst.module.inner.datas_count,
+                inst.module.inner.raw.datas_count,
                 32,
             ) catch unreachable;
 
@@ -799,7 +799,7 @@ pub const ModuleInst = extern struct {
         pub fn elemSegmentDropFlag(inst: *const Header, idx: Module.ElemIdx) DropFlag {
             const drop_mask_len = std.math.divCeil(
                 u32,
-                inst.module.inner.elems_count,
+                inst.module.inner.raw.elems_count,
                 32,
             ) catch unreachable;
 
@@ -807,13 +807,9 @@ pub const ModuleInst = extern struct {
         }
 
         pub fn elemSegment(inst: *const Header, idx: Module.ElemIdx) Module.ElemSegment {
+            // Make a "copy", and mask away the length if the segment was already dropped
             var elem = inst.module.elementSegments()[@intFromEnum(idx)];
-            const len: *u32 = switch (elem.tag) {
-                .func_indices => &elem.contents.func_indices.len,
-                .func_expressions, .extern_expressions => &elem.contents.expressions.len,
-            };
-
-            len.* &= @truncate(inst.elemSegmentDropFlag(idx).lengthMask());
+            elem.len &= @truncate(inst.elemSegmentDropFlag(idx).lengthMask());
             return elem;
         }
     };
@@ -1091,12 +1087,12 @@ pub const TableInst = extern struct {
         const table_addr = module_inst.tableAddr(table);
         const table_inst = table_addr.table;
         const src_elems = module_inst.elemSegment(src);
-        const actual_len = len orelse src_elems.len();
+        const actual_len = len orelse src_elems.len;
 
         const src_end_idx = std.math.add(usize, src_idx, actual_len) catch
             return error.TableAccessOutOfBounds;
 
-        if (src_end_idx > src_elems.len())
+        if (src_end_idx > src_elems.len)
             return error.TableAccessOutOfBounds;
 
         const dst_end_idx = std.math.add(usize, dst_idx, actual_len) catch
@@ -1116,27 +1112,14 @@ pub const TableInst = extern struct {
 
                 switch (src_elems.tag) {
                     .func_indices => {
-                        const src_indices = src_elems.contents.func_indices
-                            .items(module_inst.module.arena_data)[src_idx..src_end_idx];
-
-                        for (
-                            @as([]const Module.FuncIdx, src_indices),
-                            dst_elems,
-                        ) |i, *dst| {
-                            dst.* = @as(
-                                FuncAddr.Nullable,
-                                @bitCast(module_inst.funcAddr(i)),
-                            );
+                        const src_indices = src_elems.contents.func_indices[src_idx..src_end_idx];
+                        for (src_indices, dst_elems) |i, *dst| {
+                            dst.* = @as(FuncAddr.Nullable, @bitCast(module_inst.funcAddr(i)));
                         }
                     },
                     .func_expressions => {
-                        const src_exprs = src_elems.contents.expressions
-                            .items(module_inst.module.arena_data)[src_idx..src_end_idx];
-
-                        for (
-                            @as([]const Module.ElemSegment.Expr, src_exprs),
-                            dst_elems,
-                        ) |*src_expr, *dst| {
+                        const src_exprs = src_elems.contents.expressions[src_idx..src_end_idx];
+                        for (src_exprs, dst_elems) |*src_expr, *dst| {
                             dst.* = switch (src_expr.tag) {
                                 .@"ref.null" => FuncAddr.Nullable.null,
                                 .@"ref.func" => @bitCast(
@@ -1164,13 +1147,8 @@ pub const TableInst = extern struct {
                 const dst_elems: []ExternAddr = table_inst.base
                     .extern_ref[0..table_inst.len][dst_idx..dst_end_idx];
 
-                const src_exprs = src_elems.contents.expressions
-                    .items(module_inst.module.arena_data)[src_idx..src_end_idx];
-
-                for (
-                    @as([]const Module.ElemSegment.Expr, src_exprs),
-                    dst_elems,
-                ) |*src_expr, *dst| {
+                const src_exprs = src_elems.contents.expressions[src_idx..src_end_idx];
+                for (src_exprs, dst_elems) |*src_expr, *dst| {
                     dst.* = switch (src_expr.tag) {
                         .@"ref.null" => ExternAddr.null,
                         .@"global.get" => get: {
