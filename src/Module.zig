@@ -65,6 +65,14 @@ fn SmallIdx(comptime Int: type, comptime Idx: type) type {
 
 const Module = @This();
 
+// /// Describes the shape of a `ModuleInst`.
+// const RuntimeShape = struct {
+//     /// Stores the values of defined globals.
+//     global_values: [*]const u16,
+//     /// Offset to the array of global addresses.
+//     global_addrs: u16,
+// };
+
 // Fields are ordered manually, for the following reasons:
 // - to (maybe) ensure fields used together are close together
 // - to allow access from assembly code (when/if it is used)
@@ -823,157 +831,6 @@ const Sections = struct {
     };
 };
 
-const Size = struct {
-    bytes: usize = 0,
-
-    fn add(estimate: *Size, comptime T: type, count: usize) Allocator.Error!void {
-        comptime {
-            std.debug.assert(@alignOf(T) <= @alignOf(usize));
-        }
-
-        const items_size = std.math.mul(usize, @sizeOf(T), count) catch return error.OutOfMemory;
-        const already_aligned = comptime std.math.isPowerOfTwo(@sizeOf(T)) and
-            @sizeOf(T) >= @sizeOf(usize);
-
-        const aligned_size = if (already_aligned)
-            items_size
-        else
-            std.mem.alignBackward(
-                usize,
-                std.math.add(usize, items_size, @alignOf(usize) - 1) catch
-                    return error.OutOfMemory,
-                @alignOf(usize),
-            );
-
-        estimate.bytes = std.math.add(usize, estimate.bytes, aligned_size) catch
-            return error.OutOfMemory;
-    }
-
-    fn allocWithHeaderAlign(
-        estimate: Size,
-        arena: *ArenaAllocator,
-        comptime Header: type,
-        comptime header_alignment: std.mem.Alignment,
-    ) Allocator.Error!struct {
-        inner: *align(header_alignment.toByteUnits()) Header,
-        alloc: InnerAllocator,
-    } {
-        std.debug.assert(estimate.bytes >= @sizeOf(Header));
-        const allocation = try arena.allocator().alignedAlloc(
-            u8,
-            header_alignment,
-            // Round up to the alignment
-            std.mem.alignBackward(
-                usize,
-                std.math.add(usize, estimate.bytes, header_alignment.toByteUnits() - 1) catch
-                    return error.OutOfMemory,
-                header_alignment.toByteUnits(),
-            ),
-        );
-
-        return .{
-            .inner = @ptrCast(allocation[0..@sizeOf(Header)]),
-            .alloc = .{ .buffer = .init(allocation[@sizeOf(Header)..]), .arena = arena },
-        };
-    }
-};
-
-const InnerAllocator = struct {
-    buffer: FixedBufferAllocator,
-    arena: *ArenaAllocator,
-
-    fn alloc(ctx: *anyopaque, len: usize, alignment: Alignment, ret_addr: usize) ?[*]u8 {
-        const self: *InnerAllocator = @ptrCast(@alignCast(ctx));
-        return FixedBufferAllocator.alloc(
-            @ptrCast(&self.buffer),
-            len,
-            alignment,
-            ret_addr,
-        ) orelse self.arena.allocator().rawAlloc(len, alignment, ret_addr);
-    }
-
-    fn resize(
-        ctx: *anyopaque,
-        buf: []u8,
-        alignment: Alignment,
-        new_len: usize,
-        ret_addr: usize,
-    ) bool {
-        const self: *InnerAllocator = @ptrCast(@alignCast(ctx));
-        return if (self.buffer.ownsSlice(buf))
-            FixedBufferAllocator.resize(@ptrCast(&self.buffer), buf, alignment, new_len, ret_addr)
-        else
-            self.arena.allocator().rawResize(buf, alignment, new_len, ret_addr);
-    }
-
-    fn remap(
-        ctx: *anyopaque,
-        buf: []u8,
-        alignment: Alignment,
-        new_len: usize,
-        ret_addr: usize,
-    ) ?[*]u8 {
-        const self: *InnerAllocator = @ptrCast(@alignCast(ctx));
-        if (self.buffer.ownsSlice(buf)) {
-            const resized = FixedBufferAllocator.resize(
-                @ptrCast(&self.buffer),
-                buf,
-                alignment,
-                new_len,
-                ret_addr,
-            );
-
-            if (resized) {
-                return buf.ptr;
-            } else {
-                std.debug.assert(new_len > buf.len);
-                const new_ptr = self.arena.allocator().rawAlloc(
-                    new_len,
-                    alignment,
-                    ret_addr,
-                ) orelse return null;
-
-                @memcpy(new_ptr[0..new_len], buf);
-
-                FixedBufferAllocator.free(@ptrCast(&self.buffer), buf, alignment, ret_addr);
-
-                return buf.ptr;
-            }
-        } else {
-            return self.arena.allocator().rawRemap(buf, alignment, new_len, ret_addr);
-        }
-    }
-
-    fn free(ctx: *anyopaque, buf: []u8, alignment: Alignment, ret_addr: usize) void {
-        const self: *InnerAllocator = @ptrCast(@alignCast(ctx));
-        if (self.buffer.ownsSlice(buf)) {
-            FixedBufferAllocator.free(@ptrCast(&self.buffer), buf, alignment, ret_addr);
-        } else {
-            self.arena.allocator().rawFree(buf, alignment, ret_addr);
-        }
-    }
-
-    fn allocator(self: *InnerAllocator) Allocator {
-        return .{
-            .ptr = @ptrCast(self),
-            .vtable = &.{
-                .alloc = InnerAllocator.alloc,
-                .resize = InnerAllocator.resize,
-                .remap = InnerAllocator.remap,
-                .free = InnerAllocator.free,
-            },
-        };
-    }
-
-    fn deinit(self: *InnerAllocator) void {
-        self.arena.deinit();
-        self.* = undefined;
-    }
-
-    const FixedBufferAllocator = std.heap.FixedBufferAllocator;
-    const Alignment = std.mem.Alignment;
-};
-
 pub fn parse(
     gpa: Allocator,
     /// Pointer refering to the WebAssembly binary module to parse.
@@ -1016,26 +873,6 @@ pub fn parse(
     const has_data_count_section = !sections.readers.data_count.isEmpty();
 
     const counts = try Sections.Counts.parse(&sections.readers);
-
-    var size = Size{ .bytes = @sizeOf(Inner) };
-    try size.add(FuncType, counts.type);
-    try size.add(ValType, sections.readers.type.bytes.len -| counts.type);
-    try size.add(ImportName, counts.import);
-    // Assume most imports are functions
-    try size.add(*const FuncType, counts.func +| (counts.import / 2));
-    try size.add(TableType, @max(@min(1, counts.import), counts.table));
-    try size.add(MemType, @max(@min(1, counts.mem), counts.mem));
-    try size.add(GlobalType, counts.global);
-    try size.add(ConstExpr, counts.global);
-    try size.add(Export, counts.@"export");
-    try size.add(u32, std.math.divCeil(u32, @intCast(counts.elem), 32) catch unreachable);
-    try size.add(ElemSegment, counts.elem);
-    try size.add(u32, counts.data);
-    try size.add([*]const u8, counts.data);
-    try size.add(Code.Entry, counts.code);
-    try size.add(Code, counts.code);
-    try size.add(CustomSection, custom_sections_buf.len);
-
     if (counts.code != counts.func) {
         return error.MalformedWasm; // # of func section must match # of code
     }
@@ -1047,13 +884,36 @@ pub fn parse(
     try sections.readers.data_count.expectEndOfStream();
 
     var module_arena = ArenaAllocator.init(gpa);
-    var module = try size.allocWithHeaderAlign(
-        &module_arena,
-        Inner,
-        .fromByteUnits(std.atomic.cache_line),
-    );
-    size = undefined;
-    errdefer module.alloc.deinit();
+    var module = allocator: {
+        var allocator = reservation_allocator.ReservationAllocator.zero;
+        try allocator.reserve(FuncType, counts.type);
+        try allocator.reserve(ValType, sections.readers.type.bytes.len -| counts.type);
+        try allocator.reserve(ImportName, counts.import);
+        // Assume most imports are functions
+        try allocator.reserve(*const FuncType, counts.func +| (counts.import / 2));
+        try allocator.reserve(TableType, @max(@min(1, counts.import), counts.table));
+        try allocator.reserve(MemType, @max(@min(1, counts.mem), counts.mem));
+        try allocator.reserve(GlobalType, counts.global);
+        try allocator.reserve(ConstExpr, counts.global);
+        try allocator.reserve(Export, counts.@"export");
+        try allocator.reserve(
+            u32,
+            std.math.divCeil(u32, @intCast(counts.elem), 32) catch unreachable,
+        );
+        try allocator.reserve(ElemSegment, counts.elem);
+        try allocator.reserve(u32, counts.data);
+        try allocator.reserve([*]const u8, counts.data);
+        try allocator.reserve(Code.Entry, counts.code);
+        try allocator.reserve(Code, counts.code);
+        try allocator.reserve(CustomSection, custom_sections_buf.len);
+
+        break :allocator try allocator.arenaFallbackAllocatorWithHeaderAligned(
+            &module_arena,
+            Inner,
+            .fromByteUnits(std.atomic.cache_line),
+        );
+    };
+    errdefer module_arena.deinit();
 
     const type_sec = types: {
         errdefer wasm.* = sections.known.type;
@@ -1209,7 +1069,7 @@ pub fn parse(
 }
 
 fn parseTypeSec(
-    arena: *InnerAllocator,
+    arena: *reservation_allocator.ArenaFallbackAllocator,
     count: u32,
     readers: *const Sections.Readers,
 ) ![]const FuncType {
@@ -1285,7 +1145,7 @@ const ImportSec = struct {
 };
 
 fn parseImportSec(
-    arena: *InnerAllocator,
+    arena: *reservation_allocator.ArenaFallbackAllocator,
     type_sec: []const FuncType,
     counts: *const Sections.Counts,
     readers: *const Sections.Readers,
@@ -1386,9 +1246,9 @@ fn parseImportSec(
         },
         .types = types: {
             var final_types: ImportSec.Types = undefined;
-            var types_size = Size{};
+            var types_size = reservation_allocator.ReservationAllocator.zero;
             inline for (@typeInfo(ImportSec.Types).@"struct".fields) |f| {
-                try types_size.add(
+                try types_size.reserve(
                     @typeInfo(@FieldType(ImportSec.Types, f.name)).pointer.child,
                     std.math.add(
                         u32,
@@ -1398,17 +1258,8 @@ fn parseImportSec(
                 );
             }
 
-            var types_alloc = InnerAllocator{
-                .buffer = .init(try arena.allocator().alignedAlloc(
-                    u8,
-                    .fromByteUnits(@max(
-                        @alignOf(*const FuncType),
-                        @alignOf(TableType),
-                        @alignOf(MemType),
-                        @alignOf(GlobalType),
-                    )),
-                    types_size.bytes,
-                )),
+            var types_alloc = reservation_allocator.ArenaFallbackAllocator{
+                .buffer = try types_size.bufferAllocator(arena.allocator()),
                 .arena = arena.arena,
             };
 
@@ -1510,7 +1361,7 @@ fn parseMemSec(
 }
 
 fn parseGlobalSec(
-    arena: *InnerAllocator,
+    arena: *reservation_allocator.ArenaFallbackAllocator,
     import_sec: *const ImportSec,
     count: u32,
     readers: *const Sections.Readers,
@@ -1548,7 +1399,7 @@ const ExportSec = struct {
 
 fn parseExportSec(
     import_types: *const ImportSec.Types,
-    arena: *InnerAllocator,
+    arena: *reservation_allocator.ArenaFallbackAllocator,
     count: u32,
     readers: *const Sections.Readers,
     rng_seed: u64,
@@ -1632,7 +1483,7 @@ const ElemSec = struct {
 };
 
 fn parseElemSec(
-    arena: *InnerAllocator,
+    arena: *reservation_allocator.ArenaFallbackAllocator,
     readers: *const Sections.Readers,
     count: u32,
     import_types: *const ImportSec.Types,
@@ -1818,7 +1669,7 @@ const CodeSec = struct {
 };
 
 pub fn parseCodeSec(
-    arena: *InnerAllocator,
+    arena: *reservation_allocator.ArenaFallbackAllocator,
     readers: *const Sections.Readers,
     count: u32,
 ) !CodeSec {
@@ -1856,7 +1707,7 @@ const DataSec = struct {
 };
 
 fn parseDataSec(
-    arena: *InnerAllocator,
+    arena: *reservation_allocator.ArenaFallbackAllocator,
     readers: *const Sections.Readers,
     count: u32,
     import_sec: *const ImportSec,
@@ -1973,6 +1824,7 @@ const Type = std.builtin.Type;
 const Writer = std.Io.Writer;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
+const reservation_allocator = @import("reservation_allocator.zig");
 const Reader = @import("Module/Reader.zig");
 const opcodes = @import("opcodes.zig");
 const validator = @import("Module/validator.zig");
