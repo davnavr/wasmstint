@@ -1,7 +1,6 @@
 /// A memory allocator into a buffer of a precalculated size.
 pub fn AlignedReservationAllocator(
-    /// The alignment that all allocations into the buffer are expected to have.
-    comptime alignment: Alignment,
+    comptime max_alignment: Alignment,
 ) type {
     return struct {
         const Self = @This();
@@ -10,10 +9,14 @@ pub fn AlignedReservationAllocator(
 
         pub const zero = Self{ .bytes = 0 };
 
-        const align_bytes = alignment.toByteUnits();
+        const max_align_bytes = max_alignment.toByteUnits();
 
         pub fn alignUpTo(reservation: *Self, comptime new_alignment: Alignment) Oom!void {
             const new_alignment_bytes = comptime new_alignment.toByteUnits();
+            comptime {
+                std.debug.assert(new_alignment_bytes <= max_align_bytes);
+            }
+
             reservation.bytes = std.mem.alignBackward(
                 usize,
                 std.math.add(usize, reservation.bytes, new_alignment_bytes - 1) catch
@@ -24,24 +27,30 @@ pub fn AlignedReservationAllocator(
             std.debug.assert(reservation.bytes % new_alignment_bytes == 0);
         }
 
-        pub fn reserve(reservation: *Self, comptime T: type, count: usize) Oom!void {
-            comptime {
-                if (@alignOf(T) > align_bytes) {
-                    @compileError(
-                        std.fmt.comptimePrint(
-                            @typeName(T) ++ " has an alignment of {}, exceeding the maximum of {}",
-                            .{ @alignOf(T), align_bytes },
-                        ),
-                    );
-                }
-            }
-
+        pub inline fn reserveUnaligned(
+            reservation: *Self,
+            comptime T: type,
+            count: usize,
+        ) Oom!void {
             reservation.bytes = std.math.add(
                 usize,
                 reservation.bytes,
                 std.math.mul(usize, @sizeOf(T), count) catch return Oom.OutOfMemory,
             ) catch return Oom.OutOfMemory;
-            try reservation.alignUpTo(alignment);
+        }
+
+        pub fn reserve(reservation: *Self, comptime T: type, count: usize) Oom!void {
+            comptime {
+                if (@alignOf(T) > max_align_bytes) @compileError(
+                    std.fmt.comptimePrint(
+                        @typeName(T) ++ " has an alignment of {} bytes, exceeding the maximum of {}",
+                        .{ @alignOf(T), max_align_bytes },
+                    ),
+                );
+            }
+
+            try reservation.alignUpTo(.fromByteUnits(@alignOf(T)));
+            try reservation.reserveUnaligned(T, count);
         }
 
         /// Don't forget to call `backing_allocator.free()` on the returned buffer to deallocate
@@ -51,7 +60,7 @@ pub fn AlignedReservationAllocator(
             backing_allocator: Allocator,
         ) Oom!FixedBufferAllocator {
             return FixedBufferAllocator.init(
-                try backing_allocator.alignedAlloc(u8, alignment, reservation.bytes),
+                try backing_allocator.alignedAlloc(u8, max_alignment, reservation.bytes),
             );
         }
 
@@ -69,18 +78,16 @@ pub fn AlignedReservationAllocator(
             reservation: Self,
             arena: *ArenaAllocator,
             comptime Header: type,
-            comptime header_align: Alignment,
+            comptime header_alignment: Alignment,
         ) Oom!struct {
-            inner: *align(@max(align_bytes, header_align.toByteUnits())) Header,
+            inner: *align(@max(max_alignment, header_alignment.toByteUnits())) Header,
             alloc: ArenaFallbackAllocator,
         } {
-            const new_alignment = comptime Alignment.max(alignment, header_align);
-
             var new_reservation = reservation;
-            try new_reservation.reserve(Header, 1);
-            try new_reservation.alignUpTo(new_alignment);
+            try new_reservation.reserveUnaligned(Header, 1);
             std.debug.assert(new_reservation.bytes >= @sizeOf(Header));
-
+            const new_alignment = comptime header_alignment.max(max_alignment);
+            try new_reservation.alignUpTo(new_alignment);
             var allocator = ArenaFallbackAllocator{
                 .buffer = FixedBufferAllocator.init(
                     try arena.allocator().alignedAlloc(u8, new_alignment, new_reservation.bytes),
@@ -96,12 +103,15 @@ pub fn AlignedReservationAllocator(
     };
 }
 
-pub const ReservationAllocator = AlignedReservationAllocator(.fromByteUnits(@alignOf(usize)));
+pub const ReservationAllocator = AlignedReservationAllocator(.@"16");
 
 pub const ArenaFallbackAllocator = struct {
-    /// Where allocations go until it is filled.
+    /// Where allocations go until it is full.
     ///
     /// Allocated in the `arena`.
+    ///
+    /// Because the underlying `arena` can already allocate "next" to the `buffer` when it is
+    /// full, no logic is needed to attempt to resize the `buffer`.
     buffer: FixedBufferAllocator,
     arena: *ArenaAllocator,
 
@@ -127,6 +137,8 @@ pub const ArenaFallbackAllocator = struct {
     ) bool {
         const self: *ArenaFallbackAllocator = @ptrCast(@alignCast(ctx));
         return if (self.buffer.ownsSlice(buf))
+            // Could attempt resize of `self.buffer` here using `arena`, but it would rarely succeed
+            // anyway
             FixedBufferAllocator.resize(@ptrCast(&self.buffer), buf, alignment, new_len, ret_addr)
         else
             self.arena.allocator().rawResize(buf, alignment, new_len, ret_addr);
