@@ -154,11 +154,6 @@ pub const ModuleAlloc = struct {
                         else => false,
                     };
 
-                    std.log.debug(
-                        "want to allocate {} bytes, {} remaining of {}",
-                        .{ @sizeOf(Pointee), arena.buffer.len - arena.end_index, arena.buffer.len },
-                    );
-
                     const value = arena.allocator().create(Pointee) catch unreachable;
 
                     // Instantiation is responsible for initializing defined globals
