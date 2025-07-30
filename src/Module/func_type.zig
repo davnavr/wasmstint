@@ -1,5 +1,4 @@
 const std = @import("std");
-const IndexedArena = @import("../IndexedArena.zig");
 const ValType = @import("val_type.zig").ValType;
 
 pub const FuncType = extern struct {

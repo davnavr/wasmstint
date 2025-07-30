@@ -45,6 +45,6 @@ comptime {
 }
 
 test {
-    _ = @import("IndexedArena.zig");
+    _ = @import("reservation_allocator.zig");
     _ = PageBufferAllocator;
 }
