@@ -116,7 +116,7 @@ pub const FuncAddr = extern struct {
     pub fn init(inst: Expanded) FuncAddr {
         return FuncAddr{
             .module_or_host = switch (inst) {
-                .wasm => |*wasm| @ptrCast(wasm.module.data),
+                .wasm => |*wasm| @ptrCast(@constCast(wasm.module.inner)),
                 .host => |*host| @ptrFromInt(@intFromPtr(host.func) | 1),
             },
             .func = switch (inst) {
@@ -130,7 +130,7 @@ pub const FuncAddr = extern struct {
         const module_or_host = @intFromPtr(inst.module_or_host);
         return if (module_or_host & 1 == 0) Expanded{
             .wasm = .{
-                .module = ModuleInst{ .data = @ptrFromInt(module_or_host) },
+                .module = ModuleInst{ .inner = @ptrFromInt(module_or_host) },
                 .idx = inst.func.wasm,
             },
         } else .{
@@ -143,7 +143,7 @@ pub const FuncAddr = extern struct {
 
     comptime {
         std.debug.assert(@sizeOf(FuncAddr) == @sizeOf([2]*anyopaque));
-        std.debug.assert(std.meta.alignment(@FieldType(ModuleInst, "data")) >= 2);
+        std.debug.assert(std.meta.alignment(@FieldType(ModuleInst, "inner")) >= 2);
         std.debug.assert(@alignOf(Host) >= 2);
     }
 

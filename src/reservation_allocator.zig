@@ -13,9 +13,6 @@ pub fn AlignedReservationAllocator(
 
         pub fn alignUpTo(reservation: *Self, comptime new_alignment: Alignment) Oom!void {
             const new_alignment_bytes = comptime new_alignment.toByteUnits();
-            comptime {
-                std.debug.assert(new_alignment_bytes <= max_align_bytes);
-            }
 
             reservation.bytes = std.mem.alignBackward(
                 usize,
@@ -39,6 +36,7 @@ pub fn AlignedReservationAllocator(
             ) catch return Oom.OutOfMemory;
         }
 
+        /// Asserts at compile time that the alignment of `T` does not exceed `max_alignment`.
         pub fn reserve(reservation: *Self, comptime T: type, count: usize) Oom!void {
             comptime {
                 if (@alignOf(T) > max_align_bytes) @compileError(
@@ -80,7 +78,7 @@ pub fn AlignedReservationAllocator(
             comptime Header: type,
             comptime header_alignment: Alignment,
         ) Oom!struct {
-            inner: *align(@max(max_alignment, header_alignment.toByteUnits())) Header,
+            inner: *align(@max(max_align_bytes, header_alignment.toByteUnits())) Header,
             alloc: ArenaFallbackAllocator,
         } {
             var new_reservation = reservation;

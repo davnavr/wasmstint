@@ -65,14 +65,6 @@ fn SmallIdx(comptime Int: type, comptime Idx: type) type {
 
 const Module = @This();
 
-// /// Describes the shape of a `ModuleInst`.
-// const RuntimeShape = struct {
-//     /// Stores the values of defined globals.
-//     global_values: [*]const u16,
-//     /// Offset to the array of global addresses.
-//     global_addrs: u16,
-// };
-
 // Fields are ordered manually, for the following reasons:
 // - to (maybe) ensure fields used together are close together
 // - to allow access from assembly code (when/if it is used)
@@ -139,14 +131,13 @@ const RawInner = extern struct {
     datas_ptrs: [*]const [*]const u8,
     datas_lens: [*]const u32,
     active_datas: [*]const ActiveData,
-
-    // TODO: Store ModuleInst/Alloc shape here
 };
 
 const Inner = struct {
     raw: RawInner,
     wasm: []const u8,
     arena: ArenaAllocator.State,
+    runtime_shape: @import("runtime.zig").ModuleInst.Shape,
 };
 
 inner: *align(std.atomic.cache_line) const Inner,
@@ -223,6 +214,11 @@ pub inline fn globalImportNames(module: Module) []const ImportName {
 
 pub inline fn globalImportTypes(module: Module) []const GlobalType {
     return module.globalTypes()[0..module.inner.raw.global_import_count];
+}
+
+pub inline fn globalInitializers(module: Module) []const ConstExpr {
+    const defined_count = module.inner.raw.global_count - module.inner.raw.global_import_count;
+    return module.inner.raw.global_exprs[0..defined_count];
 }
 
 pub inline fn codeEntries(module: Module) []const Code.Entry {
@@ -895,6 +891,7 @@ pub fn parse(
         try allocator.reserve(MemType, @max(@min(1, counts.mem), counts.mem));
         try allocator.reserve(GlobalType, counts.global);
         try allocator.reserve(ConstExpr, counts.global);
+        // try allocator.reserve(u16, counts.global); // global_value_offsets
         try allocator.reserve(Export, counts.@"export");
         try allocator.reserve(
             u32,
@@ -955,6 +952,7 @@ pub fn parse(
             &sections.readers,
         );
     };
+    // const global_value_offsets = try module.alloc.allocator().alloc(u16, counts.global);
 
     const export_sec = exports: {
         errdefer wasm.* = sections.known.@"export";
@@ -1005,8 +1003,6 @@ pub fn parse(
             &scratch,
         );
     };
-
-    errdefer comptime unreachable;
 
     module.inner.* = Inner{
         .raw = RawInner{
@@ -1063,9 +1059,12 @@ pub fn parse(
         },
         .arena = module_arena.state,
         .wasm = original_wasm,
+        .runtime_shape = undefined,
     };
 
-    return Module{ .inner = module.inner };
+    const final_module = Module{ .inner = module.inner };
+    try module.inner.runtime_shape.calculate(final_module);
+    return final_module;
 }
 
 fn parseTypeSec(

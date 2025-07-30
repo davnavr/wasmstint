@@ -28,23 +28,36 @@ pub const ModuleAlloc = struct {
 
     pub const Error = ImportProvider.Error || Allocator.Error;
 
+    /// Allocates, but does not instantiate, a WebAssembly module.
     pub fn allocate(
         module: Module,
         import_provider: ImportProvider,
         gpa: Allocator,
         store: ModuleAllocator,
-        // scratch: Allocator, // could be used to avoid arena_array reallocation
         import_failure: ?*ImportProvider.FailedRequest,
     ) Error!ModuleAlloc {
-        var arena_array = IndexedArena.init(gpa);
-        defer arena_array.deinit();
+        var arena = std.heap.FixedBufferAllocator.init(
+            try gpa.alignedAlloc(
+                u8,
+                .fromByteUnits(std.atomic.cache_line),
+                module.inner.runtime_shape.size.bytes,
+            ),
+        );
+        errdefer gpa.free(arena.buffer);
 
-        var header = try arena_array.create(ModuleInst.Header);
-        std.debug.assert(header == ModuleInst.Header.index);
+        const header = &(arena.allocator().alignedAlloc(
+            ModuleInst.Header,
+            .fromByteUnits(std.atomic.cache_line),
+            1,
+        ) catch unreachable)[0];
+        std.debug.assert(@intFromPtr(header) == @intFromPtr(arena.buffer.ptr));
 
-        const func_imports = try arena_array.alloc(FuncAddr, module.inner.raw.func_import_count);
+        const func_imports = arena.allocator().alloc(
+            FuncAddr,
+            module.inner.raw.func_import_count,
+        ) catch unreachable;
         for (
-            func_imports.items(&arena_array),
+            func_imports,
             module.funcImportNames(),
             module.funcImportTypes(),
         ) |*import, name, func_type| {
@@ -57,9 +70,10 @@ pub const ModuleAlloc = struct {
             );
         }
 
-        const tables = try arena_array.alloc(*TableInst, module.inner.raw.table_count);
+        const tables =
+            arena.allocator().alloc(*TableInst, module.inner.raw.table_count) catch unreachable;
         for (
-            tables.items(&arena_array)[0..module.inner.raw.table_import_count],
+            tables[0..module.inner.raw.table_import_count],
             module.tableImportNames(),
             module.tableImportTypes(),
         ) |*import, name, *table_type| {
@@ -72,14 +86,15 @@ pub const ModuleAlloc = struct {
             )).table;
         }
 
-        const table_definitions = try arena_array.alloc(
+        const table_definitions = arena.allocator().alloc(
             TableInst,
             module.inner.raw.table_count - module.inner.raw.table_import_count,
-        );
+        ) catch unreachable;
 
-        const mems = try arena_array.alloc(*MemInst, module.inner.raw.mem_count);
+        const mems = arena.allocator().alloc(*MemInst, module.inner.raw.mem_count) catch
+            unreachable;
         for (
-            mems.items(&arena_array)[0..module.inner.raw.mem_import_count],
+            mems[0..module.inner.raw.mem_import_count],
             module.memImportNames(),
             module.memImportTypes(),
         ) |*import, name, *mem_type| {
@@ -92,17 +107,17 @@ pub const ModuleAlloc = struct {
             );
         }
 
-        const mem_definitions = try arena_array.alloc(
+        const mem_definitions = arena.allocator().alloc(
             MemInst,
             module.inner.raw.mem_count - module.inner.raw.mem_import_count,
-        );
+        ) catch unreachable;
 
         {
             var request = ModuleAllocator.Request.init(
                 module.tableTypes()[module.inner.raw.table_import_count..],
-                table_definitions.items(&arena_array),
+                table_definitions,
                 module.memTypes()[module.inner.raw.mem_import_count..],
-                mem_definitions.items(&arena_array),
+                mem_definitions,
             );
 
             try store.allocate(&request);
@@ -110,126 +125,95 @@ pub const ModuleAlloc = struct {
             if (!request.isDone()) return error.OutOfMemory;
         }
 
-        const GlobalFixup = packed union {
-            ptr: *anyopaque,
-            idx: IndexedArena.Idx(IndexedArena.Word),
-        };
-
-        const globals = try arena_array.alloc(GlobalFixup, module.inner.raw.global_count);
+        const globals = arena.allocator().alloc(*anyopaque, module.inner.raw.global_count) catch
+            unreachable;
         for (
-            globals.items(&arena_array)[0..module.inner.raw.global_import_count],
+            globals[0..module.inner.raw.global_import_count],
             module.globalImportNames(),
             module.globalImportTypes(),
         ) |*import, name, *global_type| {
-            import.* = GlobalFixup{
-                .ptr = (try import_provider.resolveTyped(
-                    name.module_name(module),
-                    name.desc_name(module),
-                    .global,
-                    global_type,
-                    import_failure,
-                )).value,
-            };
+            import.* = (try import_provider.resolveTyped(
+                name.module_name(module),
+                name.desc_name(module),
+                .global,
+                global_type,
+                import_failure,
+            )).value;
         }
 
         for (
-            module.inner.raw.global_import_count..,
+            globals[module.inner.raw.global_import_count..],
             module.globalTypes()[module.inner.raw.global_import_count..],
-        ) |i, *global_type| {
-            const size: u5 = switch (global_type.val_type) {
-                .i32, .f32 => 4,
-                .i64, .f64 => 8,
-                .v128 => 16,
-                .funcref => @sizeOf(FuncAddr.Nullable),
-                .externref => @sizeOf(ExternAddr),
+        ) |*value_ptr, *global_type| {
+            value_ptr.* = switch (global_type.val_type) {
+                .v128 => unreachable,
+                inline else => |val_type| value: {
+                    const Pointee = GlobalAddr.Pointee(val_type);
+                    const is_primitive = switch (@typeInfo(Pointee)) {
+                        .int, .float => true,
+                        else => false,
+                    };
+
+                    std.log.debug(
+                        "want to allocate {} bytes, {} remaining of {}",
+                        .{ @sizeOf(Pointee), arena.buffer.len - arena.end_index, arena.buffer.len },
+                    );
+
+                    const value = arena.allocator().create(Pointee) catch unreachable;
+
+                    // Instantiation is responsible for initializing defined globals
+                    value.* = if (!is_primitive and @hasDecl(Pointee, "null"))
+                        .null
+                    else
+                        std.mem.zeroes(Pointee);
+
+                    break :value @as(*anyopaque, @ptrCast(value));
+                },
             };
-
-            const raw_space_idx = try arena_array.rawAlloc(size, switch (global_type.val_type) {
-                .i32, .f32 => 4,
-                .i64, .f64 => @alignOf(u64),
-                .v128 => 16, // 8 if no SIMD
-                .funcref, .externref => @alignOf(*anyopaque),
-            });
-
-            const space_idx = IndexedArena.Idx(IndexedArena.Word).fromInt(raw_space_idx);
-
-            // Instantiation is responsible for initializing defined globals
-            @memset(
-                @as(
-                    [*]align(IndexedArena.min_alignment) u8,
-                    @ptrCast(space_idx.getPtr(&arena_array)),
-                )[0..size],
-                undefined,
-            );
-
-            globals.setAt(
-                i,
-                &arena_array,
-                GlobalFixup{ .idx = space_idx },
-            );
         }
 
-        const datas_drop_mask = try arena_array.alloc(
+        const datas_drop_mask = arena.allocator().alloc(
             u32,
-            std.math.divCeil(
-                u32,
-                module.inner.raw.datas_count,
-                32,
-            ) catch unreachable,
-        );
-        @memset(datas_drop_mask.items(&arena_array), std.math.maxInt(u32));
-
-        const elems_drop_mask_len = std.math.divCeil(
-            u32,
-            module.inner.raw.elems_count,
-            32,
+            std.math.divCeil(u32, module.inner.raw.datas_count, 32) catch unreachable,
         ) catch unreachable;
-        const elems_drop_mask = try arena_array.dupe(
+        @memset(datas_drop_mask, std.math.maxInt(u32));
+
+        const elems_drop_mask_len = std.math.divCeil(u32, module.inner.raw.elems_count, 32) catch
+            unreachable;
+        const elems_drop_mask = arena.allocator().dupe(
             u32,
             module.inner.raw.non_declarative_elems_mask[0..elems_drop_mask_len],
-        );
+        ) catch unreachable;
 
         errdefer comptime unreachable;
 
         for (
-            tables.items(&arena_array)[module.inner.raw.table_import_count..],
-            table_definitions.items(&arena_array),
+            tables[module.inner.raw.table_import_count..],
+            table_definitions,
         ) |*table_addr, *table_inst| {
             table_addr.* = table_inst;
         }
 
         for (
-            mems.items(&arena_array)[module.inner.raw.mem_import_count..],
-            mem_definitions.items(&arena_array),
+            mems[module.inner.raw.mem_import_count..],
+            mem_definitions,
         ) |*mem_addr, *mem_inst| {
             mem_addr.* = mem_inst;
         }
 
-        for (globals.items(&arena_array)[module.inner.raw.global_import_count..]) |*global| {
-            const value_ptr: *IndexedArena.Word = global.idx.getPtr(&arena_array);
-            global.* = GlobalFixup{ .ptr = @ptrCast(value_ptr) };
-        }
-
-        arena_array.data.expandToCapacity();
-
-        const module_data = arena_array.data.toOwnedSlice() catch unreachable;
-
-        header.getPtr(module_data).* = ModuleInst.Header{
-            .data_len = module_data.len,
+        header.* = ModuleInst.Header{
+            .buffer_len = arena.buffer.len,
             .module = module,
-            .func_import_count = module.inner.raw.func_import_count,
-            .func_imports = func_imports.items(module_data).ptr,
-            .mems = mems.items(module_data).ptr,
-            .tables = tables.items(module_data).ptr,
-            .globals = @ptrCast(globals.items(module_data).ptr),
-            .datas_drop_mask = datas_drop_mask.items(module_data).ptr,
-            .elems_drop_mask = elems_drop_mask.items(module_data).ptr,
+            .func_imports = func_imports.ptr,
+            .mems = mems.ptr,
+            .tables = tables.ptr,
+            .globals = globals.ptr,
+            .datas_drop_mask = datas_drop_mask.ptr,
+            .elems_drop_mask = elems_drop_mask.ptr,
         };
 
         return ModuleAlloc{
-            .requiring_instantiation = ModuleInst{
-                .data = module_data.ptr,
-            },
+            .requiring_instantiation = ModuleInst{ .inner = header },
         };
     }
 
@@ -241,6 +225,6 @@ pub const ModuleAlloc = struct {
 
 const std = @import("std");
 const Writer = std.Io.Writer;
-const IndexedArena = @import("IndexedArena.zig");
+const reservation_allocator = @import("reservation_allocator.zig");
 const Allocator = std.mem.Allocator;
 const Module = @import("Module.zig");

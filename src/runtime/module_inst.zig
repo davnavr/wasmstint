@@ -4,15 +4,67 @@
 /// then passed to `Interpreter.instantiateModule`.
 pub const ModuleInst = extern struct {
     /// Internal API.
-    pub const Header = struct {
-        data_len: usize,
+    ///
+    /// Makes calculating the layout of a `ModuleInst` a single cost when a `Module` is parsed,
+    /// rather than recalculating it every time a module is instantiated.
+    pub const Shape = struct {
+        size: reservation_allocator.ReservationAllocator,
+        // /// Stores the offsets of the values of defined globals.
+        // ///
+        // /// These offsets are relative to the address of the value of the first defined global.
+        // global_value_offsets: [*]const u16,
+
+        /// Returns an error if an overflow occurred while calculating the module layout.
+        pub fn calculate(
+            /// Pointer to where the calculated shape is written to.
+            shape: *Shape,
+            /// As this function is used in `Module.parse()`, it must make sure not to access
+            /// uninitialized data.
+            module: Module,
+            // /// Allocated in the `module`'s arena.
+            // global_value_offsets: []u16,
+        ) std.mem.Allocator.Error!void {
+            const info = &module.inner.raw;
+
+            var size = reservation_allocator.ReservationAllocator{ .bytes = @sizeOf(Header) };
+            try size.reserve(FuncAddr, info.func_import_count);
+            try size.reserve(*TableInst, info.table_count);
+            try size.reserve(TableInst, info.table_count - info.table_import_count);
+            try size.reserve(*MemInst, info.mem_count);
+            try size.reserve(MemInst, info.mem_count - info.mem_import_count);
+            try size.reserve(*anyopaque, info.global_count);
+
+            // More efficient packing of global values is possible
+            // TODO: figure out why allocation failure occurs for global values
+            // const defined_global_types = module.globalTypes()[0..module.globalInitializers().len];
+            // if (defined_global_types.len > 0) {
+            //     try size.alignUpTo(.fromByteUnits(@alignOf(u64)));
+            // }
+
+            // for (defined_global_types) |*global_type| {
+            //     switch (global_type.val_type) {
+            //         .v128 => unreachable,
+            //         inline else => |ty| try size.reserve(GlobalAddr.Pointee(ty), 1),
+            //     }
+            // }
+            try size.reserve(FuncAddr, module.globalInitializers().len);
+
+            try size.reserve(u32, std.math.divCeil(u32, info.datas_count, 32) catch unreachable);
+            try size.reserve(u32, std.math.divCeil(u32, info.elems_count, 32) catch unreachable);
+
+            shape.* = .{ .size = size };
+        }
+    };
+
+    /// Internal API.
+    pub const Header = struct { // extern
+        buffer_len: usize,
         module: Module,
         // /// Used to detect multi-threaded usage of a module instance.
         // ///
         // /// Currently, the WASM specification focuses only on single-threaded usage, with
         // /// *shared* memories currently being the sole exception.
         // acquired_flag: std.atomic.Value(bool) = .{ .raw = false },
-        func_import_count: u32,
         func_imports: [*]const FuncAddr,
         mems: [*]const *MemInst, // TODO: Could use comptime config to have specialized [1]MemInst (same for TableInst)
         tables: [*]const *TableInst,
@@ -26,18 +78,14 @@ pub const ModuleInst = extern struct {
         /// Before instantiation, both active and passive element segments have not yet been dropped.
         elems_drop_mask: [*]u32,
 
-        pub const index = IndexedArena.Idx(Header).fromInt(0);
-
-        pub fn moduleInst(inst: *const Header) ModuleInst {
-            const module = ModuleInst{ .data = @constCast(@ptrCast(@alignCast(inst))) };
-            std.debug.assert(@intFromPtr(inst) == @intFromPtr(module.header()));
-            return module;
+        pub inline fn moduleInst(inst: *const Header) ModuleInst {
+            return ModuleInst{ .inner = @alignCast(inst) };
         }
 
         pub fn funcAddr(inst: *const Header, idx: Module.FuncIdx) FuncAddr {
             const i: usize = @intFromEnum(idx);
             std.debug.assert(i < inst.module.funcCount());
-            return if (i < inst.func_import_count)
+            return if (i < inst.module.inner.raw.func_import_count)
                 inst.func_imports[i]
             else
                 FuncAddr.init(.{
@@ -158,16 +206,12 @@ pub const ModuleInst = extern struct {
         }
     };
 
-    data: [*]align(IndexedArena.max_alignment) IndexedArena.Word,
+    inner: *align(std.atomic.cache_line) const Header,
 
     /// Internal API used to obtain the functions, tables, memories, globals, etc.
     /// that are defined or imported by the module.
-    pub fn header(inst: ModuleInst) *const Header {
-        const header_ptr: *Header = @ptrCast(inst.data);
-        std.debug.assert(
-            @intFromPtr(Header.index.getPtr(inst.data[0..header_ptr.data_len])) == @intFromPtr(header_ptr),
-        );
-        return header_ptr;
+    pub inline fn header(inst: ModuleInst) *const Header {
+        return inst.inner; // might become &inst.inner.header in the future
     }
 
     pub const FindExportError = error{
@@ -236,13 +280,13 @@ pub const ModuleInst = extern struct {
             .tables = instance.definedTableInsts(),
         });
 
-        gpa.free(inst.data[0..instance.data_len]);
-        inst.data = undefined;
+        gpa.free(@as([*]const u8, @ptrCast(inst.*.inner))[0..inst.inner.buffer_len]);
+        inst.* = undefined;
     }
 };
 
 const std = @import("std");
-const IndexedArena = @import("../IndexedArena.zig");
+const reservation_allocator = @import("../reservation_allocator.zig");
 const Module = @import("../Module.zig");
 const MemInst = @import("memory.zig").MemInst;
 const TableInst = @import("table.zig").TableInst;
