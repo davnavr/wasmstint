@@ -16,10 +16,13 @@ pub fn readFileZ(dir: Dir, path: [:0]const u8) ReadError!FileContent {
     const page_size = pageSize();
     const indicated_size = std.math.cast(usize, (try file.stat()).size) orelse
         return Oom.OutOfMemory;
-    const allocated_size = std.mem.alignBackward(
-        usize,
-        std.math.add(usize, indicated_size, page_size - 1) catch return Oom.OutOfMemory,
+    const allocated_size = @max(
         page_size,
+        std.mem.alignBackward(
+            usize,
+            std.math.add(usize, indicated_size, page_size - 1) catch return Oom.OutOfMemory,
+            page_size,
+        ),
     );
 
     std.debug.assert(allocated_size >= indicated_size);
