@@ -97,10 +97,15 @@ pub fn main() u8 {
 
     var rng = rng: {
         var init = std.Random.Xoshiro256{ .s = undefined };
-        if (arguments.@"rng-seed") |seed|
-            init.s = @bitCast(seed)
-        else
+        if (arguments.@"rng-seed") |seed| {
+            init.s = @bitCast(seed);
+        } else if (builtin.os.tag == .windows) {
+            // Undefined symbol: SystemFunction032
+            // Don't want to linkadvapi32 right now
+            init.seed(42);
+        } else {
             std.posix.getrandom(std.mem.asBytes(&init.s)) catch @panic("cannot obtain RNG");
+        }
 
         break :rng init;
     };
