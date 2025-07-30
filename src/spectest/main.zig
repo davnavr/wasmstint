@@ -142,7 +142,7 @@ pub fn main() u8 {
 
     const exit_code: u8 = while (true) {
         const command = (json_script.next(&arena, &scratch) catch |e|
-            handleJsonError(arguments.run, &json_script, stderr, e)) orelse break 1;
+            handleJsonError(arguments.run, &json_script, stderr, e)) orelse break 0;
 
         stderr.print(
             "{f}:{} {t}\n",
