@@ -135,9 +135,9 @@ pub fn main() u8 {
         &rng,
     );
 
-    while (true) {
+    const exit_code: u8 = while (true) {
         const command = (json_script.next(&arena, &scratch) catch |e|
-            handleJsonError(arguments.run, &json_script, stderr, e)) orelse break;
+            handleJsonError(arguments.run, &json_script, stderr, e)) orelse break 1;
 
         stderr.print(
             "{f}:{} {t}\n",
@@ -152,16 +152,16 @@ pub fn main() u8 {
                         trace.format(stderr.writer) catch {};
                     }
                 }
-                break;
+                break 1;
             },
         };
 
         _ = scratch.reset(.retain_capacity);
-    }
+    } else 0;
 
     stderr.print("{} tests passed\n", .{json_script.command_count});
 
-    return 0;
+    return exit_code;
 }
 
 fn handleJsonError(
