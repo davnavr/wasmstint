@@ -75,13 +75,15 @@ pub fn readFileZ(dir: Dir, path: [:0]const u8) ReadError!FileContent {
             );
         }
 
-        var dummy_old_protect: windows.DWORD = undefined;
-        windows.VirtualProtect(
-            @ptrCast(pages.used.ptr),
-            pages.used.len,
-            windows.PAGE_READONLY,
-            &dummy_old_protect,
-        ) catch unreachable;
+        if (pages.used.len > 0) {
+            var dummy_old_protect: windows.DWORD = undefined;
+            windows.VirtualProtect(
+                @ptrCast(pages.used.ptr),
+                pages.used.len,
+                windows.PAGE_READONLY,
+                &dummy_old_protect,
+            ) catch unreachable;
+        }
 
         return .{ .contents = allocated[0..actual_size] };
     } else {
