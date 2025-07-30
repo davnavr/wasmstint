@@ -9,7 +9,10 @@ pub const ArgIterator = struct {
         return .{
             .remaining = switch (builtin.os.tag) {
                 .wasi => (try std.process.ArgIteratorWasi.init(arena.allocator())).args,
-                .windows => try std.process.argsAlloc(arena.allocator()),
+                .windows => std.process.argsAlloc(arena.allocator()) catch |e| return switch (e) {
+                    error.OutOfMemory => |oom| oom,
+                    error.Overflow => Oom.OutOfMemory,
+                },
                 else => posix: {
                     var args = try arena.allocator().alloc(
                         [:0]const u8,
