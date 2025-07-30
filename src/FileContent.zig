@@ -31,8 +31,15 @@ pub fn readFileZ(dir: Dir, path: [:0]const u8) ReadError!FileContent {
     if (builtin.os.tag == .windows) {
         @panic("TODO: Windows VirtualAlloc(reserve and allocate) and then decommit");
     } else {
+        // see `PageAllocator.map`
+        const hint = @atomicLoad(
+            @TypeOf(std.heap.next_mmap_addr_hint),
+            &std.heap.next_mmap_addr_hint,
+            .unordered,
+        );
+
         const allocated: []align(page_size_min) u8 = posix.mmap(
-            std.heap.next_mmap_addr_hint, // TODO: Fix need atomic operations
+            hint,
             allocated_size,
             posix.system.PROT.WRITE,
             .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
@@ -59,12 +66,26 @@ pub fn readFileZ(dir: Dir, path: [:0]const u8) ReadError!FileContent {
         std.debug.assert(
             @intFromPtr(used_pages.ptr + used_pages.len) <= @intFromPtr(unused_pages.ptr),
         );
+
         if (unused_pages_size > 0) {
             posix.munmap(unused_pages); // Does Zig allow unmapping some pages at the end?
         }
 
-        // OOM shouldn't occur when "shortening" an allocation
-        posix.mprotect(used_pages, posix.system.PROT.READ) catch unreachable;
+        // see `PageAllocator.map`
+        _ = @cmpxchgWeak(
+            @TypeOf(std.heap.next_mmap_addr_hint),
+            &std.heap.next_mmap_addr_hint,
+            hint,
+            @constCast(unused_pages.ptr),
+            .monotonic,
+            .monotonic,
+        );
+
+        posix.mprotect(used_pages, posix.system.PROT.READ) catch |e| switch (e) {
+            // OOM probably shouldn't occur, since "whole" allocation is marked read-only
+            error.OutOfMemory => |oom| return oom,
+            else => unreachable,
+        };
 
         return .{ .contents = allocated[0..actual_size], .allocated_size = {} };
     }
