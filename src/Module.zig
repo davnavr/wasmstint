@@ -1534,6 +1534,10 @@ fn parseMemSec(
     // check std.math.maxInt(@typeInfo(MemIdx).@"enum".tag_type)
 
     for (import_types.mems[import_types.mems.len - count ..], 0..count) |*mem, _| {
+        if (mem_reader.isEmpty()) {
+            return diag.writeAll(.parse, "unexpected end of section or function, expected memory");
+        }
+
         mem.* = try MemType.parse(mem_reader, diag);
     }
 
@@ -1560,6 +1564,10 @@ fn parseGlobalSec(
     }
 
     for (global_types[global_types.len - count ..], global_exprs) |*ty, *expr| {
+        if (global_reader.isEmpty()) {
+            return diag.writeAll(.parse, "unexpected end of section or function, expected global");
+        }
+
         ty.* = try GlobalType.parse(global_reader, diag);
         expr.* = try ConstExpr.parse(
             global_reader,
@@ -1621,6 +1629,10 @@ fn parseExportSec(
 
     const exports_start = export_reader.bytes.*.ptr;
     for (descs) |*ex| {
+        if (export_reader.isEmpty()) {
+            return diag.writeAll(.parse, "length out of bounds, expected export");
+        }
+
         const name = try export_reader.readName(diag);
         if (export_dedup.getOrPutAssumeCapacityContext(name.bytes, export_dedup_context)
             .found_existing)

@@ -1082,7 +1082,6 @@ pub fn rawValidate(
             }
         }
 
-        std.log.debug("{} locals", .{buf.len});
         std.debug.assert(local_idx == buf.len);
         local_vars.clearRetainingCapacity();
         val_stack = ValStack{ .buf = local_vars };
