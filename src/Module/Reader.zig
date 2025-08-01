@@ -91,7 +91,7 @@ pub fn read(reader: Reader, len: usize, diag: Diagnostics, desc: []const u8) Err
     if (reader.bytes.len < len) {
         return diag.print(
             .parse,
-            "expected {} bytes for {s}, but {} bytes were remaining",
+            "length out of bounds: expected {} bytes for {s}, but {} bytes were remaining",
             .{ len, desc, reader.bytes.len },
         );
     }
