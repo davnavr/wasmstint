@@ -551,11 +551,10 @@ const Label = struct {
         module: Module,
         diag: Diagnostics,
     ) !Label {
-        const frame_idx = ctrl_stack.len - 1 - depth;
         const frame: *const CtrlFrame = if (depth < ctrl_stack.len)
-            ctrl_stack.at(frame_idx)
+            ctrl_stack.at(ctrl_stack.len - 1 - depth)
         else
-            return diag.print(.validation, "unknown label {}", .{frame_idx});
+            return diag.print(.validation, "unknown label {}", .{depth});
 
         // std.debug.print(
         //     " ? label at depth {} targets 0x{X} ({s})\n",
