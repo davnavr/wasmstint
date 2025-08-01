@@ -165,6 +165,10 @@ pub const StackFrame = extern struct {
     /// The length of the value stack to restore when returning from this function is equal to this
     /// value.
     values_base: u32,
+    /// Set to true when the function returns.
+    ///
+    /// If the function is the start function, then this indicates that the module was successfully
+    /// instantiated. Otherwise, this points to a dummy memory location which is never read.
     instantiate_flag: *bool,
 
     // TODO: What if call stack was an "unrolled linked list" or something like std.SegmentedList?
@@ -1240,7 +1244,7 @@ const Instructions = extern struct {
         return .{ .p = ip, .ep = eip };
     }
 
-    fn readByteArray(i: *Instructions, comptime n: usize) Module.NoEofError!*const [n]u8 {
+    fn readByteArray(i: *Instructions, comptime n: usize) error{EndOfStream}!*const [n]u8 {
         if (@intFromPtr(i.p) + (n - 1) <= @intFromPtr(i.ep)) {
             const result = i.p[0..n];
             i.p += n;
@@ -1248,7 +1252,7 @@ const Instructions = extern struct {
         } else return error.EndOfStream;
     }
 
-    pub inline fn readByte(i: *Instructions) Module.NoEofError!u8 {
+    pub inline fn readByte(i: *Instructions) error{EndOfStream}!u8 {
         return (try i.readByteArray(1))[0];
     }
 

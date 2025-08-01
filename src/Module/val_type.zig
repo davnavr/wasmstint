@@ -20,11 +20,11 @@ pub const ValType = enum(u8) { // packed union
         };
     }
 
-    pub fn read(reader: Reader) Reader.Error!ValType {
+    pub fn parse(reader: Reader, diag: Reader.Diagnostics) Reader.Error!ValType {
         // Code has to change if ValType becomes a pointer to support typed function references/GC proposal.
         comptime std.debug.assert(@typeInfo(ValType).@"enum".tag_type == u8);
 
-        return reader.readByteTag(ValType);
+        return reader.readByteTag(ValType, diag, "valtype");
     }
 
     // comptime {

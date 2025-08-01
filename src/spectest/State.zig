@@ -150,8 +150,11 @@ fn processModuleCommand(
     state: *State,
     command: *const Parser.Command,
     output: Output,
-    scratch: *ArenaAllocator,
+    alloca: *ArenaAllocator,
 ) Error!void {
+    defer _ = alloca.reset(.retain_capacity);
+    var scratch = ArenaAllocator.init(alloca.allocator());
+
     const module = &command.type.module;
     const module_lookup_entry = if (module.name) |name| has_name: {
         const entry = state.module_lookup.getOrPut(std.heap.page_allocator, name) catch
@@ -170,31 +173,57 @@ fn processModuleCommand(
     const fmt_filename = std.unicode.fmtUtf8(module.filename);
     // errdefer module_binary.deinit();
 
+    var parse_diagnostics = std.Io.Writer.Allocating.initCapacity(alloca.allocator(), 128) catch
+        @panic("oom");
     const parsed_module = module: {
         var wasm: []const u8 = module_binary.contents;
         break :module wasmstint.Module.parse(
             state.module_arena.allocator(),
             &wasm,
-            scratch,
-            .{ .random_seed = state.rng.random().int(u64) },
+            &scratch,
+            .{
+                .random_seed = state.rng.random().int(u64),
+                .diagnostics = .init(&parse_diagnostics.writer),
+            },
         ) catch |e| return switch (e) {
             error.OutOfMemory => @panic("oom"),
-            error.InvalidWasm => failFmt(output, "failed to validate module {f}", .{fmt_filename}),
-            else => failFmt(output, "module parse error: {t}", .{e}),
+            error.InvalidWasm => failFmt(
+                output,
+                "failed to validate module {f}: {s}",
+                .{ fmt_filename, parse_diagnostics.getWritten() },
+            ),
+            error.MalformedWasm => failFmt(
+                output,
+                "failed to parse module {f}: {s}",
+                .{ fmt_filename, parse_diagnostics.getWritten() },
+            ),
+            else => return failFmt(output, "failed to parse module {f}: {t}", .{ fmt_filename, e }),
         };
     };
     _ = scratch.reset(.retain_capacity);
 
     // `assert_invalid` commands mean lazy validation won't work
+    parse_diagnostics.clearRetainingCapacity();
     const validation_finished = parsed_module.finishCodeValidation(
         state.module_arena.allocator(),
-        scratch,
+        &scratch,
+        .init(&parse_diagnostics.writer),
     ) catch |e| switch (e) {
         error.OutOfMemory => @panic("oom"),
-        else => return failFmt(output, "module code validation error: {t}", .{e}),
+        error.InvalidWasm, error.MalformedWasm => return failFmt(
+            output,
+            "failed to validate code for module {f}: {s}",
+            .{ fmt_filename, parse_diagnostics.getWritten() },
+        ),
+        else => return failFmt(
+            output,
+            "failed to parse module code {f}: {t}",
+            .{ fmt_filename, e },
+        ),
     };
 
-    _ = scratch.reset(.retain_capacity);
+    scratch = undefined;
+    _ = alloca.reset(.retain_capacity);
 
     std.debug.assert(validation_finished);
 
@@ -217,7 +246,7 @@ fn processModuleCommand(
         &fuel,
     ) catch @panic("oom");
 
-    _ = try state.expectResultValues(&fuel, &Parser.Command.Expected.Vec{}, output, scratch);
+    _ = try state.expectResultValues(&fuel, &Parser.Command.Expected.Vec{}, output, alloca);
 
     const module_inst = module_alloc.expectInstantiated();
     state.current_module = module_inst;
@@ -962,34 +991,48 @@ fn processAssertInvalid(
 
     var scratch = std.heap.ArenaAllocator.init(arena.allocator());
     var wasm: []const u8 = module_binary.contents;
+    var parse_diagnostics = std.Io.Writer.Allocating.initCapacity(arena.allocator(), 128) catch
+        @panic("oom");
     validation_failed: {
         var parsed_module = wasmstint.Module.parse(
             arena.allocator(),
             &wasm,
             &scratch,
-            .{ .random_seed = state.rng.random().int(u64) },
+            .{
+                .random_seed = state.rng.random().int(u64),
+                .diagnostics = .init(&parse_diagnostics.writer),
+            },
         ) catch |e| switch (e) {
             error.OutOfMemory => @panic("oom"),
             error.InvalidWasm => break :validation_failed,
-            else => |err| return failFmt(
+            error.MalformedWasm => return failFmt(
                 output,
-                "expected validation error for module \"{f}\", got syntax error {t}",
-                .{ fmt_filename, err },
+                "expected validation error for module \"{f}\", got syntax error: {s}",
+                .{ fmt_filename, parse_diagnostics.getWritten() },
             ),
+            else => return failFmt(output, "failed to parse module {f}: {t}", .{ fmt_filename, e }),
         };
 
         _ = scratch.reset(.retain_capacity);
 
+        // Validation error is in the code
+        parse_diagnostics.clearRetainingCapacity();
         const validation_finished = parsed_module.finishCodeValidation(
             state.module_arena.allocator(),
             &scratch,
+            .init(&parse_diagnostics.writer),
         ) catch |e| switch (e) {
             error.OutOfMemory => @panic("oom"),
             error.InvalidWasm => break :validation_failed,
-            else => |err| return failFmt(
+            error.MalformedWasm => return failFmt(
                 output,
-                "expected code validation error for module \"{f}\", got syntax error {t}",
-                .{ fmt_filename, err },
+                "expected code validation error for module \"{f}\", got syntax error: {s}",
+                .{ fmt_filename, parse_diagnostics.getWritten() },
+            ),
+            else => return failFmt(
+                output,
+                "failed to parse module code {f}: {t}",
+                .{ fmt_filename, e },
             ),
         };
 
@@ -1002,7 +1045,15 @@ fn processAssertInvalid(
         );
     }
 
-    output.writeAll("TODO: actually check the message for assert_invalid\n");
+    if (std.mem.indexOf(u8, parse_diagnostics.getWritten(), command.text) == null) {
+        return failFmt(
+            output,
+            "validation message mismatch for module \"{f}\"\nexpected: {s}\nactual: {s}",
+            .{ fmt_filename, command.text, parse_diagnostics.getWritten() },
+        );
+    }
+
+    output.print("validation failed: {s}\n", .{parse_diagnostics.getWritten()});
 }
 
 fn processAssertMalformed(
@@ -1019,35 +1070,53 @@ fn processAssertMalformed(
 
     var scratch = std.heap.ArenaAllocator.init(arena.allocator());
     var wasm: []const u8 = module_binary.contents;
-    validation_failed: {
+    var parse_diagnostics = std.Io.Writer.Allocating.initCapacity(arena.allocator(), 128) catch
+        @panic("oom");
+    parse_failed: {
         var parsed_module = wasmstint.Module.parse(
             arena.allocator(),
             &wasm,
             &scratch,
-            .{ .random_seed = state.rng.random().int(u64) },
+            .{
+                .random_seed = state.rng.random().int(u64),
+                .diagnostics = .init(&parse_diagnostics.writer),
+            },
         ) catch |e| switch (e) {
             error.OutOfMemory => @panic("oom"),
+            error.MalformedWasm => break :parse_failed,
             error.InvalidWasm => return failFmt(
                 output,
-                "expected parse error for module \"{f}\", but got validation error",
-                .{fmt_filename},
+                "expected parse error for module \"{f}\", but got validation error: {s}",
+                .{ fmt_filename, parse_diagnostics.getWritten() },
             ),
-            else => break :validation_failed,
+            else => return failFmt(
+                output,
+                "failed to parse module {f}: {t}",
+                .{ fmt_filename, e },
+            ),
         };
 
         _ = scratch.reset(.retain_capacity);
 
+        // Parse error is in the code
+        parse_diagnostics.clearRetainingCapacity();
         const validation_finished = parsed_module.finishCodeValidation(
             state.module_arena.allocator(),
             &scratch,
+            .init(&parse_diagnostics.writer),
         ) catch |e| switch (e) {
             error.OutOfMemory => @panic("oom"),
+            error.MalformedWasm => break :parse_failed,
             error.InvalidWasm => return failFmt(
                 output,
-                "expected code parse error for module \"{f}\", but got validation error",
-                .{fmt_filename},
+                "expected code parse error for module \"{f}\", but got validation error: {s}",
+                .{ fmt_filename, parse_diagnostics.getWritten() },
             ),
-            else => break :validation_failed,
+            else => return failFmt(
+                output,
+                "failed to parse module code {f}: {t}",
+                .{ fmt_filename, e },
+            ),
         };
 
         std.debug.assert(validation_finished);
@@ -1059,7 +1128,15 @@ fn processAssertMalformed(
         );
     }
 
-    output.writeAll("TODO: actually check the message for assert_malformed\n");
+    if (std.mem.indexOf(u8, parse_diagnostics.getWritten(), command.text) == null) {
+        return failFmt(
+            output,
+            "parse error message mismatch for module \"{f}\"\nexpected: {s}\nactual: {s}",
+            .{ fmt_filename, command.text, parse_diagnostics.getWritten() },
+        );
+    }
+
+    output.print("parser error: {s}\n", .{parse_diagnostics.getWritten()});
 }
 
 fn processAssertUninstantiable(
@@ -1076,24 +1153,48 @@ fn processAssertUninstantiable(
 
     var scratch = std.heap.ArenaAllocator.init(arena.allocator());
     var wasm: []const u8 = module_binary.contents;
+    var parse_diagnostics = std.Io.Writer.Allocating.initCapacity(arena.allocator(), 128) catch
+        @panic("oom");
     const module = wasmstint.Module.parse(
         arena.allocator(),
         &wasm,
         &scratch,
-        .{ .random_seed = state.rng.random().int(u64) },
+        .{
+            .random_seed = state.rng.random().int(u64),
+            .diagnostics = .init(&parse_diagnostics.writer),
+        },
     ) catch |e| return switch (e) {
         error.OutOfMemory => @panic("oom"),
-        error.InvalidWasm => failFmt(output, "failed to validate module {f}", .{fmt_filename}),
-        else => failFmt(output, "module parse error: {t}", .{e}),
+        error.InvalidWasm, error.MalformedWasm => failFmt(
+            output,
+            "failed to validate module {f}: {s}",
+            .{ fmt_filename, parse_diagnostics.getWritten() },
+        ),
+        else => return failFmt(
+            output,
+            "failed to parse module {f}: {t}",
+            .{ fmt_filename, e },
+        ),
     };
     _ = scratch.reset(.retain_capacity);
 
+    parse_diagnostics.clearRetainingCapacity();
     const validation_finished = module.finishCodeValidation(
         arena.allocator(),
         &scratch,
+        .init(&parse_diagnostics.writer),
     ) catch |e| switch (e) {
         error.OutOfMemory => @panic("oom"),
-        else => return failFmt(output, "module code validation error: {t}", .{e}),
+        error.InvalidWasm, error.MalformedWasm => return failFmt(
+            output,
+            "failed to validate module code {f}: {s}",
+            .{ fmt_filename, parse_diagnostics.getWritten() },
+        ),
+        else => return failFmt(
+            output,
+            "failed to parse module code {f}: {t}",
+            .{ fmt_filename, e },
+        ),
     };
     _ = scratch.reset(.retain_capacity);
 
@@ -1136,24 +1237,48 @@ fn processAssertUnlinkable(
 
     var scratch = std.heap.ArenaAllocator.init(arena.allocator());
     var wasm: []const u8 = module_binary.contents;
+    var parse_diagnostics = std.Io.Writer.Allocating.initCapacity(arena.allocator(), 128) catch
+        @panic("oom");
     var module = wasmstint.Module.parse(
         arena.allocator(),
         &wasm,
         &scratch,
-        .{ .random_seed = state.rng.random().int(u64) },
+        .{
+            .random_seed = state.rng.random().int(u64),
+            .diagnostics = .init(&parse_diagnostics.writer),
+        },
     ) catch |e| return switch (e) {
         error.OutOfMemory => @panic("oom"),
-        error.InvalidWasm => failFmt(output, "failed to validate module {f}", .{fmt_filename}),
-        else => failFmt(output, "module parse error: {t}", .{e}),
+        error.InvalidWasm, error.MalformedWasm => failFmt(
+            output,
+            "failed to validate module {f}: {s}",
+            .{ fmt_filename, parse_diagnostics.getWritten() },
+        ),
+        else => return failFmt(
+            output,
+            "failed to parse module {f}: {t}",
+            .{ fmt_filename, e },
+        ),
     };
     _ = scratch.reset(.retain_capacity);
 
+    parse_diagnostics.clearRetainingCapacity();
     const validation_finished = module.finishCodeValidation(
         arena.allocator(),
         &scratch,
+        .init(&parse_diagnostics.writer),
     ) catch |e| switch (e) {
         error.OutOfMemory => @panic("oom"),
-        else => return failFmt(output, "module code validation error: {t}", .{e}),
+        error.InvalidWasm, error.MalformedWasm => return failFmt(
+            output,
+            "failed to validate module code {f}: {s}",
+            .{ fmt_filename, parse_diagnostics.getWritten() },
+        ),
+        else => return failFmt(
+            output,
+            "failed to parse module code {f}: {t}",
+            .{ fmt_filename, e },
+        ),
     };
 
     std.debug.assert(validation_finished);
