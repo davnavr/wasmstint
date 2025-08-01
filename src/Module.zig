@@ -875,6 +875,7 @@ const Sections = struct {
         var section_order = Order.any;
         known_sections.* = Known{};
         var section_readers: Readers = undefined;
+        var encountered = std.EnumSet(std.meta.FieldEnum(Known)).initEmpty();
         inline for (@typeInfo(Readers).@"struct".fields) |f| {
             @field(section_readers, f.name) = Reader.init(&@field(known_sections, f.name));
         }
@@ -907,17 +908,26 @@ const Sections = struct {
                     }
                 },
                 inline else => |known_id| {
-                    if (@intFromEnum(section_order) >=
-                        @intFromEnum(@field(Order, @tagName(known_id))))
-                    {
+                    const this_order = @field(Order, @tagName(known_id));
+                    if (@intFromEnum(section_order) > @intFromEnum(this_order)) {
                         return diag.print(
-                            .validation,
+                            .parse,
                             "unexpected content after last section: '{t}' was placed after {t}",
                             .{ known_id, section_order },
                         );
                     }
 
-                    section_order = @enumFromInt(@intFromEnum(section_order) + 1);
+                    const this_key = @field(std.meta.FieldEnum(Known), @tagName(known_id));
+                    if (encountered.contains(this_key)) {
+                        return diag.print(
+                            .parse,
+                            "unexpected content after last section: duplicate '{t}' section",
+                            .{known_id},
+                        );
+                    }
+
+                    encountered.insert(this_key);
+                    section_order = @enumFromInt(@intFromEnum(this_order) + 1);
                     @field(known_sections, @tagName(known_id)) = section_contents;
                 },
             }
