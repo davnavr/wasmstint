@@ -1991,6 +1991,13 @@ fn parseDataSec(
     defer _ = scratch.reset(.retain_capacity);
 
     for (data_ptrs, data_lens, 0..count) |*ptr, *len, i| {
+        if (datas_reader.isEmpty()) {
+            return diag.writeAll(
+                .parse,
+                "unexpected end of section or function, expected data segment",
+            );
+        }
+
         const data_idx: DataIdx = @enumFromInt(
             @as(@typeInfo(DataIdx).@"enum".tag_type, @intCast(i)),
         );
@@ -2047,10 +2054,19 @@ fn parseDataSec(
             );
         }
 
-        const contents = try datas_reader.readByteVec(diag, "data segment bytes");
+        const contents_len = try datas_reader.readUleb128(u32, diag, "data segment length");
+        if (datas_reader.bytes.len < contents_len) {
+            return diag.print(
+                .parse,
+                "unexpected end of section or function, data segment has length {}, but {}" ++
+                    " bytes were remaining",
+                .{ contents_len, datas_reader.bytes.len },
+            );
+        }
 
+        const contents = datas_reader.readAssumeLength(contents_len);
         ptr.* = contents.ptr;
-        len.* = @intCast(contents.len);
+        len.* = contents_len;
     }
 
     try datas_reader.expectEnd(diag, "data section size mismatch");
