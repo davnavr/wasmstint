@@ -1116,9 +1116,22 @@ pub fn rawValidate(
         // byte of the instruction being parsed.
         instr_offset = @intCast(@intFromPtr(reader.bytes.ptr) - @intFromPtr(instructions));
 
-        const byte_tag = try reader.readByteTag(opcodes.ByteOpcode, diag, "illegal opcode");
-        // std.debug.print("validate: {}\n", .{byte_tag});
-        switch (byte_tag) {
+        if (reader.isEmpty()) {
+            // Spec test is based on spec interpreter, which does weird things like
+            // start consuming the data section even when the length of the code section says
+            // to stop
+            return diag.writeAll(
+                .parse,
+                "unexpected end of section or function: END opcode expected or section size mismatch",
+            );
+        }
+
+        const opcode_byte = reader.readAssumeLength(1)[0];
+        const opcode_tag = std.meta.intToEnum(opcodes.ByteOpcode, opcode_byte) catch
+            return diag.print(.parse, "illegal opcode 0x{X:0>2}", .{opcode_byte});
+
+        // std.debug.print("validate: {}\n", .{opcode_tag });
+        switch (opcode_tag) {
             .@"unreachable" => markUnreachable(&val_stack, &ctrl_stack),
             .nop => {},
             .block => {
@@ -2051,10 +2064,10 @@ pub fn rawValidate(
         }
     }
 
-    try reader.expectEnd(diag, "expected end of code");
+    try reader.expectEnd(diag, "END opcode expected as last byte");
 
     if (ctrl_stack.len != 0) {
-        return diag.writeAll(.parse, "END opcode expected");
+        return diag.writeAll(.parse, "END opcode expected, but control stack was not empty");
     }
 
     std.debug.assert(val_stack.len() == func_type.result_count);
