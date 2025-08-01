@@ -2031,6 +2031,8 @@ fn parseDataSec(
                     diag,
                     "unknown memory in data segment",
                 )
+            else if (import_sec.types.mems.len == 0)
+                return diag.writeAll(.validation, "unknown memory 0 in data segment")
             else
                 MemIdx.default;
 
