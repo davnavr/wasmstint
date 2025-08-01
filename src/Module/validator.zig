@@ -1048,7 +1048,7 @@ pub fn rawValidate(
             struct { type: ValType, count: u32 },
             local_group_count,
         );
-        var total_locals_count: u32 = 0;
+        var total_locals_count: u32 = func_type.param_count;
         for (local_groups) |*group| {
             const local_count = try reader.readUleb128(u32, diag, "locals count");
             const local_type = try ValType.parse(reader, diag);
@@ -1062,16 +1062,18 @@ pub fn rawValidate(
         }
 
         const buf = try scratch.allocator().alloc(ValType, total_locals_count);
+        @memcpy(buf[0..func_type.param_count], func_type.parameters());
         var local_vars = ValBuf{};
-        if (total_locals_count > ValBuf.prealloc_count) {
+        const locals_only_count = total_locals_count - func_type.param_count;
+        if (locals_only_count > ValBuf.prealloc_count) {
             // TODO(Zig): handle OOMs properly for std.SegmentedList
             // https://github.com/ziglang/zig/issues/23027
-            try local_vars.growCapacity(scratch.allocator(), total_locals_count);
+            try local_vars.growCapacity(scratch.allocator(), locals_only_count);
         }
 
         errdefer comptime unreachable;
 
-        var local_idx: u16 = 0;
+        var local_idx: u16 = func_type.param_count;
         for (local_groups) |*group| {
             for (0..group.count) |_| {
                 local_vars.append(undefined, valTypeToVal(group.type)) catch unreachable;
@@ -1080,6 +1082,7 @@ pub fn rawValidate(
             }
         }
 
+        std.log.debug("{} locals", .{buf.len});
         std.debug.assert(local_idx == buf.len);
         local_vars.clearRetainingCapacity();
         val_stack = ValStack{ .buf = local_vars };
