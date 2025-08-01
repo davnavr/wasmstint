@@ -1030,6 +1030,7 @@ pub fn rawValidate(
     diag: Reader.Diagnostics,
 ) Error!Code.Inner {
     _ = scratch.reset(.retain_capacity);
+    var per_instr_arena = ArenaAllocator.init(scratch.allocator());
 
     var code_ptr = code;
     var reader = Reader.init(&code_ptr);
@@ -1039,46 +1040,50 @@ pub fn rawValidate(
     var val_stack: ValStack = undefined;
     const locals: struct { types: []const ValType, count: u16 } = locals: {
         const local_group_count = try reader.readUleb128(u32, diag, "locals count");
-        var local_vars = ValBuf{};
 
-        const reserve_count = std.math.add(u32, func_type.param_count, local_group_count) catch
-            return error.OutOfMemory;
-
-        // if (local_group_count > Valbuf.prealloc_count) {
-        try local_vars.setCapacity(scratch.allocator(), reserve_count);
-        // }
-
-        defer {
-            local_vars.clearRetainingCapacity();
-            val_stack = ValStack{ .buf = local_vars };
-        }
-
-        local_vars.appendSlice(
-            undefined,
-            @ptrCast(func_type.parameters()),
-        ) catch unreachable;
-
-        for (0..local_group_count) |_| {
+        // Since std.SegmentedList is buggy when faced with OOMs, and a parser error
+        // (not an OOM) should happen if # locals exceeds what is allowed by the spec (2^32 - 1),
+        // this allows determining the total # of all locals beforehand
+        const local_groups = try per_instr_arena.allocator().alloc(
+            struct { type: ValType, count: u32 },
+            local_group_count,
+        );
+        var total_locals_count: u32 = 0;
+        for (local_groups) |*group| {
             const local_count = try reader.readUleb128(u32, diag, "locals count");
             const local_type = try ValType.parse(reader, diag);
-            const new_local_len = std.math.add(u32, @intCast(local_vars.len), local_count) catch
-                // Must return error before OOM from too many locals
+            total_locals_count = std.math.add(u32, total_locals_count, local_count) catch
                 return diag.writeAll(.parse, "too many locals");
+            group.* = .{ .type = local_type, .count = local_count };
+        }
 
-            if (new_local_len > ValBuf.prealloc_count) {
-                try local_vars.growCapacity(scratch.allocator(), new_local_len);
-            }
+        if (total_locals_count > std.math.maxInt(u16)) {
+            return error.WasmImplementationLimit; // too many locals
+        }
 
-            for (0..local_count) |_| {
-                local_vars.append(undefined, valTypeToVal(local_type)) catch unreachable;
+        const buf = try scratch.allocator().alloc(ValType, total_locals_count);
+        var local_vars = ValBuf{};
+        if (total_locals_count > ValBuf.prealloc_count) {
+            // TODO(Zig): handle OOMs properly for std.SegmentedList
+            // https://github.com/ziglang/zig/issues/23027
+            try local_vars.growCapacity(scratch.allocator(), total_locals_count);
+        }
+
+        errdefer comptime unreachable;
+
+        var local_idx: u16 = 0;
+        for (local_groups) |*group| {
+            for (0..group.count) |_| {
+                local_vars.append(undefined, valTypeToVal(group.type)) catch unreachable;
+                buf[local_idx] = group.type;
+                local_idx += 1;
             }
         }
 
-        const count: u16 = @intCast(local_vars.len - func_type.param_count);
-
-        const buf = try scratch.allocator().alloc(ValType, local_vars.len);
-        local_vars.writeToSlice(@ptrCast(buf), 0);
-        break :locals .{ .types = buf, .count = count };
+        std.debug.assert(local_idx == buf.len);
+        local_vars.clearRetainingCapacity();
+        val_stack = ValStack{ .buf = local_vars };
+        break :locals .{ .types = buf, .count = @intCast(total_locals_count) };
     };
 
     var side_table = SideTableBuilder{};
@@ -1105,8 +1110,6 @@ pub fn rawValidate(
     ) catch unreachable;
 
     const instructions: Code.Ip = @ptrCast(reader.bytes.ptr);
-
-    var per_instr_arena = ArenaAllocator.init(scratch.allocator());
 
     var instr_offset: u32 = 0;
     while (ctrl_stack.len > 0) {
