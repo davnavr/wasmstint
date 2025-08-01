@@ -379,7 +379,14 @@ pub const Limits = extern struct {
         try writer.print("{} {}", .{ limits.min, limits.max });
     }
 
-    fn parse(reader: Reader, diag: ParseDiagnostics) !Limits {
+    fn parse(
+        reader: Reader,
+        default_maximum: u32,
+        /// For memories, spec test assumes limits do not exceed bounds before comparing `min` and
+        /// `max`.
+        comptime checkLimitsBounds: fn (Limits, diag: ParseDiagnostics) Reader.ValidationError!void,
+        diag: ParseDiagnostics,
+    ) !Limits {
         const LimitsFlag = enum(u2) {
             no_maximum = 0x00,
             has_maximum = 0x01,
@@ -404,12 +411,15 @@ pub const Limits = extern struct {
         const min = try reader.readUleb128(u32, diag, "limits minimum");
 
         const max: u32 = switch (flag) {
-            .no_maximum => std.math.maxInt(u32),
+            .no_maximum => default_maximum,
             .has_maximum => try reader.readUleb128(u32, diag, "limits maximum"),
         };
 
+        const limits = Limits{ .min = min, .max = max };
+        try checkLimitsBounds(limits, diag);
+
         return if (min <= max)
-            .{ .min = min, .max = max }
+            limits
         else
             diag.print(
                 .validation,
@@ -434,6 +444,8 @@ pub const TableType = extern struct {
         try writer.print("{f} {t}", .{ table_type.limits, table_type.elem_type });
     }
 
+    fn noLimitsBounds(_: Limits, _: ParseDiagnostics) Reader.ValidationError!void {}
+
     fn parse(reader: Reader, diag: ParseDiagnostics) !TableType {
         const elem_type = try ValType.parse(reader, diag);
         if (!elem_type.isRefType()) {
@@ -442,13 +454,16 @@ pub const TableType = extern struct {
 
         return .{
             .elem_type = elem_type,
-            .limits = try Limits.parse(reader, diag),
+            .limits = try Limits.parse(reader, std.math.maxInt(u32), noLimitsBounds, diag),
         };
     }
 };
 
 pub const MemType = extern struct {
     /// The minimum and maximum number of pages.
+    ///
+    /// Since only 32-bit memories are supported, both `min` and `min` are currently constrained
+    /// to never exceed `65536`.
     limits: Limits,
     // flags: packed struct(u32) {
     //     log2_page_size: u5 = std.math.log2_int(u17, 65536),
@@ -464,8 +479,18 @@ pub const MemType = extern struct {
         try mem_type.limits.format(writer);
     }
 
+    fn checkMemoryLimits(limits: Limits, diag: ParseDiagnostics) Reader.ValidationError!void {
+        if (limits.min > 65536 or limits.max > 65536) {
+            return diag.print(
+                .validation,
+                "memory size must be at most 65536 pages (4GiB), got {}",
+                .{if (limits.min > 65536) limits.min else limits.max},
+            );
+        }
+    }
+
     fn parse(reader: Reader, diag: ParseDiagnostics) !MemType {
-        const limits = try Limits.parse(reader, diag);
+        const limits = try Limits.parse(reader, 65536, checkMemoryLimits, diag);
         return .{ .limits = limits };
     }
 };
