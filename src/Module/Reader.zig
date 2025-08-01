@@ -209,7 +209,9 @@ pub fn readIleb128(reader: Reader, comptime T: type, diag: Diagnostics, desc: []
         const byte = reader.readAssumeLength(1)[0];
 
         const shift: std.math.Log2Int(Value) = @intCast(i * 7);
-        value |= @shlExact(@as(Value, byte & 0x7F), shift);
+        value |= @bitCast(
+            @shlExact(@as(std.meta.Int(.unsigned, 7 * max_byte_len), byte & 0x7F), shift),
+        );
 
         if (byte & 0x80 == 0) {
             if (i < max_byte_len - 1 and (byte & 0x40) != 0) {
@@ -245,6 +247,7 @@ test readIleb128 {
     try testReadIleb128(i32, "\x7E", -2);
     try testReadIleb128(i32, "\x7B", -5);
     try testReadIleb128(i32, "\x74", -12);
+    try testReadIleb128(i32, "\xff\xff\xff\xff\x7f", -1);
 }
 
 pub fn readByteVec(reader: Reader, diag: Diagnostics, desc: []const u8) Error![]const u8 {
