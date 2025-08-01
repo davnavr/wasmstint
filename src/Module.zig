@@ -621,7 +621,12 @@ pub const ConstExpr = union(enum) {
             ),
         };
 
-        const end_opcode = try reader.readByteTag(opcodes.ByteOpcode, diag, "END opcode");
+        const end_opcode = try reader.readByteTag(
+            opcodes.ByteOpcode,
+            diag,
+            // Spec thinks reading into code section is ok!?
+            "END opcode or illegal opcode",
+        );
         if (end_opcode != .end) {
             return diag.print(
                 .validation,
