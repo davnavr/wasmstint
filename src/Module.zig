@@ -1330,6 +1330,10 @@ fn parseImportSec(
     _ = scratch.reset(.retain_capacity);
 
     for (0..counts.import) |_| {
+        if (import_reader.isEmpty()) {
+            return diag.writeAll(.parse, "unexpected end of section or function, expected import");
+        }
+
         const mod = try import_reader.readName(diag);
         const name = try import_reader.readName(diag);
         const import_name = ImportName{
@@ -1490,6 +1494,10 @@ fn parseTableSec(
     }
 
     for (table_types[table_types.len - count ..], 0..count) |*tt, _| {
+        if (table_reader.isEmpty()) {
+            return diag.writeAll(.parse, "unexpected end of section or function, expected table");
+        }
+
         tt.* = try TableType.parse(table_reader, diag);
     }
 
