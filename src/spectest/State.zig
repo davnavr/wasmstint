@@ -1007,8 +1007,8 @@ fn processAssertInvalid(
             error.InvalidWasm => break :validation_failed,
             error.MalformedWasm => return failFmt(
                 output,
-                "expected validation error for module \"{f}\", got syntax error: {s}",
-                .{ fmt_filename, parse_diagnostics.getWritten() },
+                "expected validation error \"{s}\" for module \"{f}\", got syntax error: {s}",
+                .{ command.text, fmt_filename, parse_diagnostics.getWritten() },
             ),
             else => return failFmt(output, "failed to parse module {f}: {t}", .{ fmt_filename, e }),
         };
@@ -1026,8 +1026,8 @@ fn processAssertInvalid(
             error.InvalidWasm => break :validation_failed,
             error.MalformedWasm => return failFmt(
                 output,
-                "expected code validation error for module \"{f}\", got syntax error: {s}",
-                .{ fmt_filename, parse_diagnostics.getWritten() },
+                "expected code validation error \"{s}\" for module \"{f}\", got syntax error: {s}",
+                .{ command.text, fmt_filename, parse_diagnostics.getWritten() },
             ),
             else => return failFmt(
                 output,
@@ -1086,8 +1086,8 @@ fn processAssertMalformed(
             error.MalformedWasm => break :parse_failed,
             error.InvalidWasm => return failFmt(
                 output,
-                "expected parse error for module \"{f}\", but got validation error: {s}",
-                .{ fmt_filename, parse_diagnostics.getWritten() },
+                "expected parse error \"{s}\" for module \"{f}\", but got validation error: {s}",
+                .{ command.text, fmt_filename, parse_diagnostics.getWritten() },
             ),
             else => return failFmt(
                 output,
@@ -1109,8 +1109,8 @@ fn processAssertMalformed(
             error.MalformedWasm => break :parse_failed,
             error.InvalidWasm => return failFmt(
                 output,
-                "expected code parse error for module \"{f}\", but got validation error: {s}",
-                .{ fmt_filename, parse_diagnostics.getWritten() },
+                "expected code parse error \"{s}\" for module \"{f}\", but got validation error: {s}",
+                .{ command.text, fmt_filename, parse_diagnostics.getWritten() },
             ),
             else => return failFmt(
                 output,
@@ -1136,7 +1136,7 @@ fn processAssertMalformed(
         );
     }
 
-    output.print("parser error: {s}\n", .{parse_diagnostics.getWritten()});
+    output.print("parse failed: {s}\n", .{parse_diagnostics.getWritten()});
 }
 
 fn processAssertUninstantiable(
