@@ -268,7 +268,7 @@ pub fn readIdx(
     comptime I: type,
     len: usize,
     diag: Diagnostics,
-    oob_desc: []const u8,
+    desc: *const [2][]const u8,
 ) !I {
     const idx = try reader.readUleb128(u32, diag, @typeName(I));
     return if (idx < len)
@@ -277,7 +277,7 @@ pub fn readIdx(
                 return error.WasmImplementationLimit,
         )
     else
-        diag.print(.validation, "invalid index {}: {s}", .{ idx, oob_desc });
+        diag.print(.validation, "unknown {s} {}, {s}", .{ desc[0], idx, desc[1] });
 }
 
 const std = @import("std");

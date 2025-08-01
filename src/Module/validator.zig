@@ -488,7 +488,12 @@ fn readMemArg(
 
 fn readTableIdx(reader: *Reader, module: Module, diag: Diagnostics) !ValType {
     const table_types = module.tableTypes();
-    const idx = try reader.readIdx(Module.TableIdx, table_types.len, diag, "unknown table");
+    const idx = try reader.readIdx(
+        Module.TableIdx,
+        table_types.len,
+        diag,
+        &.{ "table", "in code" },
+    );
     return module.tableTypes()[@intFromEnum(idx)].elem_type;
 }
 
@@ -497,7 +502,7 @@ fn readDataIdx(reader: *Reader, module: Module, diag: Diagnostics) !void {
         Module.DataIdx,
         module.inner.raw.datas_count,
         diag,
-        "unknown data segment",
+        &.{ "data segment", "in code" },
     );
 
     // spec first checks OOB index
@@ -511,7 +516,7 @@ fn readElemIdx(reader: *Reader, module: Module, diag: Diagnostics) !ValType {
         Module.ElemIdx,
         module.inner.raw.elems_count,
         diag,
-        "unknown elem segment",
+        &.{ "elem segment", "in code" },
     );
     return module.elementSegments()[@intFromEnum(idx)].elementType();
 }
@@ -1407,7 +1412,7 @@ pub fn rawValidate(
                     Module.FuncIdx,
                     module.funcTypes().len,
                     diag,
-                    "unknown function",
+                    &.{ "function", "in call" },
                 );
                 const callee_signature = module.funcTypes()[@intFromEnum(callee)];
 
@@ -1420,7 +1425,7 @@ pub fn rawValidate(
                     Module.TypeIdx,
                     module_types.len,
                     diag,
-                    "unknown type",
+                    &.{ "type", "in call_indirect" },
                 );
 
                 const callee_signature: *const Module.FuncType =
@@ -1436,7 +1441,7 @@ pub fn rawValidate(
                     Module.TableIdx,
                     table_types.len,
                     diag,
-                    "unknown table",
+                    &.{ "table", "in call_indirect" },
                 );
                 const table_type: *const Module.TableType = &table_types[@intFromEnum(table_idx)];
 
@@ -1516,7 +1521,7 @@ pub fn rawValidate(
                     Module.GlobalIdx,
                     module.globalTypes().len,
                     diag,
-                    "unknown global",
+                    &.{ "global", "in global.get" },
                 );
 
                 try val_stack.push(
@@ -1529,7 +1534,7 @@ pub fn rawValidate(
                     Module.GlobalIdx,
                     module.globalTypes().len,
                     diag,
-                    "unknown global",
+                    &.{ "global", "in global.get" },
                 );
 
                 const global_type: *const Module.GlobalType =
@@ -1965,7 +1970,7 @@ pub fn rawValidate(
                     Module.FuncIdx,
                     module.funcTypes().len,
                     diag,
-                    "unknown function",
+                    &.{ "function", "in ref.func" },
                 );
                 try val_stack.push(scratch, ValType.funcref);
             },

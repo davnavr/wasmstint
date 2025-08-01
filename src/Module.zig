@@ -275,7 +275,7 @@ pub const Start = packed struct(u32) {
                 FuncIdx,
                 functions.len,
                 diag,
-                "unknown function in 'start' section",
+                &.{ "function", "in 'start' section" },
             );
 
             try start_reader.expectEnd(
@@ -634,7 +634,7 @@ pub const ConstExpr = union(enum) {
                     FuncIdx,
                     func_count,
                     diag,
-                    "unknown function in constant expression",
+                    &.{ "function", "in constant expression" },
                 ),
             },
             .@"global.get" => {
@@ -642,7 +642,7 @@ pub const ConstExpr = union(enum) {
                     GlobalIdx,
                     global_types.len,
                     diag,
-                    "unknown global in constant expression",
+                    &.{ "global", "in constant expression" },
                 );
 
                 const actual_type: *const GlobalType = &global_types[@intFromEnum(global_idx)];
@@ -1422,7 +1422,7 @@ fn parseImportSec(
                     TypeIdx,
                     type_sec.len,
                     diag,
-                    "unknown type for function import",
+                    &.{ "type", "for function import" },
                 ),
             ),
             .table => try import_types.tables.append(
@@ -1529,7 +1529,7 @@ fn parseFuncSec(
             TypeIdx,
             type_sec.len,
             diag,
-            "unknown type in 'func' section",
+            &.{ "type", "in 'func' section" },
         );
         func_ty.* = &type_sec[@intFromEnum(type_idx)];
     }
@@ -1706,7 +1706,7 @@ fn parseExportSec(
                         FuncIdx,
                         import_types.funcs.len,
                         diag,
-                        "unknown function in export",
+                        &.{ "function", "in export" },
                     ),
                 },
                 .table => .{
@@ -1714,7 +1714,7 @@ fn parseExportSec(
                         TableIdx,
                         import_types.tables.len,
                         diag,
-                        "unknown table in export",
+                        &.{ "table", "in export" },
                     ),
                 },
                 .mem => .{
@@ -1722,7 +1722,7 @@ fn parseExportSec(
                         MemIdx,
                         import_types.mems.len,
                         diag,
-                        "unknown memory in export",
+                        &.{ "memory", "in export" },
                     ),
                 },
                 .global => .{
@@ -1730,7 +1730,7 @@ fn parseExportSec(
                         GlobalIdx,
                         import_types.globals.len,
                         diag,
-                        "unknown global in export",
+                        &.{ "global", "in export" },
                     ),
                 },
             },
@@ -1807,7 +1807,7 @@ fn parseElemSec(
                     TableIdx,
                     import_types.tables.len,
                     diag,
-                    "unknown table in element section",
+                    &.{ "table", "in element section" },
                 )
             else if (import_types.tables.len == 0)
                 return diag.writeAll(.validation, "unknown table 0 in element section")
@@ -1935,7 +1935,7 @@ fn parseElemSec(
                     FuncIdx,
                     import_types.funcs.len,
                     diag,
-                    "unknown function index in element segment",
+                    &.{ "function", "in element segment" },
                 );
             }
 
@@ -2060,7 +2060,7 @@ fn parseDataSec(
                     MemIdx,
                     import_sec.types.mems.len,
                     diag,
-                    "unknown memory in data segment",
+                    &.{ "memory", "data segment" },
                 )
             else if (import_sec.types.mems.len == 0)
                 return diag.writeAll(.validation, "unknown memory 0 in data segment")
