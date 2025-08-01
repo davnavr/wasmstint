@@ -380,12 +380,25 @@ pub const Limits = extern struct {
     }
 
     fn parse(reader: Reader, diag: ParseDiagnostics) !Limits {
-        const LimitsFlag = enum(u8) {
+        const LimitsFlag = enum(u2) {
             no_maximum = 0x00,
             has_maximum = 0x01,
         };
 
-        const flag = try reader.readByteTag(LimitsFlag, diag, "limits flag");
+        const flag_byte = try reader.readByte(diag, "limits flag");
+        // For some reason, spec test checks that the flag is a LEB128, despite the spec not
+        // mentioning this.
+        if (flag_byte & 0x80 != 0) {
+            return diag.writeAll(.parse, "limits flag integer representation too long");
+        }
+
+        // If 64-bit memory and/or shared memory is used, limits is a LEB128 u32?
+        // const flag = try reader.readUleb128Enum(u32, LimitsFlag, diag, "limits flag");
+        const flag = std.meta.intToEnum(LimitsFlag, flag_byte) catch return diag.print(
+            .parse,
+            "limits flag integer too large: 0x{X:0>2}",
+            .{flag_byte},
+        );
 
         // When 64-bit memories are supported, parsed type needs to conditionally change to u64.
         const min = try reader.readUleb128(u32, diag, "limits minimum");
