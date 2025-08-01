@@ -1809,6 +1809,8 @@ fn parseElemSec(
                     diag,
                     "unknown table in element section",
                 )
+            else if (import_types.tables.len == 0)
+                return diag.writeAll(.validation, "unknown table 0 in element section")
             else
                 TableIdx.default;
 
