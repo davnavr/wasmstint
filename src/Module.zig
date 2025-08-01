@@ -411,7 +411,11 @@ pub const Limits = extern struct {
         return if (min <= max)
             .{ .min = min, .max = max }
         else
-            diag.print(.validation, "maximum {} exceeded minimum {}", .{ max, min });
+            diag.print(
+                .validation,
+                "size minimum must not be greater than maximum ({} > {})",
+                .{ min, max },
+            );
     }
 };
 
