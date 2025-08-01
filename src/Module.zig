@@ -634,11 +634,15 @@ pub const ConstExpr = union(enum) {
             ),
         };
 
+        if (reader.isEmpty()) {
+            // Spec thinks reading into code section is ok!?
+            return diag.writeAll(.parse, "illegal opcode or unexpected end");
+        }
+
         const end_opcode = try reader.readByteTag(
             opcodes.ByteOpcode,
             diag,
-            // Spec thinks reading into code section is ok!?
-            "END opcode or illegal opcode",
+            "END opcode",
         );
         if (end_opcode != .end) {
             return diag.print(
