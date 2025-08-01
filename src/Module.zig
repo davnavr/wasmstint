@@ -658,7 +658,7 @@ pub const ConstExpr = union(enum) {
             },
             else => return diag.print(
                 .validation,
-                "illegal opcode {t} in constant expression {s}",
+                "constant expression required, got opcode {t} in {s}",
                 .{ const_opcode, desc },
             ),
         };
@@ -676,8 +676,8 @@ pub const ConstExpr = union(enum) {
         if (end_opcode != .end) {
             return diag.print(
                 .validation,
-                "END opcode expected in constant expression {s}",
-                .{desc},
+                "constant expression required, expected END opcode in {s}, got {t}",
+                .{ desc, end_opcode },
             );
         }
 
