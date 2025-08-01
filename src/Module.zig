@@ -1348,7 +1348,7 @@ fn parseImportSec(
                 return error.WasmImplementationLimit, // too many imports
         };
 
-        const tag = try import_reader.readByteTag(ImportExportDesc, diag, "import tag");
+        const tag = try import_reader.readByteTag(ImportExportDesc, diag, "malformed import kind");
         (switch (tag) {
             inline else => |t| try @field(names, @tagName(t) ++ "s").addOne(scratch.allocator()),
         }).* = import_name;
