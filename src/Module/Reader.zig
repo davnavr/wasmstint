@@ -214,7 +214,7 @@ pub fn readIleb128(reader: Reader, comptime T: type, diag: Diagnostics, desc: []
         if (byte & 0x80 == 0) {
             if (i < max_byte_len - 1 and (byte & 0x40) != 0) {
                 // Sign extension is needed, fills the rest of the bits with ones
-                value |= std.math.shl(Value, -1, shift);
+                value |= std.math.shl(Value, -1, shift + 7);
             }
 
             break;
@@ -223,6 +223,28 @@ pub fn readIleb128(reader: Reader, comptime T: type, diag: Diagnostics, desc: []
 
     return std.math.cast(T, value) orelse
         return diag.print(.parse, "integer too large for" ++ suffix, .{desc});
+}
+
+fn testReadIleb128(comptime T: type, input_bytes: []const u8, expected: T) !void {
+    var input = input_bytes;
+    var reader = Reader.init(&input);
+    const actual = value: {
+        var diag_buffer: [128]u8 = undefined;
+        const diag = Diagnostics.init(std.debug.lockStderrWriter(&diag_buffer));
+        defer std.debug.unlockStdErr();
+        break :value try reader.readIleb128(T, diag, @typeName(T));
+    };
+    try std.testing.expectEqual(expected, actual);
+}
+
+test readIleb128 {
+    try testReadIleb128(i32, "\x00", 0);
+    try testReadIleb128(i32, "\x82\x00", 2);
+    try testReadIleb128(i64, "\x08", 8);
+    try testReadIleb128(i32, "\x0A", 0xA);
+    try testReadIleb128(i32, "\x7E", -2);
+    try testReadIleb128(i32, "\x7B", -5);
+    try testReadIleb128(i32, "\x74", -12);
 }
 
 pub fn readByteVec(reader: Reader, diag: Diagnostics, desc: []const u8) Error![]const u8 {

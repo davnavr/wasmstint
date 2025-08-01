@@ -2162,3 +2162,7 @@ const reservation_allocator = @import("reservation_allocator.zig");
 const Reader = @import("Module/Reader.zig");
 const opcodes = @import("opcodes.zig");
 const validator = @import("Module/validator.zig");
+
+test {
+    _ = Reader;
+}

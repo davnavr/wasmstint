@@ -47,4 +47,5 @@ comptime {
 test {
     _ = @import("reservation_allocator.zig");
     _ = PageBufferAllocator;
+    _ = Module;
 }
