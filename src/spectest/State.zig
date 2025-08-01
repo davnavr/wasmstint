@@ -1040,8 +1040,8 @@ fn processAssertInvalid(
 
         return failFmt(
             output,
-            "module \"{f}\" unexpectedly passed validation",
-            .{fmt_filename},
+            "module \"{f}\" unexpectedly passed validation, expected \"{s}\"",
+            .{ fmt_filename, command.text },
         );
     }
 
@@ -1123,8 +1123,8 @@ fn processAssertMalformed(
 
         return failFmt(
             output,
-            "module \"{f}\" unexpectedly parsed successfully",
-            .{fmt_filename},
+            "module \"{f}\" unexpectedly parsed successfully, expected \"{s}\"",
+            .{ fmt_filename, command.text },
         );
     }
 
