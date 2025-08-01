@@ -1014,9 +1014,6 @@ pub fn parse(
     const has_data_count_section = !sections.readers.data_count.isEmpty();
 
     const counts = try Sections.Counts.parse(&sections.readers, diag);
-    if (counts.code != counts.func) {
-        return diag.writeAll(.parse, "function and code section have inconsistent lengths");
-    }
 
     if (has_data_count_section and counts.data_count != counts.data) {
         return diag.writeAll(.parse, "data count and data section have inconsistent lengths");
@@ -1136,6 +1133,11 @@ pub fn parse(
             diag,
         );
     };
+
+    // Because of spectests, checked after any errors in the element section occurs
+    if (counts.code != counts.func) {
+        return diag.writeAll(.parse, "function and code section have inconsistent lengths");
+    }
 
     const code_sec = code: {
         errdefer wasm.* = sections.known.code;
