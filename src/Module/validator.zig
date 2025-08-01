@@ -476,11 +476,7 @@ fn readMemArg(
     const a = try reader.readUleb128(u32, diag, "memarg alignment");
 
     if (a > natural_alignment) {
-        return diag.print(
-            .validation,
-            "alignment 1<<{} exceeds natural alignment of 1<<{}",
-            .{ a, natural_alignment },
-        );
+        return diag.writeAll(.validation, "alignment must not be larger than natural");
     }
 
     if (module.inner.raw.mem_count == 0) {
