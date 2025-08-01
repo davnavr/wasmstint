@@ -509,7 +509,7 @@ fn readDataIdx(reader: *Reader, module: Module, diag: Diagnostics) !void {
 fn readElemIdx(reader: *Reader, module: Module, diag: Diagnostics) !ValType {
     const idx = try reader.readIdx(
         Module.ElemIdx,
-        module.inner.raw.datas_count,
+        module.inner.raw.elems_count,
         diag,
         "unknown elem segment",
     );
