@@ -493,16 +493,17 @@ fn readTableIdx(reader: *Reader, module: Module, diag: Diagnostics) !ValType {
 }
 
 fn readDataIdx(reader: *Reader, module: Module, diag: Diagnostics) !void {
-    if (!module.inner.raw.has_data_count_section) {
-        return diag.writeAll(.parse, "data count section required");
-    }
-
     _ = try reader.readIdx(
         Module.DataIdx,
         module.inner.raw.datas_count,
         diag,
         "unknown data segment",
     );
+
+    // spec first checks OOB index
+    if (!module.inner.raw.has_data_count_section) {
+        return diag.writeAll(.parse, "data count section required");
+    }
 }
 
 fn readElemIdx(reader: *Reader, module: Module, diag: Diagnostics) !ValType {
