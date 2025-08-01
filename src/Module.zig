@@ -1379,7 +1379,7 @@ fn parseImportSec(
     }
 
     if (counts.mem + @as(u32, @intCast(names.mems.len)) > 1) {
-        return diag.writeAll(.parse, "multiple memories are not yet supported");
+        return diag.writeAll(.validation, "multiple memories are not yet supported");
     }
 
     try import_reader.expectEnd(diag, "import section size mismatch");
