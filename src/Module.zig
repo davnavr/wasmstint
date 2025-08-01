@@ -1947,7 +1947,7 @@ fn parseElemSec(
         };
 
         const is_declarative = tag.kind == .passive_or_declarative and tag.bit_1.is_declarative;
-        non_declarative_mask[std.math.divCeil(u32, @intCast(i), 32) catch unreachable] |=
+        non_declarative_mask[i / 32] |=
             @as(u32, @intFromBool(!is_declarative)) << @as(u5, @intCast(i % 32));
     }
 
