@@ -235,7 +235,7 @@ pub fn readName(reader: Reader, diag: Diagnostics) Error!std.unicode.Utf8View {
     return if (std.unicode.utf8ValidateSlice(contents))
         .{ .bytes = contents }
     else
-        diag.writeAll(.parse, "name must be valid UTF-8");
+        diag.writeAll(.parse, "malformed UTF-8 encoding");
 }
 
 pub fn readIdx(

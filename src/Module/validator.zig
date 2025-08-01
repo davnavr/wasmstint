@@ -347,17 +347,21 @@ const ValStack = struct {
         val_stack.max = @max(new_len, val_stack.max);
     }
 
+    fn errorValueStackUnderflow(height: u16, diag: Diagnostics) Reader.ValidationError {
+        return diag.print(
+            .validation,
+            "type mismatch: value stack underflows at height {}",
+            .{height},
+        );
+    }
+
     fn popAny(val_stack: *ValStack, ctrl_stack: *const CtrlStack, diag: Diagnostics) !Val {
         const current_frame: *const CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
         if (val_stack.len() == current_frame.info.height) {
             return if (current_frame.info.@"unreachable")
                 Val.unknown
             else
-                diag.print(
-                    .validation,
-                    "value stack underflow at height {}",
-                    .{current_frame.info.height},
-                );
+                errorValueStackUnderflow(current_frame.info.height, diag);
         }
 
         return val_stack.buf.pop().?;
@@ -404,11 +408,7 @@ const ValStack = struct {
         } else if (current_frame.info.@"unreachable") {
             try val_stack.push(arena, replacement);
         } else {
-            return diag.print(
-                .validation,
-                "value stack underflow at height {}",
-                .{current_frame.info.height},
-            );
+            return errorValueStackUnderflow(current_frame.info.height, diag);
         }
     }
 
@@ -439,11 +439,7 @@ const ValStack = struct {
                 if (current_frame.info.@"unreachable")
                     Val.unknown
                 else
-                    return diag.print(
-                        .validation,
-                        "value stack underflow at height {}",
-                        .{current_frame.info.height},
-                    )
+                    return errorValueStackUnderflow(current_frame.info.height, diag)
             else
                 val_stack.buf.at(current_height - 1).*;
 
@@ -629,7 +625,7 @@ fn popCtrlFrame(
     if (val_stack.len() != frame.info.height) {
         return diag.print(
             .validation,
-            "expected value stack height to be {}, was {}",
+            "type mismatch: expected value stack height to be {}, was {}",
             .{ frame.info.height, val_stack.len() },
         );
     }
