@@ -425,7 +425,7 @@ const ValStack = struct {
     }
 
     /// Used to preserve `.unknown` stack values when popping and pushing the same types.
-    fn popThenPushManyExpecting(
+    fn popThenPushManyExpectingPreserveUnknown(
         val_stack: *ValStack,
         ctrl_stack: *const CtrlStack,
         expected: []const ValType,
@@ -1326,11 +1326,9 @@ pub fn rawValidate(
                 // TODO: Skip branch fixup processing for unreachable code.
                 try appendSideTableEntry(scratch, &side_table, instr_offset, label);
 
-                try val_stack.popThenPushManyExpecting(
-                    &ctrl_stack,
-                    label.frame.labelTypes(module),
-                    diag,
-                );
+                const label_types = label.frame.labelTypes(module);
+                try val_stack.popManyExpecting(&ctrl_stack, label_types, diag);
+                try val_stack.pushMany(scratch, label_types);
             },
             .br_table => {
                 try val_stack.popExpecting(&ctrl_stack, .i32, diag);
@@ -1392,7 +1390,11 @@ pub fn rawValidate(
                         );
                     }
 
-                    try val_stack.popThenPushManyExpecting(&ctrl_stack, l_types, diag);
+                    try val_stack.popThenPushManyExpectingPreserveUnknown(
+                        &ctrl_stack,
+                        l_types,
+                        diag,
+                    );
                 }
 
                 try appendSideTableEntry(scratch, &side_table, instr_offset, last_label);
