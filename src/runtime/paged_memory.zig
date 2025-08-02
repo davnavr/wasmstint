@@ -192,7 +192,7 @@ pub fn grow(
     std.debug.assert(request.memory.capacity < new_bytes_size);
 
     const new_pages: []align(page_size_min) u8 = @alignCast(
-        request.memory.base[0..request.memory.limits][request.memory.size..new_bytes_size],
+        request.memory.base[0..request.memory.limit][request.memory.size..new_bytes_size],
     );
 
     if (builtin.os.tag == .windows) {

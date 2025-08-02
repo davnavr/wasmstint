@@ -617,33 +617,7 @@ fn runToCompletion(state: *State, fuel: *Interpreter.Fuel, output: Output) void 
             .interrupted => |*interrupt| {
                 switch (interrupt.cause) {
                     .out_of_fuel => return,
-                    .memory_grow => |grow| {
-                        _ = grow; // TODO: Should ModuleAllocator API handle resizing?
-                        // const new_cap = @min(
-                        //     @max(
-                        //         grow.delta + grow.memory.size,
-                        //         grow.memory.capacity *| 2,
-                        //     ),
-                        //     grow.memory.limit,
-                        // );
-
-                        // const remapped = state.store.arena.allocator().remap(
-                        //     grow.memory.base[0..grow.memory.capacity],
-                        //     new_cap,
-                        // );
-
-                        // if (remapped) |new_buf| {
-                        //     _ = grow.resize(new_buf);
-                        // } else resize_failed: {
-                        //     _ = grow.resize(
-                        //         state.store.arena.allocator().alignedAlloc(
-                        //             u8,
-                        //             wasmstint.runtime.MemInst.buffer_align,
-                        //             new_cap,
-                        //         ) catch break :resize_failed,
-                        //     );
-                        // }
-                    },
+                    .memory_grow => |*grow| wasmstint.runtime.paged_memory.grow(grow),
                     .table_grow => |grow| {
                         _ = grow; // TODO: Should ModuleAllocator API handle resizing?
                         // const table = grow.table.table;
