@@ -13,7 +13,6 @@ interpreter_allocator: std.mem.Allocator,
 interpreter: Interpreter,
 starting_fuel: Interpreter.Fuel,
 
-store: wasmstint.runtime.ModuleAllocator,
 imports: *Imports,
 script_dir: std.fs.Dir,
 rng: *std.Random.Xoshiro256,
@@ -24,7 +23,6 @@ pub fn init(
     state: *State,
     interpreter_allocator: std.mem.Allocator,
     starting_fuel: Interpreter.Fuel,
-    store: wasmstint.runtime.ModuleAllocator,
     imports: *Imports,
     script_dir: std.fs.Dir,
     rng: *std.Random.Xoshiro256,
@@ -37,7 +35,6 @@ pub fn init(
         .interpreter = wasmstint.Interpreter.init(interpreter_allocator, .{}) catch
             @panic("oom"),
         .starting_fuel = starting_fuel,
-        .store = store,
         .imports = imports,
         .script_dir = script_dir,
         .rng = rng,
@@ -146,6 +143,29 @@ fn openModuleContents(
     };
 }
 
+fn finishModuleAllocation(
+    module: *wasmstint.runtime.ModuleAllocating,
+    arena: *ArenaAllocator,
+) Error!wasmstint.runtime.ModuleAlloc {
+    while (module.nextMemoryType()) |ty| {
+        wasmstint.runtime.paged_memory.allocate(
+            module,
+            ty.limits.min * wasmstint.runtime.MemInst.page_size,
+            4 * (1024 * 1024), // 4 MiB, 64 pages
+        ) catch @panic("bad mem");
+    }
+
+    while (module.nextTableType()) |_| {
+        wasmstint.runtime.table_allocator.allocateForModule(
+            module,
+            arena.allocator(),
+            65536, // 1 MiB, 16 bytes per funcref
+        ) catch @panic("bad table");
+    }
+
+    return module.finish() catch @panic("bad alloc");
+}
+
 fn processModuleCommand(
     state: *State,
     command: *const Parser.Command,
@@ -228,16 +248,20 @@ fn processModuleCommand(
     std.debug.assert(validation_finished);
 
     var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
-    var module_alloc = wasmstint.runtime.ModuleAlloc.allocate(
+    var module_allocating = wasmstint.runtime.ModuleAllocating.begin(
         parsed_module,
         state.imports.provider(),
         state.module_arena.allocator(),
-        state.store,
         &import_error,
     ) catch |e| switch (e) {
         error.OutOfMemory => @panic("oom"),
         error.ImportFailure => return failFmt(output, "{f}", .{import_error}),
     };
+
+    var module_alloc = try finishModuleAllocation(
+        &module_allocating,
+        &state.module_arena,
+    );
 
     var fuel = state.starting_fuel;
     _ = state.interpreter.state.awaiting_host.instantiateModule(
@@ -248,7 +272,7 @@ fn processModuleCommand(
 
     _ = try state.expectResultValues(&fuel, &Parser.Command.Expected.Vec{}, output, alloca);
 
-    const module_inst = module_alloc.expectInstantiated();
+    const module_inst = module_alloc.assumeInstantiated();
     state.current_module = module_inst;
 
     if (module_lookup_entry) |entry| {
@@ -1201,16 +1225,18 @@ fn processAssertUninstantiable(
     std.debug.assert(validation_finished);
 
     var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
-    var module_alloc = wasmstint.runtime.ModuleAlloc.allocate(
+    var module_allocating = wasmstint.runtime.ModuleAllocating.begin(
         module,
         state.imports.provider(),
         arena.allocator(),
-        state.store, // TODO: Use temporary store
         &import_error,
     ) catch |e| switch (e) {
         error.OutOfMemory => @panic("oom"),
         error.ImportFailure => return failFmt(output, "{f}", .{import_error}),
     };
+
+    // Danging allocations (pages for WASM memory)
+    var module_alloc = try finishModuleAllocation(&module_allocating, arena);
 
     var fuel = state.starting_fuel;
     _ = state.interpreter.state.awaiting_host.instantiateModule(
@@ -1284,11 +1310,10 @@ fn processAssertUnlinkable(
     std.debug.assert(validation_finished);
 
     var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
-    _ = wasmstint.runtime.ModuleAlloc.allocate(
+    _ = wasmstint.runtime.ModuleAllocating.begin(
         module,
         state.imports.provider(),
         arena.allocator(),
-        state.store, // TODO: Use temporary store
         &import_error,
     ) catch |e| switch (e) {
         error.OutOfMemory => @panic("oom"),

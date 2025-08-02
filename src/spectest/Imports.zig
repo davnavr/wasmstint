@@ -165,7 +165,7 @@ const globals = struct {
 pub fn init(
     imports: *Imports,
     rng: std.Random,
-    store_allocator: wasmstint.runtime.ModuleAllocator,
+    arena: *std.heap.ArenaAllocator,
 ) void {
     imports.* = Imports{
         .lookup_buffer = undefined,
@@ -176,19 +176,27 @@ pub fn init(
         .registered_context = .{ .seed = rng.int(u32) },
     };
 
-    var allocation_request = wasmstint.runtime.ModuleAllocator.Request.init(
-        &[1]wasmstint.Module.TableType{
-            .{
-                .elem_type = .funcref,
-                .limits = .{ .min = 10, .max = 20 },
-            },
-        },
-        (&imports.table)[0..1],
-        &[1]wasmstint.Module.MemType{.{ .limits = .{ .min = 1, .max = 2 } }},
-        (&imports.memory)[0..1],
-    );
+    const table_type = wasmstint.Module.TableType{
+        .elem_type = .funcref,
+        .limits = .{ .min = 10, .max = 20 },
+    };
 
-    store_allocator.allocate(&allocation_request) catch @panic("oom");
+    imports.table = wasmstint.runtime.table_allocator.allocate(
+        &table_type,
+        arena.allocator(),
+        rng.intRangeAtMost(u32, table_type.limits.min, table_type.limits.max),
+    ) catch @panic("oom");
+
+    const mem_type = wasmstint.Module.MemType{
+        .limits = .{ .min = 1, .max = 2 },
+    };
+
+    imports.memory = wasmstint.runtime.paged_memory.map(
+        &mem_type,
+        rng.intRangeAtMost(usize, mem_type.limits.min, mem_type.limits.max) *
+            wasmstint.runtime.MemInst.page_size,
+        mem_type.limits.max * wasmstint.runtime.MemInst.page_size,
+    ) catch @panic("oom");
 
     var lookup_buffer = std.heap.FixedBufferAllocator.init(&imports.lookup_buffer);
     imports.lookup.ensureTotalCapacity(

@@ -96,11 +96,11 @@ pub const ModuleInst = extern struct {
                 });
         }
 
-        inline fn tableInsts(inst: *const Header) []const *TableInst {
+        pub inline fn tableInsts(inst: *const Header) []const *TableInst {
             return inst.tables[0..inst.module.inner.raw.table_count];
         }
 
-        inline fn definedTableInsts(inst: *const Header) []const *TableInst {
+        pub inline fn definedTableInsts(inst: *const Header) []const *TableInst {
             return inst.tableInsts()[inst.module.inner.raw.table_import_count..];
         }
 

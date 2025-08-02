@@ -3,7 +3,7 @@
 const Error = ModuleAllocating.LimitsError || Allocator.Error;
 
 pub fn allocate(
-    table_type: *TableType,
+    table_type: *const TableType,
     allocator: Allocator,
     /// The initial size of the allocation, in elements.
     ///
@@ -12,7 +12,8 @@ pub fn allocate(
     initial_capacity: usize,
 ) Error!TableInst {
     std.debug.assert(table_type.limits.min <= table_type.limits.max);
-    if (table_type.limits.min < initial_capacity) {
+    std.debug.assert(table_type.limits.max <= std.math.maxInt(u32));
+    if (initial_capacity < table_type.limits.min) {
         return error.LimitsMismatch;
     }
 
@@ -20,16 +21,19 @@ pub fn allocate(
     const actual_capacity: u32 = @intCast(@min(initial_capacity, table_type.limits.max));
     const stride = TableStride.ofType(table_type.elem_type);
     const stride_bytes = stride.toBytes();
-    const allocation = try allocator.rawAlloc(
-        std.math.mul(u32, stride_bytes, actual_capacity) catch return error.OutOfMemory,
+    const allocation_size = std.math.mul(u32, stride_bytes, actual_capacity) catch
+        return error.OutOfMemory;
+    const allocation = allocator.rawAlloc(
+        allocation_size,
         .fromByteUnits(stride_bytes),
         @returnAddress(),
-    );
-    @memset(allocation, 0);
+    ) orelse return error.OutOfMemory;
+    @memset(allocation[0..allocation_size], 0);
 
     return TableInst{
-        .base = TableInst.Base{ .ptr = @ptrCast(allocation) },
-        .len = table_type.limits.min,
+        .base = TableInst.Base{ .ptr = @alignCast(@ptrCast(allocation)) },
+        .stride = stride,
+        .len = @intCast(table_type.limits.min),
         .capacity = actual_capacity,
         .limit = @intCast(table_type.limits.max),
     };

@@ -124,17 +124,14 @@ pub fn main() u8 {
         std.heap.page_allocator,
     );
 
-    var store = wasmstint.runtime.ModuleAllocator.WithinArena{ .arena = &arena };
-
     var imports: Imports = undefined;
-    imports.init(rng.random(), store.allocator());
+    imports.init(rng.random(), &arena);
 
     var state: State = undefined;
     State.init(
         &state,
         interpreter_allocator.allocator(),
         .{ .remaining = arguments.fuel },
-        store.allocator(),
         &imports,
         json_dir,
         &rng,

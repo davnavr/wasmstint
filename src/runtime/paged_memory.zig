@@ -27,21 +27,21 @@ pub fn map(
 
     std.debug.assert(mem_type.limits.min <= mem_type.limits.max);
     std.debug.assert(initial_capacity <= maximum_size);
-    const min_bytes = @as(u32, @intCast(mem_type.limits.min)) * MemInst.page_size;
-    const max_bytes = @as(u32, @intCast(mem_type.limits.max)) * MemInst.page_size;
+    const min_bytes = @as(u33, @intCast(mem_type.limits.min)) * MemInst.page_size;
+    const max_bytes = @as(u33, @intCast(mem_type.limits.max)) * MemInst.page_size;
 
-    const reserve: u32 = @intCast(
+    const reserve: u33 = @intCast(
         @min(
             max_bytes,
             std.mem.alignBackward(usize, maximum_size, MemInst.page_size),
         ),
     );
 
-    if (min_bytes > reserve) {
+    if (reserve < min_bytes) {
         return error.LimitsMismatch;
     }
 
-    const capacity = std.mem.alignBackward(u32, @intCast(initial_capacity), MemInst.page_size);
+    const capacity = std.mem.alignBackward(u33, @intCast(initial_capacity), MemInst.page_size);
     std.debug.assert(min_bytes <= capacity);
     std.debug.assert(capacity <= reserve);
     if (builtin.mode == .Debug) {
@@ -81,11 +81,17 @@ pub fn map(
         const pages = posix.mmap(
             hint,
             reserve,
-            if (single_syscall) posix.system.PROT.WRITE else posix.system.PROT.NONE,
+            if (single_syscall)
+                (posix.system.PROT.WRITE | posix.system.PROT.READ)
+            else
+                posix.system.PROT.NONE,
             .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
             -1,
             0,
-        );
+        ) catch |e| switch (e) {
+            error.OutOfMemory => |oom| return oom,
+            else => unreachable,
+        };
         errdefer posix.munmap(pages);
 
         // This recreates windows commit behavior
@@ -102,7 +108,7 @@ pub fn map(
             @TypeOf(std.heap.next_mmap_addr_hint),
             &std.heap.next_mmap_addr_hint,
             hint,
-            @constCast(pages.unused.ptr),
+            @constCast(@alignCast(pages.ptr[pages.len..pages.len].ptr)),
             .monotonic,
             .monotonic,
         );
@@ -201,7 +207,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
 const windows = std.os.windows;
-const pageSize = std.heap.pageSize();
+const pageSize = std.heap.pageSize;
 const page_size_min = std.heap.page_size_min;
 const Oom = std.mem.Allocator.Error;
 const MemType = @import("../Module.zig").MemType;

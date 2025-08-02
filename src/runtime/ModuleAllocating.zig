@@ -133,7 +133,7 @@ pub fn begin(
                 else
                     std.mem.zeroes(Pointee);
 
-                break :value @as(*anyopaque, @ptrCast(value));
+                break :value @as(*anyopaque, @ptrCast(global_value));
             },
         };
     }
@@ -180,12 +180,12 @@ pub fn begin(
 
     return ModuleAllocating{
         .requiring_allocation = ModuleInst{ .inner = header },
-        .mem_idx = module.inner.raw.mem_import_count,
-        .table_idx = module.inner.raw.table_import_count,
+        .mem_idx = @intCast(module.inner.raw.mem_import_count),
+        .table_idx = @intCast(module.inner.raw.table_import_count),
     };
 }
 
-const LimitsError = error{LimitsMismatch};
+pub const LimitsError = error{LimitsMismatch};
 
 pub fn nextMemoryType(request: *const ModuleAllocating) ?*const Module.MemType {
     const types = request.requiring_allocation.header().module.memTypes();
@@ -209,20 +209,17 @@ pub fn noTable(request: *ModuleAllocating) LimitsError!void {
         return error.LimitsMismatch;
     }
 
-    const table = request.nextTable();
     const stride = TableStride.ofType(table_type.elem_type);
-    table.* = TableInst{
-        .base = @intFromPtr(stride.toBytes()),
+    request.nextTable().* = TableInst{
+        .base = TableInst.Base{ .ptr = @ptrFromInt(stride.toBytes()) },
         .stride = stride,
         .len = 0,
         .capacity = 0,
-        .limit = table_type.limits.max,
+        .limit = @intCast(table_type.limits.max),
     };
-
-    return table;
 }
 
-pub fn nextTableType(request: *ModuleAllocating) ?*Module.TableType {
+pub fn nextTableType(request: *ModuleAllocating) ?*const Module.TableType {
     const types = request.requiring_allocation.header().module.tableTypes();
     if (request.table_idx < types.len) {
         const table_type = &types[request.table_idx];
@@ -244,26 +241,23 @@ pub fn noMemory(request: *ModuleAllocating) LimitsError!void {
         return error.LimitsMismatch;
     }
 
-    const mem = request.nextMemory();
-    mem.* = MemInst{
-        .base = @intFromPtr(MemInst.buffer_align),
+    request.nextMemory().* = MemInst{
+        .base = @ptrFromInt(MemInst.buffer_align),
         .size = 0,
         .capacity = 0,
         .limit = mem_type.limits.max * MemInst.page_size,
     };
-
-    return mem;
 }
 
 // TODO: need to note that mems and tables must still contain zeroes until module instantiation is done
 
 pub fn finish(request: *ModuleAllocating) LimitsError!ModuleAlloc {
     while (request.nextMemoryType() != null) {
-        request.noMemory();
+        try request.noMemory();
     }
 
     while (request.nextTableType() != null) {
-        request.noTable();
+        try request.noTable();
     }
 
     defer request.* = undefined;
