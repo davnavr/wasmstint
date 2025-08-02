@@ -1965,12 +1965,21 @@ pub fn rawValidate(
                 try val_stack.push(scratch, .i32);
             },
             .@"ref.func" => {
-                _ = try reader.readIdx(
+                const func_idx = try reader.readIdx(
                     Module.FuncIdx,
                     module.funcTypes().len,
                     diag,
                     &.{ "function", "in ref.func" },
                 );
+
+                if (!module.funcIsReferenceable(func_idx)) {
+                    return diag.print(
+                        .validation,
+                        "undeclared function reference {} in ref.func",
+                        .{@intFromEnum(func_idx)},
+                    );
+                }
+
                 try val_stack.push(scratch, ValType.funcref);
             },
 

@@ -131,6 +131,11 @@ const RawInner = extern struct {
     datas_ptrs: [*]const [*]const u8,
     datas_lens: [*]const u32,
     active_datas: [*]const ActiveData,
+    /// Set of functions that are allowed to be used with `ref.func` in function bodies.
+    /// This is only used during validation.
+    ///
+    /// See: https://webassembly.github.io/spec/core/valid/conventions.html#context
+    func_refs: [*]std.DynamicBitSetUnmanaged.MaskInt,
 };
 
 const Inner = struct {
@@ -161,7 +166,7 @@ pub inline fn funcTypes(module: Module) []const *const FuncType {
 
 pub inline fn funcTypeIdx(module: Module, func: FuncIdx) TypeIdx {
     const func_idx: @typeInfo(FuncIdx).@"enum".tag_type = @intFromEnum(func);
-    std.debug.assert(func_idx < module.inner.raw.func_import_count + module.inner.raw.code_count);
+    std.debug.assert(func_idx < module.funcTypes().len);
 
     const type_ptr = @intFromPtr(@as(*const FuncType, module.funcTypes()[func_idx]));
     std.debug.assert(
@@ -178,6 +183,14 @@ pub inline fn funcImportNames(module: Module) []const ImportName {
 
 pub inline fn funcImportTypes(module: Module) []const *const FuncType {
     return module.funcTypes()[0..module.inner.raw.func_import_count];
+}
+
+pub fn funcIsReferenceable(module: Module, idx: FuncIdx) bool {
+    const set = std.DynamicBitSetUnmanaged{
+        .bit_length = module.funcTypes().len,
+        .masks = module.inner.raw.func_refs,
+    };
+    return set.isSet(@intFromEnum(idx));
 }
 
 pub inline fn tableTypes(module: Module) []const TableType {
@@ -339,6 +352,14 @@ pub const ImportName = struct {
         return .{
             .bytes = name_slice.slice(module.inner.raw.import_section, module.inner.wasm),
         };
+    }
+};
+
+const FuncRefs = struct {
+    set: std.bit_set.DynamicBitSetUnmanaged,
+
+    fn insert(refs: *FuncRefs, idx: FuncIdx) void {
+        refs.set.set(@intFromEnum(idx));
     }
 };
 
@@ -544,6 +565,7 @@ pub const ConstExpr = union(enum) {
         func_count: u32,
         /// Should refer to global imports only.
         global_types: []const GlobalType,
+        func_refs: *FuncRefs,
         diag: ParseDiagnostics,
         desc: []const u8,
     ) !ConstExpr {
@@ -629,13 +651,24 @@ pub const ConstExpr = union(enum) {
 
                 break :ref_null .{ .@"ref.null" = expected_type };
             },
-            .@"ref.func" => .{
-                .@"ref.func" = try reader.readIdx(
+            .@"ref.func" => ref_func: {
+                const func_idx = try reader.readIdx(
                     FuncIdx,
                     func_count,
                     diag,
                     &.{ "function", "in constant expression" },
-                ),
+                );
+
+                if (expected_type != .funcref) {
+                    return diag.print(
+                        .validation,
+                        "type mismatch: expected {t}, got ref.func in {s}",
+                        .{ expected_type, desc },
+                    );
+                }
+
+                func_refs.insert(func_idx);
+                break :ref_func .{ .@"ref.func" = func_idx };
             },
             .@"global.get" => {
                 const global_idx = try reader.readIdx(
@@ -1071,7 +1104,16 @@ pub fn parse(
         try allocator.reserve(ValType, sections.readers.type.bytes.len -| counts.type);
         try allocator.reserve(ImportName, counts.import);
         // Assume most imports are functions
-        try allocator.reserve(*const FuncType, counts.func +| (counts.import / 2));
+        const func_estimate: u32 = counts.func +| (counts.import / 2);
+        try allocator.reserve(*const FuncType, func_estimate);
+        try allocator.reserve(
+            std.DynamicBitSetUnmanaged.MaskInt,
+            std.math.divCeil(
+                u32,
+                func_estimate,
+                @typeInfo(std.DynamicBitSetUnmanaged.MaskInt).int.bits,
+            ) catch unreachable,
+        );
         try allocator.reserve(TableType, @max(@min(1, counts.import), counts.table));
         try allocator.reserve(MemType, @max(@min(1, counts.mem), counts.mem));
         try allocator.reserve(GlobalType, counts.global);
@@ -1116,6 +1158,12 @@ pub fn parse(
         );
     };
 
+    var func_refs = FuncRefs{
+        .set = try .initEmpty(module.alloc.allocator(), import_sec.types.funcs.len),
+    };
+    // Function imports can always be referenced
+    func_refs.set.setRangeValue(.{ .start = 0, .end = import_sec.names.funcs.len }, true);
+
     {
         errdefer wasm.* = sections.known.func;
         try parseFuncSec(type_sec, &import_sec.types, counts.func, &sections.readers, diag);
@@ -1136,6 +1184,7 @@ pub fn parse(
             &import_sec,
             counts.global,
             &sections.readers,
+            &func_refs,
             diag,
         );
     };
@@ -1149,6 +1198,7 @@ pub fn parse(
             counts.@"export",
             &sections.readers,
             options.random_seed,
+            &func_refs,
             &scratch,
             diag,
         );
@@ -1172,6 +1222,7 @@ pub fn parse(
             &sections.readers,
             counts.elem,
             &import_sec.types,
+            &func_refs,
             &scratch,
             diag,
         );
@@ -1251,6 +1302,8 @@ pub fn parse(
             .datas_lens = data_sec.datas_lens.ptr,
             .active_datas = data_sec.active_datas.ptr,
             .active_datas_count = @intCast(data_sec.active_datas.len),
+
+            .func_refs = func_refs.set.masks,
         },
         .arena = module_arena.state,
         .wasm = original_wasm,
@@ -1595,6 +1648,7 @@ fn parseGlobalSec(
     import_sec: *const ImportSec,
     count: u32,
     readers: *const Sections.Readers,
+    func_refs: *FuncRefs,
     diag: ParseDiagnostics,
 ) ![]const ConstExpr {
     const global_reader = readers.global;
@@ -1619,6 +1673,7 @@ fn parseGlobalSec(
             ty.val_type,
             @intCast(import_sec.types.funcs.len),
             global_import_types,
+            func_refs,
             diag,
             "global initializer",
         );
@@ -1640,6 +1695,7 @@ fn parseExportSec(
     count: u32,
     readers: *const Sections.Readers,
     rng_seed: u64,
+    func_refs: *FuncRefs,
     scratch: *ArenaAllocator,
     diag: ParseDiagnostics,
 ) ParseError!ExportSec {
@@ -1700,14 +1756,17 @@ fn parseExportSec(
                     @tagName(desc_tag),
                 ),
             },
-            .desc = switch (tag) {
-                .func => .{
-                    .func = try export_reader.readIdx(
+            .desc = desc: switch (tag) {
+                .func => {
+                    const func_idx = try export_reader.readIdx(
                         FuncIdx,
                         import_types.funcs.len,
                         diag,
                         &.{ "function", "in export" },
-                    ),
+                    );
+
+                    func_refs.insert(func_idx);
+                    break :desc .{ .func = func_idx };
                 },
                 .table => .{
                     .table = try export_reader.readIdx(
@@ -1753,6 +1812,7 @@ fn parseElemSec(
     readers: *const Sections.Readers,
     count: u32,
     import_types: *const ImportSec.Types,
+    func_refs: *FuncRefs,
     scratch: *ArenaAllocator,
     diag: ParseDiagnostics,
 ) !ElemSec {
@@ -1814,11 +1874,13 @@ fn parseElemSec(
             else
                 TableIdx.default;
 
+            var dummy_func_refs = FuncRefs{ .set = .{} };
             const offset = try ConstExpr.parse(
                 elems_reader,
                 .i32,
                 @intCast(import_types.funcs.len),
                 global_types_in_const,
+                &dummy_func_refs, // Offsets cannot be `ref.func`
                 diag,
                 "offset in element segment",
             );
@@ -1911,6 +1973,7 @@ fn parseElemSec(
                         ref_type,
                         @intCast(import_types.funcs.len),
                         global_types_in_const,
+                        func_refs,
                         diag,
                         "element segment expression",
                     ),
@@ -1937,6 +2000,7 @@ fn parseElemSec(
                     diag,
                     &.{ "function", "in element segment" },
                 );
+                func_refs.insert(idx.*);
             }
 
             break :idx_exprs ElemSegment{
@@ -2067,11 +2131,13 @@ fn parseDataSec(
             else
                 MemIdx.default;
 
+            var dummy_func_refs = FuncRefs{ .set = .{} };
             const offset = try ConstExpr.parse(
                 datas_reader,
                 .i32,
                 @intCast(import_sec.types.funcs.len),
                 import_sec.types.globals[0..import_sec.names.globals.len],
+                &dummy_func_refs, // Offsets cannot be `ref.func`
                 diag,
                 "data segment offset",
             );
