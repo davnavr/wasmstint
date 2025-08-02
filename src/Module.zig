@@ -1221,7 +1221,7 @@ pub fn parse(
             &module.alloc,
             &sections.readers,
             counts.elem,
-            &import_sec.types,
+            &import_sec,
             &func_refs,
             &scratch,
             diag,
@@ -1811,7 +1811,7 @@ fn parseElemSec(
     arena: *reservation_allocator.ArenaFallbackAllocator,
     readers: *const Sections.Readers,
     count: u32,
-    import_types: *const ImportSec.Types,
+    import_sec: *const ImportSec,
     func_refs: *FuncRefs,
     scratch: *ArenaAllocator,
     diag: ParseDiagnostics,
@@ -1833,7 +1833,7 @@ fn parseElemSec(
     var active_elems = std.SegmentedList(ActiveElem, 4){};
     defer _ = scratch.reset(.retain_capacity);
 
-    const global_types_in_const = import_types.globals[0..import_types.globals.len];
+    const global_types_in_const = import_sec.types.globals[0..import_sec.names.globals.len];
     for (elems[0..count], 0..count) |*elem_segment, i| {
         const elem_idx: ElemIdx = @enumFromInt(
             @as(@typeInfo(ElemIdx).@"enum".tag_type, @intCast(i)),
@@ -1865,11 +1865,11 @@ fn parseElemSec(
             const table_idx: TableIdx = if (tag.bit_1.active_has_table_idx)
                 try elems_reader.readIdx(
                     TableIdx,
-                    import_types.tables.len,
+                    import_sec.types.tables.len,
                     diag,
                     &.{ "table", "in element section" },
                 )
-            else if (import_types.tables.len == 0)
+            else if (import_sec.types.tables.len == 0)
                 return diag.writeAll(.validation, "unknown table 0 in element section")
             else
                 TableIdx.default;
@@ -1878,7 +1878,7 @@ fn parseElemSec(
             const offset = try ConstExpr.parse(
                 elems_reader,
                 .i32,
-                @intCast(import_types.funcs.len),
+                @intCast(import_sec.types.funcs.len),
                 global_types_in_const,
                 &dummy_func_refs, // Offsets cannot be `ref.func`
                 diag,
@@ -1971,7 +1971,7 @@ fn parseElemSec(
                     try ConstExpr.parse(
                         elems_reader,
                         ref_type,
-                        @intCast(import_types.funcs.len),
+                        @intCast(import_sec.types.funcs.len),
                         global_types_in_const,
                         func_refs,
                         diag,
@@ -1996,7 +1996,7 @@ fn parseElemSec(
             for (func_indices) |*idx| {
                 idx.* = try elems_reader.readIdx(
                     FuncIdx,
-                    import_types.funcs.len,
+                    import_sec.types.funcs.len,
                     diag,
                     &.{ "function", "in element segment" },
                 );
