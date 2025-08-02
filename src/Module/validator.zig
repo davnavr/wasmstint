@@ -2019,8 +2019,19 @@ pub fn rawValidate(
                 },
 
                 .@"table.init" => {
-                    const elem_type = try readElemIdx(&reader, module, diag);
+                    // const elem_type = try readElemIdx(&reader, module, diag);
+                    // Spectests require first checking the table index
+                    const elem_idx = try reader.readUleb128(u32, diag, "elemidx in table.init");
                     const table_type = try readTableIdx(&reader, module, diag);
+                    const elem_type = if (elem_idx < module.elementSegments().len)
+                        module.elementSegments()[elem_idx].elementType()
+                    else
+                        return diag.print(
+                            .validation,
+                            "unknown element segment {} in table.init",
+                            .{elem_idx},
+                        );
+
                     if (elem_type != table_type) {
                         return diag.print(
                             .validation,
