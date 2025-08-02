@@ -41,6 +41,15 @@ pub fn map(
         return error.LimitsMismatch;
     }
 
+    if (reserve == 0) {
+        return MemInst{
+            .base = @ptrFromInt(std.heap.page_size_max),
+            .size = 0,
+            .capacity = 0,
+            .limit = 0,
+        };
+    }
+
     const capacity = std.mem.alignBackward(u33, @intCast(initial_capacity), MemInst.page_size);
     std.debug.assert(min_bytes <= capacity);
     std.debug.assert(capacity <= reserve);
