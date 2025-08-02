@@ -25,6 +25,7 @@ pub fn allocate(
         .fromByteUnits(stride_bytes),
         @returnAddress(),
     );
+    @memset(allocation, 0);
 
     return TableInst{
         .base = TableInst.Base{ .ptr = @ptrCast(allocation) },
