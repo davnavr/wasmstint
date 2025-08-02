@@ -112,11 +112,11 @@ pub const ModuleInst = extern struct {
             };
         }
 
-        inline fn memInsts(inst: *const Header) []const *MemInst {
+        pub inline fn memInsts(inst: *const Header) []const *MemInst {
             return inst.mems[0..inst.module.inner.raw.mem_count];
         }
 
-        inline fn definedMemInsts(inst: *const Header) []const *MemInst {
+        pub inline fn definedMemInsts(inst: *const Header) []const *MemInst {
             return inst.memInsts()[inst.module.inner.raw.mem_import_count..];
         }
 
@@ -273,15 +273,12 @@ pub const ModuleInst = extern struct {
     ///
     /// Additionally, callers are responsible for freeing any imported functions, memories, globals
     /// used by this module.
-    pub fn deinit(inst: *ModuleInst, gpa: std.mem.Allocator, store: ModuleAllocator) void {
-        const instance = inst.header();
-        store.free(ModuleAllocator.Free{
-            .mems = instance.definedMemInsts(),
-            .tables = instance.definedTableInsts(),
-        });
-
-        gpa.free(@as([*]const u8, @ptrCast(inst.*.inner))[0..inst.inner.buffer_len]);
-        inst.* = undefined;
+    pub fn deinit(inst: *ModuleInst) ModuleDeallocation {
+        return .{
+            .inst = inst,
+            .mems = inst.header().definedMemInsts(),
+            .tables = inst.header().definedTableInsts(),
+        };
     }
 };
 
@@ -294,4 +291,4 @@ const FuncAddr = @import("value.zig").FuncAddr;
 const TableAddr = @import("value.zig").TableAddr;
 const GlobalAddr = @import("value.zig").GlobalAddr;
 const ExternVal = @import("value.zig").ExternVal;
-const ModuleAllocator = @import("ModuleAllocator.zig");
+const ModuleDeallocation = @import("ModuleDeallocation.zig");
