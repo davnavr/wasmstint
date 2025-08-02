@@ -537,7 +537,7 @@ fn expectResultValues(
     output: Output,
     scratch: *ArenaAllocator,
 ) Error![]const Interpreter.TaggedValue {
-    state.runToCompletion(fuel, output);
+    state.runToCompletion(fuel, output, &state.module_arena);
     switch (state.interpreter.state) {
         .awaiting_validation => unreachable,
         .call_stack_exhaustion => return state.failCallStackExhausted(output),
@@ -563,7 +563,13 @@ fn expectResultValues(
     return actual_results;
 }
 
-fn runToCompletion(state: *State, fuel: *Interpreter.Fuel, output: Output) void {
+fn runToCompletion(
+    state: *State,
+    fuel: *Interpreter.Fuel,
+    output: Output,
+    /// Used to allocate tables.
+    store_arena: *ArenaAllocator,
+) void {
     for (0..1234) |_| {
         switch (state.interpreter.state) {
             .awaiting_host => |*host| if (state.interpreter.call_stack.items.len == 0) {
@@ -618,31 +624,10 @@ fn runToCompletion(state: *State, fuel: *Interpreter.Fuel, output: Output) void 
                 switch (interrupt.cause) {
                     .out_of_fuel => return,
                     .memory_grow => |*grow| wasmstint.runtime.paged_memory.grow(grow),
-                    .table_grow => |grow| {
-                        _ = grow; // TODO: Should ModuleAllocator API handle resizing?
-                        // const table = grow.table.table;
-                        // const new_cap = @min(
-                        //     @max(grow.delta + table.len, table.capacity *| 2),
-                        //     table.limit,
-                        // ) * table.stride.toBytes();
-
-                        // const remapped = state.store.arena.allocator().remap(
-                        //     table.base.ptr[0 .. table.capacity * table.stride.toBytes()],
-                        //     new_cap,
-                        // );
-
-                        // if (remapped) |new_buf| {
-                        //     _ = grow.resize(new_buf);
-                        // } else resize_failed: {
-                        //     _ = grow.resize(
-                        //         state.store.arena.allocator().alignedAlloc(
-                        //             u8,
-                        //             wasmstint.runtime.TableInst.buffer_align,
-                        //             new_cap,
-                        //         ) catch break :resize_failed,
-                        //     );
-                        // }
-                    },
+                    .table_grow => |*grow| wasmstint.runtime.table_allocator.grow(
+                        grow,
+                        store_arena.allocator(),
+                    ),
                 }
 
                 _ = interrupt.resumeExecution(fuel);
@@ -816,12 +801,13 @@ fn failInterpreterResults(state: *State, scratch: *ArenaAllocator, output: Outpu
 
 fn expectTrap(
     state: *State,
+    store_arena: *ArenaAllocator,
     fuel: *Interpreter.Fuel,
     expected: []const u8,
-    arena: *ArenaAllocator,
+    scratch: *ArenaAllocator,
     output: Output,
 ) Error![]const u8 {
-    state.runToCompletion(fuel, output);
+    state.runToCompletion(fuel, output, store_arena);
 
     const trap: *const Interpreter.Trap = switch (state.interpreter.state) {
         .awaiting_validation => unreachable,
@@ -831,7 +817,7 @@ fn expectTrap(
             interrupt.cause,
             output,
         ),
-        .awaiting_host => return state.failInterpreterResults(arena, output),
+        .awaiting_host => return state.failInterpreterResults(scratch, output),
     };
 
     // Recreate spec test interpreter trap message
@@ -918,7 +904,13 @@ fn processAssertTrap(
         return failFmt(output, "cannot check '{t}' for traps", .{finished_action});
     }
 
-    const message = try state.expectTrap(&fuel, command.text, scratch, output);
+    const message = try state.expectTrap(
+        &state.module_arena,
+        &fuel,
+        command.text,
+        scratch,
+        output,
+    );
     output.print("invoke \"{s}\" trapped: \"{s}\"\n", .{ command.action.field, message });
 }
 
@@ -940,7 +932,7 @@ fn processAssertExhaustion(
         return failFmt(output, "cannot check '{t}' for resource exhaustion", .{finished_action});
     }
 
-    state.runToCompletion(&fuel, output);
+    state.runToCompletion(&fuel, output, &state.module_arena);
 
     switch (state.interpreter.state) {
         .awaiting_validation => unreachable,
@@ -1209,7 +1201,7 @@ fn processAssertUninstantiable(
         error.ImportFailure => return failFmt(output, "{f}", .{import_error}),
     };
 
-    // Danging allocations (pages for WASM memory)
+    // Dangling allocations (pages for WASM memory)
     var module_alloc = try finishModuleAllocation(&module_allocating, arena);
 
     var fuel = state.starting_fuel;
@@ -1219,7 +1211,7 @@ fn processAssertUninstantiable(
         &fuel,
     ) catch @panic("oom");
 
-    const message = try state.expectTrap(&fuel, command.text, &scratch, output);
+    const message = try state.expectTrap(arena, &fuel, command.text, &scratch, output);
     output.print("module instantiation \"{f}\" trapped: \"{s}\"\n", .{ fmt_filename, message });
 }
 

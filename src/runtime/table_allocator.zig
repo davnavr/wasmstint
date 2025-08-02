@@ -48,6 +48,56 @@ pub fn allocateForModule(
     request.nextTable().* = table_inst;
 }
 
+pub fn grow(
+    request: *const Interpreter.InterruptionCause.TableGrow,
+    allocator: Allocator,
+) void {
+    const table = request.table.table;
+    const old_capacity = table.capacity;
+    const stride_bytes = table.stride.toBytes();
+    const new_len: u32 = table.len + request.delta;
+    std.debug.assert(new_len <= table.limit);
+    std.debug.assert(old_capacity < new_len);
+    std.debug.assert(table.len <= old_capacity);
+
+    const new_capacity: u32 = @max(
+        new_len,
+        // Try multiplying by 1.5
+        old_capacity +| (old_capacity / 2),
+    );
+
+    const old_allocation: []align(TableInst.buffer_align) u8 =
+        table.base.ptr[0 .. old_capacity * stride_bytes];
+
+    const elem_bytes = std.mem.asBytes(&request.elem)[0..stride_bytes];
+    const resized_in_place = allocator.rawResize(
+        old_allocation,
+        .fromByteUnits(stride_bytes),
+        new_capacity,
+        @returnAddress(),
+    );
+    if (resized_in_place) {
+        table.capacity = new_capacity;
+        table.fillWithinCapacity(elem_bytes, table.len, new_len);
+    } else {
+        // Fill the unused parts so the allocator actually copies useful stuff
+        table.fillWithinCapacity(elem_bytes, table.len, old_capacity);
+
+        const new_allocation: [*]align(TableInst.buffer_align) u8 = @alignCast(
+            allocator.rawRemap(
+                old_allocation,
+                .fromByteUnits(stride_bytes),
+                new_capacity,
+                @returnAddress(),
+            ) orelse return,
+        );
+
+        table.base = .{ .ptr = new_allocation };
+        table.capacity = new_capacity;
+        table.fillWithinCapacity(elem_bytes, old_capacity, new_len);
+    }
+}
+
 // pub fn free(table: *TableInst, allocator: Allocator) void {}
 
 const std = @import("std");
@@ -56,3 +106,4 @@ const TableType = @import("../Module.zig").TableType;
 const ModuleAllocating = @import("ModuleAllocating.zig");
 const TableInst = @import("table.zig").TableInst;
 const TableStride = @import("table.zig").TableStride;
+const Interpreter = @import("../Interpreter.zig");
