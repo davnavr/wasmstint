@@ -177,22 +177,23 @@ pub fn free(mem: *MemInst) void {
 ///
 /// Because `MemInst.limit` tracks both the memory's maximum and the current size of
 /// the allocation, `mremap` is unable to be used on Linux without introducing a
-/// new `usize` value.
-///
-/// TODO: do that ^
+/// new `usize` value to track a "reserved capacity".
 pub fn grow(
     request: *const Interpreter.InterruptionCause.MemoryGrow,
 ) void {
     checkMemInst(request.memory);
     // No overflow, already handled by Interpreter's memory.grow handler
-    const new_bytes_size = request.memory.size + request.delta;
-    std.debug.assert(new_bytes_size <= request.memory.limit);
-    std.debug.assert(new_bytes_size % MemInst.buffer_align == 0);
-    // TODO: Track old size in MemoryGrow to allow make function idempotent?
-    std.debug.assert(request.memory.capacity < new_bytes_size);
+    std.debug.assert(request.old_size <= request.new_size);
+    std.debug.assert(request.new_size <= request.memory.limit);
+    std.debug.assert(request.new_size % MemInst.buffer_align == 0);
+
+    if (request.new_size <= request.memory.size) {
+        std.debug.assert(request.new_size <= request.memory.capacity);
+        return; // resize already occurred
+    }
 
     const new_pages: []align(page_size_min) u8 = @alignCast(
-        request.memory.base[0..request.memory.limit][request.memory.size..new_bytes_size],
+        request.memory.base[0..request.memory.limit][request.memory.size..request.new_size],
     );
 
     if (builtin.os.tag == .windows) {
@@ -209,7 +210,8 @@ pub fn grow(
         };
     }
 
-    request.memory.capacity = new_bytes_size;
+    request.memory.capacity = request.new_size;
+    request.result.i32 = @intCast(request.old_size);
 }
 
 const std = @import("std");

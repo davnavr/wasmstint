@@ -189,21 +189,17 @@ pub const TableInst = extern struct {
         if (len == 0) return;
 
         const stride = src.stride.toBytes();
-        const src_slice: []const u8 = src.bytes()[src_idx * stride .. src_end_idx * stride];
+        const src_slice: []align(@sizeOf(usize)) const u8 =
+            @alignCast(src.bytes()[src_idx * stride .. src_end_idx * stride]);
         std.debug.assert(src_slice.len % stride == 0);
 
-        const dst_slice = dst.bytes()[dst_idx * stride .. dst_end_idx * stride];
+        const dst_slice: []align(@sizeOf(usize)) u8 =
+            @alignCast(dst.bytes()[dst_idx * stride .. dst_end_idx * stride]);
         std.debug.assert(dst_slice.len % stride == 0);
 
         // This is duplicate code from the `memory.copy` helper
         if (@intFromPtr(src) == @intFromPtr(dst) and (dst_idx < src_end_idx or src_idx < dst_end_idx)) {
-            if (src_idx < dst_idx) {
-                std.mem.copyBackwards(u8, dst_slice, src_slice);
-            } else if (dst_idx < src_idx) {
-                std.mem.copyForwards(u8, dst_slice, src_slice);
-            } else {
-                unreachable;
-            }
+            @memmove(dst_slice, src_slice);
         } else {
             @memcpy(dst_slice, src_slice);
         }

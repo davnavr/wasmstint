@@ -55,13 +55,17 @@ pub fn grow(
     const table = request.table.table;
     const old_capacity = table.capacity;
     const stride_bytes = table.stride.toBytes();
-    const new_len: u32 = table.len + request.delta;
-    std.debug.assert(new_len <= table.limit);
-    std.debug.assert(old_capacity < new_len);
-    std.debug.assert(table.len <= old_capacity);
+    std.debug.assert(request.new_len <= table.limit);
+    std.debug.assert(old_capacity < request.new_len);
+    std.debug.assert(request.old_len <= table.len);
+
+    if (request.new_len <= table.len) {
+        std.debug.assert(request.new_len <= old_capacity);
+        return; // resize already occurred
+    }
 
     const new_capacity: u32 = @max(
-        new_len,
+        request.new_len,
         // Try multiplying by 1.5
         old_capacity +| (old_capacity / 2),
     );
@@ -78,7 +82,7 @@ pub fn grow(
     );
     if (resized_in_place) {
         table.capacity = new_capacity;
-        table.fillWithinCapacity(elem_bytes, table.len, new_len);
+        table.fillWithinCapacity(elem_bytes, table.len, request.new_len);
     } else {
         // Fill the unused parts so the allocator actually copies useful stuff
         table.fillWithinCapacity(elem_bytes, table.len, old_capacity);
@@ -94,8 +98,10 @@ pub fn grow(
 
         table.base = .{ .ptr = new_allocation };
         table.capacity = new_capacity;
-        table.fillWithinCapacity(elem_bytes, old_capacity, new_len);
+        table.fillWithinCapacity(elem_bytes, old_capacity, request.new_len);
     }
+
+    request.elem.* = .{ .i32 = @bitCast(request.old_len) };
 }
 
 // pub fn free(table: *TableInst, allocator: Allocator) void {}

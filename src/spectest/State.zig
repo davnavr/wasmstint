@@ -32,13 +32,14 @@ pub fn init(
         .module_lookup = .empty,
         .current_module = null,
         .interpreter_allocator = interpreter_allocator,
-        .interpreter = wasmstint.Interpreter.init(interpreter_allocator, .{}) catch
-            @panic("oom"),
+        .interpreter = unreachable,
         .starting_fuel = starting_fuel,
         .imports = imports,
         .script_dir = script_dir,
         .rng = rng,
     };
+    wasmstint.Interpreter.init(&state.interpreter, interpreter_allocator, .{}) catch
+        @panic("oom");
 }
 
 pub const Output = struct {
@@ -83,12 +84,19 @@ pub fn processCommand(
     output: Output,
     scratch: *ArenaAllocator,
 ) Error!void {
-    state.interpreter.reset();
     switch (command.type) {
         .module => try state.processModuleCommand(command, output, scratch),
         .action => |*act| {
             var fuel = state.starting_fuel;
-            _ = try state.processActionCommand(act, output, &fuel, scratch);
+            switch (try state.processActionCommand(act, output, &fuel, scratch)) {
+                .invoke => |invoke_state| _ = state.runToCompletion(
+                    invoke_state,
+                    &fuel,
+                    output,
+                    &state.module_arena,
+                ),
+                .get => {},
+            }
         },
         .assert_return => |*assert_return| try state.processAssertReturn(
             assert_return,
@@ -264,13 +272,20 @@ fn processModuleCommand(
     );
 
     var fuel = state.starting_fuel;
-    _ = state.interpreter.state.awaiting_host.instantiateModule(
+    var interp = state.interpreter.reset();
+    interp = interp.awaiting_host.instantiateModule(
         state.module_arena.allocator(),
         &module_alloc,
         &fuel,
     ) catch @panic("oom");
 
-    _ = try state.expectResultValues(&fuel, &Parser.Command.Expected.Vec{}, output, alloca);
+    _ = try state.expectResultValues(
+        interp,
+        &fuel,
+        &Parser.Command.Expected.Vec{},
+        output,
+        alloca,
+    );
 
     const module_inst = module_alloc.assumeInstantiated();
     state.current_module = module_inst;
@@ -331,7 +346,7 @@ fn failCallStackExhausted(state: *const State, output: Output) Error {
     return failFmt(
         output,
         "call stack exhausted after {} frames",
-        .{state.interpreter.call_stack.items.len},
+        .{state.interpreter.call_depth},
     );
 }
 
@@ -532,22 +547,24 @@ fn resultValueMatches(
 
 fn expectResultValues(
     state: *State,
+    interp: Interpreter.State,
     fuel: *Interpreter.Fuel,
     expected: *const Parser.Command.Expected.Vec,
     output: Output,
     scratch: *ArenaAllocator,
 ) Error![]const Interpreter.TaggedValue {
-    state.runToCompletion(fuel, output, &state.module_arena);
-    switch (state.interpreter.state) {
+    const result_state = switch (state.runToCompletion(interp, fuel, output, &state.module_arena)) {
         .awaiting_validation => unreachable,
         .call_stack_exhaustion => return state.failCallStackExhausted(output),
-        .trapped => |trap| return failInterpreterTrap(trap.code, output),
+        .trapped => |trap| return failInterpreterTrap(trap.trap.code, output),
         .interrupted => |interrupt| return failInterpreterInterrupted(interrupt.cause, output),
-        .awaiting_host => std.debug.assert(state.interpreter.call_stack.items.len == 0),
-    }
+        .awaiting_host => |awaiting| awaiting,
+    };
 
-    const actual_results: []const Interpreter.TaggedValue = state.interpreter.state
-        .awaiting_host.copyValues(scratch) catch @panic("oom");
+    std.debug.assert(state.interpreter.call_depth == 0);
+
+    const actual_results: []const Interpreter.TaggedValue =
+        result_state.allocResults(scratch.allocator()) catch @panic("oom");
 
     if (expected.len != actual_results.len) return failFmt(
         output,
@@ -565,17 +582,16 @@ fn expectResultValues(
 
 fn runToCompletion(
     state: *State,
+    interpreter_state: Interpreter.State,
     fuel: *Interpreter.Fuel,
     output: Output,
     /// Used to allocate tables.
     store_arena: *ArenaAllocator,
-) void {
-    for (0..1234) |_| {
-        switch (state.interpreter.state) {
-            .awaiting_host => |*host| if (state.interpreter.call_stack.items.len == 0) {
-                return;
-            } else {
-                const callee = host.currentHostFunction().?;
+) Interpreter.State {
+    var interp = interpreter_state;
+    for (0..123456) |_| {
+        interp = next: switch (interp) {
+            .awaiting_host => |*host| if (host.currentHostFunction()) |callee| {
                 const print_func_idx = @divExact(
                     @intFromPtr(callee.func) - @intFromPtr(&Imports.PrintFunction.functions),
                     @sizeOf(wasmstint.runtime.FuncAddr.Host),
@@ -588,41 +604,41 @@ fn runToCompletion(
                     .print => {},
                     .print_i32 => output.print(
                         "{}",
-                        host.valuesTyped(struct { i32 }) catch unreachable,
+                        host.paramsTyped(struct { i32 }) catch unreachable,
                     ),
                     .print_i64 => output.print(
                         "{}",
-                        host.valuesTyped(struct { i64 }) catch unreachable,
+                        host.paramsTyped(struct { i64 }) catch unreachable,
                     ),
                     .print_f32 => output.print(
                         "{}",
-                        host.valuesTyped(struct { f32 }) catch unreachable,
+                        host.paramsTyped(struct { f32 }) catch unreachable,
                     ),
                     .print_f64 => output.print(
                         "{}",
-                        host.valuesTyped(struct { f64 }) catch unreachable,
+                        host.paramsTyped(struct { f64 }) catch unreachable,
                     ),
                     .print_i32_f32 => output.print(
                         "{}, {}",
-                        host.valuesTyped(struct { i32, f32 }) catch unreachable,
+                        host.paramsTyped(struct { i32, f32 }) catch unreachable,
                     ),
                     .print_f64_f64 => output.print(
                         "{}, {}",
-                        host.valuesTyped(struct { f64, f64 }) catch unreachable,
+                        host.paramsTyped(struct { f64, f64 }) catch unreachable,
                     ),
                 }
                 output.writeAll(")\n");
 
-                _ = host.returnFromHostTyped({}, fuel) catch unreachable;
-            },
+                break :next host.returnFromHostTyped({}, fuel) catch unreachable;
+            } else return interp,
             .awaiting_validation => unreachable,
-            .call_stack_exhaustion => |*oof| {
-                _ = oof.resumeExecution(state.interpreter_allocator, fuel) catch
-                    return;
-            },
+            .call_stack_exhaustion => |*oof| oof.resumeExecution(
+                state.interpreter_allocator,
+                fuel,
+            ) catch return interp,
             .interrupted => |*interrupt| {
                 switch (interrupt.cause) {
-                    .out_of_fuel => return,
+                    .out_of_fuel => return interp,
                     .memory_grow => |*grow| wasmstint.runtime.paged_memory.grow(grow),
                     .table_grow => |*grow| wasmstint.runtime.table_allocator.grow(
                         grow,
@@ -630,17 +646,17 @@ fn runToCompletion(
                     ),
                 }
 
-                _ = interrupt.resumeExecution(fuel);
+                break :next interrupt.resumeExecution(fuel);
             },
-            .trapped => return,
-        }
+            .trapped => return interp,
+        };
     }
 
     @panic("Possible infinite loop in interpreter handler");
 }
 
 const Action = union(enum) {
-    invoke,
+    invoke: Interpreter.State,
     get: Interpreter.TaggedValue,
 };
 
@@ -712,7 +728,7 @@ fn processActionCommand(
                 ),
             };
 
-            _ = state.interpreter.state.awaiting_host.beginCall(
+            const invoke_state = state.interpreter.reset().awaiting_host.beginCall(
                 state.interpreter_allocator,
                 callee,
                 allocateFunctionArguments(&invoke.args, scratch),
@@ -737,10 +753,11 @@ fn processActionCommand(
                         .{ command.field, fmt_module, callee },
                     );
                 },
+                error.ValidationNeeded => unreachable,
             };
             _ = scratch.reset(.retain_capacity);
 
-            return .invoke;
+            return .{ .invoke = invoke_state };
         },
         .get => {
             const global: wasmstint.runtime.GlobalAddr = switch (target_export) {
@@ -785,9 +802,12 @@ fn processActionCommand(
     }
 }
 
-fn failInterpreterResults(state: *State, scratch: *ArenaAllocator, output: Output) Error {
-    const results = state.interpreter.state.awaiting_host.copyValues(scratch) catch
-        @panic("oom");
+fn failInterpreterResults(
+    interp: Interpreter.State.AwaitingHost,
+    scratch: *ArenaAllocator,
+    output: Output,
+) Error {
+    const results = interp.allocResults(scratch.allocator()) catch @panic("oom");
 
     return if (results.len > 0)
         failFmt(
@@ -801,23 +821,20 @@ fn failInterpreterResults(state: *State, scratch: *ArenaAllocator, output: Outpu
 
 fn expectTrap(
     state: *State,
+    interp: Interpreter.State,
     store_arena: *ArenaAllocator,
     fuel: *Interpreter.Fuel,
     expected: []const u8,
     scratch: *ArenaAllocator,
     output: Output,
 ) Error![]const u8 {
-    state.runToCompletion(fuel, output, store_arena);
-
-    const trap: *const Interpreter.Trap = switch (state.interpreter.state) {
+    const result_state = state.runToCompletion(interp, fuel, output, store_arena);
+    const trap: Interpreter.Trap = switch (result_state) {
         .awaiting_validation => unreachable,
-        .trapped => |*trapped| trapped,
+        .trapped => |trapped| trapped.trap,
         .call_stack_exhaustion => return state.failCallStackExhausted(output),
-        .interrupted => |interrupt| return failInterpreterInterrupted(
-            interrupt.cause,
-            output,
-        ),
-        .awaiting_host => return state.failInterpreterResults(scratch, output),
+        .interrupted => |interrupt| return failInterpreterInterrupted(interrupt.cause, output),
+        .awaiting_host => |awaiting| return failInterpreterResults(awaiting, scratch, output),
     };
 
     // Recreate spec test interpreter trap message
@@ -849,8 +866,9 @@ fn processAssertReturn(
     var fuel = state.starting_fuel;
     const action = try state.processActionCommand(&command.action, output, &fuel, scratch);
     switch (action) {
-        .invoke => {
+        .invoke => |interp| {
             const results = try state.expectResultValues(
+                interp,
                 &fuel,
                 &command.expected,
                 output,
@@ -905,6 +923,7 @@ fn processAssertTrap(
     }
 
     const message = try state.expectTrap(
+        finished_action.invoke,
         &state.module_arena,
         &fuel,
         command.text,
@@ -932,16 +951,14 @@ fn processAssertExhaustion(
         return failFmt(output, "cannot check '{t}' for resource exhaustion", .{finished_action});
     }
 
-    state.runToCompletion(&fuel, output, &state.module_arena);
-
-    switch (state.interpreter.state) {
+    switch (state.runToCompletion(finished_action.invoke, &fuel, output, &state.module_arena)) {
         .awaiting_validation => unreachable,
         .call_stack_exhaustion => {},
-        .trapped => |*trap| return failInterpreterTrap(trap.code, output),
-        .interrupted => |*interrupt| if (interrupt.cause != .out_of_fuel) {
+        .trapped => |trap| return failInterpreterTrap(trap.trap.code, output),
+        .interrupted => |interrupt| if (interrupt.cause != .out_of_fuel) {
             return failInterpreterInterrupted(interrupt.cause, output);
         },
-        .awaiting_host => return state.failInterpreterResults(scratch, output),
+        .awaiting_host => |awaiting| return failInterpreterResults(awaiting, scratch, output),
     }
 
     const expected_msg = "call stack exhausted";
@@ -1205,13 +1222,20 @@ fn processAssertUninstantiable(
     var module_alloc = try finishModuleAllocation(&module_allocating, arena);
 
     var fuel = state.starting_fuel;
-    _ = state.interpreter.state.awaiting_host.instantiateModule(
+    const instantiating = state.interpreter.reset().awaiting_host.instantiateModule(
         state.module_arena.allocator(),
         &module_alloc,
         &fuel,
     ) catch @panic("oom");
 
-    const message = try state.expectTrap(arena, &fuel, command.text, &scratch, output);
+    const message = try state.expectTrap(
+        instantiating,
+        arena,
+        &fuel,
+        command.text,
+        &scratch,
+        output,
+    );
     output.print("module instantiation \"{f}\" trapped: \"{s}\"\n", .{ fmt_filename, message });
 }
 

@@ -1,7 +1,4 @@
-const std = @import("std");
-const meta = std.meta;
-
-const opcodes = @This();
+//! WebAssembly opcodes.
 
 pub const ByteOpcode = enum(u8) {
     @"unreachable" = 0x00,
@@ -210,21 +207,6 @@ pub const ByteOpcode = enum(u8) {
     // @"0xFD" = 0xFD,
 };
 
-pub const IllegalOpcode = enum(u8) {
-    /// The `0xFF` opcode is currently used by some engines for private opcodes.
-    ///
-    /// See <https://github.com/WebAssembly/design/issues/1539> for more information.
-    @"wasmstint.validation_fail" = 0xFF,
-
-    comptime {
-        for (std.enums.values(IllegalOpcode)) |illegal| {
-            for (std.enums.values(ByteOpcode)) |byte| {
-                std.debug.assert(@intFromEnum(illegal) != @intFromEnum(byte));
-            }
-        }
-    }
-};
-
 // Added in some proposal?
 /// Technically a LEB128 encoded `u32`, but all of these are `<= 0x7F` for now.
 pub const FCPrefixOpcode = enum(u5) {
@@ -254,64 +236,5 @@ pub const FCPrefixOpcode = enum(u5) {
 //     @"v128.load" = 0,
 // };
 
-pub const PrefixSet = struct {
-    prefix: ByteOpcode,
-    @"enum": type,
-
-    fn init(comptime prefix: ByteOpcode) @This() {
-        return .{
-            .prefix = prefix,
-            .@"enum" = @field(opcodes, @tagName(prefix)[2..4] ++ "PrefixOpcode"),
-        };
-    }
-
-    fn fields(set: *const PrefixSet) []const std.builtin.Type.EnumField {
-        return @typeInfo(set.@"enum").@"enum".fields;
-    }
-
-    pub const all = [1]PrefixSet{PrefixSet.init(.@"0xFC")};
-};
-
-pub const AllOpcodes: type = ty: {
-    const byte_opcodes = @typeInfo(ByteOpcode).@"enum".fields;
-    const non_prefix_byte_opcode_count = byte_opcodes.len - PrefixSet.all.len;
-
-    const total_count = count: {
-        var total = non_prefix_byte_opcode_count;
-        for (PrefixSet.all) |set| total += set.fields().len;
-        break :count total;
-    };
-
-    const TagType = std.math.IntFittingRange(0, total_count);
-
-    var fields: [total_count]std.builtin.Type.EnumField = undefined;
-    var init_fields: TagType = 0;
-
-    @setEvalBranchQuota(total_count * 2);
-
-    for (byte_opcodes) |byte_opcode| {
-        if (std.mem.startsWith(u8, byte_opcode.name, "0x")) continue;
-        fields[init_fields] = .{ .name = byte_opcode.name, .value = init_fields };
-        init_fields += 1;
-    }
-
-    std.debug.assert(init_fields == non_prefix_byte_opcode_count);
-
-    for (PrefixSet.all) |set| {
-        for (set.fields()) |opcode| {
-            fields[init_fields] = .{ .name = opcode.name, .value = init_fields };
-            init_fields += 1;
-        }
-    }
-
-    std.debug.assert(init_fields == fields.len);
-
-    break :ty @Type(std.builtin.Type{
-        .@"enum" = .{
-            .tag_type = TagType,
-            .fields = &fields,
-            .decls = &[0]std.builtin.Type.Declaration{},
-            .is_exhaustive = true,
-        },
-    });
-};
+const std = @import("std");
+const meta = std.meta;

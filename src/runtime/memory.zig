@@ -108,13 +108,7 @@ pub const MemInst = extern struct {
         const dst_slice = dst.bytes()[dst_idx..dst_end_idx];
         // std.debug.dumpHex(dst_slice);
         if (@intFromPtr(src) == @intFromPtr(dst) and (dst_idx < src_end_idx or src_idx < dst_end_idx)) {
-            if (src_idx < dst_idx) {
-                std.mem.copyBackwards(u8, dst_slice, src_slice);
-            } else if (dst_idx < src_idx) {
-                std.mem.copyForwards(u8, dst_slice, src_slice);
-            } else if (src_idx == dst_idx) {
-                // Do nothing!
-            }
+            @memmove(dst_slice, src_slice);
         } else {
             @memcpy(dst_slice, src_slice);
         }

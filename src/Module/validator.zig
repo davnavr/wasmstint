@@ -66,7 +66,15 @@ pub const Code = extern struct {
     status: std.atomic.Value(Status) = .{ .raw = .not_started },
 
     const validation_failed_body = [_:@intFromEnum(End.end)]u8{
-        @intFromEnum(opcodes.IllegalOpcode.@"wasmstint.validation_fail"),
+        @intFromEnum(opcodes.ByteOpcode.@"unreachable"),
+        // The `0xFF` opcode is currently used by some engines for private opcodes.
+        //
+        // See <https://github.com/WebAssembly/design/issues/1539> for more information.
+        //
+        // This is here more to catch bugs. The handler for `unreachable` checks if
+        // `@intFromPtr(ip) == @intFromPtr(&validation_failed_body)` to determine if validation
+        // failure actually occurred.
+        0xFF,
     };
 
     pub const validation_failed = Inner{
@@ -93,9 +101,9 @@ pub const Code = extern struct {
     /// If `false` is returned, callers can wait for validation on other threads to finish by
     /// waiting for the `status` flag to change.
     ///
-    /// Note that due to API limitations, encountering an OOM condition during validation is
-    /// treated as a validation failure. Attempting to interpret a function that failed validation
-    /// is treated as a trap.
+    /// Attempting to interpret a function that failed validation is treated as a trap. Note that
+    /// due to API limitations, encountering an OOM condition during validation is treated as a
+    /// validation failure.
     ///
     /// Asserts that this `Code` belongs to the given `Module`.
     pub fn validate(
