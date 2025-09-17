@@ -193,19 +193,21 @@ pub const StackFrame = extern struct {
     checksum: if (builtin.mode == .Debug) u128 else void,
 
     function: runtime.FuncAddr,
-    signature: *const Module.FuncType,
 
+    signature: *const Module.FuncType,
     /// Set to true when the function returns.
     ///
     /// If the function is the start function, then this indicates that the module was successfully
     /// instantiated. Otherwise, this points to a dummy memory location which is never read.
     instantiate_flag: *bool,
+
     /// The total number of parameters and local variables.
     local_count: u32,
     /// Offset to the previous stack frame.
     prev_frame: Offset,
+    padding: u64 = undefined,
     /// Where `Wasm` would be if `function.expanded() == .wasm`.
-    wasm: struct {} = .{},
+    wasm: u0 = 0,
 
     const Offset = enum(u32) {
         none = std.math.maxInt(u32),
@@ -235,7 +237,7 @@ pub const StackFrame = extern struct {
     ) type {
         std.debug.assert(@typeInfo(Self).pointer.child == StackFrame);
         std.debug.assert(@typeInfo(Self).pointer.size == .one);
-        std.debug.assert(@typeInfo(Self).pointer.alignment >= @sizeOf(Value));
+        std.debug.assert(@typeInfo(Self).pointer.alignment >= alignment);
         return @Type(.{
             .pointer = std.builtin.Type.Pointer{
                 .size = size,
@@ -301,6 +303,13 @@ pub const StackFrame = extern struct {
         /// for the function.
         stack: []align(@sizeOf(Value)) const Value,
     ) u128 {
+        // No need to check `std.meta.hasUniqueRepresentation`, since even padding bits are
+        // expected to remain unchanged. This still probably violates some rule somewhere.
+        // comptime {
+        //     std.debug.assert(std.meta.hasUniqueRepresentation(StackFrame));
+        //     std.debug.assert(std.meta.hasUniqueRepresentation(Wasm));
+        // }
+
         const stack_end = &stack.ptr[stack.len];
         const locals = frame.localValues(stack);
 
@@ -319,9 +328,6 @@ pub const StackFrame = extern struct {
         }
 
         // Fowler-Noll-Vo is designed for both hashing AND checksums.
-
-        // No need to check `std.meta.hasUniqueRepresentation`, since even padding bits are
-        // expected to remain unchanged. This still probably violates some rule somewhere.
         return std.hash.Fnv1a_128.hash(
             std.mem.sliceAsBytes(
                 @as(
@@ -1052,6 +1058,7 @@ pub const State = union(enum) {
                 dst.* = src.untagged();
             }
 
+            interp.current_frame = new_frame.offset;
             interp.version.increment();
             return switch (callee.expanded()) {
                 .host => |host| State{
@@ -4727,7 +4734,7 @@ fn enterMainLoop(interp: *Interpreter, fuel: *Fuel) State {
         std.debug.assert(@intFromPtr(code.inner.instructions_end) == @intFromPtr(wasm_frame.eip));
 
         std.debug.assert(@intFromPtr(wasm_frame.stp.ptr) <= @intFromPtr(code.inner.side_table_ptr));
-        std.debug.assert(
+        std.debug.assert( // side table OOB
             @intFromPtr(code.inner.side_table_ptr) <
                 @intFromPtr(&wasm_frame.stp.ptr[code.inner.side_table_len]),
         );

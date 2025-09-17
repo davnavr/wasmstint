@@ -32,13 +32,13 @@ pub fn init(
         .module_lookup = .empty,
         .current_module = null,
         .interpreter_allocator = interpreter_allocator,
-        .interpreter = unreachable,
+        .interpreter = undefined,
         .starting_fuel = starting_fuel,
         .imports = imports,
         .script_dir = script_dir,
         .rng = rng,
     };
-    wasmstint.Interpreter.init(&state.interpreter, interpreter_allocator, .{}) catch
+    _ = wasmstint.Interpreter.init(&state.interpreter, interpreter_allocator, .{}) catch
         @panic("oom");
 }
 
