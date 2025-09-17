@@ -334,7 +334,7 @@ pub const StackFrame = extern struct {
 };
 
 /// In `.Debug` mode, this ensures that `State` structs operate on the correct `Interpreter`.
-const Version = struct {
+const Version = packed struct {
     const enabled = builtin.mode == .Debug;
 
     number: if (enabled) u32 else void =
@@ -1840,11 +1840,12 @@ const OpcodeHandler = fn (
 //     }.wrapped;
 // }
 
-const StateTransition = struct {
+// Is a `packed struct` to work around https://github.com/ziglang/zig/issues/18189
+const StateTransition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version))) {
     version: Version,
     serialize_token: SerializeToken,
 
-    const SerializeToken = enum {
+    const SerializeToken = enum(u0) {
         wrote_ip_and_stp_to_the_current_stack_frame,
 
         comptime {
