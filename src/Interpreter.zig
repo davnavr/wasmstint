@@ -1753,9 +1753,9 @@ const ValStack = extern struct {
         vals.stack.ptr += count;
         // Check for overflow
         if (builtin.mode == .Debug) {
-            std.debug.assert(
+            std.debug.assert( // value stack overflow
                 @intFromPtr(vals.stack.ptr) <=
-                    @intFromPtr(interp.stack.slice()[interp.stack.len..].ptr),
+                    @intFromPtr(interp.stack.base + interp.stack.cap),
             );
         }
 
@@ -4735,7 +4735,7 @@ fn enterMainLoop(interp: *Interpreter, fuel: *Fuel) State {
 
         std.debug.assert(@intFromPtr(wasm_frame.stp.ptr) <= @intFromPtr(code.inner.side_table_ptr));
         std.debug.assert( // side table OOB
-            @intFromPtr(code.inner.side_table_ptr) <
+            @intFromPtr(code.inner.side_table_ptr) <=
                 @intFromPtr(&wasm_frame.stp.ptr[code.inner.side_table_len]),
         );
     }
