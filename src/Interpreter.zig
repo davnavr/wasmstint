@@ -1918,11 +1918,11 @@ const StateTransition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version
     ) StateTransition {
         interp.version.increment();
 
-        const frame: *align(@sizeOf(Value)) StackFrame = interp.currentFrame().?;
+        const frame: ?*align(@sizeOf(Value)) StackFrame = interp.currentFrame();
         state.* = .{
             .awaiting_host = .{
                 .interpreter = .init(interp),
-                .param_types = frame.signature.parameters(),
+                .param_types = if (frame) |called| called.signature.parameters() else &.{},
                 .result_types = callee_signature.results(),
             },
         };
