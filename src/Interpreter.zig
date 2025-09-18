@@ -1558,7 +1558,7 @@ const SideTable = packed struct(usize) {
         table: *SideTable,
         interp: *Interpreter,
         base_ip: Ip,
-        i: *Instructions,
+        i: *Instr,
         vals: *ValStack,
         branch: u32,
     ) void {
@@ -1594,13 +1594,9 @@ const SideTable = packed struct(usize) {
         //     },
         // );
 
-        const eip: Ip = @ptrCast(i.end());
-        i.bytes = @ptrCast(
-            @as([]const u8, addPtrWithOffset(base_ip, target.delta_ip.done)[0..(eip - base_ip)]),
-        );
-        std.debug.assert(@intFromPtr(eip) == @intFromPtr(i.end()));
-        std.debug.assert(@intFromPtr(code.inner.instructions_start) <= @intFromPtr(i.bytes.ptr));
-        std.debug.assert(@intFromPtr(i.bytes.ptr) <= @intFromPtr(i.end()));
+        i.next = addPtrWithOffset(base_ip, target.delta_ip.done);
+        _ = i.bytes();
+        std.debug.assert(@intFromPtr(code.inner.instructions_start) == @intFromPtr(i.start));
 
         // std.debug.print(
         //     " ? NEXT[{X:0>6}]: 0x{X} ({s})\n",
@@ -1861,16 +1857,16 @@ const StateTransition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version
     };
 
     fn serializeStackFrame(
-        instr: Instructions,
+        instr: Instr,
         vals: ValStack,
         stp: SideTable,
         interp: *Interpreter,
     ) SerializeToken {
         const current_frame: *align(@sizeOf(Value)) StackFrame = interp.currentFrame().?;
         const wasm_frame: *align(@sizeOf(Value)) StackFrame.Wasm = current_frame.wasmFrame();
-        wasm_frame.ip = instr.bytes.ptr;
+        wasm_frame.ip = instr.next;
         wasm_frame.stp = stp.next;
-        std.debug.assert(@intFromPtr(wasm_frame.eip) == @intFromPtr(instr.end()));
+        std.debug.assert(@intFromPtr(wasm_frame.eip) == @intFromPtr(instr.end));
 
         std.debug.assert(@intFromPtr(interp.stack.base) <= @intFromPtr(vals.stack.ptr));
         std.debug.assert(
@@ -1883,7 +1879,7 @@ const StateTransition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version
     }
 
     fn trap(
-        instr: Instructions,
+        instr: Instr,
         vals: ValStack,
         stp: SideTable,
         interp: *Interpreter,
@@ -1901,7 +1897,7 @@ const StateTransition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version
     }
 
     fn interrupted(
-        instr: Instructions,
+        instr: Instr,
         vals: ValStack,
         stp: SideTable,
         interp: *Interpreter,
@@ -1953,30 +1949,38 @@ const StateTransition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version
     }
 };
 
-const Instructions = struct {
-    bytes: [:@intFromEnum(Module.Code.End.end)]const u8,
+const Instr = struct {
+    const has_start = builtin.mode == .Debug;
 
-    inline fn init(ip: Ip, eip: Eip) Instructions {
-        return .{ .bytes = ip[0..(@intFromPtr(eip) - @intFromPtr(ip)) :0x0B] };
+    start: if (has_start) Ip else void,
+    /// Invariant that `start <= next and next <= end + 1`.
+    next: Ip,
+    end: Eip,
+
+    inline fn init(ip: Ip, eip: Eip) Instr {
+        const instr = Instr{ .start = if (has_start) ip, .next = ip, .end = eip };
+        _ = instr.bytes();
+        return instr;
     }
 
-    inline fn end(i: Instructions) Eip {
-        const ptr = &i.bytes[i.bytes.len];
-        std.debug.assert(ptr.* == @intFromEnum(Module.Code.End.end));
-        return @ptrCast(ptr);
+    inline fn bytes(i: Instr) []const u8 {
+        std.debug.assert(@intFromPtr(i.start) <= @intFromPtr(i.next));
+        return i.next[0..(@intFromPtr(i.end) + 1 - @intFromPtr(i.next))];
     }
 
-    inline fn readByteArray(i: *Instructions, comptime n: usize) *const [n]u8 {
-        const bytes = i.bytes[0..n];
-        i.bytes = i.bytes[n..];
-        return bytes;
+    inline fn readByteArray(i: *Instr, comptime n: usize) *const [n]u8 {
+        const arr = i.bytes()[0..n];
+        i.next += n;
+        _ = i.bytes();
+        return arr;
     }
 
-    pub inline fn readByte(i: *Instructions) u8 {
-        return i.readByteArray(1)[0];
+    pub inline fn readByte(i: *Instr) u8 {
+        const b = i.readByteArray(1)[0];
+        return b;
     }
 
-    fn readIdxRawRemaining(i: *Instructions, first_byte: u8) u32 {
+    fn readIdxRawRemaining(i: *Instr, first_byte: u8) u32 {
         var value: u32 = first_byte;
         for (1..5) |idx| {
             const next_byte = i.readByte();
@@ -1993,7 +1997,7 @@ const Instructions = struct {
         unreachable;
     }
 
-    inline fn readIdxRaw(i: *Instructions) u32 {
+    inline fn readIdxRaw(i: *Instr) u32 {
         const first_byte = i.readByte();
         if (first_byte & 0x80 == 0) {
             return first_byte;
@@ -2003,13 +2007,13 @@ const Instructions = struct {
         }
     }
 
-    inline fn readIdx(reader: *Instructions, comptime I: type) I {
+    inline fn readIdx(reader: *Instr, comptime I: type) I {
         return @enumFromInt(
             @as(@typeInfo(I).@"enum".tag_type, @intCast(reader.readIdxRaw())),
         );
     }
 
-    inline fn readIleb128(reader: *Instructions, comptime I: type) I {
+    inline fn readIleb128(reader: *Instr, comptime I: type) I {
         comptime {
             std.debug.assert(@typeInfo(I).int.signedness == .signed);
         }
@@ -2046,7 +2050,7 @@ const Instructions = struct {
     }
 
     inline fn readNextOpcodeHandler(
-        reader: *Instructions,
+        reader: *Instr,
         fuel: *Fuel,
         locals: Locals,
         interp: *Interpreter,
@@ -2083,9 +2087,8 @@ const Instructions = struct {
         }
     }
 
-    // TODO(zig): https://github.com/ziglang/zig/issues/19398
     inline fn dispatchNextOpcode(
-        reader: Instructions,
+        reader: Instr,
         vals: ValStack,
         fuel: *Fuel,
         stp: SideTable,
@@ -2100,25 +2103,25 @@ const Instructions = struct {
             .always_tail,
             handler,
             .{
-                i.bytes.ptr,
+                i.next,
                 vals.stack,
                 fuel,
                 stp.next,
                 locals,
                 interp,
-                i.end(),
+                i.end,
                 state,
                 module,
             },
         );
     }
 
-    inline fn skipValType(reader: *Instructions) void {
+    inline fn skipValType(reader: *Instr) void {
         const b = reader.readByte();
         _ = @as(Module.ValType, @enumFromInt(b));
     }
 
-    inline fn skipBlockType(reader: *Instructions) void {
+    inline fn skipBlockType(reader: *Instr) void {
         {
             // Assume that most block types are one byte long
             const first_byte = reader.readByte();
@@ -2196,7 +2199,7 @@ fn returnFromWasm(
         if (interp.call_depth == 0) break :return_to_host;
 
         switch (caller_frame.?.function.expanded()) {
-            .wasm => return Instructions.init(ip, eip)
+            .wasm => return Instr.init(ip, eip)
                 .dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module),
             .host => break :return_to_host,
         }
@@ -2216,7 +2219,7 @@ fn returnFromWasm(
 /// If enough stack space is not available, then the interpreter is interrupted and the IP is set to
 /// `call_ip`, which is a pointer to the call instruction to restart.
 inline fn invokeWithinWasm(
-    old_i: Instructions,
+    old_i: Instr,
     old_vals: ValStack,
     fuel: *Fuel,
     old_stp: SideTable,
@@ -2233,7 +2236,7 @@ inline fn invokeWithinWasm(
 
     if (interp.call_depth == std.math.maxInt(@FieldType(Interpreter, "call_depth"))) {
         @branchHint(.cold);
-        return .callStackExhaustion(call_ip, old_i.end(), old_vals, old_stp, interp, state, callee);
+        return .callStackExhaustion(call_ip, old_i.end, old_vals, old_stp, interp, state, callee);
     }
 
     var new_vals = old_vals;
@@ -2252,7 +2255,7 @@ inline fn invokeWithinWasm(
         ) catch |e| switch (e) {
             error.OutOfMemory => return .callStackExhaustion(
                 call_ip,
-                old_i.end(),
+                old_i.end,
                 old_vals,
                 old_stp,
                 interp,
@@ -2264,8 +2267,8 @@ inline fn invokeWithinWasm(
     };
 
     interp.currentFrame().?.wasmFrame().* = StackFrame.Wasm{
-        .ip = old_i.bytes,
-        .eip = old_i.end(),
+        .ip = old_i.next,
+        .eip = old_i.end,
         .stp = old_stp.next,
     };
 
@@ -2280,7 +2283,7 @@ inline fn invokeWithinWasm(
     switch (callee.expanded()) {
         .wasm => |wasm| {
             const new_wasm_frame: *align(@sizeOf(Value)) StackFrame.Wasm = new_frame.frame.wasmFrame();
-            return Instructions.init(new_wasm_frame.ip, new_wasm_frame.eip).dispatchNextOpcode(
+            return Instr.init(new_wasm_frame.ip, new_wasm_frame.eip).dispatchNextOpcode(
                 new_vals,
                 fuel,
                 .init(new_wasm_frame.stp),
@@ -2298,7 +2301,7 @@ const MemArg = struct {
     mem: *const runtime.MemInst,
     offset: u32,
 
-    fn read(i: *Instructions, module: runtime.ModuleInst) MemArg {
+    fn read(i: *Instr, module: runtime.ModuleInst) MemArg {
         // TODO: Spec probably only allows reading single byte here!
         _ = @as(u3, @intCast(i.readByte())); // align, maximum is 16 bytes (1 << 4)
         return .{
@@ -2324,7 +2327,7 @@ fn linearMemoryAccessors(
         const Bytes = [access_size]u8;
 
         fn performLoad(
-            i: *Instructions,
+            i: *Instr,
             vals: *ValStack,
             interp: *Interpreter,
             module: runtime.ModuleInst,
@@ -2339,7 +2342,7 @@ fn linearMemoryAccessors(
         }
 
         fn performStore(
-            i: *Instructions,
+            i: *Instr,
             vals: *ValStack,
             interp: *Interpreter,
             module: runtime.ModuleInst,
@@ -2379,7 +2382,7 @@ fn linearMemoryHandlers(comptime field: Value.Tag) type {
             state: *State,
             module: runtime.ModuleInst,
         ) StateTransition {
-            var i = Instructions.init(ip, eip);
+            var i = Instr.init(ip, eip);
             var vals = ValStack.init(sp, interp);
 
             const bytes = accessors.performLoad(&i, &vals, interp, module) orelse {
@@ -2410,7 +2413,7 @@ fn linearMemoryHandlers(comptime field: Value.Tag) type {
             state: *State,
             module: runtime.ModuleInst,
         ) StateTransition {
-            var i = Instructions.init(ip, eip);
+            var i = Instr.init(ip, eip);
             var vals = ValStack.init(sp, interp);
 
             const c: accessors.Bytes = @bitCast(vals.popTyped(interp, &.{field}).@"0");
@@ -2451,7 +2454,7 @@ fn extendingLinearMemoryLoad(comptime field: Value.Tag, comptime S: type) Opcode
             state: *State,
             module: runtime.ModuleInst,
         ) StateTransition {
-            var i = Instructions.init(ip, eip);
+            var i = Instr.init(ip, eip);
             var vals = ValStack.init(sp, interp);
 
             const bytes = linearMemoryAccessors(@sizeOf(S)).performLoad(
@@ -2495,7 +2498,7 @@ fn narrowingLinearMemoryStore(comptime field: Value.Tag, comptime size: u6) Opco
             state: *State,
             module: runtime.ModuleInst,
         ) StateTransition {
-            var i = Instructions.init(ip, eip);
+            var i = Instr.init(ip, eip);
             var vals = ValStack.init(sp, interp);
 
             const narrowed: S = @truncate(vals.popTyped(interp, &.{field}).@"0");
@@ -2546,7 +2549,7 @@ fn defineBinOp(
             state: *State,
             module: runtime.ModuleInst,
         ) StateTransition {
-            var i = Instructions.init(ip, eip);
+            var i = Instr.init(ip, eip);
             var vals = ValStack.init(sp, interp);
 
             const operands = vals.popTyped(interp, &(.{value_field} ** 2));
@@ -2579,7 +2582,7 @@ fn defineUnOp(
             state: *State,
             module: runtime.ModuleInst,
         ) StateTransition {
-            var i = Instructions.init(ip, eip);
+            var i = Instr.init(ip, eip);
             var vals = ValStack.init(sp, interp);
 
             const c_1 = vals.popTyped(interp, &.{value_field}).@"0";
@@ -2608,7 +2611,7 @@ fn defineTestOp(
             state: *State,
             module: runtime.ModuleInst,
         ) StateTransition {
-            var i = Instructions.init(ip, eip);
+            var i = Instr.init(ip, eip);
             var vals = ValStack.init(sp, interp);
 
             const c_1 = vals.popTyped(interp, &.{value_field}).@"0";
@@ -2637,7 +2640,7 @@ fn defineRelOp(
             state: *State,
             module: runtime.ModuleInst,
         ) StateTransition {
-            var i = Instructions.init(ip, eip);
+            var i = Instr.init(ip, eip);
             var vals = ValStack.init(sp, interp);
 
             const operands = vals.popTyped(interp, &(.{value_field} ** 2));
@@ -2670,7 +2673,7 @@ fn defineConvOp(
             state: *State,
             module: runtime.ModuleInst,
         ) StateTransition {
-            var i = Instructions.init(ip, eip);
+            var i = Instr.init(ip, eip);
             var vals = ValStack.init(sp, interp);
 
             const t_1 = vals.popTyped(interp, &.{src_field}).@"0";
@@ -2887,7 +2890,7 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
             state: *State,
             module: runtime.ModuleInst,
         ) StateTransition {
-            var i = Instructions.init(ip, eip);
+            var i = Instr.init(ip, eip);
             var vals = ValStack.init(sp, interp);
 
             const n = i.readIleb128(Signed);
@@ -3142,7 +3145,7 @@ fn floatOpcodeHandlers(comptime F: type) type {
             state: *State,
             module: runtime.ModuleInst,
         ) StateTransition {
-            var i = Instructions.init(ip, eip);
+            var i = Instr.init(ip, eip);
             var vals = ValStack.init(sp, interp);
 
             const z = std.mem.readInt(
@@ -3269,14 +3272,14 @@ fn prefixDispatchTable(comptime prefix: opcodes.ByteOpcode, comptime Opcode: typ
             state: *State,
             module: runtime.ModuleInst,
         ) StateTransition {
-            var i = Instructions.init(ip, eip);
+            var i = Instr.init(ip, eip);
             const n = i.readIdx(Opcode);
             const next = entries[@intFromEnum(n)];
-            std.debug.assert(@intFromPtr(i.end()) == @intFromPtr(eip));
+            std.debug.assert(@intFromPtr(i.end) == @intFromPtr(eip));
             return @call(
                 .always_tail,
                 next,
-                .{ i.bytes.ptr, sp, fuel, stp, locals, interp, eip, state, module },
+                .{ i.next, sp, fuel, stp, locals, interp, eip, state, module },
             );
         }
     };
@@ -3386,7 +3389,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        return Instructions.init(ip, eip).dispatchNextOpcode(
+        return Instr.init(ip, eip).dispatchNextOpcode(
             .init(sp, interp),
             fuel,
             .init(stp),
@@ -3408,7 +3411,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         i.skipBlockType();
         return i.dispatchNextOpcode(
             .init(sp, interp),
@@ -3434,7 +3437,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
         var side_table = SideTable.init(stp);
 
@@ -3464,7 +3467,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
         var side_table = SideTable.init(stp);
 
@@ -3493,7 +3496,7 @@ const opcode_handlers = struct {
                 .{ ip, sp, fuel, stp, locals, interp, eip, state, module },
             )
         else
-            Instructions.init(ip, eip).dispatchNextOpcode(
+            Instr.init(ip, eip).dispatchNextOpcode(
                 .init(sp, interp),
                 fuel,
                 .init(stp),
@@ -3515,7 +3518,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
         var side_table = SideTable.init(stp);
 
@@ -3537,7 +3540,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
         var side_table = SideTable.init(stp);
 
@@ -3572,7 +3575,7 @@ const opcode_handlers = struct {
         const br_table_ptr: *const opcodes.ByteOpcode = @ptrCast(ip - 1);
         std.debug.assert(br_table_ptr.* == opcodes.ByteOpcode.br_table);
 
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
         var side_table = SideTable.init(stp);
 
@@ -3606,7 +3609,7 @@ const opcode_handlers = struct {
         const call_ip = ip - 1;
         std.debug.assert(call_ip[0] == @intFromEnum(opcodes.ByteOpcode.call));
 
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
 
         if (builtin.mode == .Debug) {
             const current_frame: *align(@sizeOf(Value)) const StackFrame = interp.currentFrame().?;
@@ -3645,7 +3648,7 @@ const opcode_handlers = struct {
         const call_ip = ip - 1;
         std.debug.assert(call_ip[0] == @intFromEnum(opcodes.ByteOpcode.call_indirect));
 
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const current_module = module.header();
@@ -3701,7 +3704,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         _ = vals.popArray(interp, 1);
@@ -3722,7 +3725,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const popped = vals.popArray(interp, 2);
@@ -3745,7 +3748,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
 
         const type_count: u32 = i.readIdxRaw();
         std.debug.assert(type_count == 1);
@@ -3761,7 +3764,7 @@ const opcode_handlers = struct {
                     .ReleaseSafe, .ReleaseFast => .always_inline,
                 },
                 select,
-                .{ i.bytes, sp, fuel, stp, locals, interp, eip, state, module },
+                .{ i.next, sp, fuel, stp, locals, interp, eip, state, module },
             )
         else
             unreachable;
@@ -3778,7 +3781,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const n: u16 = @intCast(i.readIdxRaw());
@@ -3801,7 +3804,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const n: u16 = @intCast(i.readIdxRaw());
@@ -3822,7 +3825,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const n: u16 = @intCast(i.readIdxRaw());
@@ -3842,7 +3845,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const global_idx = i.readIdx(Module.GlobalIdx);
@@ -3882,7 +3885,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const global_idx = i.readIdx(Module.GlobalIdx);
@@ -3920,7 +3923,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const table_idx = i.readIdx(Module.TableIdx);
@@ -3960,7 +3963,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const table_idx = i.readIdx(Module.TableIdx);
@@ -4020,7 +4023,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const mem_idx = i.readIdx(Module.MemIdx);
@@ -4042,7 +4045,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const mem_idx = i.readIdx(Module.MemIdx);
@@ -4275,7 +4278,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         _ = i.readByte();
@@ -4295,7 +4298,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const top: *align(@sizeOf(Value)) Value = &vals.topArray(interp, 1)[0];
@@ -4322,7 +4325,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const func_idx = i.readIdx(Module.FuncIdx);
@@ -4353,7 +4356,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const data_idx = i.readIdx(Module.DataIdx);
@@ -4389,7 +4392,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
 
         const data_idx = i.readIdx(Module.DataIdx);
 
@@ -4418,7 +4421,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const dst_idx = i.readIdx(Module.MemIdx);
@@ -4450,7 +4453,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const mem_idx = i.readIdx(Module.MemIdx);
@@ -4485,7 +4488,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const elem_idx = i.readIdx(Module.ElemIdx);
@@ -4526,7 +4529,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
 
         const elem_idx = i.readIdx(Module.ElemIdx);
 
@@ -4555,7 +4558,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const dst_idx = i.readIdx(Module.TableIdx);
@@ -4598,7 +4601,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const table_idx = i.readIdx(Module.TableIdx);
@@ -4657,7 +4660,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const table_idx = i.readIdx(Module.TableIdx);
@@ -4683,7 +4686,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
-        var i = Instructions.init(ip, eip);
+        var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
         const table_idx = i.readIdx(Module.TableIdx);
@@ -4741,7 +4744,7 @@ fn enterMainLoop(interp: *Interpreter, fuel: *Fuel) State {
     }
 
     var state: State = undefined;
-    var i = Instructions.init(wasm_frame.ip, wasm_frame.eip);
+    var i = Instr.init(wasm_frame.ip, wasm_frame.eip);
     const locals = Locals{ .ptr = starting_frame.localValues(interp.stack.slice()).ptr };
     const handler: *const OpcodeHandler = i.readNextOpcodeHandler(
         fuel,
@@ -4750,13 +4753,13 @@ fn enterMainLoop(interp: *Interpreter, fuel: *Fuel) State {
         wasm_callee.module,
     );
     const transition: StateTransition = handler(
-        i.bytes,
+        i.next,
         .init(&interp.stack),
         fuel,
         wasm_frame.stp,
         locals,
         interp,
-        i.end(),
+        i.end,
         &state,
         wasm_callee.module,
     );
