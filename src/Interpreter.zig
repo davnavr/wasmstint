@@ -720,8 +720,12 @@ pub fn init(
 /// Discards the current computation.
 pub fn reset(interp: *Interpreter) State {
     interp.version.increment();
-    @memset(interp.stack.slice(), undefined);
+    if (builtin.mode == .Debug) {
+        @memset(interp.stack.slice(), undefined);
+    }
     interp.stack.len = 0;
+    interp.call_depth = 0;
+    interp.current_frame = .none;
     return .{ .awaiting_host = .{ .interpreter = .init(interp) } };
 }
 
