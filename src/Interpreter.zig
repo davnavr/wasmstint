@@ -881,7 +881,6 @@ pub const State = union(enum) {
             values: []align(@sizeOf(Value)) const Value,
             output: []TaggedValue,
         ) void {
-            errdefer comptime unreachable;
             for (output, types, values) |*dst, ty, *val| {
                 dst.* = switch (ty) {
                     .v128 => unreachable, // Not implemented
@@ -1912,6 +1911,7 @@ const StateTransition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version
     }
 
     fn awaitingHost(
+        vals: ValStack,
         interp: *Interpreter,
         state: *State,
         callee_signature: *const Module.FuncType,
@@ -1926,6 +1926,10 @@ const StateTransition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version
                 .result_types = callee_signature.results(),
             },
         };
+        interp.stack.len = @intCast(vals.stack.ptr - interp.stack.base);
+        std.debug.assert(
+            @intFromPtr(vals.stack.ptr) <= @intFromPtr(interp.stack.base + interp.stack.cap),
+        );
         return .{
             .version = interp.version,
             .serialize_token = .wrote_ip_and_stp_to_the_current_stack_frame,
@@ -2192,8 +2196,17 @@ fn returnFromWasm(
     }
 
     var vals = ValStack.init(sp, interp);
-    @memmove(result_dst, vals.popSlice(interp, @intCast(result_dst.len)));
-    vals.stack.ptr = result_dst.ptr;
+    const result_src: []align(@sizeOf(Value)) const Value =
+        vals.popSlice(interp, @intCast(result_dst.len));
+
+    @memmove(result_dst, result_src);
+    vals.stack.ptr = result_dst.ptr + result_dst.len;
+
+    const popped_signature = popped.signature;
+    @memset(
+        @as([]align(@sizeOf(Value)) Value, @ptrCast(popped)),
+        undefined,
+    );
 
     return_to_host: {
         if (interp.call_depth == 0) break :return_to_host;
@@ -2207,7 +2220,7 @@ fn returnFromWasm(
         comptime unreachable;
     }
 
-    return .awaitingHost(interp, state, popped.signature);
+    return .awaitingHost(vals, interp, state, popped_signature);
 }
 
 /// Continues execution of WASM code up to calling the `target_function`, with arguments expected
@@ -2282,7 +2295,8 @@ inline fn invokeWithinWasm(
 
     switch (callee.expanded()) {
         .wasm => |wasm| {
-            const new_wasm_frame: *align(@sizeOf(Value)) StackFrame.Wasm = new_frame.frame.wasmFrame();
+            const new_wasm_frame: *align(@sizeOf(Value)) StackFrame.Wasm =
+                new_frame.frame.wasmFrame();
             return Instr.init(new_wasm_frame.ip, new_wasm_frame.eip).dispatchNextOpcode(
                 new_vals,
                 fuel,
@@ -2293,7 +2307,7 @@ inline fn invokeWithinWasm(
                 wasm.module,
             );
         },
-        .host => |host| return .awaitingHost(interp, state, &host.func.signature),
+        .host => |host| return .awaitingHost(new_vals, interp, state, &host.func.signature),
     }
 }
 
