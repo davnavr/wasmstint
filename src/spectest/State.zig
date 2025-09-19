@@ -819,6 +819,23 @@ fn failInterpreterResults(
         fail(output, "call unexpectedly succeeded");
 }
 
+fn fmtMemoryAccessOutOfBoundsTrap(
+    oob: *const Interpreter.Trap.MemoryAccessOutOfBounds,
+    writer: *std.Io.Writer,
+) std.Io.Writer.Error!void {
+    try writer.writeAll("out of bounds memory access: ");
+    switch (oob.cause) {
+        .access => {
+            const access = oob.info.access;
+            try writer.print(
+                "access at {}+{} >= max_value {}",
+                .{ access.address, access.size.toByteUnits(), access.maximum },
+            );
+        },
+        inline else => |tag| try writer.print("{t} out of bounds", .{tag}),
+    }
+}
+
 fn expectTrap(
     state: *State,
     interp: Interpreter.State,
@@ -843,7 +860,16 @@ fn expectTrap(
         .integer_division_by_zero => "integer divide by zero",
         .integer_overflow => "integer overflow",
         .invalid_conversion_to_integer => "invalid conversion to integer",
-        // .memory_access_out_of_bounds
+        .memory_access_out_of_bounds => std.fmt.allocPrint(
+            scratch.allocator(),
+            "{f}",
+            .{
+                std.fmt.Alt(
+                    *const Interpreter.Trap.MemoryAccessOutOfBounds,
+                    fmtMemoryAccessOutOfBoundsTrap,
+                ){ .data = &trap.information.memory_access_out_of_bounds },
+            },
+        ) catch @panic("oom"),
         // .table_access_out_of_bounds
         .indirect_call_to_null => "uninitialized table element",
         // .indirect_call_signature_mismatch

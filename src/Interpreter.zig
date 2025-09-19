@@ -811,6 +811,7 @@ pub const Trap = struct {
             pub const Access = packed struct {
                 address: std.meta.Int(.unsigned, @typeInfo(usize).int.bits),
                 size: std.mem.Alignment,
+                maximum: usize,
             };
         };
 
@@ -2476,7 +2477,11 @@ const MemArg = struct {
         return Trap.init(.memory_access_out_of_bounds, .init(
             mem_arg.idx,
             .access,
-            .{ .address = address + mem_arg.offset, .size = size },
+            .{
+                .address = address + mem_arg.offset,
+                .size = size,
+                .maximum = mem_arg.mem.limit,
+            },
         ));
     }
 };
