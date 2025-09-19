@@ -797,6 +797,57 @@ pub const Trap = struct {
     code: Code,
     information: Information,
 
+    pub const MemoryAccessOutOfBounds = struct {
+        memory: Module.MemIdx,
+        cause: Cause,
+        info: Info,
+
+        pub const Info = union {
+            @"memory.init": void,
+            @"memory.copy": void,
+            @"memory.fill": void,
+            access: Access,
+
+            pub const Access = packed struct {
+                address: std.meta.Int(.unsigned, @typeInfo(usize).int.bits),
+                size: std.mem.Alignment,
+            };
+        };
+
+        pub const Cause = std.meta.FieldEnum(Info);
+
+        fn init(
+            mem: Module.MemIdx,
+            comptime cause: Cause,
+            info: @FieldType(Info, @tagName(cause)),
+        ) MemoryAccessOutOfBounds {
+            return .{
+                .memory = mem,
+                .cause = cause,
+                .info = @unionInit(Info, @tagName(cause), info),
+            };
+        }
+    };
+
+    pub const TableAccessOutOfBounds = struct {
+        table: Module.TableIdx,
+        cause: Cause,
+
+        pub const Cause = union(enum) {
+            @"table.init",
+            @"call.indirect",
+            @"table.copy",
+            @"table.fill",
+            access: Access,
+
+            pub const Access = struct { index: u32 };
+        };
+
+        pub fn init(table: Module.TableIdx, cause: Cause) TableAccessOutOfBounds {
+            return .{ .table = table, .cause = cause };
+        }
+    };
+
     pub const Information = union {
         indirect_call_to_null: struct {
             index: usize,
@@ -804,14 +855,8 @@ pub const Trap = struct {
         lazy_validation_failure: struct {
             function: Module.FuncIdx,
         },
-        // memory_access_out_of_bounds: struct {
-        //     memory: Module.MemIdx,
-        //     offset: usize,
-        // },
-        // table_access_out_of_bounds: struct {
-        //     table: Module.TableIdx,
-        //     offset: usize,
-        // },
+        memory_access_out_of_bounds: MemoryAccessOutOfBounds,
+        table_access_out_of_bounds: TableAccessOutOfBounds,
     };
 
     fn InformationType(comptime code: Code) type {
@@ -1138,17 +1183,21 @@ pub const State = union(enum) {
 
             interp.version.increment();
 
-            moduleInstantiationSetup(module) catch |e| return State{
-                .trapped = Trapped.init(
-                    .init(interp),
-                    if (start_frame) |pushed_frame| pushed_frame.offset else .none,
-                    switch (e) {
-                        error.MemoryAccessOutOfBounds => .init(.memory_access_out_of_bounds, {}),
-                        error.TableAccessOutOfBounds => .init(.table_access_out_of_bounds, {}),
-                    },
-                ),
-            };
-
+            {
+                var instantiation_error: ModuleInstantiationSetupError = undefined;
+                moduleInstantiationSetup(module, &instantiation_error) catch return State{
+                    .trapped = Trapped.init(
+                        .init(interp),
+                        if (start_frame) |pushed_frame| pushed_frame.offset else .none,
+                        switch (instantiation_error) {
+                            inline else => |info, tag| .init(
+                                @field(Trap.Code, @tagName(tag)),
+                                info,
+                            ),
+                        },
+                    ),
+                };
+            }
             if (start_frame) |pushed_frame| {
                 const start = pushed_frame.frame.function;
                 std.debug.assert(start.signature().param_count == 0);
@@ -1443,11 +1492,17 @@ pub const State = union(enum) {
     };
 };
 
+const ModuleInstantiationSetupError = union(enum) {
+    memory_access_out_of_bounds: Trap.MemoryAccessOutOfBounds,
+    table_access_out_of_bounds: Trap.TableAccessOutOfBounds,
+};
+
 /// Performs the steps of module instantiation up to but excluding the invocation of the *start*
 /// function.
 fn moduleInstantiationSetup(
     module: *runtime.ModuleAlloc,
-) (runtime.MemInst.OobError || runtime.TableInst.OobError)!void {
+    err: *ModuleInstantiationSetupError,
+) error{ModuleInstantiationTrapped}!void {
     const module_inst = module.requiring_instantiation.header();
     const wasm = module_inst.module;
     const global_types = wasm.globalTypes()[wasm.inner.raw.global_import_count..];
@@ -1520,14 +1575,24 @@ fn moduleInstantiationSetup(
             },
         };
 
-        try runtime.TableInst.init(
+        runtime.TableInst.init(
             active_elem.header.table,
             module.requiring_instantiation,
             active_elem.header.elements,
             null,
             0,
             offset,
-        );
+        ) catch |e| switch (e) {
+            error.TableAccessOutOfBounds => {
+                err.* = .{
+                    .table_access_out_of_bounds = .{
+                        .table = active_elem.header.table,
+                        .cause = .@"table.init",
+                    },
+                };
+                return error.ModuleInstantiationTrapped;
+            },
+        };
 
         module_inst.elemSegmentDropFlag(active_elem.header.elements).drop();
     }
@@ -1545,7 +1610,18 @@ fn moduleInstantiationSetup(
         };
 
         const src: []const u8 = module_inst.dataSegment(active_data.data);
-        try mem.init(src, @intCast(src.len), 0, offset);
+        mem.init(src, @intCast(src.len), 0, offset) catch |e| switch (e) {
+            error.MemoryAccessOutOfBounds => {
+                err.* = .{
+                    .memory_access_out_of_bounds = .init(
+                        active_data.header.memory,
+                        .@"memory.init",
+                        {},
+                    ),
+                };
+                return error.ModuleInstantiationTrapped;
+            },
+        };
 
         module_inst.dataSegmentDropFlag(active_data.data).drop();
     }
@@ -2377,67 +2453,100 @@ inline fn invokeWithinWasm(
 
 const MemArg = struct {
     mem: *const runtime.MemInst,
+    idx: Module.MemIdx,
     offset: u32,
 
     fn read(i: *Instr, module: runtime.ModuleInst) MemArg {
         // TODO: Spec probably only allows reading single byte here!
-        _ = @as(u3, @intCast(i.readByte())); // align, maximum is 16 bytes (1 << 4)
+        // align, maximum is 16 bytes (1 << 4)
+        const idx: Module.MemIdx = @enumFromInt(@as(u3, @intCast(i.readByte())));
         return .{
             .offset = @as(u32, i.readIdxRaw()),
-            .mem = module.header().memAddr(.default),
+            .mem = module.header().memAddr(idx),
+            .idx = idx,
         };
+    }
+
+    fn trap(
+        mem_arg: MemArg,
+        address: usize,
+        size: std.mem.Alignment,
+    ) Trap {
+        return Trap.init(.memory_access_out_of_bounds, .init(
+            mem_arg.idx,
+            .access,
+            .{ .address = address + mem_arg.offset, .size = size },
+        ));
     }
 };
 
-fn linearMemoryAccessors(
+fn linearMemoryAccessor(
     /// How many bytes are read to and written from linear memory.
     ///
     /// Must be a positive power of two.
-    comptime access_size: u5,
-) type {
+    comptime access_size: std.mem.Alignment,
+    comptime handler: fn (
+        *Instr,
+        *ValStack,
+        *Fuel,
+        SideTable,
+        Locals,
+        *Interpreter,
+        *State,
+        runtime.ModuleInst,
+        *[access_size.toByteUnits()]u8,
+    ) StateTransition,
+) OpcodeHandler {
     return struct {
         comptime {
-            std.debug.assert(0 < access_size);
-            std.debug.assert(std.math.isPowerOfTwo(access_size));
             std.debug.assert(builtin.cpu.arch.endian() == .little);
         }
 
-        const Bytes = [access_size]u8;
+        const access_size_bytes: comptime_int = access_size.toByteUnits();
 
-        fn performLoad(
-            i: *Instr,
-            vals: *ValStack,
+        fn accessLinearMemory(
+            ip: Ip,
+            sp: Sp,
+            fuel: *Fuel,
+            stp: Stp,
+            locals: Locals,
             interp: *Interpreter,
+            eip: Eip,
+            state: *State,
             module: runtime.ModuleInst,
-        ) ?*const Bytes {
-            const mem_arg = MemArg.read(i, module);
-            const base_addr: u32 = @bitCast(vals.popTyped(interp, &.{.i32}).@"0");
-            // std.debug.print(" > load of size {} @ 0x{X} + {} into memory size={}\n", .{ access_size, base_addr, mem_arg.offset, mem_arg.mem.size });
-            const effective_addr = std.math.add(u32, base_addr, mem_arg.offset) catch return null;
-            const end_addr = std.math.add(u32, effective_addr, access_size - 1) catch return null;
-            if (mem_arg.mem.size <= end_addr) return null;
-            return mem_arg.mem.bytes()[effective_addr..][0..access_size];
-        }
+        ) StateTransition {
+            var i = Instr.init(ip, eip);
+            var vals = ValStack.init(sp, interp);
+            const side_table = SideTable.init(stp);
 
-        fn performStore(
-            i: *Instr,
-            vals: *ValStack,
-            interp: *Interpreter,
-            module: runtime.ModuleInst,
-            value: Bytes,
-        ) error{OutOfBounds}!void {
-            const mem_arg = MemArg.read(i, module);
+            const mem_arg = MemArg.read(&i, module);
             const base_addr: u32 = @bitCast(vals.popTyped(interp, &.{.i32}).@"0");
+            // std.debug.print(" > access of size {} @ 0x{X} + {} into memory size={}\n", .{ access_size, base_addr, mem_arg.offset, mem_arg.mem.size });
             const effective_addr = std.math.add(u32, base_addr, mem_arg.offset) catch
-                return error.OutOfBounds;
-            const end_addr = std.math.add(u32, effective_addr, access_size - 1) catch
-                return error.OutOfBounds;
-            if (mem_arg.mem.size <= end_addr)
-                return error.OutOfBounds;
+                return .trap(i, vals, side_table, interp, state, mem_arg.trap(base_addr, access_size));
+            const end_addr = std.math.add(u32, effective_addr, access_size_bytes - 1) catch
+                return .trap(i, vals, side_table, interp, state, mem_arg.trap(base_addr, access_size));
 
-            mem_arg.mem.bytes()[effective_addr..][0..access_size].* = value;
+            return if (mem_arg.mem.size <= end_addr)
+                .trap(i, vals, side_table, interp, state, mem_arg.trap(base_addr, access_size))
+            else
+                @call(
+                    .always_inline,
+                    handler,
+                    .{
+                        &i,
+                        &vals,
+                        fuel,
+                        side_table,
+                        locals,
+                        interp,
+                        state,
+                        module,
+                        mem_arg.mem.bytes()[effective_addr..][0..access_size_bytes],
+                    },
+                );
         }
-    };
+    }.accessLinearMemory;
 }
 
 fn linearMemoryHandlers(comptime field: Value.Tag) type {
@@ -2447,69 +2556,41 @@ fn linearMemoryHandlers(comptime field: Value.Tag) type {
         }
 
         const T = field.Type();
-        const accessors = linearMemoryAccessors(@sizeOf(T));
 
-        fn load(
-            ip: Ip,
-            sp: Sp,
+        fn performLoad(
+            i: *Instr,
+            vals: *ValStack,
             fuel: *Fuel,
-            stp: Stp,
+            stp: SideTable,
             locals: Locals,
             interp: *Interpreter,
-            eip: Eip,
             state: *State,
             module: runtime.ModuleInst,
+            access: *[@sizeOf(T)]u8,
         ) StateTransition {
-            var i = Instr.init(ip, eip);
-            var vals = ValStack.init(sp, interp);
+            vals.pushTyped(interp, &.{field}, .{@as(T, @bitCast(access.*))});
 
-            const bytes = accessors.performLoad(&i, &vals, interp, module) orelse {
-                @branchHint(.unlikely);
-                return .trap(
-                    i,
-                    vals,
-                    .init(stp),
-                    interp,
-                    state,
-                    .init(.memory_access_out_of_bounds, {}),
-                );
-            };
-
-            vals.pushTyped(interp, &.{field}, .{@as(T, @bitCast(bytes.*))});
-
-            return i.dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module);
+            return i.dispatchNextOpcode(vals.*, fuel, stp, locals, interp, state, module);
         }
 
-        fn store(
-            ip: Ip,
-            sp: Sp,
+        pub const load = linearMemoryAccessor(.fromByteUnits(@sizeOf(T)), performLoad);
+
+        fn performStore(
+            i: *Instr,
+            vals: *ValStack,
             fuel: *Fuel,
-            stp: Stp,
+            stp: SideTable,
             locals: Locals,
             interp: *Interpreter,
-            eip: Eip,
             state: *State,
             module: runtime.ModuleInst,
+            access: *[@sizeOf(T)]u8,
         ) StateTransition {
-            var i = Instr.init(ip, eip);
-            var vals = ValStack.init(sp, interp);
-
-            const c: accessors.Bytes = @bitCast(vals.popTyped(interp, &.{field}).@"0");
-            accessors.performStore(&i, &vals, interp, module, c) catch |e| {
-                @branchHint(.unlikely);
-                comptime std.debug.assert(@TypeOf(e) == error{OutOfBounds});
-                return .trap(
-                    i,
-                    vals,
-                    .init(stp),
-                    interp,
-                    state,
-                    .init(.memory_access_out_of_bounds, {}),
-                );
-            };
-
-            return i.dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module);
+            access.* = @bitCast(vals.popTyped(interp, &.{field}).@"0");
+            return i.dispatchNextOpcode(vals.*, fuel, stp, locals, interp, state, module);
         }
+
+        pub const store = linearMemoryAccessor(.fromByteUnits(@sizeOf(T)), performStore);
     };
 }
 
@@ -2518,90 +2599,60 @@ fn extendingLinearMemoryLoad(comptime field: Value.Tag, comptime S: type) Opcode
         const T = field.Type();
 
         comptime {
-            std.debug.assert(@bitSizeOf(S) < @bitSizeOf(T));
+            std.debug.assert(std.meta.hasUniqueRepresentation(S));
+            std.debug.assert(@sizeOf(S) < @sizeOf(T));
         }
 
         fn handler(
-            ip: Ip,
-            sp: Sp,
+            i: *Instr,
+            vals: *ValStack,
             fuel: *Fuel,
-            stp: Stp,
+            stp: SideTable,
             locals: Locals,
             interp: *Interpreter,
-            eip: Eip,
             state: *State,
             module: runtime.ModuleInst,
+            access: *[@sizeOf(S)]u8,
         ) StateTransition {
-            var i = Instr.init(ip, eip);
-            var vals = ValStack.init(sp, interp);
-
-            const bytes = linearMemoryAccessors(@sizeOf(S)).performLoad(
-                &i,
-                &vals,
-                interp,
-                module,
-            ) orelse return .trap(
-                i,
-                vals,
-                .init(stp),
-                interp,
-                state,
-                .init(.memory_access_out_of_bounds, {}),
-            );
-
-            vals.pushTyped(interp, &.{field}, .{@as(S, @bitCast(bytes.*))});
-
-            return i.dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module);
+            vals.pushTyped(interp, &.{field}, .{@as(S, @bitCast(access.*))});
+            return i.dispatchNextOpcode(vals.*, fuel, stp, locals, interp, state, module);
         }
-    }.handler;
+
+        pub const extendingLoad = linearMemoryAccessor(.fromByteUnits(@sizeOf(S)), handler);
+    }.extendingLoad;
 }
 
-fn narrowingLinearMemoryStore(comptime field: Value.Tag, comptime size: u6) OpcodeHandler {
+fn narrowingLinearMemoryStore(
+    comptime field: Value.Tag,
+    comptime access_size: std.mem.Alignment,
+) OpcodeHandler {
     return struct {
         const T = field.Type();
-        const S = std.meta.Int(.signed, size);
+        const S = std.meta.Int(.signed, access_size.toByteUnits() * 8);
 
         comptime {
-            std.debug.assert(@bitSizeOf(S) < @bitSizeOf(T));
+            std.debug.assert(std.meta.hasUniqueRepresentation(S));
+            std.debug.assert(@sizeOf(S) < @sizeOf(T));
         }
 
         fn handler(
-            ip: Ip,
-            sp: Sp,
+            i: *Instr,
+            vals: *ValStack,
             fuel: *Fuel,
-            stp: Stp,
+            stp: SideTable,
             locals: Locals,
             interp: *Interpreter,
-            eip: Eip,
             state: *State,
             module: runtime.ModuleInst,
+            access: *[@sizeOf(S)]u8,
         ) StateTransition {
-            var i = Instr.init(ip, eip);
-            var vals = ValStack.init(sp, interp);
-
             const narrowed: S = @truncate(vals.popTyped(interp, &.{field}).@"0");
-            linearMemoryAccessors(size / 8).performStore(
-                &i,
-                &vals,
-                interp,
-                module,
-                @bitCast(narrowed),
-            ) catch |e| {
-                @branchHint(.unlikely);
-                comptime std.debug.assert(@TypeOf(e) == error{OutOfBounds});
-                return .trap(
-                    i,
-                    vals,
-                    .init(stp),
-                    interp,
-                    state,
-                    .init(.memory_access_out_of_bounds, {}),
-                );
-            };
-
-            return i.dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module);
+            access.* = @bitCast(narrowed);
+            return i.dispatchNextOpcode(vals.*, fuel, stp, locals, interp, state, module);
         }
-    }.handler;
+
+        pub const narrowingLoad = linearMemoryAccessor(access_size, handler);
+    }.narrowingLoad;
 }
 
 // fn BinOp(comptime value_field: Value.Tag) type {
@@ -3741,7 +3792,14 @@ const opcode_handlers = struct {
 
         if (table.len <= elem_index) {
             @branchHint(.unlikely);
-            return .trap(i, vals, .init(stp), interp, state, .init(.table_access_out_of_bounds, {}));
+            return .trap(
+                i,
+                vals,
+                .init(stp),
+                interp,
+                state,
+                .init(.table_access_out_of_bounds, .init(table_idx, .@"call.indirect")),
+            );
         }
 
         const callee = table.base.func_ref[0..table.len][elem_index].funcInst() orelse {
@@ -4021,7 +4079,10 @@ const opcode_handlers = struct {
                 .init(stp),
                 interp,
                 state,
-                .init(.table_access_out_of_bounds, {}),
+                .init(
+                    .table_access_out_of_bounds,
+                    .init(table_idx, .{ .access = .{ .index = idx } }),
+                ),
             ),
         );
 
@@ -4060,7 +4121,10 @@ const opcode_handlers = struct {
                 .init(stp),
                 interp,
                 state,
-                .init(.table_access_out_of_bounds, {}),
+                .init(
+                    .table_access_out_of_bounds,
+                    .init(table_idx, .{ .access = .{ .index = idx } }),
+                ),
             ),
             std.mem.asBytes(&ref)[0..table.stride.toBytes()],
         );
@@ -4086,11 +4150,11 @@ const opcode_handlers = struct {
     pub const @"i64.store" = linearMemoryHandlers(.i64).store;
     pub const @"f32.store" = linearMemoryHandlers(.f32).store;
     pub const @"f64.store" = linearMemoryHandlers(.f64).store;
-    pub const @"i32.store8" = narrowingLinearMemoryStore(.i32, 8);
-    pub const @"i32.store16" = narrowingLinearMemoryStore(.i32, 16);
-    pub const @"i64.store8" = narrowingLinearMemoryStore(.i64, 8);
-    pub const @"i64.store16" = narrowingLinearMemoryStore(.i64, 16);
-    pub const @"i64.store32" = narrowingLinearMemoryStore(.i64, 32);
+    pub const @"i32.store8" = narrowingLinearMemoryStore(.i32, .@"1");
+    pub const @"i32.store16" = narrowingLinearMemoryStore(.i32, .@"2");
+    pub const @"i64.store8" = narrowingLinearMemoryStore(.i64, .@"1");
+    pub const @"i64.store16" = narrowingLinearMemoryStore(.i64, .@"2");
+    pub const @"i64.store32" = narrowingLinearMemoryStore(.i64, .@"4");
 
     pub fn @"memory.size"(
         ip: Ip,
@@ -4455,7 +4519,7 @@ const opcode_handlers = struct {
             .init(stp),
             interp,
             state,
-            .init(.memory_access_out_of_bounds, {}),
+            .init(.memory_access_out_of_bounds, .init(mem_idx, .@"memory.init", {})),
         );
 
         return i.dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module);
@@ -4515,8 +4579,17 @@ const opcode_handlers = struct {
         const src_addr: u32 = @bitCast(operands[1].i32);
         const d: u32 = @bitCast(operands[0].i32);
 
-        dst_mem.copy(src_mem, n, src_addr, d) catch
-            return .trap(i, vals, .init(stp), interp, state, .init(.memory_access_out_of_bounds, {}));
+        dst_mem.copy(src_mem, n, src_addr, d) catch return .trap(
+            i,
+            vals,
+            .init(stp),
+            interp,
+            state,
+            .init(
+                .memory_access_out_of_bounds,
+                .init(if (dst_mem.size < src_mem.size) dst_idx else src_idx, .@"memory.copy", {}),
+            ),
+        );
 
         return i.dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module);
     }
@@ -4550,7 +4623,7 @@ const opcode_handlers = struct {
             .init(stp),
             interp,
             state,
-            .init(.memory_access_out_of_bounds, {}),
+            .init(.memory_access_out_of_bounds, .init(mem_idx, .@"memory.fill", {})),
         );
 
         return i.dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module);
@@ -4592,7 +4665,7 @@ const opcode_handlers = struct {
             .init(stp),
             interp,
             state,
-            .init(.table_access_out_of_bounds, {}),
+            .init(.table_access_out_of_bounds, .init(table_idx, .@"table.init")),
         );
 
         return i.dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module);
@@ -4663,7 +4736,13 @@ const opcode_handlers = struct {
             .init(stp),
             interp,
             state,
-            .init(.table_access_out_of_bounds, {}),
+            .init(
+                .table_access_out_of_bounds,
+                .init(
+                    if (dst_table.table.len < src_table.table.len) dst_idx else src_idx,
+                    .@"table.copy",
+                ),
+            ),
         );
 
         return i.dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module);
@@ -4783,7 +4862,7 @@ const opcode_handlers = struct {
             .init(stp),
             interp,
             state,
-            .init(.table_access_out_of_bounds, {}),
+            .init(.table_access_out_of_bounds, .init(table_idx, .@"table.fill")),
         );
 
         return i.dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module);
