@@ -1053,13 +1053,12 @@ pub fn rawValidate(
     const locals: struct { types: []const ValType, count: u16 } = locals: {
         const local_group_count = try reader.readUleb128(u32, diag, "locals count");
 
+        const LocalGroup = struct { type: ValType, count: u32 };
+
         // Since std.SegmentedList is buggy when faced with OOMs, and a parser error
         // (not an OOM) should happen if # locals exceeds what is allowed by the spec (2^32 - 1),
         // this allows determining the total # of all locals beforehand
-        const local_groups = try per_instr_arena.allocator().alloc(
-            struct { type: ValType, count: u32 },
-            local_group_count,
-        );
+        const local_groups = try per_instr_arena.allocator().alloc(LocalGroup, local_group_count);
         var total_locals_count: u32 = func_type.param_count;
         for (local_groups) |*group| {
             const local_count = try reader.readUleb128(u32, diag, "locals count");
@@ -2144,7 +2143,7 @@ pub fn rawValidate(
         .instructions_start = instructions,
         .instructions_end = eip,
         .max_values = max_values,
-        .local_values = locals.count,
+        .local_values = locals.count - func_type.param_count,
         .side_table_len = @intCast(final_side_table.len),
         .side_table_ptr = final_side_table.ptr,
     };
