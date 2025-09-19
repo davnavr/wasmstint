@@ -877,7 +877,7 @@ fn expectTrap(
     };
 
     if (std.mem.indexOf(u8, actual, expected) == null) {
-        // TODO: error
+        return failFmt(output, "incorrect trap message, expected \"{s}\"", .{expected});
     }
 
     return actual;
