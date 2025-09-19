@@ -4132,7 +4132,7 @@ const opcode_handlers = struct {
                     .init(table_idx, .{ .access = .{ .index = idx } }),
                 ),
             ),
-            std.mem.asBytes(&ref)[0..table.stride.toBytes()],
+            std.mem.asBytes(ref)[0..table.stride.toBytes()],
         );
 
         return i.dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module);
