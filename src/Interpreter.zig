@@ -2459,11 +2459,12 @@ const MemArg = struct {
     fn read(i: *Instr, module: runtime.ModuleInst) MemArg {
         // TODO: Spec probably only allows reading single byte here!
         // align, maximum is 16 bytes (1 << 4)
-        const idx: Module.MemIdx = @enumFromInt(@as(u3, @intCast(i.readByte())));
+        _ = @as(u3, @intCast(i.readByte()));
+        const mem_idx = Module.MemIdx.default;
         return .{
             .offset = @as(u32, i.readIdxRaw()),
-            .mem = module.header().memAddr(idx),
-            .idx = idx,
+            .mem = module.header().memAddr(mem_idx),
+            .idx = mem_idx,
         };
     }
 
