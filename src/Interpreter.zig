@@ -457,25 +457,25 @@ const Stack = struct {
 
     const ParameterAllocation = enum { allocate, preallocated };
 
-    const StackFrameSize = struct {
-        /// Includes non-parameter locals, the `StackFrame`, and its portion of the value stack.
-        ///
+    const StackFrameSize = packed struct(u64) {
         /// In units of `Value`s.
-        size: u32,
-        /// Total number of local variables, excluding parameters.
-        local_count: u16,
+        allocated_size: u32,
+        /// Number of local variables to allocate space for.
+        allocated_local_count: u16,
+        total_local_count: u16,
     };
 
     fn stackFrameSize(
         callee: runtime.FuncAddr,
-        params: ParameterAllocation,
+        comptime params: ParameterAllocation,
     ) error{ValidationNeeded}!StackFrameSize {
-        const param_count = switch (params) {
-            .allocate => callee.signature().param_count,
+        const param_count = callee.signature().param_count;
+        const allocated_param_count = switch (params) {
+            .allocate => param_count,
             .preallocated => 0,
         };
 
-        const local_count = param_count + switch (callee.expanded()) {
+        const local_count: u16 = switch (callee.expanded()) {
             .host => 0,
             .wasm => |wasm| wasm: {
                 const code = wasm.code();
@@ -487,12 +487,16 @@ const Stack = struct {
             },
         };
 
+        const allocated_local_count = allocated_param_count + local_count;
+        const value_stack_size = switch (callee.expanded()) {
+            .host => 0,
+            .wasm => |wasm| StackFrame.Wasm.size_in_values + wasm.code().inner.max_values,
+        };
+
         return .{
-            .local_count = local_count,
-            .size = StackFrame.size_in_values + local_count + switch (callee.expanded()) {
-                .host => 0,
-                .wasm => |wasm| wasm.code().inner.max_values,
-            },
+            .allocated_local_count = allocated_local_count,
+            .total_local_count = param_count + local_count,
+            .allocated_size = StackFrame.size_in_values + allocated_local_count + value_stack_size,
         };
     }
 
@@ -508,18 +512,21 @@ const Stack = struct {
         stack: *Stack,
         prev_frame: StackFrame.Offset,
         instantiate_flag: *bool,
-        params: ParameterAllocation,
+        comptime params: ParameterAllocation,
         callee: runtime.FuncAddr,
     ) PushStackFrameError!PushedStackFrame {
         const frame_info = try stackFrameSize(callee, params);
-        if (frame_info.size > stack.cap - stack.len) {
+        std.debug.assert(frame_info.allocated_size > frame_info.allocated_local_count);
+        if (frame_info.allocated_size > stack.cap - stack.len) {
             return error.OutOfMemory;
         }
 
         errdefer comptime unreachable;
 
-        const stack_frame: ?*align(@sizeOf(Value)) StackFrame = stack.stackFrame(prev_frame);
-        const prev_frame_hash = if (stack_frame) |prev|
+        const old_stack_top = stack.base + stack.len;
+
+        const prev_frame_ptr: ?*align(@sizeOf(Value)) StackFrame = stack.stackFrame(prev_frame);
+        const prev_frame_hash = if (prev_frame_ptr) |prev|
             prev.calculateChecksum(
                 stack.slice()[0 .. stack.len - switch (params) {
                     .allocate => 0,
@@ -529,36 +536,42 @@ const Stack = struct {
         else
             0;
 
-        const offset: StackFrame.Offset = @enumFromInt(stack.len + frame_info.local_count);
+        const offset: StackFrame.Offset =
+            @enumFromInt(stack.len + frame_info.allocated_local_count);
 
         const frame_values: []align(@sizeOf(Value)) Value =
-            stack.allocatedSlice()[stack.len .. stack.len + frame_info.size];
+            stack.allocatedSlice()[stack.len .. stack.len + frame_info.allocated_size];
 
         @memset(frame_values, undefined);
 
         const frame_base: []align(@sizeOf(Value)) Value = @alignCast(
-            frame_values[frame_info.local_count .. frame_info.local_count + StackFrame.size_in_values],
+            frame_values[frame_info.allocated_local_count..],
         );
-        const frame_ptr: *align(@sizeOf(Value)) StackFrame = @ptrCast(frame_base);
+        const frame_ptr: *align(@sizeOf(Value)) StackFrame = @ptrCast(
+            frame_base[0..StackFrame.size_in_values],
+        );
         frame_ptr.* = StackFrame{
             .checksum = if (builtin.mode == .Debug) prev_frame_hash,
             .function = callee,
             .signature = callee.signature(),
             .instantiate_flag = instantiate_flag,
-            .local_count = frame_info.local_count,
+            .local_count = frame_info.total_local_count,
             .prev_frame = prev_frame,
         };
 
         std.debug.assert(@intFromPtr(&stack.base[@intFromEnum(offset)]) == @intFromPtr(frame_ptr));
 
-        stack.len += frame_info.size;
+        stack.len += @intCast(frame_ptr.valueStackBase() - (stack.base + stack.len));
 
         switch (callee.expanded()) {
             .host => {},
             .wasm => |wasm| {
                 const code = wasm.code();
                 if (builtin.mode == .Debug and !code.isValidationFinished()) {
-                    unreachable; // validation check should have already occurred
+                    std.debug.panic(
+                        "validation check should have already occurred for {f}",
+                        .{callee},
+                    );
                 }
 
                 frame_ptr.wasmFrame().* = StackFrame.Wasm{
@@ -575,6 +588,29 @@ const Stack = struct {
             },
         }
 
+        if (builtin.mode == .Debug and
+            @intFromPtr(frame_ptr.valueStackBase()) != @intFromPtr(stack.base + stack.len))
+        {
+            std.debug.panic(
+                "incorrect value stack base!\n" ++
+                    "{*} - frame allocation start\n" ++
+                    "{*} - frame\n" ++
+                    "{*} - frame values base\n" ++
+                    "{*} - old stack top\n" ++
+                    "{*} - stack top\n" ++
+                    "allocated {} with {t} parameters\n",
+                .{
+                    frame_values.ptr,
+                    frame_base,
+                    frame_ptr.valueStackBase(),
+                    old_stack_top,
+                    stack.base + stack.len,
+                    frame_info,
+                    params,
+                },
+            );
+        }
+
         return .{
             .offset = offset,
             .frame = frame_ptr,
@@ -588,10 +624,10 @@ const Stack = struct {
     fn reserveStackFrame(
         stack: *Stack,
         alloca: Allocator,
-        params: ParameterAllocation,
+        comptime params: ParameterAllocation,
         callee: runtime.FuncAddr,
     ) Allocator.Error!ReserveStackFrame {
-        const frame_size = (stackFrameSize(callee, params) catch unreachable).size;
+        const frame_size = (stackFrameSize(callee, params) catch unreachable).allocated_size;
         const new_len = std.math.add(u32, stack.len, frame_size) catch
             return error.OutOfMemory;
 
@@ -628,7 +664,7 @@ const Stack = struct {
         alloca: Allocator,
         prev_frame: StackFrame.Offset,
         instantiate_flag: *bool,
-        params: ParameterAllocation,
+        comptime params: ParameterAllocation,
         callee: runtime.FuncAddr,
     ) PushStackFrameError!PushedStackFrame {
         alloc_needed: {
@@ -1654,6 +1690,7 @@ const Sp = packed struct(usize) {
 ///
 /// [value stack]: https://webassembly.github.io/spec/core/exec/runtime.html#stack
 const ValStack = extern struct {
+    /// Points to the "top" of the value stack, which is just past the last valid value.
     stack: Sp,
 
     fn init(stack: Sp, interp: *const Interpreter) ValStack {
@@ -1678,9 +1715,32 @@ const ValStack = extern struct {
 
         // Check for underflow
         if (builtin.mode == .Debug) {
+            std.debug.assert(@intFromPtr(interp.stack.base) <= @intFromPtr(values.ptr));
+            std.debug.assert(
+                @intFromPtr(vals.stack.ptr) <= @intFromPtr(interp.stack.base + interp.stack.cap),
+            );
+
             const current_frame: ?*align(@sizeOf(Value)) const StackFrame = interp.currentFrame();
             if (current_frame) |frame| {
-                std.debug.assert(@intFromPtr(frame.valueStackBase()) <= @intFromPtr(values.ptr));
+                const value_stack_base = frame.valueStackBase();
+                if (@intFromPtr(value_stack_base) > @intFromPtr(values.ptr)) {
+                    std.debug.panic(
+                        "value stack underflow!\n" ++
+                            "{*} - current function value base\n" ++
+                            "{*} - current frame\n" ++
+                            "{*} - start of {} top values\n" ++
+                            "{*} - current stack top\n" ++
+                            "{*} - stack base\n",
+                        .{
+                            value_stack_base,
+                            frame,
+                            values.ptr,
+                            count,
+                            vals.stack.ptr,
+                            interp.stack.base,
+                        },
+                    );
+                }
             }
         }
 
@@ -2556,7 +2616,7 @@ fn defineBinOp(
     comptime trap: anytype,
 ) OpcodeHandler {
     return struct {
-        fn handler(
+        fn binOpHandler(
             ip: Ip,
             sp: Sp,
             fuel: *Fuel,
@@ -2580,7 +2640,7 @@ fn defineBinOp(
 
             return i.dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module);
         }
-    }.handler;
+    }.binOpHandler;
 }
 
 /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-unop
@@ -2589,7 +2649,7 @@ fn defineUnOp(
     comptime op: fn (c_1: value_field.Type()) value_field.Type(),
 ) OpcodeHandler {
     return struct {
-        fn handler(
+        fn unOpHandler(
             ip: Ip,
             sp: Sp,
             fuel: *Fuel,
@@ -2609,7 +2669,7 @@ fn defineUnOp(
 
             return i.dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module);
         }
-    }.handler;
+    }.unOpHandler;
 }
 
 /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-testop
@@ -3804,6 +3864,8 @@ const opcode_handlers = struct {
 
         const n: u16 = @intCast(i.readIdxRaw());
         const src: *align(@sizeOf(Value)) const Value = locals.get(interp, n);
+
+        // std.debug.print(" > before local.get {}, sp = {*}\n", .{ n, sp.ptr });
         vals.pushArray(interp, 1)[0] = src.*;
 
         // std.debug.print(" > (local.get {}) (i32.const {})\n", .{ n, value.i32 });
@@ -4770,9 +4832,12 @@ fn enterMainLoop(interp: *Interpreter, fuel: *Fuel) State {
         interp,
         wasm_callee.module,
     );
+
+    const sp = Sp.init(&interp.stack);
+    std.debug.assert(@intFromPtr(sp.ptr) == @intFromPtr(starting_frame.valueStackBase()));
     const transition: StateTransition = handler(
         i.next,
-        .init(&interp.stack),
+        sp,
         fuel,
         wasm_frame.stp,
         locals,
