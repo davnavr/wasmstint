@@ -1711,8 +1711,9 @@ const SideTable = packed struct(usize) {
         // );
 
         i.next = addPtrWithOffset(base_ip, target.delta_ip.done);
+        std.debug.assert(@intFromPtr(code.inner.instructions_end) == @intFromPtr(i.end));
         _ = i.bytes();
-        std.debug.assert(@intFromPtr(code.inner.instructions_start) == @intFromPtr(i.start));
+        std.debug.assert(@intFromPtr(code.inner.instructions_start) <= @intFromPtr(i.next));
 
         // std.debug.print(
         //     " ? NEXT[{X:0>6}]: 0x{X} ({s})\n",
@@ -2095,21 +2096,17 @@ const StateTransition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version
 };
 
 const Instr = struct {
-    const has_start = builtin.mode == .Debug;
-
-    start: if (has_start) Ip else void,
     /// Invariant that `start <= next and next <= end + 1`.
     next: Ip,
     end: Eip,
 
     inline fn init(ip: Ip, eip: Eip) Instr {
-        const instr = Instr{ .start = if (has_start) ip, .next = ip, .end = eip };
+        const instr = Instr{ .next = ip, .end = eip };
         _ = instr.bytes();
         return instr;
     }
 
     inline fn bytes(i: Instr) []const u8 {
-        std.debug.assert(@intFromPtr(i.start) <= @intFromPtr(i.next));
         return i.next[0..(@intFromPtr(i.end) + 1 - @intFromPtr(i.next))];
     }
 
