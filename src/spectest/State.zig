@@ -351,10 +351,10 @@ fn failCallStackExhausted(state: *const State, output: Output) Error {
 }
 
 fn failInterpreterTrap(
-    trap_code: Interpreter.Trap.Code,
+    trap: *const Interpreter.Trap,
     output: Output,
 ) Error {
-    return failFmt(output, "unexpected trap {t}", .{trap_code});
+    return failFmt(output, "unexpected trap {t}: {f}", .{ trap.code, TrapMessage.init(trap) });
 }
 
 fn failInterpreterInterrupted(
@@ -556,7 +556,7 @@ fn expectResultValues(
     const result_state = switch (state.runToCompletion(interp, fuel, output, &state.module_arena)) {
         .awaiting_validation => unreachable,
         .call_stack_exhaustion => return state.failCallStackExhausted(output),
-        .trapped => |trap| return failInterpreterTrap(trap.trap.code, output),
+        .trapped => |trap| return failInterpreterTrap(&trap.trap, output),
         .interrupted => |interrupt| return failInterpreterInterrupted(interrupt.cause, output),
         .awaiting_host => |awaiting| awaiting,
     };
@@ -819,22 +819,53 @@ fn failInterpreterResults(
         fail(output, "call unexpectedly succeeded");
 }
 
-fn fmtMemoryAccessOutOfBoundsTrap(
-    oob: *const Interpreter.Trap.MemoryAccessOutOfBounds,
-    writer: *std.Io.Writer,
-) std.Io.Writer.Error!void {
-    try writer.writeAll("out of bounds memory access: ");
-    switch (oob.cause) {
-        .access => {
-            const access = oob.info.access;
-            try writer.print(
-                "access at {}+{} >= max_value {}",
-                .{ access.address, access.size.toByteUnits(), access.maximum },
-            );
-        },
-        inline else => |tag| try writer.print("{t} out of bounds", .{tag}),
+/// Recreates a spec test interpreter trap message
+const TrapMessage = union(enum) {
+    string: [:0]const u8,
+    memory_access_out_of_bounds: *const Interpreter.Trap.MemoryAccessOutOfBounds,
+
+    fn init(trap: *const Interpreter.Trap) TrapMessage {
+        return switch (trap.code) {
+            .unreachable_code_reached => .{ .string = "unreachable executed" },
+            .integer_division_by_zero => .{ .string = "integer divide by zero" },
+            .integer_overflow => .{ .string = "integer overflow" },
+            .invalid_conversion_to_integer => .{ .string = "invalid conversion to integer" },
+            .memory_access_out_of_bounds => .{
+                .memory_access_out_of_bounds = &trap.information.memory_access_out_of_bounds,
+            },
+            // .table_access_out_of_bounds
+            .indirect_call_to_null => .{ .string = "uninitialized table element" },
+            // .indirect_call_signature_mismatch
+            else => |bad| std.debug.panic("TODO: trap message recreation for {t}", .{bad}),
+        };
     }
-}
+
+    pub fn format(message: TrapMessage, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (message) {
+            .string => |s| try writer.writeAll(s),
+            .memory_access_out_of_bounds => |oob| {
+                try writer.writeAll("out of bounds memory access: ");
+                switch (oob.cause) {
+                    .access => {
+                        const access = oob.info.access;
+                        try writer.print(
+                            "access at {}+{} >= max_value {}",
+                            .{ access.address, access.size.toByteUnits(), access.maximum },
+                        );
+                    },
+                    inline else => |tag| try writer.print("{t} out of bounds", .{tag}),
+                }
+            },
+        }
+    }
+
+    fn toString(message: TrapMessage, allocator: std.mem.Allocator) error{OutOfMemory}![]const u8 {
+        return switch (message) {
+            .string => |s| s,
+            else => std.fmt.allocPrint(allocator, "{f}", .{message}),
+        };
+    }
+};
 
 fn expectTrap(
     state: *State,
@@ -846,35 +877,16 @@ fn expectTrap(
     output: Output,
 ) Error![]const u8 {
     const result_state = state.runToCompletion(interp, fuel, output, store_arena);
-    const trap: Interpreter.Trap = switch (result_state) {
+    const trap: *const Interpreter.Trap = switch (result_state) {
         .awaiting_validation => unreachable,
-        .trapped => |trapped| trapped.trap,
+        .trapped => |trapped| &trapped.trap,
         .call_stack_exhaustion => return state.failCallStackExhausted(output),
         .interrupted => |interrupt| return failInterpreterInterrupted(interrupt.cause, output),
         .awaiting_host => |awaiting| return failInterpreterResults(awaiting, scratch, output),
     };
 
-    // Recreate spec test interpreter trap message
-    const actual: []const u8 = switch (trap.code) {
-        .unreachable_code_reached => "unreachable executed",
-        .integer_division_by_zero => "integer divide by zero",
-        .integer_overflow => "integer overflow",
-        .invalid_conversion_to_integer => "invalid conversion to integer",
-        .memory_access_out_of_bounds => std.fmt.allocPrint(
-            scratch.allocator(),
-            "{f}",
-            .{
-                std.fmt.Alt(
-                    *const Interpreter.Trap.MemoryAccessOutOfBounds,
-                    fmtMemoryAccessOutOfBoundsTrap,
-                ){ .data = &trap.information.memory_access_out_of_bounds },
-            },
-        ) catch @panic("oom"),
-        // .table_access_out_of_bounds
-        .indirect_call_to_null => "uninitialized table element",
-        // .indirect_call_signature_mismatch
-        else => |bad| return failFmt(output, "TODO: trap message recreation for {t}", .{bad}),
-    };
+    const actual: []const u8 = TrapMessage.init(trap).toString(scratch.allocator()) catch
+        @panic("oom");
 
     if (std.mem.indexOf(u8, actual, expected) == null) {
         return failFmt(output, "incorrect trap message, expected \"{s}\"", .{expected});
@@ -980,7 +992,7 @@ fn processAssertExhaustion(
     switch (state.runToCompletion(finished_action.invoke, &fuel, output, &state.module_arena)) {
         .awaiting_validation => unreachable,
         .call_stack_exhaustion => {},
-        .trapped => |trap| return failInterpreterTrap(trap.trap.code, output),
+        .trapped => |trap| return failInterpreterTrap(&trap.trap, output),
         .interrupted => |interrupt| if (interrupt.cause != .out_of_fuel) {
             return failInterpreterInterrupted(interrupt.cause, output);
         },
