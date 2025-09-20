@@ -2171,6 +2171,8 @@ const Instr = struct {
             const shift: std.math.Log2Int(I) = @intCast(i * 7);
             const byte = reader.readByte();
 
+            result |= @shlExact(@as(Result, byte & 0x7F), shift);
+
             if (byte & 0x80 == 0) {
                 if (i < max_byte_len - 1 and byte & 0x40 != 0) {
                     // value is signed, sign extension is needed
@@ -2184,12 +2186,21 @@ const Instr = struct {
                 }
 
                 return @bitCast(@as(U, @truncate(result)));
-            } else {
-                result |= @shlExact(@as(Result, byte & 0x7F), shift);
             }
         }
 
         unreachable;
+    }
+
+    test readIleb128 {
+        const input: []const u8 = "\x02\x3F\x7E\x40\x80\x80\x80\x80\x78\x0B";
+        var i = Instr.init(@ptrCast(input.ptr), @ptrCast(input.ptr + input.len - 1));
+        try std.testing.expectEqual(2, i.readIleb128(i32));
+        try std.testing.expectEqual(63, i.readIleb128(i32));
+        try std.testing.expectEqual(-2, i.readIleb128(i32));
+        try std.testing.expectEqual(-64, i.readIleb128(i32));
+        try std.testing.expectEqual(std.math.minInt(i32), i.readIleb128(i32));
+        try std.testing.expectEqual(0x0B, i.readByte());
     }
 
     inline fn readNextOpcodeHandler(
@@ -3046,8 +3057,8 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
             vals.pushTyped(interp, &.{value_field}, .{n});
 
             // std.debug.print(
-            //     " > (" ++ @typeName(Signed) ++ ".const) {[0]} (0x{[0]X}) ;; height = {[1]}\n",
-            //     .{ n, vals.items.len },
+            //     " > (" ++ @typeName(Signed) ++ ".const) {[0]} (0x{[0]X}) ;; stp = {[1]*}\n",
+            //     .{ n, sp.ptr },
             // );
 
             return i.dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module);
@@ -4964,3 +4975,7 @@ const Allocator = std.mem.Allocator;
 const Module = @import("Module.zig");
 const runtime = @import("runtime.zig");
 const opcodes = @import("opcodes.zig");
+
+test {
+    _ = Instr;
+}
