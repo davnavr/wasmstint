@@ -187,12 +187,16 @@ pub fn grow(
     std.debug.assert(request.new_size <= request.memory.limit);
     std.debug.assert(request.new_size % MemInst.buffer_align == 0);
 
+    var success = false;
+    defer std.debug.assert(success or request.result.i32 == -1);
+
     if (request.new_size <= request.memory.size) {
         std.debug.assert(request.new_size <= request.memory.capacity);
         return; // resize already occurred
     }
 
     const new_pages: []align(page_size_min) u8 = @alignCast(
+        // TODO: Implement exponential growth (2 * request.new_size)
         request.memory.base[0..request.memory.limit][request.memory.size..request.new_size],
     );
 
@@ -211,7 +215,9 @@ pub fn grow(
     }
 
     request.memory.capacity = request.new_size;
-    request.result.i32 = @intCast(request.old_size);
+    request.memory.size = request.new_size;
+    request.result.* = .{ .i32 = @intCast(request.old_size) };
+    success = true;
 }
 
 const std = @import("std");

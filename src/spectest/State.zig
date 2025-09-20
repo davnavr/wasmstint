@@ -639,7 +639,19 @@ fn runToCompletion(
             .interrupted => |*interrupt| {
                 switch (interrupt.cause) {
                     .out_of_fuel => return interp,
-                    .memory_grow => |*grow| wasmstint.runtime.paged_memory.grow(grow),
+                    .memory_grow => |*grow| {
+                        wasmstint.runtime.paged_memory.grow(grow);
+                        output.print(
+                            "- memory.grow {} to {}, now {} ({s}) -> {}\n",
+                            .{
+                                grow.old_size,
+                                grow.new_size,
+                                grow.memory.size,
+                                if (grow.memory.size == grow.new_size) "success" else "failure",
+                                grow.result.i32,
+                            },
+                        );
+                    },
                     .table_grow => |*grow| wasmstint.runtime.table_allocator.grow(
                         grow,
                         store_arena.allocator(),
