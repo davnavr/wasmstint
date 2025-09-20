@@ -216,7 +216,9 @@ pub fn grow(
 
     request.memory.capacity = request.new_size;
     request.memory.size = request.new_size;
-    request.result.* = .{ .i32 = @intCast(request.old_size) };
+    request.result.* = .{
+        .i32 = @bitCast(@divExact(@as(u32, @intCast(request.old_size)), MemInst.page_size)),
+    };
     success = true;
 }
 
