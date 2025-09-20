@@ -1647,7 +1647,7 @@ const Stp = packed struct(usize) {
         const current_frame: *align(@sizeOf(Value)) const StackFrame = interp.currentFrame().?;
         const code = current_frame.function.expanded().wasm.code();
         std.debug.assert(@intFromPtr(code.inner.side_table_ptr) <= stp);
-        std.debug.assert(stp < @intFromPtr(code.inner.side_table_ptr + code.inner.side_table_len));
+        std.debug.assert(stp <= @intFromPtr(code.inner.side_table_ptr + code.inner.side_table_len));
     }
 };
 
@@ -1738,7 +1738,8 @@ const SideTable = packed struct(usize) {
         const dst_start_offset = vals_top_offset - target.pop_count;
 
         const src = vals.top(interp, target.copy_count);
-        const dst = interp.stack.slice()[dst_start_offset .. dst_start_offset + target.copy_count];
+        const dst = interp.stack
+            .allocatedSlice()[0..vals_top_offset][dst_start_offset .. dst_start_offset + target.copy_count];
         @memmove(dst, src);
         vals.stack.ptr = addPtrWithOffset(
             vals.stack.ptr,
