@@ -2328,8 +2328,8 @@ fn returnFromWasm(
 
         if (expected_checksum != actual_checksum) {
             std.debug.panic(
-                "bad checksum for {f}\nexpected: {X:0>32}\nactual: {X:0>32}",
-                .{ caller_frame.?.function, expected_checksum, actual_checksum },
+                "bad checksum for {f}\nexpected: {X:0>32}\nactual:   {X:0>32}",
+                .{ popped.function, expected_checksum, actual_checksum },
             );
         }
     }
@@ -2338,14 +2338,15 @@ fn returnFromWasm(
     const result_src: []align(@sizeOf(Value)) const Value =
         vals.popSlice(interp, @intCast(result_dst.len));
 
-    @memmove(result_dst, result_src);
-    vals.stack.ptr = result_dst.ptr + result_dst.len;
-
     const popped_signature = popped.signature;
+    // Could also set locals and rest of value stack to `undefined`, but would require math
     @memset(
         @as([]align(@sizeOf(Value)) Value, @ptrCast(popped)),
         undefined,
     );
+
+    @memmove(result_dst, result_src);
+    vals.stack.ptr = result_dst.ptr + result_dst.len;
 
     return_to_host: {
         if (interp.call_depth == 0) break :return_to_host;
@@ -4217,19 +4218,24 @@ const opcode_handlers = struct {
         const operand: *align(@sizeOf(Value)) Value = &vals.top(interp, 1)[0];
         const delta: u32 = @bitCast(operand.i32);
         const grow_failed: i32 = -1;
+        operand.* = .{ .i32 = grow_failed };
 
-        const result: i32 = result: {
+        done: {
             const delta_bytes = std.math.mul(u32, runtime.MemInst.page_size, delta) catch
-                break :result grow_failed;
+                break :done;
 
             if (mem.limit - mem.size < delta_bytes) {
-                break :result grow_failed;
+                break :done;
             } else if (mem.capacity - mem.size >= delta_bytes) {
                 const new_size: u32 = @as(u32, @intCast(mem.size)) + delta_bytes;
                 const old_size: u32 = @intCast(mem.size);
                 mem.size = new_size;
                 @memset(mem.bytes()[old_size..new_size], 0);
-                break :result @bitCast(@divExact(@as(u32, @intCast(old_size)), runtime.MemInst.page_size));
+                operand.* = .{
+                    .i32 = @bitCast(
+                        @divExact(@as(u32, @intCast(old_size)), runtime.MemInst.page_size),
+                    ),
+                };
             } else {
                 return .interrupted(i, vals, .init(stp), interp, state, .{
                     .memory_grow = .{
@@ -4240,9 +4246,7 @@ const opcode_handlers = struct {
                     },
                 });
             }
-        };
-
-        operand.* = .{ .i32 = result };
+        }
 
         return i.dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module);
     }
