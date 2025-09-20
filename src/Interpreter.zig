@@ -4936,7 +4936,7 @@ fn enterMainLoop(interp: *Interpreter, fuel: *Fuel) State {
     );
 
     const sp = Sp.init(&interp.stack);
-    std.debug.assert(@intFromPtr(sp.ptr) == @intFromPtr(starting_frame.valueStackBase()));
+    std.debug.assert(@intFromPtr(starting_frame.valueStackBase()) <= @intFromPtr(sp.ptr));
     const transition: StateTransition = handler(
         i.next,
         sp,
