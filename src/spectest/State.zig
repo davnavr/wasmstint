@@ -849,7 +849,7 @@ const TrapMessage = union(enum) {
                     .access => {
                         const access = oob.info.access;
                         try writer.print(
-                            "access at {}+{} >= max_value {}",
+                            "access at {}+{} >= max value {}",
                             .{ access.address, access.size.toByteUnits(), access.maximum },
                         );
                     },
