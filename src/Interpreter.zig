@@ -2499,11 +2499,18 @@ const MemArg = struct {
     }
 };
 
+fn nopBeforeMemoryAccess(vals: *ValStack, interp: *Interpreter) void {
+    _ = vals;
+    _ = interp;
+}
+
 fn linearMemoryAccessor(
     /// How many bytes are read to and written from linear memory.
     ///
     /// Must be a positive power of two.
     comptime access_size: std.mem.Alignment,
+    comptime BeforeAccessData: type,
+    comptime beforeAccess: fn (*ValStack, *Interpreter) BeforeAccessData,
     comptime handler: fn (
         *Instr,
         *ValStack,
@@ -2513,6 +2520,7 @@ fn linearMemoryAccessor(
         *Interpreter,
         *State,
         runtime.ModuleInst,
+        BeforeAccessData,
         *[access_size.toByteUnits()]u8,
     ) StateTransition,
 ) OpcodeHandler {
@@ -2539,19 +2547,20 @@ fn linearMemoryAccessor(
             const side_table = SideTable.init(stp);
 
             const mem_arg = MemArg.read(&i, module);
+            const before_access_data = @call(.always_inline, beforeAccess, .{ &vals, interp });
             const base_addr: u32 = @bitCast(vals.popTyped(interp, &.{.i32}).@"0");
 
-            // std.debug.print(
-            //     " > access of size {} @ {}+{} ({X}+{X}) into memory size={}\n",
-            //     .{
-            //         access_size_bytes,
-            //         base_addr,
-            //         mem_arg.offset,
-            //         base_addr,
-            //         mem_arg.offset,
-            //         mem_arg.mem.size,
-            //     },
-            // );
+            std.debug.print(
+                " > access of size {} @ {}+{} ({X}+{X}) into memory size={}\n",
+                .{
+                    access_size_bytes,
+                    base_addr,
+                    mem_arg.offset,
+                    base_addr,
+                    mem_arg.offset,
+                    mem_arg.mem.size,
+                },
+            );
 
             const effective_addr = std.math.add(u32, base_addr, mem_arg.offset) catch
                 return .trap(i, vals, side_table, interp, state, mem_arg.trap(base_addr, access_size));
@@ -2573,6 +2582,7 @@ fn linearMemoryAccessor(
                         interp,
                         state,
                         module,
+                        before_access_data,
                         mem_arg.mem.bytes()[effective_addr..][0..access_size_bytes],
                     },
                 );
@@ -2597,6 +2607,7 @@ fn linearMemoryHandlers(comptime field: Value.Tag) type {
             interp: *Interpreter,
             state: *State,
             module: runtime.ModuleInst,
+            _: void,
             access: *[@sizeOf(T)]u8,
         ) StateTransition {
             vals.pushTyped(interp, &.{field}, .{@as(T, @bitCast(access.*))});
@@ -2604,7 +2615,16 @@ fn linearMemoryHandlers(comptime field: Value.Tag) type {
             return i.dispatchNextOpcode(vals.*, fuel, stp, locals, interp, state, module);
         }
 
-        pub const load = linearMemoryAccessor(.fromByteUnits(@sizeOf(T)), performLoad);
+        pub const load = linearMemoryAccessor(
+            .fromByteUnits(@sizeOf(T)),
+            void,
+            nopBeforeMemoryAccess,
+            performLoad,
+        );
+
+        fn popValueToStore(vals: *ValStack, interp: *Interpreter) T {
+            return vals.popTyped(interp, &.{field}).@"0";
+        }
 
         fn performStore(
             i: *Instr,
@@ -2615,13 +2635,19 @@ fn linearMemoryHandlers(comptime field: Value.Tag) type {
             interp: *Interpreter,
             state: *State,
             module: runtime.ModuleInst,
+            value: T,
             access: *[@sizeOf(T)]u8,
         ) StateTransition {
-            access.* = @bitCast(vals.popTyped(interp, &.{field}).@"0");
+            access.* = @bitCast(value);
             return i.dispatchNextOpcode(vals.*, fuel, stp, locals, interp, state, module);
         }
 
-        pub const store = linearMemoryAccessor(.fromByteUnits(@sizeOf(T)), performStore);
+        pub const store = linearMemoryAccessor(
+            .fromByteUnits(@sizeOf(T)),
+            T,
+            popValueToStore,
+            performStore,
+        );
     };
 }
 
@@ -2643,13 +2669,19 @@ fn extendingLinearMemoryLoad(comptime field: Value.Tag, comptime S: type) Opcode
             interp: *Interpreter,
             state: *State,
             module: runtime.ModuleInst,
+            _: void,
             access: *[@sizeOf(S)]u8,
         ) StateTransition {
             vals.pushTyped(interp, &.{field}, .{@as(S, @bitCast(access.*))});
             return i.dispatchNextOpcode(vals.*, fuel, stp, locals, interp, state, module);
         }
 
-        pub const extendingLoad = linearMemoryAccessor(.fromByteUnits(@sizeOf(S)), handler);
+        pub const extendingLoad = linearMemoryAccessor(
+            .fromByteUnits(@sizeOf(S)),
+            void,
+            nopBeforeMemoryAccess,
+            handler,
+        );
     }.extendingLoad;
 }
 
@@ -2666,7 +2698,11 @@ fn narrowingLinearMemoryStore(
             std.debug.assert(@sizeOf(S) < @sizeOf(T));
         }
 
-        fn handler(
+        fn popValueToNarrowAndStore(vals: *ValStack, interp: *Interpreter) S {
+            return @truncate(vals.popTyped(interp, &.{field}).@"0");
+        }
+
+        fn performNarrowingStore(
             i: *Instr,
             vals: *ValStack,
             fuel: *Fuel,
@@ -2675,14 +2711,19 @@ fn narrowingLinearMemoryStore(
             interp: *Interpreter,
             state: *State,
             module: runtime.ModuleInst,
+            narrowed: S,
             access: *[@sizeOf(S)]u8,
         ) StateTransition {
-            const narrowed: S = @truncate(vals.popTyped(interp, &.{field}).@"0");
             access.* = @bitCast(narrowed);
             return i.dispatchNextOpcode(vals.*, fuel, stp, locals, interp, state, module);
         }
 
-        pub const narrowingLoad = linearMemoryAccessor(access_size, handler);
+        pub const narrowingLoad = linearMemoryAccessor(
+            access_size,
+            S,
+            popValueToNarrowAndStore,
+            performNarrowingStore,
+        );
     }.narrowingLoad;
 }
 
