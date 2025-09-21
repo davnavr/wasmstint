@@ -2550,17 +2550,17 @@ fn linearMemoryAccessor(
             const before_access_data = @call(.always_inline, beforeAccess, .{ &vals, interp });
             const base_addr: u32 = @bitCast(vals.popTyped(interp, &.{.i32}).@"0");
 
-            std.debug.print(
-                " > access of size {} @ {}+{} ({X}+{X}) into memory size={}\n",
-                .{
-                    access_size_bytes,
-                    base_addr,
-                    mem_arg.offset,
-                    base_addr,
-                    mem_arg.offset,
-                    mem_arg.mem.size,
-                },
-            );
+            // std.debug.print(
+            //     " > access of size {} @ {}+{} ({X}+{X}) into memory size={}\n",
+            //     .{
+            //         access_size_bytes,
+            //         base_addr,
+            //         mem_arg.offset,
+            //         base_addr,
+            //         mem_arg.offset,
+            //         mem_arg.mem.size,
+            //     },
+            // );
 
             const effective_addr = std.math.add(u32, base_addr, mem_arg.offset) catch
                 return .trap(i, vals, side_table, interp, state, mem_arg.trap(base_addr, access_size));

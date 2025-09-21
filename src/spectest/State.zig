@@ -10,6 +10,7 @@ module_arena: ArenaAllocator,
 module_lookup: std.StringHashMapUnmanaged(NamedModule),
 current_module: ?ModuleInst,
 interpreter_allocator: std.mem.Allocator,
+max_memory_size: usize,
 interpreter: Interpreter,
 starting_fuel: Interpreter.Fuel,
 
@@ -22,6 +23,7 @@ const Error = error{ScriptError};
 pub fn init(
     state: *State,
     interpreter_allocator: std.mem.Allocator,
+    max_memory_size: usize,
     starting_fuel: Interpreter.Fuel,
     imports: *Imports,
     script_dir: std.fs.Dir,
@@ -32,6 +34,7 @@ pub fn init(
         .module_lookup = .empty,
         .current_module = null,
         .interpreter_allocator = interpreter_allocator,
+        .max_memory_size = max_memory_size,
         .interpreter = undefined,
         .starting_fuel = starting_fuel,
         .imports = imports,
@@ -152,6 +155,7 @@ fn openModuleContents(
 }
 
 fn finishModuleAllocation(
+    max_memory_size: usize,
     module: *wasmstint.runtime.ModuleAllocating,
     arena: *ArenaAllocator,
 ) Error!wasmstint.runtime.ModuleAlloc {
@@ -159,7 +163,7 @@ fn finishModuleAllocation(
         wasmstint.runtime.paged_memory.allocate(
             module,
             ty.limits.min * wasmstint.runtime.MemInst.page_size,
-            4 * (1024 * 1024), // 4 MiB, 64 pages
+            max_memory_size,
         ) catch @panic("bad mem");
     }
 
@@ -267,6 +271,7 @@ fn processModuleCommand(
     };
 
     var module_alloc = try finishModuleAllocation(
+        state.max_memory_size,
         &module_allocating,
         &state.module_arena,
     );
@@ -642,13 +647,15 @@ fn runToCompletion(
                     .memory_grow => |*grow| {
                         wasmstint.runtime.paged_memory.grow(grow);
                         output.print(
-                            "- memory.grow {} to {}, now {} ({s}) -> {}\n",
+                            "- handling memory.grow from {[old]} to {[new]}, " ++
+                                "now {[current]} <= {[maximum]} ({[status]s}), was {[result]} pages\n",
                             .{
-                                grow.old_size,
-                                grow.new_size,
-                                grow.memory.size,
-                                if (grow.memory.size == grow.new_size) "success" else "failure",
-                                grow.result.i32,
+                                .old = grow.old_size,
+                                .new = grow.new_size,
+                                .current = grow.memory.size,
+                                .maximum = grow.memory.limit,
+                                .status = if (grow.memory.size == grow.new_size) "success" else "failure",
+                                .result = grow.result.i32,
                             },
                         );
                     },
@@ -1269,7 +1276,11 @@ fn processAssertUninstantiable(
     };
 
     // Dangling allocations (pages for WASM memory)
-    var module_alloc = try finishModuleAllocation(&module_allocating, arena);
+    var module_alloc = try finishModuleAllocation(
+        state.max_memory_size,
+        &module_allocating,
+        arena,
+    );
 
     var fuel = state.starting_fuel;
     const instantiating = state.interpreter.reset().awaiting_host.instantiateModule(

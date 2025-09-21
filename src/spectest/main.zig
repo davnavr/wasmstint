@@ -30,11 +30,20 @@ const Arguments = cli_args.CliArgs(.{
         cli_args.Flag.intUnsigned(
             .{
                 .long = "max-stack-size",
-                .description = "Limits the size of the WASM value and call stacks",
+                .description = "Limits the size of the WASM value/call stack",
             },
             "AMOUNT",
             u32,
         ).withDefault(500),
+
+        cli_args.Flag.intUnsigned(
+            .{
+                .long = "max-memory-size",
+                .description = "Upper bound on the size of a WASM linear memory, in bytes",
+            },
+            "SIZE",
+            usize,
+        ).withDefault(1000 * 65536),
 
         .boolean(.{ .long = "wait-for-debugger" }),
     },
@@ -131,6 +140,7 @@ pub fn main() u8 {
     State.init(
         &state,
         interpreter_allocator.allocator(),
+        arguments.@"max-memory-size",
         .{ .remaining = arguments.fuel },
         &imports,
         json_dir,
