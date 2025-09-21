@@ -1169,16 +1169,20 @@ pub const State = union(enum) {
 
             const maybe_start_idx =
                 module.requiring_instantiation.header().module.inner.raw.start.get();
-            const start_frame = if (maybe_start_idx) |start_idx|
-                try interp.stack.pushStackFrame(
+            const start_frame = if (maybe_start_idx) |start_idx| start: {
+                const old_call_depth = interp.call_depth;
+                interp.call_depth = std.math.add(u32, interp.call_depth, 1) catch
+                    return error.OutOfMemory; // call stack depth counter overflow
+                errdefer interp.call_depth = old_call_depth;
+
+                break :start try interp.stack.pushStackFrame(
                     alloca,
                     interp.current_frame,
                     &module.instantiated,
                     .preallocated,
                     module.requiring_instantiation.header().funcAddr(start_idx),
-                )
-            else
-                null;
+                );
+            } else null;
 
             errdefer unreachable;
 
@@ -1199,7 +1203,10 @@ pub const State = union(enum) {
                     ),
                 };
             }
+
             if (start_frame) |pushed_frame| {
+                interp.current_frame = pushed_frame.offset;
+
                 const start = pushed_frame.frame.function;
                 std.debug.assert(start.signature().param_count == 0);
                 std.debug.assert(start.signature().result_count == 0);
