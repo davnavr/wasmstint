@@ -124,7 +124,9 @@ pub fn readByteTag(
     }
 
     const byte = try reader.readByte(diag, desc);
-    return std.meta.intToEnum(Tag, byte) catch |e| switch (e) {
+    return std.meta.intToEnum(Tag, byte) catch |e| if (byte & 0x80 != 0)
+        diag.print(.parse, "invalid {s}: integer representation too long", .{desc})
+    else switch (e) {
         std.meta.IntToEnumError.InvalidEnumTag => diag.print(
             .parse,
             "invalid {s}: 0x{X:0>2}",
