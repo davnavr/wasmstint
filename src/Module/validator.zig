@@ -484,7 +484,10 @@ fn readMemArg(
     const a = try reader.readUleb128(u32, diag, "memarg alignment");
 
     if (a > natural_alignment) {
-        return diag.writeAll(.validation, "alignment must not be larger than natural");
+        return if (a < 32)
+            diag.writeAll(.validation, "alignment must not be larger than natural")
+        else
+            diag.writeAll(.parse, "malformed memop flags, alignment overflow");
     }
 
     if (module.inner.raw.mem_count == 0) {
