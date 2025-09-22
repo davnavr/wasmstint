@@ -329,18 +329,19 @@ pub const StackFrame = extern struct {
         const hashed_memory: []align(@sizeOf(Value)) const Value =
             locals.ptr[0..(values_end - locals.ptr)];
 
-        // std.debug.print(
-        //     "HASHING {} values {*}..{*} for frame {*} {} with {} locals {any}\n",
-        //     .{
-        //         hashed_memory.len,
-        //         hashed_memory.ptr,
-        //         hashed_memory.ptr + hashed_memory.len,
-        //         frame,
-        //         frame.*,
-        //         locals.len,
-        //         locals,
-        //     },
-        // );
+        std.debug.print(
+            "HASHING {} values {*}..{*} for frame {f} {*} {} with {} locals {any}\n",
+            .{
+                hashed_memory.len,
+                hashed_memory.ptr,
+                hashed_memory.ptr + hashed_memory.len,
+                frame.function,
+                frame,
+                frame.*,
+                locals.len,
+                locals,
+            },
+        );
 
         // TODO: Fix, changing of IP causes hash difference (maybe move where checksum checks occur?)
         // if (frame.function.expanded() == .wasm) {
@@ -363,7 +364,7 @@ pub const StackFrame = extern struct {
         // Fowler-Noll-Vo is designed for both hashing AND checksums.
         const hash = std.hash.Fnv1a_128.hash(std.mem.sliceAsBytes(hashed_memory));
 
-        // std.debug.print("HASH RESULT = {X}\n", .{hash});
+        std.debug.print("HASH RESULT = {X}\n", .{hash});
 
         return hash;
     }
@@ -554,6 +555,8 @@ const Stack = struct {
         errdefer comptime unreachable;
 
         const old_stack_top = stack.base + stack.len;
+
+        std.debug.print("PUSHING STACK FRAME FOR {f}\n", .{callee});
 
         const prev_frame_ptr: ?*align(@sizeOf(Value)) StackFrame = stack.stackFrame(prev_frame);
         const prev_frame_hash = if (prev_frame_ptr) |prev|
@@ -1151,10 +1154,14 @@ pub const State = union(enum) {
                 }
             }
 
+            std.debug.assert(interp.current_frame == .none or interp.call_depth == 0);
+
             const old_call_depth = interp.call_depth;
             interp.call_depth = std.math.add(u32, interp.call_depth, 1) catch
                 return error.OutOfMemory; // call stack depth counter overflow
             errdefer interp.call_depth = old_call_depth;
+
+            std.debug.print("HOST WANTS TO CALL {f}\n", .{callee});
 
             const new_frame = try interp.stack.pushStackFrame(
                 alloca,
@@ -2025,6 +2032,16 @@ const OpcodeHandler = fn (
 //     }.wrapped;
 // }
 
+fn updateWasmFrameState(
+    frame: *align(@sizeOf(Value)) StackFrame.Wasm,
+    instr: Instr,
+    stp: SideTable,
+) void {
+    frame.ip = instr.next;
+    frame.stp = stp.next;
+    std.debug.assert(@intFromPtr(frame.eip) == @intFromPtr(instr.end));
+}
+
 // Is a `packed struct` to work around https://github.com/ziglang/zig/issues/18189
 const StateTransition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version))) {
     version: Version,
@@ -2046,9 +2063,7 @@ const StateTransition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version
     ) SerializeToken {
         const current_frame: *align(@sizeOf(Value)) StackFrame = interp.currentFrame().?;
         const wasm_frame: *align(@sizeOf(Value)) StackFrame.Wasm = current_frame.wasmFrame();
-        wasm_frame.ip = instr.next;
-        wasm_frame.stp = stp.next;
-        std.debug.assert(@intFromPtr(wasm_frame.eip) == @intFromPtr(instr.end));
+        updateWasmFrameState(wasm_frame, instr, stp);
 
         std.debug.assert(@intFromPtr(interp.stack.base) <= @intFromPtr(vals.stack.ptr));
         std.debug.assert(
@@ -2441,7 +2456,14 @@ inline fn invokeWithinWasm(
         return .callStackExhaustion(call_ip, old_i.end, old_vals, old_stp, interp, state, callee);
     }
 
+    const current_frame: *align(@sizeOf(Value)) StackFrame = interp.currentFrame().?;
+    const current_frame_wasm: *align(@sizeOf(Value)) StackFrame.Wasm = current_frame.wasmFrame();
+
+    updateWasmFrameState(current_frame_wasm, old_i, old_stp);
+
     var new_vals = old_vals;
+
+    std.debug.print("WASM {f} WANTS TO CALL {f}\n", .{ current_frame.function, callee });
 
     const new_frame = setup: {
         interp.stack.len = @intCast(new_vals.stack.ptr - interp.stack.base);
@@ -2468,11 +2490,15 @@ inline fn invokeWithinWasm(
         };
     };
 
-    interp.currentFrame().?.wasmFrame().* = StackFrame.Wasm{
-        .ip = old_i.next,
-        .eip = old_i.end,
-        .stp = old_stp.next,
-    };
+    {
+        std.debug.print("CALLING {f} @ {*} (was called by {f})\n", .{ callee, new_frame.frame, current_frame.function });
+        std.debug.assert(current_frame != new_frame.frame);
+        current_frame_wasm.* = StackFrame.Wasm{
+            .ip = old_i.next,
+            .eip = old_i.end,
+            .stp = old_stp.next,
+        };
+    }
 
     interp.call_depth += 1; // overflow check before frame was pushed
     interp.current_frame = new_frame.offset;
