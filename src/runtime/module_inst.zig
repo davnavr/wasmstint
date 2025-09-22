@@ -242,6 +242,8 @@ pub const ModuleInst = extern struct {
         return error.ExportNotFound;
     }
 
+    // pub fn findExportNames(inst: ModuleInst, idx: Module.Export.DescIdx) []const Module.Export.Id {}
+
     pub const ExportVals = struct {
         inst: ModuleInst,
         len: u32,

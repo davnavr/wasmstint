@@ -141,6 +141,7 @@ const RawInner = extern struct {
 const Inner = struct {
     raw: RawInner,
     wasm: []const u8,
+    // export_lookups: Export.Lookups,
     arena: ArenaAllocator.State,
     runtime_shape: @import("runtime.zig").ModuleInst.Shape,
 };
@@ -386,6 +387,35 @@ pub const Export = packed struct(u64) {
             },
         };
     }
+
+    // /// Numeric identifier referring to an `Export`.
+    // pub const Id = enum(u32) { _ };
+
+    pub const DescIdx = @Type(.{
+        .@"union" = .{
+            .layout = .auto,
+            .fields = @typeInfo(Desc).@"union".fields,
+            .tag_type = std.meta.FieldEnum(Desc),
+            .decls = &.{},
+        },
+    });
+
+    pub fn descIdx(self: Export) DescIdx {
+        return switch (self.desc_tag) {
+            inline else => |tag| @unionInit(
+                DescIdx,
+                @tagName(tag),
+                @field(self.desc, @tagName(tag)),
+            ),
+        };
+    }
+
+    // pub const Lookups = struct {
+    // descs: std.hash_map.HashMapUnmanaged(void, void, DoThingWithExportKey, std.hash_map.default_max_load_percentage),
+    // ^ module_inst findExport() should search this first
+    // names: std.hash_map.HashMapUnmanaged(void, LinkedListToIds, DoThingWithDescIdx, std.hash_map.default_max_load_percentage),
+    // ^ maybe struct { SinglyLinkedList.Node, Export (actually smaller on 32-bit with *const Export) }
+    // };
 };
 
 pub const Limits = extern struct {

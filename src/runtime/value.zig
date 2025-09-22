@@ -94,10 +94,20 @@ pub const FuncAddr = extern struct {
         pub fn format(func: *const Expanded, writer: *Writer) Writer.Error!void {
             try writer.writeAll("(func ");
             switch (func.*) {
-                .wasm => |*wasm| try writer.print(
-                    "$f{} (;module@{X};)",
-                    .{ @intFromEnum(wasm.idx), @intFromPtr(wasm.module.header()) },
-                ),
+                .wasm => |*wasm| {
+                    try writer.print("$f{}", .{@intFromEnum(wasm.idx)});
+
+                    const module = wasm.module.header().module;
+                    // for (wasm.module.findExportNames(.{ .func = wasm.idx })) |name| {
+                    for (module.exports()) |exp| {
+                        const desc = exp.descIdx();
+                        if (desc == .func and desc.func == wasm.idx) {
+                            try writer.print(" (export \"{s}\")", .{exp.name(module).bytes});
+                        }
+                    }
+
+                    try writer.print(" (;module@{X};)", .{@intFromPtr(wasm.module.header())});
+                },
                 .host => |*host| try writer.print(
                     "(;host@{X};)",
                     .{@intFromPtr(host.func)},
