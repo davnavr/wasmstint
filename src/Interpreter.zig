@@ -2255,14 +2255,22 @@ const Instr = struct {
     ) *const OpcodeHandler {
         if (builtin.mode == .Debug) {
             const current_frame: *align(@sizeOf(Value)) const StackFrame = interp.currentFrame().?;
-            std.debug.assert(
-                @intFromPtr(module.inner) ==
-                    @intFromPtr(current_frame.function.expanded().wasm.module.inner),
-            );
-            std.debug.assert(
-                @intFromPtr(locals.ptr) ==
-                    @intFromPtr(current_frame.localValues(interp.stack.allocatedSlice()).ptr),
-            );
+            const actual_module = current_frame.function.expanded().wasm.module;
+            if (@intFromPtr(module.inner) != @intFromPtr(actual_module.inner)) {
+                std.debug.panic(
+                    "expected module {*}, got {*}",
+                    .{ module.inner, actual_module.inner },
+                );
+            }
+
+            const actual_locals: []align(@sizeOf(Value)) const Value =
+                current_frame.localValues(interp.stack.allocatedSlice());
+            if (@intFromPtr(locals.ptr) != @intFromPtr(actual_locals.ptr)) {
+                std.debug.panic(
+                    "expected locals {*}, got {*}\nwhile calling {f}",
+                    .{ locals.ptr, actual_locals.ptr, current_frame.function },
+                );
+            }
         }
 
         if (fuel.remaining == 0) {
@@ -2348,19 +2356,25 @@ const Instr = struct {
 /// To ensure the interpreter cannot overflow the native stack, opcode handlers must call this
 /// function via `@call` with either `.always_tail` or `always_inline`.
 fn returnFromWasm(
-    ip: Ip,
-    sp: Sp,
+    old_ip: Ip,
+    old_sp: Sp,
     fuel: *Fuel,
-    stp: Stp,
-    locals: Locals,
+    old_stp: Stp,
+    old_locals: Locals,
     interp: *Interpreter,
-    eip: Eip,
+    old_eip: Eip,
     state: *State,
-    module: runtime.ModuleInst,
+    old_module: runtime.ModuleInst,
 ) StateTransition {
+    _ = old_ip;
+    _ = old_stp;
+    _ = old_locals;
+    _ = old_eip;
+    _ = old_module;
+
     const popped: *align(@sizeOf(Value)) StackFrame = interp.currentFrame().?;
     std.debug.assert(popped.function.expanded() == .wasm);
-    std.debug.assert(@intFromPtr(popped.valueStackBase()) <= @intFromPtr(sp.ptr));
+    std.debug.assert(@intFromPtr(popped.valueStackBase()) <= @intFromPtr(old_sp.ptr));
 
     interp.call_depth -= 1;
     interp.current_frame = popped.prev_frame;
@@ -2386,7 +2400,7 @@ fn returnFromWasm(
         }
     }
 
-    var vals = ValStack.init(sp, interp);
+    var vals = ValStack.init(old_sp, interp);
     const result_src: []align(@sizeOf(Value)) const Value =
         vals.popSlice(interp, @intCast(result_dst.len));
 
@@ -2404,8 +2418,25 @@ fn returnFromWasm(
         if (interp.call_depth == 0) break :return_to_host;
 
         switch (caller_frame.?.function.expanded()) {
-            .wasm => return Instr.init(ip, eip)
-                .dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module),
+            .wasm => |wasm| {
+                const wasm_frame: *align(@sizeOf(Value)) StackFrame.Wasm =
+                    caller_frame.?.wasmFrame();
+                const new_locals = Locals{
+                    .ptr = caller_frame.?.localValues(
+                        interp.stack.base[0..@intFromEnum(interp.current_frame)],
+                    ).ptr,
+                };
+
+                return Instr.init(wasm_frame.ip, wasm_frame.eip).dispatchNextOpcode(
+                    vals,
+                    fuel,
+                    .init(wasm_frame.stp),
+                    new_locals,
+                    interp,
+                    state,
+                    wasm.module,
+                );
+            },
             .host => break :return_to_host,
         }
 
@@ -2482,6 +2513,7 @@ inline fn invokeWithinWasm(
     //     "CALLING {f} @ {*} (was called by {f})\n",
     //     .{ callee, new_frame.frame, current_frame.function },
     // );
+
     std.debug.assert(current_frame != new_frame.frame);
     current_frame_wasm.* = StackFrame.Wasm{
         .ip = old_i.next,
@@ -2501,6 +2533,7 @@ inline fn invokeWithinWasm(
         .wasm => |wasm| {
             const new_wasm_frame: *align(@sizeOf(Value)) StackFrame.Wasm =
                 new_frame.frame.wasmFrame();
+
             return Instr.init(new_wasm_frame.ip, new_wasm_frame.eip).dispatchNextOpcode(
                 new_vals,
                 fuel,
