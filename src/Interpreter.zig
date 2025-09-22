@@ -274,11 +274,20 @@ pub const StackFrame = extern struct {
             @ptrCast(frame);
 
         const locals = (base - frame.local_count)[0..frame.local_count];
-        std.debug.assert(@intFromPtr(bounds.ptr) <= @intFromPtr(locals.ptr));
-        std.debug.assert(
-            @intFromPtr(&locals.ptr[locals.len]) <= @intFromPtr(&bounds.ptr[bounds.len]),
-        );
-        std.debug.assert(@intFromPtr(&locals.ptr[locals.len]) == @intFromPtr(frame));
+        {
+            const locals_end = &locals.ptr[locals.len];
+            const bounds_end = &bounds.ptr[bounds.len];
+            std.debug.assert(@intFromPtr(locals_end) <= @intFromPtr(bounds_end));
+            std.debug.assert(@intFromPtr(locals_end) == @intFromPtr(frame));
+
+            if (builtin.mode == .Debug and @intFromPtr(bounds.ptr) > @intFromPtr(locals.ptr)) {
+                std.debug.panic(
+                    "locals {} {*} for frame {*} below bounds {*}..{*}",
+                    .{ locals.len, locals.ptr, frame, bounds, bounds_end },
+                );
+            }
+        }
+
         return locals;
     }
 
@@ -602,9 +611,15 @@ const Stack = struct {
                     .stp = .{ .ptr = code.inner.side_table_ptr },
                 };
 
-                // Zero the local variables
+                // Zero the local variables that aren't parameters
                 @memset(
-                    frame_ptr.localValues(frame_values)[callee.signature().param_count..],
+                    frame_ptr.localValues(switch (params) {
+                        .allocate => frame_values,
+                        .preallocated => if (prev_frame_ptr) |prev|
+                            prev.valueStackBase()[0..(frame_base.ptr - prev.valueStackBase())]
+                        else
+                            stack.base[@intFromEnum(prev_frame)..@intFromEnum(offset)],
+                    })[callee.signature().param_count..],
                     std.mem.zeroes(Value),
                 );
             },
