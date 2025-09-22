@@ -169,7 +169,7 @@ const TranslateSpectests = struct {
         install_step: *Step,
         tool_paths: *const ToolPaths,
     ) TranslateSpectests {
-        var spectests = std.ArrayListUnmanaged(Test).initCapacity(b.allocator, 147) catch
+        var spectests = std.ArrayList(Test).initCapacity(b.allocator, 147) catch
             @panic("OOM");
 
         const tests_dir = b.path("tests/spec");

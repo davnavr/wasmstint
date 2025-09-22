@@ -396,7 +396,7 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
                             .type = f.type.State,
                             .default_value_ptr = &f.type.default_state,
                             .is_comptime = false,
-                            .alignment = 0,
+                            .alignment = @alignOf(f.type.State),
                         };
                     }
                     break :fields &fields;
@@ -417,7 +417,7 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
                             .type = f.type.Result,
                             .default_value_ptr = null,
                             .is_comptime = false,
-                            .alignment = 0,
+                            .alignment = @alignOf(f.type.Result),
                         };
                     }
                     break :fields &fields;

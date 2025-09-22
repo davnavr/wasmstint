@@ -297,14 +297,14 @@ test "ArrayList" {
     var pages = try PageBufferAllocator.init(pageSize() * 3);
     defer pages.deinit();
 
-    var list = std.ArrayList(u8).init(pages.allocator());
+    var list = std.ArrayList(u8).empty;
     defer list.deinit();
 
-    try list.appendSlice("Hello");
+    try list.appendSlice(pages.allocator(), "Hello");
 
     const other = try pages.allocator().alloc(u8, 100);
     defer pages.allocator().free(other);
 
-    try list.appendSlice(" World!");
+    try list.appendSlice(pages.allocator(), " World!");
     try std.testing.expectEqualStrings("Hello World!", list.items);
 }

@@ -285,7 +285,7 @@ pub const StackFrame = extern struct {
     const size_in_values: comptime_int = @divExact(@sizeOf(StackFrame), @sizeOf(Value));
 
     fn valueStackBase(frame: anytype) ChangePointee(@TypeOf(frame), .many, @sizeOf(Value), Value) {
-        return @as([*]align(@sizeOf(Value)) Value, @constCast(@ptrCast(frame))) +
+        return @as([*]align(@sizeOf(Value)) Value, @ptrCast(@constCast(frame))) +
             StackFrame.size_in_values +
             if (frame.function.expanded() == .wasm)
                 @as(usize, StackFrame.Wasm.size_in_values)
@@ -330,12 +330,42 @@ pub const StackFrame = extern struct {
             locals.ptr[0..(values_end - locals.ptr)];
 
         // std.debug.print(
-        //     "HASHING {} values {*}..{*} for frame {*}\n",
-        //     .{ hashed_memory.len, hashed_memory.ptr, hashed_memory.ptr + hashed_memory.len, frame },
+        //     "HASHING {} values {*}..{*} for frame {*} {} with {} locals {any}\n",
+        //     .{
+        //         hashed_memory.len,
+        //         hashed_memory.ptr,
+        //         hashed_memory.ptr + hashed_memory.len,
+        //         frame,
+        //         frame.*,
+        //         locals.len,
+        //         locals,
+        //     },
         // );
 
+        // TODO: Fix, changing of IP causes hash difference (maybe move where checksum checks occur?)
+        // if (frame.function.expanded() == .wasm) {
+        //     std.debug.print(
+        //         "HEY {any} {X}\n",
+        //         .{
+        //             frame.wasmFrame(),
+        //             std.hash.Fnv1a_128.hash(
+        //                 std.mem.sliceAsBytes(
+        //                     @as(
+        //                         []align(@sizeOf(Value)) const StackFrame.Wasm,
+        //                         frame.wasmFrame()[0..1],
+        //                     ),
+        //                 ),
+        //             ),
+        //         },
+        //     );
+        // }
+
         // Fowler-Noll-Vo is designed for both hashing AND checksums.
-        return std.hash.Fnv1a_128.hash(std.mem.sliceAsBytes(hashed_memory));
+        const hash = std.hash.Fnv1a_128.hash(std.mem.sliceAsBytes(hashed_memory));
+
+        // std.debug.print("HASH RESULT = {X}\n", .{hash});
+
+        return hash;
     }
 };
 
@@ -3046,7 +3076,8 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
                 // );
 
                 const tr = @trunc(z);
-                return if (tr < std.math.minInt(Signed) or std.math.maxInt(Signed) < tr)
+                return if (tr < @as(comptime_float, std.math.minInt(Signed)) or
+                    @as(comptime_float, std.math.maxInt(Signed)) < tr)
                     error.Overflow
                 else
                     std.math.cast(
@@ -3062,7 +3093,7 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
                 if (std.math.isNan(z)) return error.NotANumber;
 
                 const tr = @trunc(z);
-                return if (tr < -0.0 or std.math.maxInt(Unsigned) < tr)
+                return if (tr < -0.0 or @as(comptime_float, std.math.maxInt(Unsigned)) < tr)
                     error.Overflow
                 else
                     @bitCast(
@@ -4075,7 +4106,7 @@ const opcode_handlers = struct {
                 .externref = ExternRef{
                     .addr = @as(
                         *const runtime.ExternAddr,
-                        @constCast(@ptrCast(@alignCast(global_addr.value))),
+                        @ptrCast(@alignCast(@constCast(global_addr.value))),
                     ).*,
                 },
             },
@@ -4084,7 +4115,7 @@ const opcode_handlers = struct {
                 @tagName(val_type),
                 @as(
                     *const runtime.GlobalAddr.Pointee(val_type),
-                    @constCast(@ptrCast(@alignCast(global_addr.value))),
+                    @ptrCast(@alignCast(@constCast(global_addr.value))),
                 ).*,
             ),
         }};

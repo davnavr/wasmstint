@@ -394,7 +394,19 @@ pub const Export = packed struct(u64) {
     pub const DescIdx = @Type(.{
         .@"union" = .{
             .layout = .auto,
-            .fields = @typeInfo(Desc).@"union".fields,
+            .fields = fields: {
+                const src_fields = @typeInfo(Desc).@"union".fields;
+                var dst_fields: [src_fields.len]std.builtin.Type.UnionField = undefined;
+                for (src_fields, &dst_fields) |src, *dst| {
+                    dst.* = .{
+                        .name = src.name,
+                        .type = src.type,
+                        // For some reason, src.alignment > 0
+                        .alignment = @alignOf(src.type),
+                    };
+                }
+                break :fields &dst_fields;
+            },
             .tag_type = std.meta.FieldEnum(Desc),
             .decls = &.{},
         },
@@ -947,7 +959,7 @@ const Sections = struct {
                             else
                                 null,
                             .is_comptime = false,
-                            .alignment = 0,
+                            .alignment = @alignOf(FieldType),
                         };
                     }
 
@@ -1359,7 +1371,7 @@ fn parseTypeSec(
         const tag = try type_reader.readByteTag(TypeTag, diag, "function type tag");
         std.debug.assert(tag == .func);
 
-        var val_types = std.ArrayListUnmanaged(ValType).empty;
+        var val_types = std.ArrayList(ValType).empty;
         const param_count = try type_reader.readUleb128Casted(
             u32,
             u16,
@@ -1419,7 +1431,7 @@ const ImportSec = struct {
         globals: []const ImportName,
 
         fn moveToBuffer(
-            dst: *std.ArrayListUnmanaged(ImportName),
+            dst: *std.ArrayList(ImportName),
             comptime prealloc_count: usize,
             src: *std.SegmentedList(ImportName, prealloc_count),
         ) Allocator.Error![]const ImportName {
@@ -1461,10 +1473,7 @@ fn parseImportSec(
     var names = NamesBuf{};
     var import_types = TypesBuf{};
 
-    var names_buf = try std.ArrayListUnmanaged(ImportName).initCapacity(
-        arena.allocator(),
-        counts.import,
-    );
+    var names_buf = try std.ArrayList(ImportName).initCapacity(arena.allocator(), counts.import);
 
     const imports_start = import_reader.bytes.*.ptr;
 

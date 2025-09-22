@@ -222,12 +222,12 @@ fn processModuleCommand(
             error.InvalidWasm => failFmt(
                 output,
                 "failed to validate module {f}: {s}",
-                .{ fmt_filename, parse_diagnostics.getWritten() },
+                .{ fmt_filename, parse_diagnostics.written() },
             ),
             error.MalformedWasm => failFmt(
                 output,
                 "failed to parse module {f}: {s}",
-                .{ fmt_filename, parse_diagnostics.getWritten() },
+                .{ fmt_filename, parse_diagnostics.written() },
             ),
             else => return failFmt(output, "failed to parse module {f}: {t}", .{ fmt_filename, e }),
         };
@@ -245,7 +245,7 @@ fn processModuleCommand(
         error.InvalidWasm, error.MalformedWasm => return failFmt(
             output,
             "failed to validate code for module {f}: {s}",
-            .{ fmt_filename, parse_diagnostics.getWritten() },
+            .{ fmt_filename, parse_diagnostics.written() },
         ),
         else => return failFmt(
             output,
@@ -1072,7 +1072,7 @@ fn processAssertInvalid(
             error.MalformedWasm => return failFmt(
                 output,
                 "expected validation error \"{s}\" for module \"{f}\", got syntax error: {s}",
-                .{ command.text, fmt_filename, parse_diagnostics.getWritten() },
+                .{ command.text, fmt_filename, parse_diagnostics.written() },
             ),
             else => return failFmt(output, "failed to parse module {f}: {t}", .{ fmt_filename, e }),
         };
@@ -1091,7 +1091,7 @@ fn processAssertInvalid(
             error.MalformedWasm => return failFmt(
                 output,
                 "expected code validation error \"{s}\" for module \"{f}\", got syntax error: {s}",
-                .{ command.text, fmt_filename, parse_diagnostics.getWritten() },
+                .{ command.text, fmt_filename, parse_diagnostics.written() },
             ),
             else => return failFmt(
                 output,
@@ -1109,15 +1109,15 @@ fn processAssertInvalid(
         );
     }
 
-    if (std.mem.indexOf(u8, parse_diagnostics.getWritten(), command.text) == null) {
+    if (std.mem.indexOf(u8, parse_diagnostics.written(), command.text) == null) {
         return failFmt(
             output,
             "validation message mismatch for module \"{f}\"\nexpected: {s}\nactual: {s}",
-            .{ fmt_filename, command.text, parse_diagnostics.getWritten() },
+            .{ fmt_filename, command.text, parse_diagnostics.written() },
         );
     }
 
-    output.print("validation failed: {s}\n", .{parse_diagnostics.getWritten()});
+    output.print("validation failed: {s}\n", .{parse_diagnostics.written()});
 }
 
 fn processAssertMalformed(
@@ -1151,7 +1151,7 @@ fn processAssertMalformed(
             error.InvalidWasm => return failFmt(
                 output,
                 "expected parse error \"{s}\" for module \"{f}\", but got validation error: {s}",
-                .{ command.text, fmt_filename, parse_diagnostics.getWritten() },
+                .{ command.text, fmt_filename, parse_diagnostics.written() },
             ),
             else => return failFmt(
                 output,
@@ -1174,7 +1174,7 @@ fn processAssertMalformed(
             error.InvalidWasm => return failFmt(
                 output,
                 "expected code parse error \"{s}\" for module \"{f}\", but got validation error: {s}",
-                .{ command.text, fmt_filename, parse_diagnostics.getWritten() },
+                .{ command.text, fmt_filename, parse_diagnostics.written() },
             ),
             else => return failFmt(
                 output,
@@ -1192,15 +1192,15 @@ fn processAssertMalformed(
         );
     }
 
-    if (std.mem.indexOf(u8, parse_diagnostics.getWritten(), command.text) == null) {
+    if (std.mem.indexOf(u8, parse_diagnostics.written(), command.text) == null) {
         return failFmt(
             output,
             "parse error message mismatch for module \"{f}\"\nexpected: {s}\nactual: {s}",
-            .{ fmt_filename, command.text, parse_diagnostics.getWritten() },
+            .{ fmt_filename, command.text, parse_diagnostics.written() },
         );
     }
 
-    output.print("parse failed: {s}\n", .{parse_diagnostics.getWritten()});
+    output.print("parse failed: {s}\n", .{parse_diagnostics.written()});
 }
 
 fn processAssertUninstantiable(
@@ -1232,7 +1232,7 @@ fn processAssertUninstantiable(
         error.InvalidWasm, error.MalformedWasm => failFmt(
             output,
             "failed to validate module {f}: {s}",
-            .{ fmt_filename, parse_diagnostics.getWritten() },
+            .{ fmt_filename, parse_diagnostics.written() },
         ),
         else => return failFmt(
             output,
@@ -1252,7 +1252,7 @@ fn processAssertUninstantiable(
         error.InvalidWasm, error.MalformedWasm => return failFmt(
             output,
             "failed to validate module code {f}: {s}",
-            .{ fmt_filename, parse_diagnostics.getWritten() },
+            .{ fmt_filename, parse_diagnostics.written() },
         ),
         else => return failFmt(
             output,
@@ -1329,7 +1329,7 @@ fn processAssertUnlinkable(
         error.InvalidWasm, error.MalformedWasm => failFmt(
             output,
             "failed to validate module {f}: {s}",
-            .{ fmt_filename, parse_diagnostics.getWritten() },
+            .{ fmt_filename, parse_diagnostics.written() },
         ),
         else => return failFmt(
             output,
@@ -1349,7 +1349,7 @@ fn processAssertUnlinkable(
         error.InvalidWasm, error.MalformedWasm => return failFmt(
             output,
             "failed to validate module code {f}: {s}",
-            .{ fmt_filename, parse_diagnostics.getWritten() },
+            .{ fmt_filename, parse_diagnostics.written() },
         ),
         else => return failFmt(
             output,
