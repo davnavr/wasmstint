@@ -316,57 +316,45 @@ pub const StackFrame = extern struct {
         const frame_offset: u32 = @intCast(
             @as([*]align(@sizeOf(Value)) const Value, @ptrCast(frame)) - stack.base,
         );
+        const value_stack_base = frame.valueStackBase();
         const locals = frame.localValues(stack.allocatedSlice()[0..frame_offset]);
-        switch (frame.function.expanded()) {
+        const frame_function = frame.function.expanded();
+        switch (frame_function) {
             .wasm => |wasm| if (wasm.code().isValidationFinished()) {
                 std.debug.assert(
-                    values_end - frame.valueStackBase() <= wasm.code().inner.max_values,
+                    values_end - value_stack_base <= wasm.code().inner.max_values,
                 );
             },
             .host => {},
         }
 
-        const hashed_memory: []align(@sizeOf(Value)) const Value =
-            locals.ptr[0..(values_end - locals.ptr)];
-
-        std.debug.print(
-            "HASHING {} values {*}..{*} for frame {f} {*} {} with {} locals {any}\n",
-            .{
-                hashed_memory.len,
-                hashed_memory.ptr,
-                hashed_memory.ptr + hashed_memory.len,
-                frame.function,
-                frame,
-                frame.*,
-                locals.len,
-                locals,
-            },
-        );
-
-        // TODO: Fix, changing of IP causes hash difference (maybe move where checksum checks occur?)
-        // if (frame.function.expanded() == .wasm) {
-        //     std.debug.print(
-        //         "HEY {any} {X}\n",
-        //         .{
-        //             frame.wasmFrame(),
-        //             std.hash.Fnv1a_128.hash(
-        //                 std.mem.sliceAsBytes(
-        //                     @as(
-        //                         []align(@sizeOf(Value)) const StackFrame.Wasm,
-        //                         frame.wasmFrame()[0..1],
-        //                     ),
-        //                 ),
-        //             ),
-        //         },
-        //     );
-        // }
+        // std.debug.print(
+        //     "Calculating hash for frame {f} {*} {} with {} locals {any}\n",
+        //     .{
+        //         frame.function,
+        //         frame,
+        //         frame.*,
+        //         locals.len,
+        //         locals,
+        //     },
+        // );
 
         // Fowler-Noll-Vo is designed for both hashing AND checksums.
-        const hash = std.hash.Fnv1a_128.hash(std.mem.sliceAsBytes(hashed_memory));
+        var hasher = std.hash.Fnv1a_128.init();
+        hasher.update(
+            std.mem.sliceAsBytes(locals.ptr[0 .. locals.len + StackFrame.size_in_values]),
+        );
 
-        std.debug.print("HASH RESULT = {X}\n", .{hash});
+        // exclude most of `WasmFrame` from the hash
+        if (frame_function == .wasm) {
+            std.hash.autoHashStrat(&hasher, frame.wasmFrame().eip, .Shallow);
+        }
 
-        return hash;
+        hasher.update(std.mem.sliceAsBytes(value_stack_base[0 .. values_end - value_stack_base]));
+
+        const final = hasher.final();
+        // std.debug.print("HASH RESULT = {X}\n", .{final});
+        return final;
     }
 };
 
@@ -556,7 +544,7 @@ const Stack = struct {
 
         const old_stack_top = stack.base + stack.len;
 
-        std.debug.print("PUSHING STACK FRAME FOR {f}\n", .{callee});
+        // std.debug.print("PUSHING STACK FRAME FOR {f}\n", .{callee});
 
         const prev_frame_ptr: ?*align(@sizeOf(Value)) StackFrame = stack.stackFrame(prev_frame);
         const prev_frame_hash = if (prev_frame_ptr) |prev|
@@ -1161,7 +1149,7 @@ pub const State = union(enum) {
                 return error.OutOfMemory; // call stack depth counter overflow
             errdefer interp.call_depth = old_call_depth;
 
-            std.debug.print("HOST WANTS TO CALL {f}\n", .{callee});
+            // std.debug.print("HOST WANTS TO CALL {f}\n", .{callee});
 
             const new_frame = try interp.stack.pushStackFrame(
                 alloca,
@@ -2463,7 +2451,7 @@ inline fn invokeWithinWasm(
 
     var new_vals = old_vals;
 
-    std.debug.print("WASM {f} WANTS TO CALL {f}\n", .{ current_frame.function, callee });
+    // std.debug.print("WASM {f} WANTS TO CALL {f}\n", .{ current_frame.function, callee });
 
     const new_frame = setup: {
         interp.stack.len = @intCast(new_vals.stack.ptr - interp.stack.base);
@@ -2490,15 +2478,16 @@ inline fn invokeWithinWasm(
         };
     };
 
-    {
-        std.debug.print("CALLING {f} @ {*} (was called by {f})\n", .{ callee, new_frame.frame, current_frame.function });
-        std.debug.assert(current_frame != new_frame.frame);
-        current_frame_wasm.* = StackFrame.Wasm{
-            .ip = old_i.next,
-            .eip = old_i.end,
-            .stp = old_stp.next,
-        };
-    }
+    // std.debug.print(
+    //     "CALLING {f} @ {*} (was called by {f})\n",
+    //     .{ callee, new_frame.frame, current_frame.function },
+    // );
+    std.debug.assert(current_frame != new_frame.frame);
+    current_frame_wasm.* = StackFrame.Wasm{
+        .ip = old_i.next,
+        .eip = old_i.end,
+        .stp = old_stp.next,
+    };
 
     interp.call_depth += 1; // overflow check before frame was pushed
     interp.current_frame = new_frame.offset;
