@@ -295,13 +295,10 @@ pub const StackFrame = extern struct {
 
     /// Calculates a checksum of the stack frame's contents.
     fn calculateChecksum(
+        /// The frame to calculate a checksum for.
         frame: *align(@sizeOf(Value)) const StackFrame,
-        /// A slice of the `Interpreter`'s stack, containing the `frame`, its locals, and its
-        /// values.
-        ///
-        /// `stack[stack.len - 1]` refers to the value currently at the top of the value stack
-        /// for the function.
-        stack: []align(@sizeOf(Value)) const Value,
+        stack: *const Stack,
+        values_end: [*]align(@sizeOf(Value)) const Value,
     ) u128 {
         // No need to check `std.meta.hasUniqueRepresentation`, since even padding bits are
         // expected to remain unchanged. This still probably violates some rule somewhere.
@@ -310,32 +307,35 @@ pub const StackFrame = extern struct {
         //     std.debug.assert(std.meta.hasUniqueRepresentation(Wasm));
         // }
 
-        const stack_end = &stack.ptr[stack.len];
-        const locals = frame.localValues(stack);
+        // Check that `frame` is in bounds.
+        std.debug.assert(@intFromPtr(stack.base) <= @intFromPtr(frame));
+        std.debug.assert(@intFromPtr(frame.valueStackBase()) <= @intFromPtr(values_end));
 
-        // Check that frame is in bounds.
-        std.debug.assert(size_in_values + locals.len <= stack.len);
-        std.debug.assert(@intFromPtr(stack.ptr) <= @intFromPtr(frame));
-        std.debug.assert(@intFromPtr(frame.valueStackBase()) <= @intFromPtr(stack_end));
+        std.debug.assert(@intFromPtr(values_end) <= @intFromPtr(stack.base + stack.cap));
 
+        const frame_offset: u32 = @intCast(
+            @as([*]align(@sizeOf(Value)) const Value, @ptrCast(frame)) - stack.base,
+        );
+        const locals = frame.localValues(stack.allocatedSlice()[0..frame_offset]);
         switch (frame.function.expanded()) {
             .wasm => |wasm| if (wasm.code().isValidationFinished()) {
                 std.debug.assert(
-                    stack.len - (size_in_values + locals.len) <= wasm.code().inner.max_values,
+                    values_end - frame.valueStackBase() <= wasm.code().inner.max_values,
                 );
             },
             .host => {},
         }
 
+        const hashed_memory: []align(@sizeOf(Value)) const Value =
+            locals.ptr[0..(values_end - locals.ptr)];
+
+        // std.debug.print(
+        //     "HASHING {} values {*}..{*} for frame {*}\n",
+        //     .{ hashed_memory.len, hashed_memory.ptr, hashed_memory.ptr + hashed_memory.len, frame },
+        // );
+
         // Fowler-Noll-Vo is designed for both hashing AND checksums.
-        return std.hash.Fnv1a_128.hash(
-            std.mem.sliceAsBytes(
-                @as(
-                    []align(@sizeOf(Value)) const Value,
-                    locals.ptr[0..(stack_end - locals.ptr)],
-                ),
-            ),
-        );
+        return std.hash.Fnv1a_128.hash(std.mem.sliceAsBytes(hashed_memory));
     }
 };
 
@@ -528,10 +528,11 @@ const Stack = struct {
         const prev_frame_ptr: ?*align(@sizeOf(Value)) StackFrame = stack.stackFrame(prev_frame);
         const prev_frame_hash = if (prev_frame_ptr) |prev|
             prev.calculateChecksum(
-                stack.slice()[0 .. stack.len - switch (params) {
+                stack,
+                stack.base + stack.len - switch (params) {
                     .allocate => 0,
                     .preallocated => callee.signature().param_count,
-                }],
+                },
             )
         else
             0;
@@ -1259,7 +1260,8 @@ pub const State = union(enum) {
             errdefer interp.stack.len = saved_stack_len;
             std.debug.assert(saved_stack_len <= interp.stack.cap);
 
-            const popped_locals = popped_addr.localValues(interp.stack.slice());
+            const popped_locals: []align(@sizeOf(Value)) Value =
+                popped_addr.localValues(interp.stack.slice());
             const results_dst = popped_locals.ptr[0..results.len];
             std.debug.assert(@intFromPtr(interp.stack.base) <= @intFromPtr(results_dst.ptr));
             std.debug.assert(
@@ -1290,18 +1292,19 @@ pub const State = union(enum) {
             popped.instantiate_flag.* = true;
 
             interp.current_frame = popped.prev_frame;
-            if (interp.currentFrame()) |current| {
-                switch (current.function.expanded()) {
+            if (@as(?*align(@sizeOf(Value)) const StackFrame, interp.currentFrame())) |current| {
+                const current_func = current.function.expanded();
+                switch (current_func) {
                     .wasm => {
-                        const actual_checksum =
-                            interp.stack.stackFrame(interp.current_frame).?.calculateChecksum(
-                                interp.stack.slice()[0 .. interp.stack.len - results.len],
-                            );
+                        const actual_checksum = current.calculateChecksum(
+                            &interp.stack,
+                            popped_locals.ptr,
+                        );
 
                         if (builtin.mode == .Debug and expected_checksum != actual_checksum) {
                             std.debug.panic(
-                                "frame checksum mismatch:\nexpected: {X}\nactual: {X}",
-                                .{ expected_checksum, actual_checksum },
+                                "frame checksum mismatch for {f}:\nexpected: {X}\nactual: {X}",
+                                .{ current_func, expected_checksum, actual_checksum },
                             );
                         }
 
@@ -2338,9 +2341,7 @@ fn returnFromWasm(
     if (builtin.mode == .Debug) {
         const expected_checksum = popped.checksum;
         const actual_checksum = if (interp.call_depth > 0)
-            caller_frame.?.calculateChecksum(
-                interp.stack.allocatedSlice()[0..(result_dst.ptr - interp.stack.base)],
-            )
+            caller_frame.?.calculateChecksum(&interp.stack, @ptrCast(popped))
         else
             0;
 
