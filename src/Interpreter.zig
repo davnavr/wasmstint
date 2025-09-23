@@ -656,7 +656,7 @@ const Stack = struct {
                         .preallocated => if (prev_frame_ptr) |prev|
                             prev.valueStackBase()[0..(frame_base.ptr - prev.valueStackBase())]
                         else
-                            stack.base[@intFromEnum(prev_frame)..@intFromEnum(offset)],
+                            stack.base[0..@intFromEnum(offset)],
                     })[callee.signature().param_count..],
                     std.mem.zeroes(Value),
                 );
