@@ -5389,12 +5389,20 @@ fn enterMainLoop(interp: *Interpreter, fuel: *Fuel) State {
     {
         std.debug.assert(@intFromPtr(code.inner.instructions_start) <= @intFromPtr(wasm_frame.ip));
         std.debug.assert(@intFromPtr(code.inner.instructions_end) == @intFromPtr(wasm_frame.eip));
+    }
 
-        std.debug.assert(@intFromPtr(wasm_frame.stp.ptr) <= @intFromPtr(code.inner.side_table_ptr));
-        std.debug.assert( // side table OOB
-            @intFromPtr(code.inner.side_table_ptr) <=
-                @intFromPtr(&wasm_frame.stp.ptr[code.inner.side_table_len]),
-        );
+    if (builtin.mode == .Debug) {
+        if (@intFromPtr(wasm_frame.stp.ptr) < @intFromPtr(code.inner.side_table_ptr)) {
+            std.debug.panic( // past start
+                "side table OOB: {*} < {*}",
+                .{ wasm_frame.stp.ptr, code.inner.side_table_ptr },
+            );
+        }
+
+        const side_table_end = code.inner.side_table_ptr + code.inner.side_table_len;
+        if (@intFromPtr(wasm_frame.stp.ptr) > @intFromPtr(side_table_end)) {
+            std.debug.panic("side table OOB: {*} > {*}", .{ wasm_frame.stp.ptr, side_table_end });
+        }
     }
 
     var state: State = undefined;
