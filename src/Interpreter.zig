@@ -1954,12 +1954,28 @@ const SideTable = packed struct(usize) {
         const wasm_base_ptr = @intFromPtr(current_frame.function.expanded().wasm
             .module.header().module.inner.wasm.ptr);
 
+        // std.debug.print("SIDE TABLE PTR = {*} + {}\n", .{ table.next.ptr, branch });
         const target: *const Module.Code.SideTableEntry = &table.next.ptr[branch];
         std.debug.assert(@intFromPtr(code.inner.side_table_ptr) <= @intFromPtr(target));
-        std.debug.assert(@intFromPtr(target) <=
-            @intFromPtr(code.inner.side_table_ptr + code.inner.side_table_len));
 
         if (builtin.mode == .Debug) {
+            const side_table_end: [*]const Module.Code.SideTableEntry =
+                code.inner.side_table_ptr + code.inner.side_table_len;
+
+            if (@intFromPtr(target) > @intFromPtr(side_table_end)) {
+                std.debug.panic( // oob past side table
+                    "side table entry {X} (index {}) is OOB past side table end at {X}..{X} " ++
+                        "({} entries)",
+                    .{
+                        @intFromPtr(target),
+                        target - code.inner.side_table_ptr,
+                        @intFromPtr(code.inner.side_table_ptr),
+                        @intFromPtr(side_table_end),
+                        code.inner.side_table_len,
+                    },
+                );
+            }
+
             const origin_ip = code.inner.instructions_start + target.origin;
             if (@intFromPtr(base_ip) != @intFromPtr(origin_ip)) {
                 std.debug.panic(
@@ -2402,8 +2418,8 @@ const Instr = struct {
         return b;
     }
 
-    fn readIdxRawRemaining(i: *Instr, first_byte: u8) u32 {
-        var value: u32 = first_byte;
+    fn readIdxRawRemaining(i: *Instr, first_bits: u7) u32 {
+        var value: u32 = first_bits;
         for (1..5) |idx| {
             const next_byte = i.readByte();
             value |= @shlExact(
@@ -2425,8 +2441,16 @@ const Instr = struct {
             return first_byte;
         } else {
             @branchHint(.unlikely);
-            return i.readIdxRawRemaining(first_byte);
+            return i.readIdxRawRemaining(@truncate(first_byte));
         }
+    }
+
+    test readIdxRaw {
+        const input: []const u8 = "\x01\x95\x7E\x0B";
+        var i = Instr.init(@ptrCast(input.ptr), @ptrCast(input.ptr + input.len - 1));
+        try std.testing.expectEqual(1, i.readIdxRaw());
+        try std.testing.expectEqual(16149, i.readIdxRaw()); // br_table.wast:110
+        try std.testing.expectEqual(0x0B, i.readByte());
     }
 
     inline fn readIdx(reader: *Instr, comptime I: type) I {
@@ -4129,10 +4153,14 @@ const opcode_handlers = struct {
         // No need to read LEB128 labels
 
         const n: u32 = @bitCast(vals.popTyped(interp, &.{.i32}).@"0");
+        const actual_target: u32 = @min(n, label_count);
 
-        // std.debug.print(" > br_table [{}]\n", .{n});
+        // std.debug.print(
+        //     " > br_table (i32.const {}) ; {} labels ; goto {}\n",
+        //     .{ n, label_count, actual_target },
+        // );
 
-        side_table.takeBranch(interp, @ptrCast(br_table_ptr), &i, &vals, @min(n, label_count));
+        side_table.takeBranch(interp, @ptrCast(br_table_ptr), &i, &vals, actual_target);
 
         return i.dispatchNextOpcode(vals, fuel, side_table, locals, interp, state, module);
     }

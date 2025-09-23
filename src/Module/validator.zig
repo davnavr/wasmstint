@@ -1378,7 +1378,10 @@ pub fn rawValidate(
                 const last_label_types = last_label.frame.labelTypes(module);
                 const arity: u32 = @intCast(last_label_types.len);
 
-                // std.debug.print("BEGIN BR_TABLE\n", .{});
+                // std.debug.print(
+                //     "BEGIN BR_TABLE WITH {}+1 LABELS (was {} side table entries)\n",
+                //     .{ label_count, side_table.entries.len },
+                // );
 
                 for (labels) |n| {
                     const l = try Label.init(
@@ -1409,7 +1412,10 @@ pub fn rawValidate(
 
                 try appendSideTableEntry(scratch, &side_table, instr_offset, last_label);
 
-                // std.debug.print("END BR_TABLE\n", .{});
+                // std.debug.print(
+                //     "END BR_TABLE (now {} side table entries)\n",
+                //     .{side_table.entries.len},
+                // );
 
                 try val_stack.popManyExpecting(&ctrl_stack, last_label_types, diag);
                 markUnreachable(&val_stack, &ctrl_stack);

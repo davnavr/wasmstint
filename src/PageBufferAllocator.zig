@@ -298,7 +298,7 @@ test "ArrayList" {
     defer pages.deinit();
 
     var list = std.ArrayList(u8).empty;
-    defer list.deinit();
+    defer list.deinit(pages.allocator());
 
     try list.appendSlice(pages.allocator(), "Hello");
 
