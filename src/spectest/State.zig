@@ -299,7 +299,10 @@ fn processModuleCommand(
         entry.value_ptr.* = .{ .instance = module_inst, .line = command.line };
     }
 
-    output.print("instantiated \"{f}\"\n", .{fmt_filename});
+    output.print(
+        "instantiated \"{f}\" @ {X}\n",
+        .{ fmt_filename, @intFromPtr(module_inst.inner) },
+    );
 }
 
 /// Gets the module with the given `name`, or returns the most recent module if `name` is `null`.
