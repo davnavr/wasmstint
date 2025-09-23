@@ -32,13 +32,6 @@ pub const FuncType = extern struct {
     }
 
     pub fn format(func_type: FuncType, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        // Not an accurate count, just an estimate
-        const params_capacity =
-            (@as(usize, func_type.param_count) *% 11) + (func_type.param_count -| 1);
-        const results_capacity =
-            (@as(usize, func_type.result_count) *% 11) + (func_type.result_count -| 1);
-        try writer.ensureUnusedCapacity(params_capacity +% results_capacity);
-
         for (0..func_type.param_count, func_type.parameters()) |i, param| {
             if (i > 0) {
                 try writer.writeByte(' ');
