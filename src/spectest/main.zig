@@ -34,7 +34,7 @@ const Arguments = cli_args.CliArgs(.{
             },
             "AMOUNT",
             u32,
-        ).withDefault(500),
+        ).withDefault(5000),
 
         cli_args.Flag.intUnsigned(
             .{
@@ -127,7 +127,6 @@ pub fn main() u8 {
     const fmt_wast_path = std.unicode.fmtUtf8(json_script.source_filename);
 
     var interpreter_allocated_amount = @as(usize, arguments.@"max-stack-size") *| 16;
-    interpreter_allocated_amount *|= 4; // Remove when Interpreter uses a single allocation
     var interpreter_allocator = wasmstint.LimitedAllocator.init(
         &interpreter_allocated_amount,
         std.heap.page_allocator,
