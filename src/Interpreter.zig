@@ -5178,7 +5178,7 @@ const opcode_handlers = struct {
         const operands = vals.popArray(interp, 3);
         const n: u32 = @bitCast(operands[2].i32);
         const src_addr: u32 = @bitCast(operands[1].i32);
-        const d: u32 = @bitCast(operands[1].i32);
+        const d: u32 = @bitCast(operands[0].i32);
 
         dst_table.table.copy(
             src_table.table,
