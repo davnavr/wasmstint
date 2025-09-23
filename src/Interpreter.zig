@@ -5097,7 +5097,12 @@ const opcode_handlers = struct {
         const operands = vals.popArray(interp, 3);
         const n: u32 = @bitCast(operands[2].i32);
         const src_idx: u32 = @bitCast(operands[1].i32);
-        const d: u32 = @bitCast(operands[1].i32);
+        const d: u32 = @bitCast(operands[0].i32);
+
+        // std.debug.print(
+        //     " > table.init {} elements from {} to {}, table length is {}\n",
+        //     .{ n, src_idx, d, module.inner.tableAddr(table_idx).table.len },
+        // );
 
         runtime.TableInst.init(
             table_idx,
