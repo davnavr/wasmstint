@@ -778,13 +778,17 @@ const Stack = struct {
     }
 };
 
+pub fn walkCallStack(interp: *const Interpreter) StackWalker {
+    return .start(interp, interp.stack.base + interp.stack.len);
+}
+
 pub const StackWalker = struct {
     interpreter: *const Interpreter,
     stack_top: [*]align(@sizeOf(Value)) const Value,
     current: StackFrame.Offset,
     remaining: u32,
 
-    pub fn capture(
+    pub fn start(
         interp: *const Interpreter,
         stack_top: ?[*]align(@sizeOf(Value)) const Value,
     ) StackWalker {
@@ -837,6 +841,22 @@ pub const StackWalker = struct {
         try writer.print("0x{X:0>2}", .{ip[0]});
         if (std.enums.fromInt(opcodes.ByteOpcode, ip[0])) |opcode| {
             try writer.print(" ({t})", .{opcode});
+        }
+    }
+
+    pub fn format(initial_walker: StackWalker, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        var walker = initial_walker;
+        const n = walker.remaining;
+        while (walker.currentFrame()) |frame| {
+            defer _ = walker.next();
+            try writer.print(
+                "#{[index]} @ {[addr]X} {[callee]f}\n",
+                .{
+                    .index = n - walker.remaining,
+                    .callee = frame.function,
+                    .addr = @intFromPtr(frame),
+                },
+            );
         }
     }
 

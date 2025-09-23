@@ -353,8 +353,8 @@ fn processRegisterCommand(
 fn failCallStackExhausted(state: *const State, output: Output) Error {
     return failFmt(
         output,
-        "call stack exhausted after {} frames",
-        .{state.interpreter.call_depth},
+        "call stack exhausted after {} frames\n{f}",
+        .{ state.interpreter.call_depth, state.interpreter.walkCallStack() },
     );
 }
 
