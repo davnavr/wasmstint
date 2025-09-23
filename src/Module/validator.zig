@@ -463,7 +463,6 @@ const ValStack = struct {
 };
 
 fn readMemIdx(reader: *Reader, module: Module, diag: Diagnostics) !void {
-    // const idx = try reader.readUleb128(u32, diag, "unknown memory");
     const msg = "memory index zero byte expected";
     const idx = try reader.readByte(diag, msg);
     if (idx != 0) {
@@ -471,7 +470,7 @@ fn readMemIdx(reader: *Reader, module: Module, diag: Diagnostics) !void {
     }
 
     if (module.inner.raw.mem_count == 0) {
-        return diag.writeAll(.validation, "unknown memory");
+        return diag.print(.validation, "unknown memory {}", .{idx});
     }
 }
 
