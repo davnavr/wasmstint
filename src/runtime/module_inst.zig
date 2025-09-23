@@ -2,7 +2,10 @@
 ///
 /// To obtain a `ModuleInst`, a `Module` must first be passed to `ModuleAlloc.allocate`, which is
 /// then passed to `Interpreter.instantiateModule`.
-pub const ModuleInst = extern struct {
+pub const ModuleInst = packed struct(usize) {
+    // Packed struct to workaround a codegen bug in Zig 0.15.1
+    // ^ ModuleInst parameter's lower 16-bits get cloberred in `i32/64.const` handler
+
     /// Internal API.
     ///
     /// Makes calculating the layout of a `ModuleInst` a single cost when a `Module` is parsed,

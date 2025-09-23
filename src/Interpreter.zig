@@ -2518,11 +2518,20 @@ const Instr = struct {
     ) *const OpcodeHandler {
         if (builtin.mode == .Debug) {
             const current_frame: *align(@sizeOf(Value)) const StackFrame = interp.currentFrame().?;
-            const actual_module = current_frame.function.expanded().wasm.module;
-            if (@intFromPtr(module.inner) != @intFromPtr(actual_module.inner)) {
-                std.debug.panic(
-                    "expected module {*}, got {*}",
-                    .{ module.inner, actual_module.inner },
+            const current_function = current_frame.function.expanded();
+            const stack_frame_module = current_function.wasm.module;
+            if (@intFromPtr(module.inner) != @intFromPtr(stack_frame_module.inner)) {
+                std.debug.panic( // module mismatch
+                    "opcode handler receives module {X}, but stack frame says {X}" ++
+                        "\n...in {f}" ++
+                        "\n...IP = {f} @ {X}",
+                    .{
+                        @intFromPtr(module.inner),
+                        @intFromPtr(stack_frame_module.inner),
+                        current_function,
+                        std.fmt.Alt(Ip, StackWalker.formatIp){ .data = reader.next },
+                        @intFromPtr(reader.next),
+                    },
                 );
             }
 
@@ -2567,6 +2576,7 @@ const Instr = struct {
     ) StateTransition {
         var i = reader;
         const handler = i.readNextOpcodeHandler(fuel, locals, interp, module);
+        // std.debug.print("DISP {*}, ip={X}\n", .{ module.inner, @intFromPtr(reader.next) });
         return @call(
             .always_tail,
             handler,
@@ -3469,8 +3479,8 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
             vals.pushTyped(interp, &.{value_field}, .{n});
 
             // std.debug.print(
-            //     " > (" ++ @typeName(Signed) ++ ".const) {[0]} (0x{[0]X}) ;; stp = {[1]*}\n",
-            //     .{ n, sp.ptr },
+            //     " > (" ++ @typeName(Signed) ++ ".const (;{[0]};) 0x{[0]X}) ;; @ {[1]X} ; stp = {[2]*}\n",
+            //     .{ n, @intFromPtr(ip - 1), sp.ptr },
             // );
 
             return i.dispatchNextOpcode(vals, fuel, .init(stp), locals, interp, state, module);
