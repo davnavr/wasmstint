@@ -823,6 +823,7 @@ fn processActionCommand(
 
 fn failInterpreterResults(
     interp: Interpreter.State.AwaitingHost,
+    expected: []const u8,
     scratch: *ArenaAllocator,
     output: Output,
 ) Error {
@@ -831,11 +832,11 @@ fn failInterpreterResults(
     return if (results.len > 0)
         failFmt(
             output,
-            "call unexpectedly returned {f}",
-            .{Interpreter.TaggedValue.sliceFormatter(results)},
+            "call unexpectedly returned {f}, expected {s}",
+            .{ Interpreter.TaggedValue.sliceFormatter(results), expected },
         )
     else
-        fail(output, "call unexpectedly succeeded");
+        failFmt(output, "call unexpectedly succeeded, expected {s}", .{expected});
 }
 
 /// Recreates a spec test interpreter trap message
@@ -920,7 +921,12 @@ fn expectTrap(
         .trapped => |trapped| &trapped.trap,
         .call_stack_exhaustion => return state.failCallStackExhausted(output),
         .interrupted => |interrupt| return failInterpreterInterrupted(interrupt.cause, output),
-        .awaiting_host => |awaiting| return failInterpreterResults(awaiting, scratch, output),
+        .awaiting_host => |awaiting| return failInterpreterResults(
+            awaiting,
+            expected,
+            scratch,
+            output,
+        ),
     };
 
     const actual: []const u8 = TrapMessage.init(trap).toString(scratch.allocator()) catch
@@ -1038,7 +1044,12 @@ fn processAssertExhaustion(
         .interrupted => |interrupt| if (interrupt.cause != .out_of_fuel) {
             return failInterpreterInterrupted(interrupt.cause, output);
         },
-        .awaiting_host => |awaiting| return failInterpreterResults(awaiting, scratch, output),
+        .awaiting_host => |awaiting| return failInterpreterResults(
+            awaiting,
+            "call stack exhaustion",
+            scratch,
+            output,
+        ),
     }
 
     const expected_msg = "call stack exhausted";
