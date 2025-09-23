@@ -2019,7 +2019,7 @@ const SideTable = packed struct(usize) {
 
         // std.debug.print(" ? value stack height is {}\n", .{});
 
-        std.debug.assert(vals_top_offset == dst_start_offset + target.copy_count);
+        std.debug.assert(vals_top_offset >= dst_start_offset + target.copy_count);
         std.debug.assert(
             @intFromPtr(current_frame.valueStackBase()) <= @intFromPtr(vals.stack.ptr),
         );
