@@ -43,6 +43,32 @@ const Value = extern union {
             else => unreachable,
         });
     }
+
+    pub fn tagged(value: *const Value, ty: Module.ValType) TaggedValue {
+        return switch (ty) {
+            .v128 => unreachable, // Not implemented
+            .externref => .{ .externref = value.externref.addr },
+            inline else => |tag| @unionInit(
+                TaggedValue,
+                @tagName(tag),
+                @field(value, @tagName(tag)),
+            ),
+        };
+    }
+
+    pub fn formatBytes(value: *const Value, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const bytes: *align(@alignOf(Value)) const [@sizeOf(Value)]u8 = std.mem.asBytes(value);
+        var tuple: std.meta.Tuple(&(.{u8} ** bytes.len)) = undefined;
+        inline for (bytes, 0..) |src, i| tuple[i] = src;
+        try writer.print(
+            ("{X:0>2}" ** 4) ++ ((" " ++ ("{X:0>2}" ** 4)) ** (@divExact(bytes.len, 4) - 1)),
+            tuple,
+        );
+    }
+
+    pub fn bytesFormatter(value: *const Value) std.fmt.Alt(*const Value, formatBytes) {
+        return .{ .data = value };
+    }
 };
 
 pub const TaggedValue = union(enum) {
@@ -338,13 +364,12 @@ pub const StackFrame = extern struct {
         }
 
         // std.debug.print(
-        //     "Calculating hash for frame {f} {*} {} with {} locals {any}\n",
+        //     "Calculating hash for frame {f} {*} {} with {} locals\n",
         //     .{
         //         frame.function,
         //         frame,
         //         frame.*,
         //         locals.len,
-        //         locals,
         //     },
         // );
 
@@ -740,6 +765,179 @@ const Stack = struct {
     }
 };
 
+pub const StackWalker = struct {
+    interpreter: *const Interpreter,
+    stack_top: [*]align(@sizeOf(Value)) const Value,
+    current: StackFrame.Offset,
+    remaining: u32,
+
+    pub fn capture(
+        interp: *const Interpreter,
+        stack_top: ?[*]align(@sizeOf(Value)) const Value,
+    ) StackWalker {
+        return .{
+            .interpreter = interp,
+            .current = interp.current_frame,
+            .remaining = interp.call_depth,
+            .stack_top = stack_top orelse interp.stack.base + interp.stack.len,
+        };
+    }
+
+    pub fn currentFrame(walker: *const StackWalker) ?*align(@sizeOf(Value)) const StackFrame {
+        return walker.interpreter.stack.stackFrame(walker.current);
+    }
+
+    /// Returns `true` if `current` had a previous stack frame.
+    pub fn next(walker: *StackWalker) bool {
+        if (walker.remaining == 0) {
+            return false;
+        } else {
+            const frame = walker.currentFrame().?;
+            walker.stack_top = frame.localValues(
+                walker.interpreter.stack.allocatedSlice()[0..@intFromEnum(walker.current)],
+            ).ptr;
+            walker.current = frame.prev_frame;
+            walker.remaining -= 1;
+            return true;
+        }
+    }
+
+    fn FormatLowAddress(comptime P: type) type {
+        return struct {
+            ptr: P,
+
+            comptime {
+                std.debug.assert(@typeInfo(P) == .pointer);
+            }
+
+            pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+                try writer.print("[*{X:0>6}]", .{@as(u24, @truncate(@intFromPtr(self.ptr)))});
+            }
+        };
+    }
+
+    fn formatLowAddress(ptr: anytype) FormatLowAddress(@TypeOf(ptr)) {
+        return .{ .ptr = ptr };
+    }
+
+    fn formatIp(ip: Ip, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("0x{X:0>2}", .{ip[0]});
+        if (std.enums.fromInt(opcodes.ByteOpcode, ip[0])) |opcode| {
+            try writer.print(" ({t})", .{opcode});
+        }
+    }
+
+    pub fn formatDebug(
+        initial_walker: StackWalker,
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        const interp = initial_walker.interpreter;
+        var walker = initial_walker;
+        const n = walker.remaining;
+        while (walker.currentFrame()) |frame| {
+            defer _ = walker.next();
+            const function = frame.function.expanded();
+            try writer.print(
+                "#{[index]} @ {[addr]X} {[callee]f}\n",
+                .{ .index = n - walker.remaining, .callee = function, .addr = @intFromPtr(frame) },
+            );
+
+            const all_locals: []align(@sizeOf(Value)) const Value =
+                frame.localValues(interp.stack.allocatedSlice());
+            for (
+                all_locals[0..frame.signature.param_count],
+                frame.signature.parameters(),
+                0..,
+            ) |*param, param_ty, i| {
+                try writer.print(
+                    "{[addr]f} (param ${[index]} {[value]f})\n",
+                    .{ .addr = formatLowAddress(param), .index = i, .value = param.tagged(param_ty) },
+                );
+            }
+
+            for (
+                all_locals[frame.signature.param_count..],
+                frame.signature.param_count..,
+            ) |*local, i| {
+                try writer.print(
+                    "{[addr]f} (local ${[index]} {[value]f})\n",
+                    .{
+                        .addr = formatLowAddress(local),
+                        .index = i,
+                        .value = local.bytesFormatter(),
+                    },
+                );
+            }
+
+            if (@FieldType(StackFrame, "checksum") != void) {
+                try writer.print(
+                    "{[addr]f} checksum = {[checksum]X:0>32}\n",
+                    .{ .addr = formatLowAddress(&frame.checksum), .checksum = frame.checksum },
+                );
+            }
+
+            try writer.print(
+                "{[func_addr]f} function\n" ++
+                    "{[sig_addr]f} signature = 0x{[sig]X}\n" ++
+                    "{[inst_addr]f} instantiate_flag = {[inst]} @ 0x{[inst_ptr]X}\n" ++
+                    "{[loc_addr]f} local_count = {[loc]}\n" ++
+                    "{[prev_addr]f} prev_frame = {[prev]} (0x{[prev_ptr]X})\n" ++
+                    "{[padding_addr]f} padding = {[padding]X}\n",
+                .{
+                    .func_addr = formatLowAddress(&frame.function),
+                    .sig_addr = formatLowAddress(&frame.signature),
+                    .sig = @intFromPtr(frame.signature),
+                    .inst_addr = formatLowAddress(&frame.instantiate_flag),
+                    .inst = frame.instantiate_flag.*,
+                    .inst_ptr = @intFromPtr(frame.instantiate_flag),
+                    .loc_addr = formatLowAddress(&frame.local_count),
+                    .loc = frame.local_count,
+                    .prev_addr = formatLowAddress(&frame.prev_frame),
+                    .prev = frame.prev_frame,
+                    .prev_ptr = @intFromPtr(interp.stack.stackFrame(frame.prev_frame)),
+                    .padding_addr = formatLowAddress(&frame.padding),
+                    .padding = std.mem.asBytes(&frame.padding),
+                },
+            );
+
+            if (function == .wasm) {
+                const wasm_frame: *align(@sizeOf(Value)) const StackFrame.Wasm = frame.wasmFrame();
+                try writer.print(
+                    "{[ip_addr]f} ip = {[ip]f} @ 0x{[ip_ptr]X}\n" ++
+                        "{[eip_addr]f} eip = 0x{[eip_ptr]X}\n" ++
+                        "{[stp_addr]f} stp = 0x{[stp_ptr]X}\n" ++
+                        "{[padding_addr]f} padding = {[padding]X}\n",
+                    .{
+                        .ip_addr = formatLowAddress(&wasm_frame.ip),
+                        .ip = std.fmt.Alt(Ip, formatIp){ .data = wasm_frame.ip },
+                        .ip_ptr = @intFromPtr(wasm_frame.ip),
+                        .eip_addr = formatLowAddress(&wasm_frame.eip),
+                        .eip_ptr = @intFromPtr(wasm_frame.eip),
+                        .stp_addr = formatLowAddress(&wasm_frame.stp),
+                        .stp_ptr = @intFromPtr(wasm_frame.stp.ptr),
+                        .padding_addr = formatLowAddress(&wasm_frame.padding),
+                        .padding = std.mem.asBytes(&wasm_frame.padding),
+                    },
+                );
+
+                const value_stack = frame
+                    .valueStackBase()[0..(walker.stack_top - frame.valueStackBase())];
+
+                for (value_stack, 0..) |*value, i| {
+                    try writer.print(
+                        "{[addr]f} #{[depth]} {[value]f}\n",
+                        .{
+                            .addr = formatLowAddress(value),
+                            .depth = value_stack.len - i - 1,
+                            .value = value.bytesFormatter(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+};
+
 stack: Stack,
 current_frame: StackFrame.Offset = .none,
 call_depth: u32 = 0,
@@ -1005,15 +1203,7 @@ pub const State = union(enum) {
             output: []TaggedValue,
         ) void {
             for (output, types, values) |*dst, ty, *val| {
-                dst.* = switch (ty) {
-                    .v128 => unreachable, // Not implemented
-                    .externref => TaggedValue{ .externref = val.externref.addr },
-                    inline else => |tag| @unionInit(
-                        TaggedValue,
-                        @tagName(tag),
-                        @field(val, @tagName(tag)),
-                    ),
-                };
+                dst.* = val.tagged(ty);
             }
         }
 
@@ -2409,8 +2599,13 @@ fn returnFromWasm(
 
         if (expected_checksum != actual_checksum) {
             std.debug.panic(
-                "bad checksum for {f}\nexpected: {X:0>32}\nactual:   {X:0>32}",
-                .{ popped.function, expected_checksum, actual_checksum },
+                "bad checksum for {f}\nexpected: {X:0>32}\nactual:   {X:0>32}\nstack trace:\n{f}",
+                .{
+                    popped.function,
+                    expected_checksum,
+                    actual_checksum,
+                    std.fmt.alt(StackWalker.capture(interp, old_sp.ptr), .formatDebug),
+                },
             );
         }
     }
