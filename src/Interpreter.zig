@@ -1101,12 +1101,13 @@ pub const Trap = struct {
 
         pub const Cause = union(enum) {
             @"table.init",
-            @"call.indirect",
+            call_indirect,
             @"table.copy",
             @"table.fill",
-            access: Access,
+            @"table.get": Access,
+            @"table.set": Access,
 
-            pub const Access = struct { index: u32 };
+            pub const Access = struct { index: u32, maximum: u32 };
         };
 
         pub fn init(table: Module.TableIdx, cause: Cause) TableAccessOutOfBounds {
@@ -4213,7 +4214,7 @@ const opcode_handlers = struct {
                 .init(stp),
                 interp,
                 state,
-                .init(.table_access_out_of_bounds, .init(table_idx, .@"call.indirect")),
+                .init(.table_access_out_of_bounds, .init(table_idx, .call_indirect)),
             );
         }
 
@@ -4496,7 +4497,7 @@ const opcode_handlers = struct {
                 state,
                 .init(
                     .table_access_out_of_bounds,
-                    .init(table_idx, .{ .access = .{ .index = idx } }),
+                    .init(table_idx, .{ .@"table.get" = .{ .index = idx, .maximum = table.len } }),
                 ),
             ),
         );
@@ -4538,7 +4539,7 @@ const opcode_handlers = struct {
                 state,
                 .init(
                     .table_access_out_of_bounds,
-                    .init(table_idx, .{ .access = .{ .index = idx } }),
+                    .init(table_idx, .{ .@"table.set" = .{ .index = idx, .maximum = table.len } }),
                 ),
             ),
             std.mem.asBytes(ref)[0..table.stride.toBytes()],

@@ -842,6 +842,7 @@ fn failInterpreterResults(
 const TrapMessage = union(enum) {
     string: [:0]const u8,
     memory_access_out_of_bounds: *const Interpreter.Trap.MemoryAccessOutOfBounds,
+    table_access_out_of_bounds: *const Interpreter.Trap.TableAccessOutOfBounds,
 
     fn init(trap: *const Interpreter.Trap) TrapMessage {
         return switch (trap.code) {
@@ -852,7 +853,9 @@ const TrapMessage = union(enum) {
             .memory_access_out_of_bounds => .{
                 .memory_access_out_of_bounds = &trap.information.memory_access_out_of_bounds,
             },
-            // .table_access_out_of_bounds
+            .table_access_out_of_bounds => .{
+                .table_access_out_of_bounds = &trap.information.table_access_out_of_bounds,
+            },
             .indirect_call_to_null => .{ .string = "uninitialized table element" },
             // .indirect_call_signature_mismatch
             else => |bad| std.debug.panic("TODO: trap message recreation for {t}", .{bad}),
@@ -873,6 +876,22 @@ const TrapMessage = union(enum) {
                         );
                     },
                     inline else => |tag| try writer.print("{t} out of bounds", .{tag}),
+                }
+            },
+            .table_access_out_of_bounds => |oob| {
+                try writer.writeAll("out of bounds table access: ");
+                switch (oob.cause) {
+                    inline .@"table.get", .@"table.set" => |*access, tag| {
+                        try writer.print(
+                            "{t} at {} >= max value {}",
+                            .{ tag, access.index, access.maximum },
+                        );
+                    },
+                    inline .call_indirect => |_, tag| try writer.print(
+                        "{t} undefined element",
+                        .{tag},
+                    ),
+                    inline else => |_, tag| try writer.print("{t} out of bounds", .{tag}),
                 }
             },
         }
@@ -908,7 +927,11 @@ fn expectTrap(
         @panic("oom");
 
     if (std.mem.indexOf(u8, actual, expected) == null) {
-        return failFmt(output, "incorrect trap message, expected \"{s}\"", .{expected});
+        return failFmt(
+            output,
+            "incorrect trap message\nexpected: \"{s}\"\n  actual: \"{s}\"",
+            .{ expected, actual },
+        );
     }
 
     return actual;
