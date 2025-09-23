@@ -334,6 +334,64 @@ pub const WasmSlice = extern struct {
     }
 };
 
+/// An UTF-8 string.
+pub const Name = struct {
+    ptr: [*]const u8,
+    len: u16,
+
+    /// Asserts that `name` is valid UTF-8 and `name.len <= std.math.maxInt(u16)`.
+    pub fn init(name: []const u8) Name {
+        std.debug.assert(std.unicode.utf8ValidateSlice(name));
+        return .{ .ptr = name.ptr, .len = @intCast(name.len) };
+    }
+
+    pub fn bytes(name: Name) []const u8 {
+        return name.ptr[0..name.len];
+    }
+
+    /// Prints a WebAssembly Text Format string literal, emitting escape sequences for
+    /// non-printable and non-ASCII characters.
+    pub fn format(name: Name, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.writeByte('"');
+        var remaining = name.bytes();
+        while (remaining.len > 0) {
+            switch (remaining[0]) {
+                '\t' => try writer.writeAll("\\t"),
+                '\n' => try writer.writeAll("\\n"),
+                '\r' => try writer.writeAll("\\r"),
+                '\"' => try writer.writeAll("\\\""),
+                '\'' => try writer.writeAll("\\'"),
+                '\\' => try writer.writeAll("\\\\"),
+                else => if (std.ascii.isPrint(remaining[0])) {
+                    try writer.writeByte(remaining[0]);
+                    remaining = remaining[1..];
+                    continue;
+                } else {
+                    // Unicode escape sequence
+                    const utf8_len = std.unicode.utf8ByteSequenceLength(remaining[0]) catch
+                        unreachable;
+
+                    const codepoint = switch (utf8_len) {
+                        1 => remaining[0],
+                        2 => std.unicode.utf8Decode2(remaining[0..2].*) catch unreachable,
+                        3 => std.unicode.utf8Decode3(remaining[0..3].*) catch unreachable,
+                        4 => std.unicode.utf8Decode4(remaining[0..4].*) catch unreachable,
+                        else => unreachable,
+                    };
+
+                    remaining = remaining[utf8_len..];
+                    try writer.print("\\u{{{x}}}", .{codepoint});
+                    continue;
+                },
+            }
+
+            remaining = remaining[1..];
+        }
+
+        try writer.writeByte('"');
+    }
+};
+
 pub const ImportName = struct {
     name_offset: u16,
     name_size: u16,
@@ -341,18 +399,14 @@ pub const ImportName = struct {
     module_offset: u16,
     module_size: u16,
 
-    pub inline fn desc_name(self: ImportName, module: Module) std.unicode.Utf8View {
+    pub inline fn desc_name(self: ImportName, module: Module) Name {
         const name_slice = WasmSlice{ .offset = self.name_offset, .size = self.name_size };
-        return .{
-            .bytes = name_slice.slice(module.inner.raw.import_section, module.inner.wasm),
-        };
+        return .init(name_slice.slice(module.inner.raw.import_section, module.inner.wasm));
     }
 
-    pub inline fn module_name(self: ImportName, module: Module) std.unicode.Utf8View {
+    pub inline fn module_name(self: ImportName, module: Module) Name {
         const name_slice = WasmSlice{ .offset = self.module_offset, .size = self.module_size };
-        return .{
-            .bytes = name_slice.slice(module.inner.raw.import_section, module.inner.wasm),
-        };
+        return .init(name_slice.slice(module.inner.raw.import_section, module.inner.wasm));
     }
 };
 
@@ -377,15 +431,10 @@ pub const Export = packed struct(u64) {
         global: GlobalIdx,
     };
 
-    pub inline fn name(self: Export, module: Module) std.unicode.Utf8View {
+    pub inline fn name(self: Export, module: Module) Module.Name {
         const name_slice = WasmSlice{ .offset = self.name_offset, .size = self.name_size };
         const bytes = name_slice.slice(module.inner.raw.export_section, module.inner.wasm);
-        return switch (@import("builtin").mode) {
-            .Debug, .ReleaseSafe => std.unicode.Utf8View.init(bytes) catch unreachable,
-            .ReleaseFast, .ReleaseSmall => .{
-                .bytes = name_slice.slice(module.inner.raw.export_section, module.inner.wasm),
-            },
-        };
+        return .init(bytes);
     }
 
     // /// Numeric identifier referring to an `Export`.

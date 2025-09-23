@@ -51,14 +51,19 @@ fn expectNextToken(
     }
 }
 
-fn expectNextTokenString(
-    parser: *Parser,
-    arena: *ArenaAllocator,
-) Error![]const u8 {
+fn expectNextTokenString(parser: *Parser, arena: *ArenaAllocator) Error![]const u8 {
     return switch (try parser.nextToken(arena)) {
         .string, .allocated_string => |s| s,
         else => error.MalformedJson, // expected string
     };
+}
+
+fn expectNextTokenNameString(parser: *Parser, arena: *ArenaAllocator) Error!Name {
+    const name = try expectNextTokenString(parser, arena);
+    return if (name.len <= std.math.maxInt(u16))
+        .init(name)
+    else
+        error.MalformedJson; // name string too long
 }
 
 fn expectNextTokenStringEql(
@@ -94,14 +99,14 @@ fn initEnumStringLookup(
 pub fn init(
     parser: *Parser,
     arena: *ArenaAllocator,
-    input: []const u8,
+    input: std.unicode.Utf8View,
     scratch: *ArenaAllocator,
 ) Error!void {
     // Need pointer to `diagnostics` to be stable.
     parser.* = .{
         .source_filename = "error occurred before 'source_filename' could be parsed",
         .command_count = 0,
-        .scanner = json.Scanner.initCompleteInput(arena.allocator(), input),
+        .scanner = json.Scanner.initCompleteInput(arena.allocator(), input.bytes),
         .command_lookup = try initEnumStringLookup(arena, Command.Type.LookupKey),
         .value_lookup = try initEnumStringLookup(arena, Command.ValueLookupKey),
         .diagnostics = .{},
@@ -170,7 +175,7 @@ pub const Command = struct {
     }
 
     pub const Module = struct {
-        name: ?[]const u8,
+        name: ?Name,
         /// Path to the module, relative to the JSON file.
         filename: [:0]const u8,
 
@@ -182,7 +187,7 @@ pub const Command = struct {
             const filename_or_name = try parser.expectNextTokenString(scratch);
             const name = if (std.mem.eql(u8, "name", filename_or_name)) name: {
                 _ = scratch.reset(.retain_capacity);
-                const module_name = try parser.expectNextTokenString(arena);
+                const module_name = try parser.expectNextTokenNameString(arena);
                 try parser.expectNextTokenStringEql(scratch, "filename");
                 break :name module_name;
             } else if (std.mem.eql(u8, "filename", filename_or_name))
@@ -300,9 +305,9 @@ pub const Command = struct {
 
     pub const Action = struct {
         /// Which module to perform the action on, or `null` for the most recent module.
-        module: ?[]const u8,
+        module: ?Name,
         type: Action.Type,
-        field: []const u8,
+        field: Name,
 
         pub const Type = union(enum) {
             invoke: struct { args: Const.Vec },
@@ -336,7 +341,7 @@ pub const Command = struct {
             const module_or_field = try parser.expectNextTokenString(scratch);
             const module = if (std.mem.eql(u8, module_or_field, "module")) module: {
                 _ = scratch.reset(.retain_capacity);
-                const module_name = try parser.expectNextTokenString(arena);
+                const module_name = try parser.expectNextTokenNameString(arena);
                 try parser.expectNextTokenStringEql(scratch, "field");
                 break :module module_name;
             } else if (std.mem.eql(u8, module_or_field, "field"))
@@ -345,7 +350,7 @@ pub const Command = struct {
                 return error.MalformedJson; // expected module or field
 
             _ = scratch.reset(.retain_capacity);
-            const field = try parser.expectNextTokenString(arena);
+            const field = try parser.expectNextTokenNameString(arena);
 
             const kind: Action.Type = switch (type_tag) {
                 .get => .get,
@@ -414,7 +419,7 @@ pub const Command = struct {
     pub const AssertWithMessage = struct {
         action: Action,
         /// The error message to expect.
-        text: []const u8,
+        text: Name,
 
         fn parseInner(
             parser: *Parser,
@@ -425,7 +430,7 @@ pub const Command = struct {
             _ = scratch.reset(.retain_capacity);
 
             try parser.expectNextTokenStringEql(scratch, "text");
-            const text = try parser.expectNextTokenString(arena);
+            const text = try parser.expectNextTokenNameString(arena);
 
             try skipExpectedArray(parser, scratch);
 
@@ -453,7 +458,7 @@ pub const Command = struct {
         /// Path to the module, relative to the JSON file.
         filename: [:0]const u8,
         /// The error message to expect.
-        text: []const u8,
+        text: Name,
         module_type: ModuleType,
 
         fn parseInner(
@@ -471,7 +476,7 @@ pub const Command = struct {
 
             try parser.expectNextTokenStringEql(scratch, "text");
             _ = scratch.reset(.retain_capacity);
-            const text = try parser.expectNextTokenString(arena);
+            const text = try parser.expectNextTokenNameString(arena);
 
             const module_type = try ModuleType.parseInner(parser, scratch);
 
@@ -481,9 +486,9 @@ pub const Command = struct {
 
     pub const Register = struct {
         /// Which module to register, or `null` to use the most recent module.
-        name: ?[]const u8,
+        name: ?Name,
         /// The module name used when importing the module's exports.
-        as: []const u8,
+        as: Name,
 
         fn parseInner(
             parser: *Parser,
@@ -493,7 +498,7 @@ pub const Command = struct {
             const name_or_as = try parser.expectNextTokenString(scratch);
             const name = if (std.mem.eql(u8, "name", name_or_as)) name: {
                 _ = scratch.reset(.retain_capacity);
-                const module_name = try parser.expectNextTokenString(arena);
+                const module_name = try parser.expectNextTokenNameString(arena);
                 try parser.expectNextTokenStringEql(scratch, "as");
                 break :name module_name;
             } else if (std.mem.eql(u8, "as", name_or_as))
@@ -503,7 +508,7 @@ pub const Command = struct {
 
             _ = scratch.reset(.retain_capacity);
 
-            const as = try parser.expectNextTokenString(arena);
+            const as = try parser.expectNextTokenNameString(arena);
 
             return .{ .name = name, .as = as };
         }
@@ -561,3 +566,4 @@ const std = @import("std");
 const Oom = std.mem.Allocator.Error;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const json = std.json;
+const Name = @import("wasmstint").Module.Name;

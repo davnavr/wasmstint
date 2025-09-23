@@ -29,8 +29,8 @@ pub const Desc = union(std.meta.FieldEnum(Module.Export.Desc)) {
 ctx: *anyopaque,
 resolve: *const fn (
     ctx: *anyopaque,
-    module: std.unicode.Utf8View,
-    name: std.unicode.Utf8View,
+    module: Module.Name,
+    name: Module.Name,
     desc: Desc,
 ) ?ExternVal,
 
@@ -40,8 +40,8 @@ pub const Error = error{
 };
 
 pub const FailedRequest = struct {
-    module: std.unicode.Utf8View,
-    name: std.unicode.Utf8View,
+    module: Module.Name,
+    name: Module.Name,
     desc: Desc,
     reason: Reason,
 
@@ -53,12 +53,8 @@ pub const FailedRequest = struct {
 
     pub fn format(info: *const FailedRequest, writer: *Writer) Writer.Error!void {
         try writer.print(
-            "could not provide import (import \"{s}\" \"{s}\" {f}), ",
-            .{
-                info.module.bytes,
-                info.name.bytes,
-                info.desc,
-            },
+            "could not provide import (import {f} {f} {f}), ",
+            .{ info.module, info.name, info.desc },
         );
 
         try writer.writeAll(switch (info.reason) {
@@ -71,8 +67,8 @@ pub const FailedRequest = struct {
 
 pub fn resolveTyped(
     provider: *const ImportProvider,
-    module: std.unicode.Utf8View,
-    name: std.unicode.Utf8View,
+    module: Module.Name,
+    name: Module.Name,
     comptime desc_tag: std.meta.FieldEnum(Module.Export.Desc),
     desc: @FieldType(Desc, @tagName(desc_tag)),
     failed: ?*FailedRequest,

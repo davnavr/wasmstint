@@ -189,12 +189,12 @@ fn processModuleCommand(
 
     const module = &command.type.module;
     const module_lookup_entry = if (module.name) |name| has_name: {
-        const entry = state.module_lookup.getOrPut(std.heap.page_allocator, name) catch
+        const entry = state.module_lookup.getOrPut(std.heap.page_allocator, name.bytes()) catch
             @panic("oom");
 
         if (entry.found_existing) return failFmt(
             output,
-            "module with name \"{s}\" was already defined on line {}",
+            "module with name {f} was already defined on line {}",
             .{ name, entry.value_ptr.line },
         );
 
@@ -306,11 +306,11 @@ fn processModuleCommand(
 }
 
 /// Gets the module with the given `name`, or returns the most recent module if `name` is `null`.
-fn findModuleInst(state: *const State, name: ?[]const u8, output: Output) Error!ModuleInst {
+fn findModuleInst(state: *const State, name: ?Name, output: Output) Error!ModuleInst {
     if (name) |find_name| {
-        const named = state.module_lookup.get(find_name) orelse return failFmt(
+        const named = state.module_lookup.get(find_name.bytes()) orelse return failFmt(
             output,
-            "no module with name \"{s}\" has been instantiated at this point",
+            "no module with name {f} has been instantiated at this point",
             .{find_name},
         );
         return named.instance;
@@ -345,7 +345,7 @@ fn processRegisterCommand(
     }
 
     output.print(
-        "registered module \"{f}\" exports under \"{s}\"\n",
+        "registered module {f} exports under {f}\n",
         .{ fmtModuleName(command.name), command.as },
     );
 }
@@ -682,15 +682,15 @@ const Action = union(enum) {
     get: Interpreter.TaggedValue,
 };
 
-fn formatModuleName(name: ?[]const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+fn formatModuleName(name: ?Name, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     if (name) |s| {
-        try writer.print("module \"{s}\"", .{s});
+        try writer.print("module {f}", .{s});
     } else {
         try writer.writeAll("current module");
     }
 }
 
-fn fmtModuleName(name: ?[]const u8) std.fmt.Alt(?[]const u8, formatModuleName) {
+fn fmtModuleName(name: ?Name) std.fmt.Alt(?Name, formatModuleName) {
     return .{ .data = name };
 }
 
@@ -731,10 +731,10 @@ fn processActionCommand(
 ) Error!Action {
     const module = try state.findModuleInst(command.module, output);
     const fmt_module = fmtModuleName(command.module);
-    const target_export = module.findExport(command.field) catch |e| switch (e) {
+    const target_export = module.findExport(command.field.bytes()) catch |e| switch (e) {
         error.ExportNotFound => return failFmt(
             output,
-            "{f} does not provide export with name \"{s}\"",
+            "{f} does not provide export with name {f}",
             .{ fmt_module, command.field },
         ),
     };
@@ -745,7 +745,7 @@ fn processActionCommand(
                 .func => |f| f,
                 else => return failFmt(
                     output,
-                    "expected function export \"{s}\" from {f}, got {f}",
+                    "expected function export {f} from {f}, got {f}",
                     .{ command.field, fmt_module, target_export },
                 ),
             };
@@ -761,7 +761,7 @@ fn processActionCommand(
                     const signature = callee.signature();
                     return if (signature.param_count != invoke.args.len) failFmt(
                         output,
-                        "(export \"{s}\" {f}) from {f} expected {} arguments, got {}",
+                        "(export {f} {f}) from {f} expected {} arguments, got {}",
                         .{
                             command.field,
                             fmt_module,
@@ -771,7 +771,7 @@ fn processActionCommand(
                         },
                     ) else failFmt(
                         output,
-                        "argument type mismatch calling (export \"{s}\" {f}) from {f}",
+                        "argument type mismatch calling (export {f} {f}) from {f}",
                         .{ command.field, fmt_module, callee },
                     );
                 },
@@ -786,7 +786,7 @@ fn processActionCommand(
                 .global => |g| g,
                 else => return failFmt(
                     output,
-                    "expected global export \"{s}\" from {f}, got {f}",
+                    "expected global export {f} from {f}, got {f}",
                     .{ command.field, fmt_module, target_export },
                 ),
             };
@@ -826,7 +826,7 @@ fn processActionCommand(
 
 fn failInterpreterResults(
     interp: Interpreter.State.AwaitingHost,
-    expected: []const u8,
+    expected: Name,
     scratch: *ArenaAllocator,
     output: Output,
 ) Error {
@@ -835,11 +835,11 @@ fn failInterpreterResults(
     return if (results.len > 0)
         failFmt(
             output,
-            "call unexpectedly returned {f}, expected {s}",
+            "call unexpectedly returned {f}, expected {f}",
             .{ Interpreter.TaggedValue.sliceFormatter(results), expected },
         )
     else
-        failFmt(output, "call unexpectedly succeeded, expected {s}", .{expected});
+        failFmt(output, "call unexpectedly succeeded, expected {f}", .{expected});
 }
 
 /// Recreates a spec test interpreter trap message
@@ -935,7 +935,7 @@ fn expectTrap(
     interp: Interpreter.State,
     store_arena: *ArenaAllocator,
     fuel: *Interpreter.Fuel,
-    expected: []const u8,
+    expected: Name,
     scratch: *ArenaAllocator,
     output: Output,
 ) Error![]const u8 {
@@ -956,10 +956,10 @@ fn expectTrap(
     const actual: []const u8 = TrapMessage.init(trap).toString(scratch.allocator()) catch
         @panic("oom");
 
-    if (std.mem.indexOf(u8, actual, expected) == null) {
+    if (std.mem.indexOf(u8, actual, expected.bytes()) == null) {
         return failFmt(
             output,
-            "incorrect trap message\nexpected: \"{s}\"\n  actual: \"{s}\"",
+            "incorrect trap message\nexpected: {f}\n  actual: \"{s}\"",
             .{ expected, actual },
         );
     }
@@ -987,7 +987,7 @@ fn processAssertReturn(
 
             if (results.len > 0) {
                 output.print(
-                    "invoke \"{s}\" returned {f}\n",
+                    "invoke {f} returned {f}\n",
                     .{
                         command.action.field,
                         Interpreter.TaggedValue.sliceFormatter(results),
@@ -1007,7 +1007,7 @@ fn processAssertReturn(
             try resultValueMatches(&actual_value, command.expected.at(0), 0, output);
 
             output.print(
-                "get \"{s}\" yielded {f}\n",
+                "get {f} yielded {f}\n",
                 .{ command.action.field, actual_value },
             );
         },
@@ -1040,7 +1040,7 @@ fn processAssertTrap(
         scratch,
         output,
     );
-    output.print("invoke \"{s}\" trapped: \"{s}\"\n", .{ command.action.field, message });
+    output.print("invoke {f} trapped: \"{s}\"\n", .{ command.action.field, message });
 }
 
 fn processAssertExhaustion(
@@ -1070,22 +1070,22 @@ fn processAssertExhaustion(
         },
         .awaiting_host => |awaiting| return failInterpreterResults(
             awaiting,
-            "call stack exhaustion",
+            .init("call stack exhaustion"),
             scratch,
             output,
         ),
     }
 
     const expected_msg = "call stack exhausted";
-    if (!std.mem.eql(u8, command.text, expected_msg)) {
+    if (!std.mem.eql(u8, command.text.bytes(), expected_msg)) {
         return failFmt(
             output,
-            "expected error message \"{s}\", got \"" ++ expected_msg ++ "\"",
+            "expected error message {f}, got \"" ++ expected_msg ++ "\"",
             .{command.text},
         );
     }
 
-    output.print("invoke \"{s}\" exhausted call stack\n", .{command.action.field});
+    output.print("invoke {f} exhausted call stack\n", .{command.action.field});
 }
 
 fn openAssertionModuleContents(
@@ -1129,7 +1129,7 @@ fn processAssertInvalid(
             error.InvalidWasm => break :validation_failed,
             error.MalformedWasm => return failFmt(
                 output,
-                "expected validation error \"{s}\" for module \"{f}\", got syntax error: {s}",
+                "expected validation error {f} for module \"{f}\", got syntax error: {s}",
                 .{ command.text, fmt_filename, parse_diagnostics.written() },
             ),
             else => return failFmt(output, "failed to parse module {f}: {t}", .{ fmt_filename, e }),
@@ -1148,7 +1148,7 @@ fn processAssertInvalid(
             error.InvalidWasm => break :validation_failed,
             error.MalformedWasm => return failFmt(
                 output,
-                "expected code validation error \"{s}\" for module \"{f}\", got syntax error: {s}",
+                "expected code validation error {f} for module \"{f}\", got syntax error: {s}",
                 .{ command.text, fmt_filename, parse_diagnostics.written() },
             ),
             else => return failFmt(
@@ -1162,20 +1162,20 @@ fn processAssertInvalid(
 
         return failFmt(
             output,
-            "module \"{f}\" unexpectedly passed validation, expected \"{s}\"",
+            "module \"{f}\" unexpectedly passed validation, expected {f}",
             .{ fmt_filename, command.text },
         );
     }
 
-    if (std.mem.indexOf(u8, parse_diagnostics.written(), command.text) == null) {
+    if (std.mem.indexOf(u8, parse_diagnostics.written(), command.text.bytes()) == null) {
         return failFmt(
             output,
-            "validation message mismatch for module \"{f}\"\nexpected: {s}\nactual: {s}",
+            "validation message mismatch for module \"{f}\"\nexpected: {f}\n  actual: \"{s}\"",
             .{ fmt_filename, command.text, parse_diagnostics.written() },
         );
     }
 
-    output.print("validation failed: {s}\n", .{parse_diagnostics.written()});
+    output.print("validation failed: \"{s}\"\n", .{parse_diagnostics.written()});
 }
 
 fn processAssertMalformed(
@@ -1208,7 +1208,7 @@ fn processAssertMalformed(
             error.MalformedWasm => break :parse_failed,
             error.InvalidWasm => return failFmt(
                 output,
-                "expected parse error \"{s}\" for module \"{f}\", but got validation error: {s}",
+                "expected parse error {f} for module \"{f}\", but got validation error: {s}",
                 .{ command.text, fmt_filename, parse_diagnostics.written() },
             ),
             else => return failFmt(
@@ -1231,7 +1231,7 @@ fn processAssertMalformed(
             error.MalformedWasm => break :parse_failed,
             error.InvalidWasm => return failFmt(
                 output,
-                "expected code parse error \"{s}\" for module \"{f}\", but got validation error: {s}",
+                "expected code parse error {f} for module \"{f}\", but got validation error: {s}",
                 .{ command.text, fmt_filename, parse_diagnostics.written() },
             ),
             else => return failFmt(
@@ -1245,15 +1245,15 @@ fn processAssertMalformed(
 
         return failFmt(
             output,
-            "module \"{f}\" unexpectedly parsed successfully, expected \"{s}\"",
+            "module \"{f}\" unexpectedly parsed successfully, expected {f}",
             .{ fmt_filename, command.text },
         );
     }
 
-    if (std.mem.indexOf(u8, parse_diagnostics.written(), command.text) == null) {
+    if (std.mem.indexOf(u8, parse_diagnostics.written(), command.text.bytes()) == null) {
         return failFmt(
             output,
-            "parse error message mismatch for module \"{f}\"\nexpected: {s}\nactual: {s}",
+            "parse error message mismatch for module \"{f}\"\nexpected: {f}\n  actual: \"{s}\"",
             .{ fmt_filename, command.text, parse_diagnostics.written() },
         );
     }
@@ -1432,12 +1432,12 @@ fn processAssertUnlinkable(
                 .type_mismatch, .wrong_desc => "incompatible import type",
             };
 
-            if (std.mem.eql(u8, expected_message, command.text)) {
+            if (std.mem.eql(u8, expected_message, command.text.bytes())) {
                 output.print("module linking failed: {f}\n", .{import_error});
                 return;
             } else return failFmt(
                 output,
-                "could not match expected error \"{s}\" with \"{f}\"",
+                "could not match expected error {f} with \"{f}\"",
                 .{ command.text, import_error },
             );
         },
@@ -1452,5 +1452,6 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const wasmstint = @import("wasmstint");
 const ModuleInst = wasmstint.runtime.ModuleInst;
 const Interpreter = wasmstint.Interpreter;
+const Name = wasmstint.Module.Name;
 const Parser = @import("Parser.zig");
 const Imports = @import("Imports.zig");

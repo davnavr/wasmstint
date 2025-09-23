@@ -120,8 +120,15 @@ pub fn main() u8 {
     };
 
     var json_script: Parser = undefined;
-    json_script.init(&arena, json_file.contents, &scratch) catch |e|
-        handleJsonError(arguments.run, &json_script, stderr, e);
+    json_script.init(
+        &arena,
+        std.unicode.Utf8View.init(json_file.contents) catch {
+            stderr.writeErrorPreamble();
+            stderr.print("Input file {f} is not valid UTF-8", .{fmt_json_path});
+            return 1;
+        },
+        &scratch,
+    ) catch |e| handleJsonError(arguments.run, &json_script, stderr, e);
 
     _ = scratch.reset(.retain_capacity);
     const fmt_wast_path = std.unicode.fmtUtf8(json_script.source_filename);

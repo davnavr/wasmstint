@@ -24,39 +24,39 @@ const RegisteredContext = struct {
 
     pub fn hash(ctx: RegisteredContext, key: Name) u64 {
         var hasher = std.hash.Wyhash.init(ctx.seed);
-        hasher.update(key.module());
+        hasher.update(key.module().bytes());
         hasher.update("\xFF");
-        hasher.update(key.name());
+        hasher.update(key.name().bytes());
         return hasher.final();
     }
 
     pub fn eql(_: RegisteredContext, a: Name, b: Name) bool {
-        return std.mem.eql(u8, a.module(), b.module()) and
-            std.mem.eql(u8, a.name(), b.name());
+        return std.mem.eql(u8, a.module().bytes(), b.module().bytes()) and
+            std.mem.eql(u8, a.name().bytes(), b.name().bytes());
     }
 };
 
 pub const Name = struct {
     module_ptr: [*]const u8,
-    module_len: u32,
-    name_len: u32,
     name_ptr: [*]const u8,
+    module_len: u16,
+    name_len: u16,
 
-    pub fn init(module_bytes: []const u8, name_bytes: []const u8) Name {
+    pub fn init(module_name: wasmstint.Module.Name, value_name: wasmstint.Module.Name) Name {
         return .{
-            .module_ptr = module_bytes.ptr,
-            .module_len = @intCast(module_bytes.len),
-            .name_ptr = name_bytes.ptr,
-            .name_len = @intCast(name_bytes.len),
+            .module_ptr = module_name.ptr,
+            .module_len = module_name.len,
+            .name_ptr = value_name.ptr,
+            .name_len = value_name.len,
         };
     }
 
-    fn module(self: *const Name) []const u8 {
-        return self.module_ptr[0..self.module_len];
+    fn module(self: *const Name) wasmstint.Module.Name {
+        return .{ .ptr = self.module_ptr, .len = self.module_len };
     }
 
-    fn name(self: *const Name) []const u8 {
-        return self.name_ptr[0..self.name_len];
+    fn name(self: *const Name) wasmstint.Module.Name {
+        return .{ .ptr = self.name_ptr, .len = self.name_len };
     }
 };
 
@@ -141,22 +141,22 @@ const globals = struct {
     // Spectests expect these exact values
     const @"i32" = wasmstint.runtime.GlobalAddr{
         .global_type = .{ .mut = .@"const", .val_type = .i32 },
-        .value = @constCast(@ptrCast(&@as(i32, 666))),
+        .value = @ptrCast(@constCast(&@as(i32, 666))),
     };
 
     const @"i64" = wasmstint.runtime.GlobalAddr{
         .global_type = .{ .mut = .@"const", .val_type = .i64 },
-        .value = @constCast(@ptrCast(&@as(i64, 666))),
+        .value = @ptrCast(@constCast(&@as(i64, 666))),
     };
 
     const @"f32" = wasmstint.runtime.GlobalAddr{
         .global_type = .{ .mut = .@"const", .val_type = .f32 },
-        .value = @constCast(@ptrCast(&@as(f32, 666.6))),
+        .value = @ptrCast(@constCast(&@as(f32, 666.6))),
     };
 
     const @"f64" = wasmstint.runtime.GlobalAddr{
         .global_type = .{ .mut = .@"const", .val_type = .f64 },
-        .value = @constCast(@ptrCast(&@as(f64, 666.6))),
+        .value = @ptrCast(@constCast(&@as(f64, 666.6))),
     };
 
     const names = [4][]const u8{ "i32", "i64", "f32", "f64" };
@@ -234,20 +234,17 @@ pub fn provider(host: *Imports) wasmstint.runtime.ImportProvider {
 
 fn resolve(
     ctx: *anyopaque,
-    module: std.unicode.Utf8View,
-    name: std.unicode.Utf8View,
+    module: wasmstint.Module.Name,
+    name: wasmstint.Module.Name,
     desc: wasmstint.runtime.ImportProvider.Desc,
 ) ?wasmstint.runtime.ExternVal {
     const host: *const Imports = @ptrCast(@alignCast(ctx));
     _ = desc;
 
-    return if (std.mem.eql(u8, "spectest", module.bytes))
-        host.lookup.get(name.bytes)
+    return if (std.mem.eql(u8, "spectest", module.bytes()))
+        host.lookup.get(name.bytes())
     else
-        host.registered.getContext(
-            Name.init(module.bytes, name.bytes),
-            host.registered_context,
-        );
+        host.registered.getContext(Name.init(module, name), host.registered_context);
 }
 
 const std = @import("std");

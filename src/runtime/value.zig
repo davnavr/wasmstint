@@ -36,13 +36,13 @@ pub const GlobalAddr = extern struct {
             inline .i32, .f32, .i64, .f64 => |num| {
                 try writer.print(
                     "(" ++ @tagName(num) ++ ".const {})",
-                    .{@as(*const Pointee(num), @alignCast(@ptrCast(global.value)))},
+                    .{@as(*const Pointee(num), @ptrCast(@alignCast(global.value)))},
                 );
             },
             inline .funcref, .externref => |ref| {
                 try writer.print(
                     "{f}",
-                    .{@as(*const Pointee(ref), @alignCast(@ptrCast(global.value)))},
+                    .{@as(*const Pointee(ref), @ptrCast(@alignCast(global.value)))},
                 );
             },
             .v128 => unreachable,
@@ -102,7 +102,7 @@ pub const FuncAddr = extern struct {
                     for (module.exports()) |exp| {
                         const desc = exp.descIdx();
                         if (desc == .func and desc.func == wasm.idx) {
-                            try writer.print(" (export \"{s}\")", .{exp.name(module).bytes});
+                            try writer.print(" (export {f})", .{exp.name(module)});
                         }
                     }
 

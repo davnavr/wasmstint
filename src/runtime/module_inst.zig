@@ -236,7 +236,7 @@ pub const ModuleInst = packed struct(usize) {
         const instance = inst.header();
 
         for (instance.module.exports()) |*exp| {
-            if (!std.mem.eql(u8, name, exp.name(instance.module).bytes))
+            if (!std.mem.eql(u8, name, exp.name(instance.module).bytes()))
                 continue;
 
             return inst.exportVal(exp);
@@ -252,7 +252,7 @@ pub const ModuleInst = packed struct(usize) {
         len: u32,
 
         pub const Export = struct {
-            name: []const u8,
+            name: Module.Name,
             val: ExternVal,
         };
 
@@ -261,7 +261,7 @@ pub const ModuleInst = packed struct(usize) {
             const exp = &module.exports()[i];
             return .{
                 .val = self.inst.exportVal(exp),
-                .name = exp.name(module).bytes,
+                .name = exp.name(module),
             };
         }
     };
