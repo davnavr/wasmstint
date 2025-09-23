@@ -1107,7 +1107,10 @@ pub const Trap = struct {
             @"table.get": Access,
             @"table.set": Access,
 
-            pub const Access = struct { index: u32, maximum: u32 };
+            pub const Access = struct {
+                index: u32,
+                maximum: u32,
+            };
         };
 
         pub fn init(table: Module.TableIdx, cause: Cause) TableAccessOutOfBounds {
@@ -1115,10 +1118,10 @@ pub const Trap = struct {
         }
     };
 
+    pub const IndirectCallToNull = struct { index: u32 };
+
     pub const Information = union {
-        indirect_call_to_null: struct {
-            index: usize,
-        },
+        indirect_call_to_null: IndirectCallToNull,
         lazy_validation_failure: struct {
             function: Module.FuncIdx,
         },

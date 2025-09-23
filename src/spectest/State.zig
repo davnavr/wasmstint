@@ -842,6 +842,7 @@ fn failInterpreterResults(
 /// Recreates a spec test interpreter trap message
 const TrapMessage = union(enum) {
     string: [:0]const u8,
+    indirect_call_to_null: *const Interpreter.Trap.IndirectCallToNull,
     memory_access_out_of_bounds: *const Interpreter.Trap.MemoryAccessOutOfBounds,
     table_access_out_of_bounds: *const Interpreter.Trap.TableAccessOutOfBounds,
 
@@ -857,7 +858,9 @@ const TrapMessage = union(enum) {
             .table_access_out_of_bounds => .{
                 .table_access_out_of_bounds = &trap.information.table_access_out_of_bounds,
             },
-            .indirect_call_to_null => .{ .string = "uninitialized table element" },
+            .indirect_call_to_null => .{
+                .indirect_call_to_null = &trap.information.indirect_call_to_null,
+            },
             // .indirect_call_signature_mismatch
             else => |bad| std.debug.panic("TODO: trap message recreation for {t}", .{bad}),
         };
@@ -894,6 +897,9 @@ const TrapMessage = union(enum) {
                     ),
                     inline else => |_, tag| try writer.print("{t} out of bounds", .{tag}),
                 }
+            },
+            .indirect_call_to_null => |call_info| {
+                try writer.print("uninitialized element {}", .{call_info.index});
             },
         }
     }
