@@ -1120,8 +1120,14 @@ pub const Trap = struct {
 
     pub const IndirectCallToNull = struct { index: u32 };
 
+    pub const IndirectCallSignatureMismatch = struct {
+        expected: *const Module.FuncType,
+        actual: *const Module.FuncType,
+    };
+
     pub const Information = union {
         indirect_call_to_null: IndirectCallToNull,
+        indirect_call_signature_mismatch: IndirectCallSignatureMismatch,
         lazy_validation_failure: struct {
             function: Module.FuncIdx,
         },
@@ -4271,7 +4277,8 @@ const opcode_handlers = struct {
             );
         };
 
-        if (!expected_signature.matches(callee.signature())) {
+        const actual_signature = callee.signature();
+        if (!expected_signature.matches(actual_signature)) {
             @branchHint(.unlikely);
             return .trap(
                 i,
@@ -4279,7 +4286,10 @@ const opcode_handlers = struct {
                 .init(stp),
                 interp,
                 state,
-                .init(.indirect_call_signature_mismatch, {}),
+                .init(
+                    .indirect_call_signature_mismatch,
+                    .{ .expected = expected_signature, .actual = actual_signature },
+                ),
             );
         }
 

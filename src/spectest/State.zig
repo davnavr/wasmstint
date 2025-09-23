@@ -848,6 +848,7 @@ const TrapMessage = union(enum) {
     indirect_call_to_null: *const Interpreter.Trap.IndirectCallToNull,
     memory_access_out_of_bounds: *const Interpreter.Trap.MemoryAccessOutOfBounds,
     table_access_out_of_bounds: *const Interpreter.Trap.TableAccessOutOfBounds,
+    indirect_call_signature_mismatch: *const Interpreter.Trap.IndirectCallSignatureMismatch,
 
     fn init(trap: *const Interpreter.Trap) TrapMessage {
         return switch (trap.code) {
@@ -864,7 +865,10 @@ const TrapMessage = union(enum) {
             .indirect_call_to_null => .{
                 .indirect_call_to_null = &trap.information.indirect_call_to_null,
             },
-            // .indirect_call_signature_mismatch
+            .indirect_call_signature_mismatch => .{
+                .indirect_call_signature_mismatch = &trap.information
+                    .indirect_call_signature_mismatch,
+            },
             else => |bad| std.debug.panic("TODO: trap message recreation for {t}", .{bad}),
         };
     }
@@ -903,6 +907,17 @@ const TrapMessage = union(enum) {
             },
             .indirect_call_to_null => |call_info| {
                 try writer.print("uninitialized element {}", .{call_info.index});
+            },
+            .indirect_call_signature_mismatch => |mismatch| {
+                try writer.writeAll("indirect call type mismatch, expected (func");
+                if (mismatch.expected.param_count > 0 or mismatch.expected.result_count > 0) {
+                    try writer.print(" {f}", .{mismatch.expected});
+                }
+                try writer.writeAll(") got (func");
+                if (mismatch.actual.param_count > 0 or mismatch.actual.result_count > 0) {
+                    try writer.print(" {f}", .{mismatch.actual});
+                }
+                try writer.writeByte(')');
             },
         }
     }
