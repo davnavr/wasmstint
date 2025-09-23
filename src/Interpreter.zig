@@ -352,6 +352,8 @@ pub const StackFrame = extern struct {
             @as([*]align(@sizeOf(Value)) const Value, @ptrCast(frame)) - stack.base,
         );
         const value_stack_base = frame.valueStackBase();
+        std.debug.assert(@intFromPtr(value_stack_base) <= @intFromPtr(values_end));
+
         const locals = frame.localValues(stack.allocatedSlice()[0..frame_offset]);
         const frame_function = frame.function.expanded();
         switch (frame_function) {
@@ -363,28 +365,39 @@ pub const StackFrame = extern struct {
             .host => {},
         }
 
+        const locals_and_frame: []align(@sizeOf(Value)) const Value =
+            locals.ptr[0 .. locals.len + StackFrame.size_in_values];
+
+        const value_stack: []align(@sizeOf(Value)) const Value =
+            value_stack_base[0 .. values_end - value_stack_base];
+
         // std.debug.print(
-        //     "Calculating hash for frame {f} {*} {} with {} locals\n",
+        //     "Calculating hash for frame {f} {*} {} {?}" ++
+        //         "with {} locals {*}..{*} & {} value stack {*}..{*}\n",
         //     .{
         //         frame.function,
         //         frame,
         //         frame.*,
+        //         if (frame.function.expanded() == .wasm) frame.wasmFrame().* else null,
         //         locals.len,
+        //         locals.ptr,
+        //         locals_and_frame.ptr + locals_and_frame.len,
+        //         value_stack.len,
+        //         value_stack_base,
+        //         values_end,
         //     },
         // );
 
         // Fowler-Noll-Vo is designed for both hashing AND checksums.
         var hasher = std.hash.Fnv1a_128.init();
-        hasher.update(
-            std.mem.sliceAsBytes(locals.ptr[0 .. locals.len + StackFrame.size_in_values]),
-        );
+        hasher.update(std.mem.sliceAsBytes(locals_and_frame));
 
         // exclude most of `WasmFrame` from the hash
         if (frame_function == .wasm) {
             std.hash.autoHashStrat(&hasher, frame.wasmFrame().eip, .Shallow);
         }
 
-        hasher.update(std.mem.sliceAsBytes(value_stack_base[0 .. values_end - value_stack_base]));
+        hasher.update(std.mem.sliceAsBytes(value_stack));
 
         const final = hasher.final();
         // std.debug.print("HASH RESULT = {X}\n", .{final});
@@ -834,6 +847,7 @@ pub const StackWalker = struct {
         const interp = initial_walker.interpreter;
         var walker = initial_walker;
         const n = walker.remaining;
+        // TODO: Need to print in reverse, value stack first, then wasm, then frame, then locals
         while (walker.currentFrame()) |frame| {
             defer _ = walker.next();
             const function = frame.function.expanded();
@@ -920,8 +934,24 @@ pub const StackWalker = struct {
                     },
                 );
 
-                const value_stack = frame
-                    .valueStackBase()[0..(walker.stack_top - frame.valueStackBase())];
+                const value_stack_base = frame.valueStackBase();
+                std.debug.assert(@intFromPtr(value_stack_base) <= @intFromPtr(walker.stack_top));
+                const value_stack: []align(@sizeOf(Value)) const Value =
+                    value_stack_base[0..(walker.stack_top - value_stack_base)];
+
+                const expected_values_len = function.wasm.code().inner.max_values;
+                if (builtin.mode == .Debug and value_stack.len > expected_values_len) {
+                    std.debug.panic(
+                        "expected {} values, but value stack has {}",
+                        .{ expected_values_len, value_stack.len },
+                    );
+                }
+
+                std.debug.assert(@intFromPtr(interp.stack.base) <= @intFromPtr(value_stack.ptr));
+                std.debug.assert( // value stack OOB past capacity
+                    @intFromPtr(value_stack.ptr + value_stack.len) <=
+                        @intFromPtr(interp.stack.base + interp.stack.cap),
+                );
 
                 for (value_stack, 0..) |*value, i| {
                     try writer.print(
@@ -2593,18 +2623,18 @@ fn returnFromWasm(
     if (builtin.mode == .Debug) {
         const expected_checksum = popped.checksum;
         const actual_checksum = if (interp.call_depth > 0)
-            caller_frame.?.calculateChecksum(&interp.stack, @ptrCast(popped))
+            caller_frame.?.calculateChecksum(&interp.stack, result_dst.ptr)
         else
             0;
 
         if (expected_checksum != actual_checksum) {
-            std.debug.panic(
-                "bad checksum for {f}\nexpected: {X:0>32}\nactual:   {X:0>32}\nstack trace:\n{f}",
+            std.debug.panic( // bad checksum
+                "bad checksum for {f}\nexpected: {X:0>32}\nactual:   {X:0>32}\n", // stack trace:\n{f}
                 .{
                     popped.function,
                     expected_checksum,
                     actual_checksum,
-                    std.fmt.alt(StackWalker.capture(interp, old_sp.ptr), .formatDebug),
+                    // std.fmt.alt(StackWalker.capture(interp, old_sp.ptr), .formatDebug),
                 },
             );
         }
@@ -2692,6 +2722,14 @@ inline fn invokeWithinWasm(
 
     var new_vals = old_vals;
 
+    // std.debug.print(
+    //     "BEFORE CALL {*}\n{f}",
+    //     .{
+    //         old_vals.stack.ptr,
+    //         std.fmt.alt(StackWalker.capture(interp, old_vals.stack.ptr), .formatDebug),
+    //     },
+    // );
+
     // std.debug.print("WASM {f} WANTS TO CALL {f}\n", .{ current_frame.function, callee });
 
     const new_frame = setup: {
@@ -2741,6 +2779,14 @@ inline fn invokeWithinWasm(
 
     switch (callee.expanded()) {
         .wasm => |wasm| {
+            // std.debug.print(
+            //     "AFTER CALL {*}\n{f}",
+            //     .{
+            //         new_vals.stack.ptr,
+            //         std.fmt.alt(StackWalker.capture(interp, new_vals.stack.ptr), .formatDebug),
+            //     },
+            // );
+
             const new_wasm_frame: *align(@sizeOf(Value)) StackFrame.Wasm =
                 new_frame.frame.wasmFrame();
 
