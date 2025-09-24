@@ -365,14 +365,13 @@ const ValStack = struct {
 
     fn popAny(val_stack: *ValStack, ctrl_stack: *const CtrlStack, diag: Diagnostics) !Val {
         const current_frame: *const CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
-        if (val_stack.len() == current_frame.info.height) {
-            return if (current_frame.info.@"unreachable")
+        return if (val_stack.len() == current_frame.info.height)
+            if (current_frame.info.@"unreachable")
                 Val.unknown
             else
-                errorValueStackUnderflow(current_frame.info.height, diag);
-        }
-
-        return val_stack.buf.pop().?;
+                errorValueStackUnderflow(current_frame.info.height, diag)
+        else
+            val_stack.buf.pop().?;
     }
 
     fn popExpecting(
@@ -1498,7 +1497,20 @@ pub fn rawValidate(
             .drop => _ = try val_stack.popAny(&ctrl_stack, diag),
             .select => {
                 try val_stack.popExpecting(&ctrl_stack, .i32, diag);
-                const t_1: Val = try val_stack.popAny(&ctrl_stack, diag);
+
+                const current_frame: *const CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
+                if (val_stack.len() == current_frame.info.height and
+                    !current_frame.info.@"unreachable")
+                {
+                    return diag.print(
+                        .validation,
+                        "type mismatch or invalid result arity: value stack underflows at height {}",
+                        .{current_frame.info.height},
+                    );
+                }
+
+                const t_1: Val = val_stack.popAny(&ctrl_stack, diag) catch
+                    unreachable; // check occurs above
                 const t_2: Val = try val_stack.popAny(&ctrl_stack, diag);
 
                 const both_num_types = isNumVal(t_1) and isNumVal(t_2);
