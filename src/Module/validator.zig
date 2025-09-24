@@ -507,19 +507,31 @@ fn readTableIdx(reader: *Reader, module: Module, diag: Diagnostics) !ValType {
     return module.tableTypes()[@intFromEnum(idx)].elem_type;
 }
 
-fn readDataIdx(reader: *Reader, module: Module, diag: Diagnostics) !void {
-    _ = try reader.readIdx(
-        Module.DataIdx,
-        module.inner.raw.datas_count,
-        diag,
-        &.{ "data segment", "in code" },
-    );
+const ReadDataIdx = struct {
+    idx: u32,
 
-    // spec first checks OOB index
-    if (!module.inner.raw.has_data_count_section) {
-        return diag.writeAll(.parse, "data count section required");
+    fn begin(reader: *Reader, diag: Diagnostics) !ReadDataIdx {
+        return .{
+            .idx = try reader.readUleb128Casted(
+                u32,
+                @typeInfo(Module.DataIdx).@"enum".tag_type,
+                diag,
+                "data segment index",
+            ),
+        };
     }
-}
+
+    fn boundsCheck(self: ReadDataIdx, module: Module, diag: Diagnostics) !void {
+        // spec first checks OOB index
+        if (self.idx >= module.inner.raw.datas_count) {
+            return diag.print(.validation, "unknown data segment {}, in code", .{self.idx});
+        }
+
+        if (!module.inner.raw.has_data_count_section) {
+            return diag.writeAll(.parse, "data count section required");
+        }
+    }
+};
 
 fn readElemIdx(reader: *Reader, module: Module, diag: Diagnostics) !ValType {
     const idx = try reader.readIdx(
@@ -591,8 +603,6 @@ const Label = struct {
         return Label.init(depth, ctrl_stack, current_height, module, diag);
     }
 };
-
-//fn readDataIdx(module: Module) // TODO: Check data count sec value
 
 fn pushCtrlFrame(
     arena: *ArenaAllocator,
@@ -2031,11 +2041,14 @@ pub fn rawValidate(
                 => try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f64, .i64, diag),
 
                 .@"memory.init" => {
-                    try readDataIdx(&reader, module, diag);
+                    const data_idx = try ReadDataIdx.begin(&reader, diag);
                     try readMemIdx(&reader, module, diag);
+                    try data_idx.boundsCheck(module, diag);
                     try val_stack.popManyExpecting(&ctrl_stack, &[_]ValType{.i32} ** 3, diag);
                 },
-                .@"data.drop" => try readDataIdx(&reader, module, diag),
+                .@"data.drop" => {
+                    try (try ReadDataIdx.begin(&reader, diag)).boundsCheck(module, diag);
+                },
                 .@"memory.copy" => {
                     try readMemIdx(&reader, module, diag);
                     try readMemIdx(&reader, module, diag);
