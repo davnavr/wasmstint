@@ -631,8 +631,11 @@ fn popCtrlFrame(
         return diag.writeAll(.validation, "control stack underflow");
     }
 
-    const frame = ctrl_stack.at(ctrl_stack.len - 1).*;
-    try val_stack.popManyExpecting(ctrl_stack, frame.types.funcType(module).results(), diag);
+    const frame: CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1).*;
+    const result_types = frame.types.funcType(module).results();
+    // std.debug.print("processing {t} {any}\n", .{ frame.info.opcode, result_types });
+
+    try val_stack.popManyExpecting(ctrl_stack, result_types, diag);
     if (val_stack.len() != frame.info.height) {
         return diag.print(
             .validation,
@@ -1148,7 +1151,7 @@ pub fn rawValidate(
         const opcode_tag = std.meta.intToEnum(opcodes.ByteOpcode, opcode_byte) catch
             return diag.print(.parse, "illegal opcode 0x{X:0>2}", .{opcode_byte});
 
-        // std.debug.print("validate: {}\n", .{opcode_tag });
+        // std.debug.print("validate: {} 0x{X:0>2}\n", .{ opcode_tag, opcode_byte });
         switch (opcode_tag) {
             .@"unreachable" => markUnreachable(&val_stack, &ctrl_stack),
             .nop => {},
@@ -1280,6 +1283,7 @@ pub fn rawValidate(
                 }
             },
             .end => {
+                // std.debug.print("PROCESSING END\n", .{});
                 const frame = try popCtrlFrame(&ctrl_stack, &val_stack, module, diag);
 
                 // TODO: Skip branch fixup processing for unreachable code.
@@ -1300,11 +1304,18 @@ pub fn rawValidate(
                     if (builtin.mode == .Debug) frame.offset,
                 );
 
+                const frame_types = frame.types.funcType(module);
+                const result_types = frame_types.results();
                 if (frame.info.opcode == .@"if") {
+                    // Check that param types satisfy the results
+                    try val_stack.pushMany(scratch, frame_types.parameters());
+                    try val_stack.popManyExpecting(&ctrl_stack, result_types, diag);
+
+                    // No `else` branch exists, so there are no fixups for it
                     try side_table.popAndResolveAlternate(instr_offset);
                 }
 
-                try val_stack.pushMany(scratch, frame.types.funcType(module).results());
+                try val_stack.pushMany(scratch, result_types);
             },
             .br => {
                 const label = try Label.read(
