@@ -1974,7 +1974,7 @@ fn parseElemSec(
 
         const ElemKind = enum(u8) { funcref = 0x00 };
 
-        if (tag.kind == .active) {
+        const expected_ref_type = if (tag.kind == .active) active: {
             const table_idx: TableIdx = if (tag.bit_1.active_has_table_idx)
                 try elems_reader.readIdx(
                     TableIdx,
@@ -2017,9 +2017,12 @@ fn parseElemSec(
                     },
                 },
             );
-        } else {
+
+            break :active import_sec.types.tables[@intFromEnum(table_idx)].elem_type;
+        } else passive: {
             // TODO: maybe keep a list of passive segments too?
-        }
+            break :passive null;
+        };
 
         // std.debug.dumpHex(elems_reader.bytes.*);
 
@@ -2070,6 +2073,16 @@ fn parseElemSec(
                 "malformed reference type {t} in element segment",
                 .{ref_type},
             );
+        }
+
+        if (expected_ref_type) |expected_ty| {
+            if (!expected_ty.eql(ref_type)) {
+                return diag.print(
+                    .validation,
+                    "type mismatch at elem segment: got {t}, expected {t}",
+                    .{ ref_type, expected_ty },
+                );
+            }
         }
 
         const expr_count = try elems_reader.readUleb128(
