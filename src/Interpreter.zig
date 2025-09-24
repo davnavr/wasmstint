@@ -410,7 +410,7 @@ const Version = packed struct {
     const enabled = builtin.mode == .Debug;
 
     number: if (enabled) u32 else void =
-        if (enabled) 0 else void,
+        if (enabled) 0 else {},
 
     fn increment(ver: *Version) void {
         if (enabled) {
