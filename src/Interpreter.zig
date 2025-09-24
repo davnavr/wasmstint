@@ -591,7 +591,10 @@ const Stack = struct {
 
         const old_stack_top = stack.base + stack.len;
 
-        // std.debug.print("PUSHING STACK FRAME FOR {f}\n", .{callee});
+        // std.debug.print(
+        //     "PUSHING STACK FRAME FOR {f} (size = {})\n",
+        //     .{ callee, frame_info.allocated_size },
+        // );
 
         const prev_frame_ptr: ?*align(@sizeOf(Value)) StackFrame = stack.stackFrame(prev_frame);
         const prev_frame_hash = if (prev_frame_ptr) |prev|
@@ -1751,6 +1754,7 @@ pub const State = union(enum) {
     pub const CallStackExhaustion = struct {
         callee: runtime.FuncAddr,
         interpreter: Wrapper,
+        restorable_sp: RestorableSp,
 
         pub fn resumeExecution(
             self: CallStackExhaustion,
@@ -1758,6 +1762,8 @@ pub const State = union(enum) {
             fuel: *Fuel,
         ) error{OutOfMemory}!State {
             const interp: *Interpreter = self.interpreter.get();
+            self.restorable_sp.restore(interp);
+
             const saved_stack_len = interp.stack.len;
             _ = try interp.stack.reserveStackFrame(alloca, .preallocated, self.callee);
             errdefer comptime unreachable;
@@ -2093,9 +2099,7 @@ const ValStack = extern struct {
         std.debug.assert(
             @intFromPtr(stack.ptr) <= @intFromPtr(interp.stack.base + interp.stack.cap),
         );
-        return .{
-            .stack = stack,
-        };
+        return .{ .stack = stack };
     }
 
     fn top(
@@ -2335,8 +2339,8 @@ const StateTransition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version
         updateWasmFrameState(wasm_frame, instr, stp);
 
         std.debug.assert(@intFromPtr(interp.stack.base) <= @intFromPtr(vals.stack.ptr));
-        std.debug.assert(
-            @intFromPtr(vals.stack.ptr) < @intFromPtr(interp.stack.base + interp.stack.cap),
+        std.debug.assert( // val stack OOB past cap
+            @intFromPtr(vals.stack.ptr) <= @intFromPtr(interp.stack.base + interp.stack.cap),
         );
         interp.stack.len = @intCast(vals.stack.ptr - interp.stack.base);
         std.debug.assert(interp.stack.len <= interp.stack.cap);
@@ -2406,16 +2410,29 @@ const StateTransition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version
     fn callStackExhaustion(
         call_ip: Ip,
         eip: Eip,
-        vals: ValStack,
+        restorable_sp: RestorableSp,
         stp: SideTable,
         interp: *Interpreter,
         state: *State,
         callee: runtime.FuncAddr,
     ) StateTransition {
-        const serialized = serializeStackFrame(.init(call_ip, eip), vals, stp, interp);
+        const serialized = serializeStackFrame(
+            .init(call_ip, eip),
+            .init(restorable_sp.stack, interp),
+            stp,
+            interp,
+        );
         interp.version.increment();
 
-        state.* = .{ .call_stack_exhaustion = .{ .callee = callee, .interpreter = .init(interp) } };
+        interp.stack.len = @intCast(restorable_sp.stack.ptr - interp.stack.base);
+        state.* = .{
+            .call_stack_exhaustion = .{
+                .callee = callee,
+                .interpreter = .init(interp),
+                .restorable_sp = restorable_sp,
+            },
+        };
+        restorable_sp.checkIntegrity(interp);
         return .{ .version = interp.version, .serialize_token = serialized };
     }
 };
@@ -2600,6 +2617,24 @@ const Instr = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
+        if (builtin.mode == .Debug) {
+            const current_frame: *align(@sizeOf(Value)) const StackFrame = interp.currentFrame().?;
+            const max_val_stack = current_frame.function.expanded().wasm.code().inner.max_values;
+            const val_stack_limit = current_frame.valueStackBase() + max_val_stack;
+            // std.debug.print("SP = {*} < MAX = {*}\n", .{ vals.stack.ptr, val_stack_limit });
+            if (@intFromPtr(vals.stack.ptr) > @intFromPtr(val_stack_limit)) {
+                std.debug.panic(
+                    "value stack {*} cannot exceed {*}, function has maximum of {} but sp is {}",
+                    .{
+                        vals.stack.ptr,
+                        val_stack_limit,
+                        max_val_stack,
+                        vals.stack.ptr - current_frame.valueStackBase(),
+                    },
+                );
+            }
+        }
+
         var i = reader;
         const handler = i.readNextOpcodeHandler(fuel, locals, interp, module);
         // std.debug.print("DISP {*}, ip={X}\n", .{ module.inner, @intFromPtr(reader.next) });
@@ -2750,8 +2785,97 @@ fn returnFromWasm(
     return .awaitingHost(vals, interp, state, popped_signature);
 }
 
-/// Continues execution of WASM code up to calling the `target_function`, with arguments expected
-/// to be on top of the value stack.
+const RestorableSp = struct {
+    const has_checksum = builtin.mode == .Debug;
+
+    stack: Sp,
+    count: u32,
+    checksum: if (has_checksum) std.hash.Fnv1a_64 else void,
+
+    fn init(sp: Sp) RestorableSp {
+        return .{
+            .stack = sp,
+            .count = 0,
+            .checksum = if (has_checksum) .init(),
+        };
+    }
+
+    fn updateChecksumState(
+        state: *std.hash.Fnv1a_64,
+        values: []align(@sizeOf(Value)) const Value,
+    ) void {
+        for (0..values.len) |r| {
+            state.update(std.mem.asBytes(&values[values.len - r - 1]));
+        }
+    }
+
+    fn poppedValues(
+        state: *const RestorableSp,
+        interp: *const Interpreter,
+    ) []align(@sizeOf(Value)) const Value {
+        const popped: []align(@sizeOf(Value)) const Value =
+            (state.stack.ptr - state.count)[0..state.count];
+
+        std.debug.assert(@intFromPtr(interp.stack.base) <= @intFromPtr(popped.ptr));
+        std.debug.assert( // OOB past end of stack
+            @intFromPtr(popped.ptr + popped.len) <=
+                @intFromPtr(interp.stack.base + interp.stack.cap),
+        );
+        return popped;
+    }
+
+    fn popSlice(
+        state: *RestorableSp,
+        stack: *ValStack,
+        interp: *const Interpreter,
+        count: u32,
+    ) []align(@sizeOf(Value)) const Value {
+        std.debug.assert(@intFromPtr(state.stack.ptr) == @intFromPtr(stack.stack.ptr + state.count));
+        const popped: []align(@sizeOf(Value)) const Value = stack.popSlice(interp, count);
+        if (has_checksum) {
+            updateChecksumState(&state.checksum, popped);
+        }
+        state.count += count;
+        std.debug.assert(@intFromPtr(state.stack.ptr - state.count) == @intFromPtr(popped.ptr));
+        return popped;
+    }
+
+    fn popArray(
+        state: *RestorableSp,
+        stack: *ValStack,
+        interp: *const Interpreter,
+        comptime count: u32,
+    ) []align(@sizeOf(Value)) const Value {
+        return state.popSlice(stack, interp, count)[0..count];
+    }
+
+    fn checkIntegrity(state: *const RestorableSp, interp: *const Interpreter) void {
+        if (comptime !has_checksum) {
+            return;
+        }
+
+        var hasher: std.hash.Fnv1a_64 = @FieldType(RestorableSp, "checksum").init();
+        updateChecksumState(&hasher, state.poppedValues(interp));
+        const actual_checksum = hasher.final();
+
+        var expected_checksum_state = state.checksum;
+        const expected_checksum = expected_checksum_state.final();
+        if (actual_checksum != expected_checksum) {
+            std.debug.panic( // bad restored SP checksum
+                "bad restored SP checksum!\nexpected: {X:0>16}\n  actual: {X:0>16}",
+                .{ expected_checksum, actual_checksum },
+            );
+        }
+    }
+
+    fn restore(state: *const RestorableSp, interp: *Interpreter) void {
+        state.checkIntegrity(interp);
+        interp.stack.len = @intCast(state.stack.ptr - interp.stack.base);
+    }
+};
+
+/// Attempts to allocate a stack frame for the `target_function`, with arguments expected to be on
+/// top of the value stack, and then resumes execution.
 ///
 /// To ensure the interpreter cannot overflow the stack, opcode handlers must ensure this function
 /// is called inline.
@@ -2760,6 +2884,8 @@ fn returnFromWasm(
 /// `call_ip`, which is a pointer to the call instruction to restart.
 inline fn invokeWithinWasm(
     old_i: Instr,
+    /// Used if a `.call_stack_exhausted` interrupt occurred.
+    restorable_sp: RestorableSp,
     old_vals: ValStack,
     fuel: *Fuel,
     old_stp: SideTable,
@@ -2776,7 +2902,7 @@ inline fn invokeWithinWasm(
 
     if (interp.call_depth == std.math.maxInt(@FieldType(Interpreter, "call_depth"))) {
         @branchHint(.cold);
-        return .callStackExhaustion(call_ip, old_i.end, old_vals, old_stp, interp, state, callee);
+        return .callStackExhaustion(call_ip, old_i.end, restorable_sp, old_stp, interp, state, callee);
     }
 
     const current_frame: *align(@sizeOf(Value)) StackFrame = interp.currentFrame().?;
@@ -2787,39 +2913,38 @@ inline fn invokeWithinWasm(
     var new_vals = old_vals;
 
     // std.debug.print(
-    //     "BEFORE CALL {*}\n{f}",
-    //     .{
-    //         old_vals.stack.ptr,
-    //         std.fmt.alt(StackWalker.capture(interp, old_vals.stack.ptr), .formatDebug),
-    //     },
+    //     "WASM {f} WANTS TO CALL {f} (current depth = {})\n",
+    //     .{ current_frame.function, callee, interp.call_depth },
     // );
 
-    // std.debug.print("WASM {f} WANTS TO CALL {f}\n", .{ current_frame.function, callee });
+    interp.stack.len = @intCast(new_vals.stack.ptr - interp.stack.base);
+    std.debug.assert(interp.stack.len <= interp.stack.cap);
+    const new_frame = interp.stack.pushStackFrameWithinCapacity(
+        interp.current_frame,
+        &interp.dummy_instantiate_flag,
+        .preallocated,
+        callee,
+    ) catch |e| switch (e) {
+        error.OutOfMemory => {
+            // std.debug.print(
+            //     "WASM CALL EXHAUSTED STACK (depth = {}, ver = {})\n",
+            //     .{ interp.call_depth, interp.version.number },
+            // );
 
-    const new_frame = setup: {
-        interp.stack.len = @intCast(new_vals.stack.ptr - interp.stack.base);
-        std.debug.assert(interp.stack.len <= interp.stack.cap);
-
-        defer new_vals.stack.ptr = interp.stack.base + interp.stack.len;
-
-        break :setup interp.stack.pushStackFrameWithinCapacity(
-            interp.current_frame,
-            &interp.dummy_instantiate_flag,
-            .preallocated,
-            callee,
-        ) catch |e| switch (e) {
-            error.OutOfMemory => return .callStackExhaustion(
+            return .callStackExhaustion(
                 call_ip,
                 old_i.end,
-                old_vals,
+                restorable_sp,
                 old_stp,
                 interp,
                 state,
                 callee,
-            ),
-            error.ValidationNeeded => @panic("TODO: awaiting_validation"),
-        };
+            );
+        },
+        error.ValidationNeeded => @panic("TODO: awaiting_validation"),
     };
+
+    new_vals.stack.ptr = interp.stack.base + interp.stack.len;
 
     // std.debug.print(
     //     "CALLING {f} @ {*} (was called by {f})\n",
@@ -2844,11 +2969,8 @@ inline fn invokeWithinWasm(
     switch (callee.expanded()) {
         .wasm => |wasm| {
             // std.debug.print(
-            //     "AFTER CALL {*}\n{f}",
-            //     .{
-            //         new_vals.stack.ptr,
-            //         std.fmt.alt(StackWalker.capture(interp, new_vals.stack.ptr), .formatDebug),
-            //     },
+            //     "AFTER CALL sp={*}\n",
+            //     .{new_vals.stack.ptr},
             // );
 
             const new_wasm_frame: *align(@sizeOf(Value)) StackFrame.Wasm =
@@ -2864,7 +2986,10 @@ inline fn invokeWithinWasm(
                 wasm.module,
             );
         },
-        .host => |host| return .awaitingHost(new_vals, interp, state, &host.func.signature),
+        .host => |host| {
+            // std.debug.print("GOING TO AWAIT HOST TRANSITION\n", .{});
+            return .awaitingHost(new_vals, interp, state, &host.func.signature);
+        },
     }
 }
 
@@ -4235,6 +4360,7 @@ const opcode_handlers = struct {
         const callee = module.header().funcAddr(func_idx);
         return invokeWithinWasm(
             i,
+            .init(sp),
             .init(sp, interp),
             fuel,
             .init(stp),
@@ -4261,17 +4387,23 @@ const opcode_handlers = struct {
         std.debug.assert(call_ip[0] == @intFromEnum(opcodes.ByteOpcode.call_indirect));
 
         var i = Instr.init(ip, eip);
+        var restorable_sp = RestorableSp.init(sp);
         var vals = ValStack.init(sp, interp);
 
         const current_module = module.header();
         const expected_signature = i.readIdx(Module.TypeIdx).funcType(current_module.module);
         const table_idx = i.readIdx(Module.TableIdx);
 
-        const elem_index: u32 = @bitCast(vals.popTyped(interp, &.{.i32}).@"0");
+        const elem_index: u32 = @bitCast(restorable_sp.popArray(&vals, interp, 1)[0].i32);
 
         const table_addr = current_module.tableAddr(table_idx);
         std.debug.assert(table_addr.elem_type == .funcref);
         const table = table_addr.table;
+
+        // std.debug.print(
+        //     " > call_indirect (i32.const {} (; @ {X} ;)) ;; table.size = {}, call depth = {}\n",
+        //     .{ elem_index, @intFromPtr(vals.stack.ptr), table.len, interp.call_depth },
+        // );
 
         if (table.len <= elem_index) {
             @branchHint(.unlikely);
@@ -4313,7 +4445,19 @@ const opcode_handlers = struct {
             );
         }
 
-        return invokeWithinWasm(i, vals, fuel, .init(stp), interp, state, call_ip, callee);
+        // std.debug.print(" - calling {f}\n - sp = {*}\n", .{ callee, vals.stack.ptr });
+
+        return invokeWithinWasm(
+            i,
+            restorable_sp,
+            vals,
+            fuel,
+            .init(stp),
+            interp,
+            state,
+            call_ip,
+            callee,
+        );
     }
 
     pub fn drop(
@@ -5404,6 +5548,8 @@ fn enterMainLoop(interp: *Interpreter, fuel: *Fuel) State {
             std.debug.panic("side table OOB: {*} > {*}", .{ wasm_frame.stp.ptr, side_table_end });
         }
     }
+
+    // std.debug.print("ENTERING MAIN LOOP (ver = {})\n", .{interp.version.number});
 
     var state: State = undefined;
     var i = Instr.init(wasm_frame.ip, wasm_frame.eip);
