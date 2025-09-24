@@ -666,7 +666,7 @@ pub const ConstExpr = union(enum) {
                 if (!expected_type.eql(ValType.i32)) {
                     return diag.print(
                         .validation,
-                        "type mismatch: expected {t}, got i32.const in {s}",
+                        "type mismatch: expected {t} but got i32.const in {s}",
                         .{ expected_type, desc },
                     );
                 }
@@ -679,7 +679,7 @@ pub const ConstExpr = union(enum) {
                 if (!expected_type.eql(ValType.f32)) {
                     return diag.print(
                         .validation,
-                        "type mismatch: expected {t}, got f32.const in {s}",
+                        "type mismatch: expected {t}, but got f32.const in {s}",
                         .{ expected_type, desc },
                     );
                 }
@@ -696,7 +696,7 @@ pub const ConstExpr = union(enum) {
                 if (!expected_type.eql(ValType.i64)) {
                     return diag.print(
                         .validation,
-                        "type mismatch: expected {t}, got i64.const in {s}",
+                        "type mismatch: expected {t}, but got i64.const in {s}",
                         .{ expected_type, desc },
                     );
                 }
@@ -709,7 +709,7 @@ pub const ConstExpr = union(enum) {
                 if (!expected_type.eql(ValType.f64)) {
                     return diag.print(
                         .validation,
-                        "type mismatch: expected {t}, got f64.const in {s}",
+                        "type mismatch: expected {t}, but got f64.const in {s}",
                         .{ expected_type, desc },
                     );
                 }
@@ -727,7 +727,7 @@ pub const ConstExpr = union(enum) {
                 if (!actual_type.isRefType()) {
                     return diag.print(
                         .validation,
-                        "type mismatch: expected reference type for ref.null, got {t} in {s}",
+                        "type mismatch: expected reference type for ref.null, but got {t} in {s}",
                         .{ actual_type, desc },
                     );
                 }
@@ -735,7 +735,7 @@ pub const ConstExpr = union(enum) {
                 if (actual_type != expected_type) {
                     return diag.print(
                         .validation,
-                        "type mismatch: expected {t}, got ref.null {t} in {s}",
+                        "type mismatch: expected {t}, but got ref.null {t} in {s}",
                         .{ expected_type, actual_type, desc },
                     );
                 }
@@ -753,7 +753,7 @@ pub const ConstExpr = union(enum) {
                 if (expected_type != .funcref) {
                     return diag.print(
                         .validation,
-                        "type mismatch: expected {t}, got ref.func in {s}",
+                        "type mismatch: expected {t}, but got ref.func in {s}",
                         .{ expected_type, desc },
                     );
                 }
@@ -776,13 +776,24 @@ pub const ConstExpr = union(enum) {
                         "type mismatch: expected global {} to have type {t}, but got {f} in {s}",
                         .{ @intFromEnum(global_idx), expected_type, actual_type, desc },
                     );
+                } else if (actual_type.mut == .@"var") {
+                    return diag.print(
+                        .validation,
+                        "constant expression required: global.get {} in {s} must be const",
+                        .{ @intFromEnum(global_idx), desc },
+                    );
+                } else {
+                    break :expr .{ .@"global.get" = global_idx };
                 }
-
-                break :expr .{ .@"global.get" = global_idx };
             },
+            .end => return diag.print(
+                .validation,
+                "type mismatch: expected {t}, but got opcode END at end of {s}",
+                .{ expected_type, desc },
+            ),
             else => return diag.print(
                 .validation,
-                "constant expression required, got opcode {t} in {s}",
+                "constant expression required: got opcode {t} in {s}",
                 .{ const_opcode, desc },
             ),
         };
@@ -798,11 +809,25 @@ pub const ConstExpr = union(enum) {
             "END opcode",
         );
         if (end_opcode != .end) {
-            return diag.print(
-                .validation,
-                "constant expression required, expected END opcode in {s}, got {t}",
-                .{ desc, end_opcode },
-            );
+            return switch (end_opcode) {
+                .@"i32.const",
+                .@"i64.const",
+                .@"f32.const",
+                .@"f64.const",
+                .@"ref.null",
+                .@"ref.func",
+                .@"global.get",
+                => diag.print(
+                    .validation,
+                    "type mismatch: expected END opcode, but got opcode {t} in {s}",
+                    .{ end_opcode, desc },
+                ),
+                else => diag.print(
+                    .validation,
+                    "constant expression required: got opcode {t} in {s}",
+                    .{ end_opcode, desc },
+                ),
+            };
         }
 
         return expr;
