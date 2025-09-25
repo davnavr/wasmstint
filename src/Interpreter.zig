@@ -3748,6 +3748,9 @@ fn floatOpcodeHandlers(comptime F: type) type {
 
             /// https://webassembly.github.io/spec/core/exec/numerics.html#op-ffloor
             fn floor(z: F) F {
+                // TODO: Consistent rounding behavior for `floor`
+                // On `x86_64-linux`, uses `vroundss $0x11`
+                // On `x86_64-windows`, uses `vroundss $0x9`
                 return @floor(z);
             }
 
