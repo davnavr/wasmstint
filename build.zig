@@ -151,6 +151,8 @@ const SpectestInterp = struct {
             run.addArgs(args);
         }
 
+        b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{}).step);
+
         return .{ .exe = exe, .run = run };
     }
 };
