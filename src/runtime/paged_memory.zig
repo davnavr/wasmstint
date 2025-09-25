@@ -61,16 +61,17 @@ pub fn map(
 
     const single_syscall = capacity == reserve;
     const allocation: []align(page_size_min) u8 = if (builtin.os.tag == .windows) win: {
+        const single_commit = if (single_syscall) windows.MEM_COMMIT else @as(windows.DWORD, 0);
         const base_addr = windows.VirtualAlloc(
             null,
             reserve,
-            windows.MEM_RESERVE | (if (single_syscall) windows.MEM_COMMIT else 0),
+            windows.MEM_RESERVE | single_commit,
             windows.PAGE_READWRITE,
         ) catch return Oom.OutOfMemory;
         errdefer windows.VirtualFree(base_addr, 0, windows.MEM_RELEASE);
 
-        if (!single_syscall) {
-            windows.VirtualAlloc(
+        if (!single_syscall and capacity > 0) {
+            _ = windows.VirtualAlloc(
                 base_addr,
                 capacity,
                 windows.MEM_COMMIT,
@@ -78,7 +79,7 @@ pub fn map(
             ) catch return Oom.OutOfMemory;
         }
 
-        break :win @as([*]align(page_size_min) u8, @alignCast(@ptrCast(base_addr)))[0..reserve];
+        break :win @as([*]align(page_size_min) u8, @ptrCast(@alignCast(base_addr)))[0..reserve];
     } else posix: {
         // see `PageAllocator.map`
         const hint = @atomicLoad(
@@ -117,7 +118,7 @@ pub fn map(
             @TypeOf(std.heap.next_mmap_addr_hint),
             &std.heap.next_mmap_addr_hint,
             hint,
-            @constCast(@alignCast(pages.ptr[pages.len..pages.len].ptr)),
+            @alignCast(@constCast(pages.ptr[pages.len..pages.len].ptr)),
             .monotonic,
             .monotonic,
         );
@@ -201,12 +202,13 @@ pub fn grow(
     );
 
     if (builtin.os.tag == .windows) {
-        windows.VirtualAlloc(
+        const base = windows.VirtualAlloc(
             @ptrCast(new_pages),
             new_pages.len,
             windows.MEM_COMMIT,
             windows.PAGE_READWRITE,
         ) catch return;
+        std.debug.assert(@intFromPtr(base) == @intFromPtr(new_pages.ptr));
     } else {
         posix.mprotect(new_pages, posix.PROT.READ | posix.PROT.WRITE) catch |e| switch (e) {
             error.OutOfMemory => return,
