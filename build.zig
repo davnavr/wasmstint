@@ -17,9 +17,17 @@ const ProjectOptions = struct {
 };
 
 const ToolPaths = struct {
-    wast2json: []const u8,
-    // cargo: []const u8,
-    // @"afl-clang-lto": []const u8,
+    wast2json: ?[]const u8,
+    // @"wasm-opt": ?[]const u8,
+    // @"wasm-reduce": []const u8,
+    // @"wasm-tools": []const u8,
+
+    fn getOrDefault(
+        paths: *const ToolPaths,
+        comptime tool: std.meta.FieldEnum(ToolPaths),
+    ) []const u8 {
+        return @field(paths, @tagName(tool)) orelse @tagName(tool);
+    }
 
     fn init(b: *Build) ToolPaths {
         var options: ToolPaths = undefined;
@@ -35,24 +43,47 @@ const ToolPaths = struct {
     }
 };
 
+const top_level_steps: []const struct { [:0]const u8, [:0]const u8 } = &.{
+    .{ "check", "Check for compilation errors" },
+    .{ "install-spectest", "Translate specification tests with wast2json" },
+    .{ "run-wast", "Run the specification test interpreter" },
+    // .{ "run-wasip1", "Run the WASI (preview 1) application interpreter" },
+    .{ "test", "Run all unit and specification tests" },
+    .{ "test-unit", "Run unit tests" },
+    .{ "test-spec", "Run specification tests" },
+};
+
+const TopLevelSteps = @Type(.{
+    .@"struct" = .{
+        .layout = .auto,
+        .is_tuple = false,
+        .decls = &.{},
+        .fields = fields: {
+            var fields: [top_level_steps.len]std.builtin.Type.StructField = undefined;
+            for (top_level_steps, &fields) |*src, *dst| {
+                dst.* = .{
+                    .name = src[0],
+                    .type = *Step,
+                    .default_value_ptr = null,
+                    .is_comptime = false,
+                    .alignment = @alignOf(*Step),
+                };
+            }
+            break :fields &fields;
+        },
+    },
+});
+
 pub fn build(b: *Build) void {
     const project_options = ProjectOptions.init(b);
     const tool_paths = ToolPaths.init(b);
 
-    const steps = .{
-        .check = b.step("check", "Check for compilation errors"),
-
-        .install_spectest = b.step(
-            "install-spectest",
-            "Translate specification tests with wast2json",
-        ),
-
-        .run_wast = b.step("run-wast", "Run the specification test interpreter"),
-        // .run_wasip1 = b.step("run-wasip1", "Run the WASI (preview 1) application interpreter",),
-
-        .@"test" = b.step("test", "Run all unit and specification tests"),
-        .test_unit = b.step("test-unit", "Run unit tests"),
-        .test_spec = b.step("test-spec", "Run some specification tests"),
+    const steps: TopLevelSteps = steps: {
+        var init: TopLevelSteps = undefined;
+        inline for (top_level_steps) |step| {
+            @field(init, step[0]) = b.step(step[0], step[1]);
+        }
+        break :steps init;
     };
 
     const wasmstint_module = WasmstintModule.build(b, &project_options);
@@ -64,27 +95,34 @@ pub fn build(b: *Build) void {
         &wasmstint_module,
         &cli_args_module,
     );
-    steps.run_wast.dependOn(&spectest_exe.run.step);
+    steps.@"run-wast".dependOn(&spectest_exe.run.step);
 
     steps.check.dependOn(&wasmstint_module.unit_tests.step);
     // steps.check.dependOn(&cli_args_module.unit_tests.step);
     steps.check.dependOn(&spectest_exe.exe.step);
 
-    steps.test_unit.dependOn(&b.addRunArtifact(wasmstint_module.unit_tests).step);
-    steps.test_unit.dependOn(&b.addRunArtifact(cli_args_module.unit_tests).step);
-    steps.@"test".dependOn(steps.test_unit);
+    steps.@"test-unit".dependOn(&b.addRunArtifact(wasmstint_module.unit_tests).step);
+    steps.@"test-unit".dependOn(&b.addRunArtifact(cli_args_module.unit_tests).step);
+    steps.@"test".dependOn(steps.@"test-unit");
 
-    const translate_spectests = TranslateSpectests.build(b, steps.install_spectest, &tool_paths);
+    const translate_spectests = TranslateSpectests.build(b, &steps, &tool_paths);
     for (translate_spectests.tests) |test_spec| {
         const run_test_spec = b.addRunArtifact(spectest_exe.exe);
         run_test_spec.setName(b.fmt("spectest/{s}.wast", .{test_spec.name}));
         run_test_spec.addArg("--run");
         run_test_spec.addFileArg(test_spec.json_path);
         run_test_spec.step.dependOn(translate_spectests.translate_step);
-        steps.test_spec.dependOn(&run_test_spec.step);
+        steps.@"test-spec".dependOn(&run_test_spec.step);
     }
 
-    steps.@"test".dependOn(steps.test_spec);
+    steps.@"test".dependOn(steps.@"test-spec");
+
+    buildFuzzers(
+        b,
+        &steps,
+        .{ .project = &project_options, .tool_paths = &tool_paths },
+        .{ .wasmstint = &wasmstint_module, .cli_args = &cli_args_module },
+    );
 }
 
 fn NamedModule(
@@ -168,7 +206,7 @@ const TranslateSpectests = struct {
 
     fn build(
         b: *Build,
-        install_step: *Step,
+        top_steps: *const TopLevelSteps,
         tool_paths: *const ToolPaths,
     ) TranslateSpectests {
         var spectests = std.ArrayList(Test).initCapacity(b.allocator, 147) catch
@@ -199,7 +237,7 @@ const TranslateSpectests = struct {
                 continue;
             }
 
-            var wast2json = b.addSystemCommand(&.{tool_paths.wast2json});
+            var wast2json = b.addSystemCommand(&.{tool_paths.getOrDefault(.wast2json)});
             translate_step.dependOn(&wast2json.step);
             wast2json.setCwd(translate_output_dir);
             wast2json.addFileArg(tests_dir.path(b, tests_entry.name));
@@ -221,7 +259,7 @@ const TranslateSpectests = struct {
         else
             translate_step;
 
-        install_step.dependOn(step);
+        top_steps.@"install-spectest".dependOn(step);
 
         if (spectests.items.len > 0) {
             const install_spectests = b.addInstallDirectory(.{
@@ -231,7 +269,7 @@ const TranslateSpectests = struct {
             });
 
             install_spectests.step.dependOn(translate_step);
-            install_step.dependOn(&install_spectests.step);
+            top_steps.@"install-spectest".dependOn(&install_spectests.step);
         }
 
         return .{
@@ -240,3 +278,15 @@ const TranslateSpectests = struct {
         };
     }
 };
+
+fn buildFuzzers(
+    b: *Build,
+    steps: *const TopLevelSteps,
+    options: struct { project: *const ProjectOptions, tool_paths: *const ToolPaths },
+    modules: struct { wasmstint: *const WasmstintModule, cli_args: *const CliArgsModule },
+) void {
+    _ = b;
+    _ = steps;
+    _ = options;
+    _ = modules;
+}
