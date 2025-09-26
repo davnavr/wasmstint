@@ -6,11 +6,18 @@ pub const FuncType = extern struct {
     param_count: u16,
     result_count: u16,
 
-    pub const empty = FuncType{
-        .types = &[0]ValType{},
-        .param_count = 0,
-        .result_count = 0,
-    };
+    pub fn initComptime(
+        comptime param_types: []const ValType,
+        comptime result_types: []const ValType,
+    ) FuncType {
+        return .{
+            .types = param_types ++ result_types,
+            .param_count = @intCast(param_types.len),
+            .result_count = @intCast(result_types.len),
+        };
+    }
+
+    pub const empty = FuncType.initComptime(&.{}, &.{});
 
     inline fn paramAndResultTypes(sig: *const FuncType) []const ValType {
         return sig.types[0 .. @as(u32, sig.param_count) + sig.result_count];
@@ -25,7 +32,8 @@ pub const FuncType = extern struct {
     }
 
     pub fn matches(a: *const FuncType, b: *const FuncType) bool {
-        return @intFromPtr(a) == @intFromPtr(b) or
+        const ptrs_equal = if (@inComptime()) false else @intFromPtr(a) == @intFromPtr(b);
+        return ptrs_equal or
             (a.param_count == b.param_count and
                 a.result_count == b.result_count and
                 std.mem.eql(ValType, a.paramAndResultTypes(), b.paramAndResultTypes()));

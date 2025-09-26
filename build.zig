@@ -88,6 +88,8 @@ pub fn build(b: *Build) void {
 
     const wasmstint_module = WasmstintModule.build(b, &project_options);
     const cli_args_module = CliArgsModule.build(b, &project_options);
+    const wasip1_module = WasiPreview1Module.build(b, &project_options);
+    wasmstint_module.addAsImportTo(wasip1_module.module);
 
     const spectest_exe = SpectestInterp.build(
         b,
@@ -99,7 +101,20 @@ pub fn build(b: *Build) void {
 
     steps.check.dependOn(&wasmstint_module.unit_tests.step);
     // steps.check.dependOn(&cli_args_module.unit_tests.step);
+    steps.check.dependOn(&wasip1_module.unit_tests.step);
     steps.check.dependOn(&spectest_exe.exe.step);
+
+    const wasip1_exe = WasiPreview1Exe.build(
+        b,
+        &steps,
+        &project_options,
+        .{
+            .wasmstint = &wasmstint_module,
+            .cli_args = &cli_args_module,
+            .wasip1 = &wasip1_module,
+        },
+    );
+    _ = wasip1_exe;
 
     steps.@"test-unit".dependOn(&b.addRunArtifact(wasmstint_module.unit_tests).step);
     steps.@"test-unit".dependOn(&b.addRunArtifact(cli_args_module.unit_tests).step);
@@ -164,6 +179,7 @@ fn NamedModule(
 
 const WasmstintModule = NamedModule("wasmstint", "src/root.zig");
 const CliArgsModule = NamedModule("cli_args", "src/cli_args.zig");
+const WasiPreview1Module = NamedModule("WasiPreview1", "src/WasiPreview1.zig");
 
 const SpectestInterp = struct {
     exe: *Step.Compile,
@@ -281,6 +297,46 @@ const TranslateSpectests = struct {
             .translate_step = step,
             .tests = spectests.items,
         };
+    }
+};
+
+const WasiPreview1Exe = struct {
+    exe: *Step.Compile,
+
+    fn build(
+        b: *Build,
+        steps: *const TopLevelSteps,
+        proj_opts: *const ProjectOptions,
+        imported_modules: struct {
+            wasmstint: *const WasmstintModule,
+            cli_args: *const CliArgsModule,
+            wasip1: *const WasiPreview1Module,
+        },
+    ) WasiPreview1Exe {
+        const exe = b.addExecutable(.{
+            .name = "wasmstint-wasip1",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/WasiPreview1/main.zig"),
+                .target = proj_opts.target,
+                .optimize = proj_opts.optimize,
+            }),
+            .use_llvm = proj_opts.use_llvm,
+        });
+        imported_modules.wasmstint.addAsImportTo(exe.root_module);
+        imported_modules.cli_args.addAsImportTo(exe.root_module);
+        imported_modules.wasip1.addAsImportTo(exe.root_module);
+
+        steps.check.dependOn(&exe.step);
+
+        const run = b.addRunArtifact(exe);
+        if (b.args) |args| {
+            run.addArgs(args);
+        }
+        b.step("run-wasip1", "Run WASI 0.1 program interpreter").dependOn(&run.step);
+
+        b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{}).step);
+
+        return .{ .exe = exe };
     }
 };
 
