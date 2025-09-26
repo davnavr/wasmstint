@@ -156,6 +156,12 @@ pub const Api = enum {
         break :table host_funcs;
     };
 
+    fn fromHostFunc(ptr: *const wasmstint.runtime.FuncAddr.Host) Api {
+        return @enumFromInt(
+            ptr - @as([]const wasmstint.runtime.FuncAddr.Host, &host_func_table).ptr,
+        );
+    }
+
     fn hostFunc(api: Api) *const wasmstint.runtime.FuncAddr.Host {
         return &host_func_table[@intFromEnum(api)];
     }
@@ -373,6 +379,10 @@ pub const InitOptions = struct {
     csprng: Csprng = .os,
 };
 
+/// After initialization, hosts should call the entry point of the application (e.g. `_start`) as
+/// per [the application ABI].
+///
+/// [the application ABI]: https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/application-abi.md
 pub fn init(allocator: Allocator, options: InitOptions) InitError!WasiPreview1 {
     var rng = std.Random.SplitMix64.init(options.fd_rng_seed);
     var fd_table = try fd.Table.init(
@@ -416,7 +426,23 @@ pub fn importProvider(state: *WasiPreview1) wasmstint.runtime.ImportProvider {
     };
 }
 
-// pub fn dispatch()
+/// Asserts that `state` indicates a host function is currently being called.
+pub fn dispatch(
+    wasi: *WasiPreview1,
+    state: *wasmstint.Interpreter.State.AwaitingHost,
+    memory: *wasmstint.runtime.MemInst,
+) wasmstint.Interpreter.State {
+    const callee = state.currentHostFunction().?;
+
+    // TODO: Parameter to indicate if it safe to assume a WASI function is being called?
+    std.debug.assert(@intFromPtr(callee.data) == @intFromPtr(wasi));
+
+    const api = Api.fromHostFunc(callee.func);
+    _ = memory;
+    switch (api) {
+        else => std.debug.panic("TODO: handle {t}", .{api}),
+    }
+}
 
 pub fn deinit(state: *WasiPreview1) void {
     state.fd_table.deinit(state.allocator);

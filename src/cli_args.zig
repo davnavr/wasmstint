@@ -330,7 +330,7 @@ pub const Flag = struct {
 
         var new_info = flag.info;
         new_info.description = std.fmt.comptimePrint(
-            "{s} (default: {})",
+            "{s} (default: {any})",
             .{ flag.info.description, default_value },
         );
 
@@ -394,7 +394,10 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
                         struct_field.* = .{
                             .name = f.info.long,
                             .type = f.type.State,
-                            .default_value_ptr = &f.type.default_state,
+                            .default_value_ptr = @as(
+                                *const anyopaque,
+                                @ptrCast(&f.type.default_state),
+                            ),
                             .is_comptime = false,
                             .alignment = @alignOf(f.type.State),
                         };
