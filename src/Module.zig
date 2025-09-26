@@ -2339,11 +2339,19 @@ pub fn finishCodeValidation(
     return all_validated;
 }
 
-// TODO: need separate allocator to free code entries
-pub fn deinit(module: Module, gpa: Allocator) void {
-    gpa.free(module.arena_data);
-    module.* = undefined;
+pub fn deinitLeakCodeEntries(module: Module, gpa: Allocator) void {
+    (ArenaAllocator{
+        .child_allocator = gpa,
+        .state = module.inner.arena,
+    }).deinit();
 }
+
+// pub fn deinit(
+//     module: Module,
+//     gpa: Allocator,
+//     code_deinit_ctx: anytype,
+//     code_deinit: fn (@TypeOf(code_deinit_ctx), *CodeEntry) void,
+// ) void {}
 
 const std = @import("std");
 const Type = std.builtin.Type;
@@ -2357,4 +2365,47 @@ const validator = @import("Module/validator.zig");
 
 test {
     _ = Reader;
+}
+
+test parse {
+    const ParseFuzzer = struct {
+        fn parse(allocator: std.mem.Allocator, input: []const u8) !void {
+            var scratch = std.heap.ArenaAllocator.init(allocator);
+            defer scratch.deinit();
+
+            var diagnostic_writer = try std.Io.Writer.Allocating.initCapacity(allocator, 128);
+            defer diagnostic_writer.deinit();
+
+            var wasm = input;
+            const module = Module.parse(
+                allocator,
+                &wasm,
+                &scratch,
+                .{ .diagnostics = .init(&diagnostic_writer.writer) },
+            ) catch |e| switch (e) {
+                error.OutOfMemory => |oom| return oom,
+                error.InvalidWasm, error.MalformedWasm => {
+                    std.debug.assert(diagnostic_writer.written().len > 4);
+                    return;
+                },
+                error.WasmImplementationLimit => {
+                    std.debug.assert(diagnostic_writer.written().len == 0);
+                    return;
+                },
+            };
+            defer module.deinitLeakCodeEntries(allocator);
+
+            std.debug.assert(wasm.len == 0);
+        }
+
+        fn testOne(_: void, input: []const u8) !void {
+            try std.testing.checkAllAllocationFailures(
+                std.testing.allocator,
+                @This().parse,
+                .{input},
+            );
+        }
+    };
+
+    try std.testing.fuzz({}, ParseFuzzer.testOne, .{});
 }

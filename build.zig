@@ -147,7 +147,12 @@ fn NamedModule(
 
             return .{
                 .module = module,
-                .unit_tests = b.addTest(.{ .name = name, .root_module = module }),
+                .unit_tests = b.addTest(.{
+                    .name = name,
+                    .root_module = module,
+                    // TODO(zig): https://github.com/ziglang/zig/issues/23423
+                    .use_llvm = true,
+                }),
             };
         }
 
