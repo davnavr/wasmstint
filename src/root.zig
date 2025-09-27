@@ -7,6 +7,8 @@ pub const float = @import("float.zig");
 pub const runtime = @import("runtime.zig");
 pub const Interpreter = @import("Interpreter.zig");
 
+pub const pointer = @import("pointer.zig");
+
 pub const LimitedAllocator = @import("LimitedAllocator.zig");
 pub const PageBufferAllocator = @import("PageBufferAllocator.zig");
 
@@ -49,4 +51,5 @@ test {
     _ = PageBufferAllocator;
     _ = Module;
     _ = Interpreter;
+    _ = pointer;
 }
