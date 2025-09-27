@@ -43,7 +43,7 @@ const ClockId = enum(u32) {
 
 pub const Errno = @import("WasiPreview1/errno.zig").Errno;
 
-const fd = @import("WasiPreview1/fd.zig");
+const Fd = @import("WasiPreview1/fd.zig").Fd;
 
 fn Pointer(comptime T: type) type {
     return packed struct(u32) {
@@ -122,6 +122,40 @@ pub const Api = enum {
 
             .proc_exit => .initComptime(&.{.i32}, &.{}),
         };
+    }
+
+    fn ValTypeType(comptime ty: Module.ValType) type {
+        return switch (ty) {
+            .i32,
+            .i64,
+            .f32,
+            .f64,
+            .funcref,
+            .externref,
+            => |tag| @FieldType(Interpreter.TaggedValue, @tagName(tag)),
+            .v128 => unreachable,
+        };
+    }
+
+    fn ParamTuple(comptime api: Api) type {
+        const params = api.signature().parameters();
+        var field_types: [params.len]type = undefined;
+        for (&field_types, params) |*dst, ty| {
+            dst.* = ValTypeType(ty);
+        }
+
+        return std.meta.Tuple(&field_types);
+    }
+
+    fn taggedValuesToParamTuple(
+        comptime api: Api,
+        src: []const Interpreter.TaggedValue,
+    ) ParamTuple(api) {
+        var tuple: ParamTuple(api) = undefined;
+        inline for (0.., comptime api.signature().parameters()) |i, ty| {
+            tuple[i] = @field(src[i], @tagName(ty));
+        }
+        return tuple;
     }
 
     pub fn name(api: Api) Module.Name {
@@ -251,7 +285,7 @@ pub const Api = enum {
 allocator: Allocator,
 api_lookup: Api.Lookup,
 csprng: Csprng,
-fd_table: fd.Table,
+fd_table: Fd.Table,
 
 const WasiPreview1 = @This();
 
@@ -385,7 +419,7 @@ pub const InitOptions = struct {
 /// [the application ABI]: https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/application-abi.md
 pub fn init(allocator: Allocator, options: InitOptions) InitError!WasiPreview1 {
     var rng = std.Random.SplitMix64.init(options.fd_rng_seed);
-    var fd_table = try fd.Table.init(
+    var fd_table = try Fd.Table.init(
         allocator,
         .{ rng.next(), rng.next() },
         File.os.wrapStandardStreams(),
@@ -426,21 +460,70 @@ pub fn importProvider(state: *WasiPreview1) wasmstint.runtime.ImportProvider {
     };
 }
 
+// Note handlers here can just use `Errno.fault`, which is nice since `AwaitingHost` doesn't
+// support trapping yet.
+
+fn fd_write(
+    wasi: *WasiPreview1,
+    memory: *MemInst,
+    raw_fd: i32,
+    raw_iovs: i32,
+    raw_iovs_len: i32,
+    raw_ret: i32,
+) Errno {
+    const fd = Fd.initRaw(raw_fd) catch |e| switch (e) {
+        error.BadFd => return .badf,
+    };
+    _ = wasi;
+    _ = memory;
+    std.debug.print(
+        "TODO: fd_write({f}, 0x{X}, 0x{X}, 0x{X})\n",
+        .{
+            fd,
+            @as(u32, @bitCast(raw_iovs)),
+            @as(u32, @bitCast(raw_iovs_len)),
+            @as(u32, @bitCast(raw_ret)),
+        },
+    );
+    return .nosys;
+}
+
 /// Asserts that `state` indicates a host function is currently being called.
 pub fn dispatch(
     wasi: *WasiPreview1,
-    state: *wasmstint.Interpreter.State.AwaitingHost,
-    memory: *wasmstint.runtime.MemInst,
-) wasmstint.Interpreter.State {
+    state: *Interpreter.State.AwaitingHost,
+    memory: *MemInst,
+    fuel: *Interpreter.Fuel,
+) Interpreter.State {
     const callee = state.currentHostFunction().?;
 
     // TODO: Parameter to indicate if it safe to assume a WASI function is being called?
     std.debug.assert(@intFromPtr(callee.data) == @intFromPtr(wasi));
 
     const api = Api.fromHostFunc(callee.func);
-    _ = memory;
+    std.debug.assert(@intFromPtr(api.hostFunc()) == @intFromPtr(callee.func));
     switch (api) {
-        else => std.debug.panic("TODO: handle {t}", .{api}),
+        inline .fd_write => |id| {
+            const signature = comptime id.signature();
+            var args_values: [signature.param_count]Interpreter.TaggedValue = undefined;
+            state.copyParamsTo(&args_values);
+            const args_tuple = id.taggedValuesToParamTuple(&args_values);
+            const errno: Errno = @call(
+                .auto,
+                @field(WasiPreview1, @tagName(id)),
+                .{ wasi, memory } ++ args_tuple,
+            );
+
+            return state.returnFromHostTyped(.{@as(i32, @intFromEnum(errno))}, fuel) catch
+                unreachable;
+        },
+        else => if (std.mem.eql(Module.ValType, api.signature().results(), &.{.i32})) {
+            std.log.err("TODO: handle {t}", .{api});
+            return state.returnFromHostTyped(.{@as(i32, @intFromEnum(Errno.nosys))}, fuel) catch
+                unreachable;
+        } else {
+            std.debug.panic("TODO: handle {t}", .{api});
+        },
     }
 }
 
@@ -452,6 +535,8 @@ pub fn deinit(state: *WasiPreview1) void {
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const wasmstint = @import("wasmstint");
+const Interpreter = wasmstint.Interpreter;
+const MemInst = wasmstint.runtime.MemInst;
 const Module = wasmstint.Module;
 
 test {

@@ -376,7 +376,7 @@ fn mainLoop(
         state = next: switch (state) {
             .awaiting_host => |*host| if (host.currentHostFunction() != null) {
                 if (memory) |mem_inst| {
-                    break :next wasi.dispatch(host, mem_inst);
+                    break :next wasi.dispatch(host, mem_inst, fuel);
                 } else {
                     @branchHint(.cold);
                     return .{
