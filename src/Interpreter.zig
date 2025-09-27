@@ -2469,7 +2469,7 @@ const Instr = struct {
         for (1..5) |idx| {
             const next_byte = i.readByte();
             value |= @shlExact(
-                @as(u32, next_byte),
+                @as(u32, next_byte & 0x7F),
                 @as(u5, @intCast(idx * 7)),
             );
 
@@ -2491,12 +2491,18 @@ const Instr = struct {
         }
     }
 
+    fn testReadIdxRaw(comptime input: []const u8, comptime expected: u32) !void {
+        const full_input: []const u8 = input ++ "\x0B";
+        var i = Instr.init(@ptrCast(full_input.ptr), @ptrCast(full_input.ptr + full_input.len - 1));
+        try std.testing.expectEqual(expected, i.readIdxRaw());
+        try std.testing.expectEqual(0x0B, i.readByte()); // end byte
+    }
+
     test readIdxRaw {
-        const input: []const u8 = "\x01\x95\x7E\x0B";
-        var i = Instr.init(@ptrCast(input.ptr), @ptrCast(input.ptr + input.len - 1));
-        try std.testing.expectEqual(1, i.readIdxRaw());
-        try std.testing.expectEqual(16149, i.readIdxRaw()); // br_table.wast:110
-        try std.testing.expectEqual(0x0B, i.readByte());
+        try testReadIdxRaw("\x01", 1);
+        try testReadIdxRaw("\x95\x7E", 16149); // br_table.wast:110
+        try testReadIdxRaw("\x80\x00", 0);
+        try testReadIdxRaw("\x80\x80\x00", 0);
     }
 
     inline fn readIdx(reader: *Instr, comptime I: type) I {
@@ -4617,6 +4623,8 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
+        std.debug.assert((ip - 1)[0] == @intFromEnum(opcodes.ByteOpcode.@"global.get"));
+
         var i = Instr.init(ip, eip);
         var vals = ValStack.init(sp, interp);
 
