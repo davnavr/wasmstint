@@ -488,7 +488,9 @@ const Stack = struct {
 
     fn topSlice(stack: anytype, len: usize) Slice(@TypeOf(stack)) {
         const items = stack.slice();
-        return items[items.len - len ..];
+        const top = items[items.len - len ..];
+        std.debug.assert(top.len == len);
+        return top;
     }
 
     // /// Asserts that the stack is not empty.
@@ -1254,8 +1256,6 @@ pub const State = union(enum) {
     /// calling a host function.
     pub const AwaitingHost = struct {
         interpreter: Wrapper,
-        /// The types of the parameters provided to the called host function.
-        param_types: []const Module.ValType = &.{},
         /// The types of the values at the top of the value stack, which are the results of the most
         /// recently called function.
         result_types: []const Module.ValType = &.{},
@@ -1270,20 +1270,29 @@ pub const State = union(enum) {
             }
         }
 
+        fn currentFrame(self: *const AwaitingHost) ?*align(@sizeOf(Value)) const StackFrame {
+            return self.interpreter.get().currentFrame();
+        }
+
+        /// Asserts that a host function frame is active.
+        fn params(self: *const AwaitingHost) []align(@sizeOf(Value)) const Value {
+            return self.currentFrame().?
+                .localValues(self.interpreter.get().stack.allocatedSlice());
+        }
+
         /// Copies the parameters passed to the host function to a list.
+        ///
+        /// Asserts that a host function is currently being called.
         pub fn copyParamsTo(self: *const AwaitingHost, output: []TaggedValue) void {
-            const interp = self.interpreter.get();
-            const param_count = self.param_types.len;
-            copyValues(
-                self.param_types,
-                interp.stack.topSlice(param_count + self.result_types.len)[0..param_count],
-                output,
-            );
+            copyValues(self.currentFrame().?.signature.parameters(), self.params(), output);
         }
 
         pub fn copyResultsTo(self: *const AwaitingHost, output: []TaggedValue) void {
-            const interp = self.interpreter.get();
-            copyValues(self.result_types, interp.stack.topSlice(self.result_types.len), output);
+            copyValues(
+                self.result_types,
+                self.interpreter.get().stack.topSlice(self.result_types.len),
+                output,
+            );
         }
 
         /// Copies the parameters passed to the host function to a new allocation.
@@ -1291,9 +1300,10 @@ pub const State = union(enum) {
             self: *const AwaitingHost,
             allocator: Allocator,
         ) Allocator.Error![]TaggedValue {
-            const params = try allocator.alloc(TaggedValue, self.param_types.len);
-            self.copyParamsTo(params);
-            return params;
+            const dst =
+                try allocator.alloc(TaggedValue, self.currentFrame().?.signature.param_count);
+            self.copyParamsTo(dst);
+            return dst;
         }
 
         /// Copies the results from the most recent function call to a new allocation.
@@ -1363,13 +1373,10 @@ pub const State = union(enum) {
             self: *const AwaitingHost,
             comptime T: type,
         ) error{ValueTypeOrCountMismatch}!T {
-            const interp = self.interpreter.get();
             return valuesTyped(
                 T,
-                self.param_types,
-                interp.stack.topSlice(
-                    self.param_types.len + self.result_types.len,
-                )[0..self.param_types.len],
+                self.currentFrame().?.signature.parameters(),
+                self.params(),
             );
         }
 
@@ -1440,11 +1447,8 @@ pub const State = union(enum) {
             interp.current_frame = new_frame.offset;
             interp.version.increment();
             return switch (callee.expanded()) {
-                .host => |host| State{
-                    .awaiting_host = AwaitingHost{
-                        .interpreter = .init(interp),
-                        .param_types = host.func.signature.parameters(),
-                    },
+                .host => State{
+                    .awaiting_host = AwaitingHost{ .interpreter = .init(interp) },
                 },
                 .wasm => interp.enterMainLoop(fuel),
             };
@@ -1520,9 +1524,7 @@ pub const State = union(enum) {
 
         /// Returns the current host function being called, or `null` if the call stack is empty.
         pub fn currentHostFunction(self: *const AwaitingHost) ?runtime.FuncAddr.Expanded.Host {
-            const interp: *const Interpreter = self.interpreter.get();
-            const frame: ?*align(@sizeOf(Value)) const StackFrame = interp.currentFrame();
-            return if (frame) |stack_frame|
+            return if (self.currentFrame()) |stack_frame|
                 stack_frame.function.expanded().host
             else
                 null;
@@ -1611,7 +1613,6 @@ pub const State = union(enum) {
                 .awaiting_host = .{
                     .interpreter = .init(interp),
                     .result_types = signature.results(),
-                    .param_types = self.param_types,
                 },
             };
         }
@@ -2381,20 +2382,25 @@ const StateTransition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version
         return .{ .version = interp.version, .serialize_token = serialized };
     }
 
+    const TransitionToHost = enum { returning_to_host, calling_host };
+
+    /// Assumes that all parameters are at the top of the value stack.
     fn awaitingHost(
         vals: ValStack,
         interp: *Interpreter,
         state: *State,
         callee_signature: *const Module.FuncType,
+        status: TransitionToHost,
     ) StateTransition {
         interp.version.increment();
 
-        const frame: ?*align(@sizeOf(Value)) StackFrame = interp.currentFrame();
         state.* = .{
             .awaiting_host = .{
                 .interpreter = .init(interp),
-                .param_types = if (frame) |called| called.signature.parameters() else &.{},
-                .result_types = callee_signature.results(),
+                .result_types = switch (status) {
+                    .returning_to_host => callee_signature.results(),
+                    .calling_host => &.{},
+                },
             },
         };
         interp.stack.len = @intCast(vals.stack.ptr - interp.stack.base);
@@ -2788,7 +2794,7 @@ fn returnFromWasm(
         comptime unreachable;
     }
 
-    return .awaitingHost(vals, interp, state, popped_signature);
+    return .awaitingHost(vals, interp, state, popped_signature, .returning_to_host);
 }
 
 const RestorableSp = struct {
@@ -2919,8 +2925,8 @@ inline fn invokeWithinWasm(
     var new_vals = old_vals;
 
     // std.debug.print(
-    //     "WASM {f} WANTS TO CALL {f} (current depth = {})\n",
-    //     .{ current_frame.function, callee, interp.call_depth },
+    //     "WASM {f} WANTS TO CALL {f} (current depth = {}, args @ {*})\n",
+    //     .{ current_frame.function, callee, interp.call_depth, args },
     // );
 
     interp.stack.len = @intCast(new_vals.stack.ptr - interp.stack.base);
@@ -2994,7 +3000,11 @@ inline fn invokeWithinWasm(
         },
         .host => |host| {
             // std.debug.print("GOING TO AWAIT HOST TRANSITION\n", .{});
-            return .awaitingHost(new_vals, interp, state, &host.func.signature);
+            // std.debug.print(
+            //     "old_vals = {*}, new_vals = {*}, args = {*}\n",
+            //     .{ old_vals.stack.ptr, new_vals.stack.ptr, args.ptr },
+            // );
+            return .awaitingHost(new_vals, interp, state, &host.func.signature, .calling_host);
         },
     }
 }
