@@ -125,7 +125,9 @@ pub const Ciovec = extern struct {
     }
 
     pub fn castSlice(ciovecs: []const Ciovec) []const std.posix.iovec_const {
-        return @ptrCast(ciovecs);
+        const casted: []const std.posix.iovec_const = @ptrCast(ciovecs);
+        std.debug.assert(casted.len == ciovecs.len);
+        return casted;
     }
 };
 
@@ -146,48 +148,42 @@ pub fn unexpectedError(err: anyerror) std.posix.UnexpectedError {
 pub const VTable = struct {
     /// Do not call function pointers without checking the `File`'s `rights`.
     const Api = struct {
-        padding: [6]*anyopaque = undefined,
-        // Could add scratch: *ArenaAllocator
+        // Could add scratch: *ArenaAllocator parameter
         fd_write: *const fn (ctx: Ctx, iovs: []const Ciovec, total_len: u32) Error!u32,
+        fd_pwrite: *const fn (
+            ctx: Ctx,
+            iovs: []const Ciovec,
+            offset: types.FileSize,
+            total_len: u32,
+        ) Error!u32,
     };
 
     api: VTable.Api,
     deinit: *const fn (ctx: Ctx, allocator: Allocator) void,
-
-    // Ensure that rights checks get compiled down to an array access + bitwise AND, for fun
-    comptime {
-        for (@typeInfo(VTable.Api).@"struct".fields) |f| {
-            if (std.mem.startsWith(u8, f.name, "padding")) {
-                continue;
-            }
-            const fn_offset = @offsetOf(VTable.Api, f.name) / @sizeOf(*const fn () void);
-            const bit_offset = @bitOffsetOf(Rights, f.name);
-            if (fn_offset != bit_offset) {
-                @compileError(
-                    std.fmt.comptimePrint(
-                        "offset {} for field {s} in vtable not equal to bit offset {}",
-                        .{ fn_offset, f.name, bit_offset },
-                    ),
-                );
-            }
-        }
-    }
 };
-
-const Api = @import("api.zig").Api;
 
 fn api(
     file: *const File,
-    comptime func: Api,
+    comptime right: Api,
+    comptime func: std.meta.FieldEnum(VTable.Api),
 ) error{AccessDenied}!@FieldType(VTable.Api, @tagName(func)) {
-    return if (@field(file.rights, @tagName(func)))
+    return if (@field(file.rights, @tagName(right)))
         @field(file.impl.vtable.api, @tagName(func))
     else
         error.AccessDenied;
 }
 
 pub fn fd_write(file: *File, iovs: []const Ciovec, total_len: u32) Error!u32 {
-    return (try file.api(.fd_write))(file.impl.ctx, iovs, total_len);
+    return (try file.api(.fd_write, .fd_write))(file.impl.ctx, iovs, total_len);
+}
+
+pub fn fd_pwrite(
+    file: *File,
+    iovs: []const Ciovec,
+    offset: types.FileSize,
+    total_len: u32,
+) Error!u32 {
+    return (try file.api(.fd_write, .fd_pwrite))(file.impl.ctx, iovs, offset, total_len);
 }
 
 pub fn deinit(file: *File, allocator: Allocator) void {
@@ -197,3 +193,5 @@ pub fn deinit(file: *File, allocator: Allocator) void {
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Api = @import("api.zig").Api;
+const types = @import("types.zig");

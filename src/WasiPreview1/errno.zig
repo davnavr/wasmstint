@@ -171,7 +171,9 @@ pub const Errno = enum(u16) {
     pub fn mapError(err: Error) Errno {
         return switch (err) {
             error.MemoryAccessOutOfBounds => .fault,
-            error.OutOfMemory => .nomem,
+            error.SystemResources,
+            error.OutOfMemory,
+            => .nomem,
             error.Unexpected => unexpected,
 
             error.AccessDenied => .notcapable, // .acces,
@@ -187,9 +189,13 @@ pub const Errno = enum(u16) {
             error.NoDevice => .nxio,
             error.NoSpaceLeft => .nospc,
             error.OperationAborted => .canceled,
+            error.Overflow => .overflow,
             error.PermissionDenied => .perm,
             error.ProcessNotFound => .srch,
-            error.WouldBlock => .again,
+            error.SeekPipe => .pipe,
+            error.WouldBlock,
+            error.LockViolation,
+            => .again,
 
             error.BadFd => .badf,
             error.Unimplemented => .nosys,
@@ -200,27 +206,34 @@ pub const Errno = enum(u16) {
 /// Includes a subset of the errors in `std.posix`.
 pub const Error = std.mem.Allocator.Error ||
     wasmstint.runtime.MemInst.OobError ||
-    std.posix.UnexpectedError || error{
-    AccessDenied,
-    BrokenPipe,
-    ConnectionResetByPeer,
-    DeviceBusy,
-    DiskQuota,
-    FileNotFound,
-    FileTooBig,
-    InputOutput,
-    InvalidArgument,
-    MessageTooBig,
-    NoDevice,
-    NoSpaceLeft,
-    OperationAborted,
-    PermissionDenied,
-    ProcessNotFound,
-    WouldBlock,
+    std.posix.UnexpectedError ||
+    error{
+        AccessDenied,
+        BrokenPipe,
+        ConnectionResetByPeer,
+        DeviceBusy,
+        DiskQuota,
+        FileNotFound,
+        FileTooBig,
+        InputOutput,
+        InvalidArgument,
+        MessageTooBig,
+        NoDevice,
+        NoSpaceLeft,
+        OperationAborted,
+        Overflow,
+        PermissionDenied,
+        ProcessNotFound,
+        SeekPipe,
+        WouldBlock,
 
-    BadFd,
-    Unimplemented,
-};
+        // Windows-specific
+        SystemResources,
+        LockViolation,
+
+        BadFd,
+        Unimplemented,
+    };
 
 const std = @import("std");
 const wasmstint = @import("wasmstint");

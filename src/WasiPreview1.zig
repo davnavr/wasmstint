@@ -12,35 +12,7 @@
 //! [WebAssembly System Interface preview 1]: https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/README.md
 //! [`preview1/docs.md`]: https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md
 
-/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#size
-const Size = u32;
-
-/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#filesize
-const FileSize = packed struct(u64) { bytes: u64 };
-
-/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#timestamp
-const Timestamp = packed struct(u64) { ns: u64 };
-
-/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#clockid
-const ClockId = enum(u32) {
-    /// The clock measuring real time. Time value zero corresponds with `1970-01-01T00:00:00Z`.
-    realtime,
-    /// The store-wide monotonic clock, which is defined as a clock measuring real time, whose
-    /// value cannot be adjusted and which cannot have negative clock jumps.
-    ///
-    /// The epoch of this clock is undefined. The absolute time value of this clock therefore has
-    /// no meaning.
-    monotonic,
-
-    // Apparently these were never widely supported
-
-    /// The CPU-time clock associated with the current process.
-    process_cputime_id,
-    /// The CPU-time clock associated with the current thread.
-    thread_cputime_id,
-    _,
-};
-
+const types = @import("WasiPreview1/types.zig");
 const Errno = @import("WasiPreview1/errno.zig").Errno;
 const Fd = @import("WasiPreview1/fd.zig").Fd;
 
@@ -51,7 +23,7 @@ const Iovec = extern struct {
     /// The address of the buffer to be filled.
     buf: pointer.Pointer(u8),
     /// The length of the buffer to be filled.
-    buf_len: Size,
+    buf_len: types.Size,
 };
 
 /// A region of memory for scatter/gather **writes**.
@@ -61,7 +33,7 @@ const Ciovec = extern struct {
     /// The address of the buffer to be written.
     buf: pointer.ConstPointer(u8),
     /// The length of the buffer to be written.
-    buf_len: Size,
+    buf_len: types.Size,
 
     fn bytes(ciovec: Ciovec, mem: *const MemInst) pointer.OobError![]const u8 {
         return pointer.accessSlice(mem, ciovec.buf.addr, ciovec.buf_len);
@@ -78,7 +50,7 @@ pub const Csprng = @import("WasiPreview1/Csprng.zig");
 
 allocator: Allocator,
 scratch: struct {
-    state: std.heap.ArenaAllocator.State,
+    state: ArenaAllocator.State,
     lock: std.debug.SafetyLock = .{},
 },
 api_lookup: Api.Lookup,
@@ -232,7 +204,7 @@ pub fn init(allocator: Allocator, options: InitOptions) InitError!WasiPreview1 {
         .fd_table = fd_table,
         .api_lookup = api_lookup,
         .allocator = allocator,
-        .scratch = .{ .state = std.heap.ArenaAllocator.init(allocator).state },
+        .scratch = .{ .state = ArenaAllocator.init(allocator).state },
         .csprng = options.csprng,
     };
 }
@@ -259,20 +231,93 @@ pub fn importProvider(state: *WasiPreview1) wasmstint.runtime.ImportProvider {
     };
 }
 
-fn acquireScratch(state: *WasiPreview1) std.heap.ArenaAllocator {
+fn acquireScratch(state: *WasiPreview1) ArenaAllocator {
     state.scratch.lock.lock();
     return state.scratch.state.promote(state.allocator);
 }
 
-fn releaseScratch(state: *WasiPreview1, arena: std.heap.ArenaAllocator) void {
+fn releaseScratch(state: *WasiPreview1, arena: ArenaAllocator) void {
     var scratch = arena;
     _ = scratch.reset(.retain_capacity);
     state.scratch.state = scratch.state;
     state.scratch.lock.unlock();
 }
 
-// Note handlers here can just use `Errno.fault`, which is nice since `AwaitingHost` doesn't
-// support trapping yet.
+// Note handlers here can just use `Errno.fault` for OOB memory accesses, which is nice since
+// `AwaitingHost` doesn't support trapping yet.
+
+const Ciovs = struct {
+    list: []const File.Ciovec,
+    total_len: u32,
+
+    fn init(
+        mem: *MemInst,
+        ptr: pointer.ConstPointer(Ciovec),
+        len: u32,
+        scratch: *ArenaAllocator,
+    ) !Ciovs {
+        const iovs = try pointer.ConstSlice(Ciovec).init(mem, ptr, len);
+        var list = try std.ArrayListUnmanaged(File.Ciovec).initCapacity(
+            scratch.allocator(),
+            iovs.items.len,
+        );
+        var total_len: u32 = 0;
+        for (0..iovs.items.len) |i| {
+            if (i > 0) {
+                @branchHint(.cold);
+            }
+
+            const ciovec = try iovs.read(i).bytes(mem);
+            const ciovec_len = std.math.cast(u32, ciovec.len) orelse break;
+            total_len = std.math.add(u32, total_len, ciovec_len) catch |e| switch (e) {
+                error.Overflow => return error.InvalidArgument,
+            };
+            list.appendAssumeCapacity(File.Ciovec.init(ciovec));
+        }
+
+        return .{ .list = list.items, .total_len = total_len };
+    }
+};
+
+fn fd_pwrite(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_iovs: i32,
+    raw_iovs_len: i32,
+    raw_offset: i64,
+    raw_ret: i32,
+) Errno {
+    const iovs_ptr = pointer.ConstPointer(Ciovec){ .addr = @bitCast(raw_iovs) };
+    const ret_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
+    const offset = types.FileSize{ .bytes = @bitCast(raw_offset) };
+
+    std.log.debug(
+        "fd_pwrite({}, {f}, {}, {}, {f})\n",
+        .{
+            @as(u32, @bitCast(raw_fd)),
+            iovs_ptr,
+            @as(u32, @bitCast(raw_iovs_len)),
+            offset.bytes,
+            ret_ptr,
+        },
+    );
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    var scratch = wasi.acquireScratch();
+    defer wasi.releaseScratch(scratch);
+
+    const ciovs = Ciovs.init(mem, iovs_ptr, @bitCast(raw_iovs_len), &scratch) catch |e|
+        return .mapError(e);
+    const ret_bytes = ret_ptr.bytes(mem) catch |e| return .mapError(e);
+
+    const ret = file.fd_pwrite(ciovs.list, offset, ciovs.total_len) catch |e| return .mapError(e);
+    pointer.writeFromBytes(u32, ret_bytes, ret);
+    return .success;
+}
 
 fn fd_write(
     wasi: *WasiPreview1,
@@ -299,36 +344,14 @@ fn fd_write(
     const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
     defer wasi.fd_table.unlockTable();
 
-    const iovs = pointer.ConstSlice(Ciovec).init(
-        mem,
-        iovs_ptr,
-        @as(u32, @bitCast(raw_iovs_len)),
-    ) catch |e| return .mapError(e);
-
-    const ret_bytes = ret_ptr.bytes(mem) catch |e| return .mapError(e);
-
     var scratch = wasi.acquireScratch();
     defer wasi.releaseScratch(scratch);
 
-    var ciovs = std.ArrayListUnmanaged(File.Ciovec).initCapacity(
-        scratch.allocator(),
-        iovs.items.len,
-    ) catch |e| return .mapError(e);
-    var total_len: u32 = 0;
-    for (0..iovs.items.len) |i| {
-        if (i > 0) {
-            @branchHint(.cold);
-        }
+    const ciovs = Ciovs.init(mem, iovs_ptr, @bitCast(raw_iovs_len), &scratch) catch |e|
+        return .mapError(e);
+    const ret_bytes = ret_ptr.bytes(mem) catch |e| return .mapError(e);
 
-        const ciovec = iovs.read(i).bytes(mem) catch |e| return .mapError(e);
-        const ciovec_len = std.math.cast(u32, ciovec.len) orelse break;
-        total_len = std.math.add(u32, total_len, ciovec_len) catch |e| switch (e) {
-            error.Overflow => break, // return .inval,
-        };
-        ciovs.appendAssumeCapacity(File.Ciovec.init(ciovec));
-    }
-
-    const ret = file.fd_write(ciovs.items, total_len) catch |e| return .mapError(e);
+    const ret = file.fd_write(ciovs.list, ciovs.total_len) catch |e| return .mapError(e);
     pointer.writeFromBytes(u32, ret_bytes, ret);
     return .success;
 }
@@ -348,7 +371,9 @@ pub fn dispatch(
     const api = Api.fromHostFunc(callee.func);
     std.debug.assert(@intFromPtr(api.hostFunc()) == @intFromPtr(callee.func));
     switch (api) {
-        inline .fd_write => |id| {
+        inline .fd_pwrite,
+        .fd_write,
+        => |id| {
             const signature = comptime id.signature();
             var args_values: [signature.param_count]Interpreter.TaggedValue = undefined;
             state.copyParamsTo(&args_values);
@@ -382,6 +407,7 @@ pub fn deinit(state: *WasiPreview1) void {
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const wasmstint = @import("wasmstint");
 const Interpreter = wasmstint.Interpreter;
 const MemInst = wasmstint.runtime.MemInst;
