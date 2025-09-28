@@ -138,6 +138,12 @@ pub fn build(b: *Build) void {
         .{ .project = &project_options, .tool_paths = &tool_paths },
         .{ .wasmstint = &wasmstint_module, .cli_args = &cli_args_module },
     );
+
+    buildWasiTestPrograms(
+        b,
+        &steps,
+        .{ .project = &project_options, .tool_paths = &tool_paths },
+    );
 }
 
 fn NamedModule(
@@ -263,9 +269,7 @@ const TranslateSpectests = struct {
             wast2json.setCwd(translate_output_dir);
             wast2json.addFileArg(tests_dir.path(b, tests_entry.name));
 
-            const name = b.allocator.dupe(u8, tests_entry.name[0 .. tests_entry.name.len - 5]) catch
-                @panic("OOM");
-
+            const name = b.dupe(tests_entry.name[0 .. tests_entry.name.len - 5]);
             const json_name = b.fmt("{s}.json", .{name});
             wast2json.addArgs(&.{ "--output", json_name });
             // addPrefixedFileArg would mean each .json is in a separate dir
@@ -350,4 +354,49 @@ fn buildFuzzers(
     _ = steps;
     _ = options;
     _ = modules;
+}
+
+fn buildWasiTestPrograms(
+    b: *Build,
+    steps: *const TopLevelSteps,
+    options: struct { project: *const ProjectOptions, tool_paths: *const ToolPaths },
+) void {
+    const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
+
+    const tests_dir = b.path("tests/wasip1/zig");
+    const tests_dir_handle = b.build_root.handle.openDir(
+        tests_dir.src_path.sub_path,
+        .{
+            .iterate = true,
+        },
+    ) catch @panic("could not open tests directory");
+
+    const compile_step = b.step("install-wasip1-samples", "Build sample WASIP 0.1 programs");
+
+    var tests_iter = tests_dir_handle.iterateAssumeFirstIteration();
+    while (tests_iter.next() catch @panic("bad entry in tests directory")) |tests_entry| {
+        if (tests_entry.kind != .file or
+            !std.mem.eql(u8, ".zig", std.fs.path.extension(tests_entry.name)))
+        {
+            continue;
+        }
+
+        const sample_exe = b.addExecutable(.{
+            .name = b.dupe(tests_entry.name[0 .. tests_entry.name.len - 4]),
+            .root_module = b.createModule(.{
+                .root_source_file = tests_dir.path(b, tests_entry.name),
+                .target = wasm_target,
+                .optimize = options.project.optimize,
+            }),
+        });
+
+        steps.check.dependOn(&sample_exe.step);
+
+        const install_sample = b.addInstallArtifact(
+            sample_exe,
+            .{ .dest_dir = .{ .override = .{ .custom = "samples/zig" } } },
+        );
+
+        compile_step.dependOn(&install_sample.step);
+    }
 }
