@@ -100,7 +100,7 @@ pub const Errno = enum(u16) {
             .deadlk => "Resource deadlock would occur.",
             .destaddrreq => "Destination address required.",
             .dom => "Mathematics argument out of domain of function.",
-            .dquot => "Reserved.",
+            .dquot => "Reserved (Disk quota exceeded).",
             .exist => "File exists.",
             .fault => "Bad address.",
             .fbig => "File too large.",
@@ -165,6 +165,62 @@ pub const Errno = enum(u16) {
     pub fn format(num: Errno, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{t}: {s}", .{ num, num.message() orelse "unknown" });
     }
+
+    const unexpected: Errno = @enumFromInt(404);
+
+    pub fn mapError(err: Error) Errno {
+        return switch (err) {
+            error.MemoryAccessOutOfBounds => .fault,
+            error.OutOfMemory => .nomem,
+            error.Unexpected => unexpected,
+
+            error.AccessDenied => .notcapable, // .acces,
+            error.BrokenPipe => .pipe,
+            error.ConnectionResetByPeer => .connreset,
+            error.DeviceBusy => .busy,
+            error.DiskQuota => .dquot,
+            error.FileNotFound => .noent,
+            error.FileTooBig => .fbig,
+            error.InputOutput => .io,
+            error.InvalidArgument => .inval,
+            error.MessageTooBig => .msgsize,
+            error.NoDevice => .nxio,
+            error.NoSpaceLeft => .nospc,
+            error.OperationAborted => .canceled,
+            error.PermissionDenied => .perm,
+            error.ProcessNotFound => .srch,
+            error.WouldBlock => .again,
+
+            error.BadFd => .badf,
+            error.Unimplemented => .nosys,
+        };
+    }
+};
+
+/// Includes a subset of the errors in `std.posix`.
+pub const Error = std.mem.Allocator.Error ||
+    wasmstint.runtime.MemInst.OobError ||
+    std.posix.UnexpectedError || error{
+    AccessDenied,
+    BrokenPipe,
+    ConnectionResetByPeer,
+    DeviceBusy,
+    DiskQuota,
+    FileNotFound,
+    FileTooBig,
+    InputOutput,
+    InvalidArgument,
+    MessageTooBig,
+    NoDevice,
+    NoSpaceLeft,
+    OperationAborted,
+    PermissionDenied,
+    ProcessNotFound,
+    WouldBlock,
+
+    BadFd,
+    Unimplemented,
 };
 
 const std = @import("std");
+const wasmstint = @import("wasmstint");

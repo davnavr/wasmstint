@@ -41,248 +41,46 @@ const ClockId = enum(u32) {
     _,
 };
 
-pub const Errno = @import("WasiPreview1/errno.zig").Errno;
-
+const Errno = @import("WasiPreview1/errno.zig").Errno;
 const Fd = @import("WasiPreview1/fd.zig").Fd;
-
-fn Pointer(comptime T: type) type {
-    return packed struct(u32) {
-        addr: u32,
-
-        const Pointee = T;
-        const Ptr = @This();
-        const Const = ConstPointer(T);
-
-        fn toConst(ptr: Ptr) Const {
-            return .{ .addr = ptr.addr };
-        }
-    };
-}
 
 /// A region of memory for scatter/gather **reads**.
 ///
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#iovec
 const Iovec = extern struct {
     /// The address of the buffer to be filled.
-    buf: Pointer(u8),
+    buf: pointer.Pointer(u8),
     /// The length of the buffer to be filled.
     buf_len: Size,
 };
-
-fn ConstPointer(comptime T: type) type {
-    return packed struct(u32) {
-        addr: u32,
-
-        const Pointee = T;
-    };
-}
 
 /// A region of memory for scatter/gather **writes**.
 ///
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#ciovec
 const Ciovec = extern struct {
     /// The address of the buffer to be written.
-    buf: ConstPointer(u8),
+    buf: pointer.ConstPointer(u8),
     /// The length of the buffer to be written.
     buf_len: Size,
 
-    //const List // TODO: have an iterator type, yields slices and does MemInst bounds checks
+    fn bytes(ciovec: Ciovec, mem: *const MemInst) pointer.OobError![]const u8 {
+        return pointer.accessSlice(mem, ciovec.buf.addr, ciovec.buf_len);
+    }
 };
 
 // TODO: Add more WASI API types
 
 const File = @import("WasiPreview1/File.zig");
 
+const Api = @import("WasiPreview1/api.zig").Api;
+
 pub const Csprng = @import("WasiPreview1/Csprng.zig");
 
-pub const Api = enum {
-    // args_get,
-    // args_sizes_get,
-
-    fd_filestat_get,
-
-    fd_pwrite,
-    fd_read,
-
-    fd_seek,
-
-    fd_write,
-
-    proc_exit,
-
-    pub fn signature(api: Api) Module.FuncType {
-        const result: []const Module.ValType = &.{.i32};
-        return switch (api) {
-            .fd_filestat_get => .initComptime(&.{ .i32, .i32 }, result),
-
-            .fd_pwrite => .initComptime(&.{ .i32, .i32, .i32, .i64, .i32 }, result),
-            .fd_read, .fd_write => .initComptime(&.{ .i32, .i32, .i32, .i32 }, result),
-
-            .fd_seek => .initComptime(&.{ .i32, .i64, .i32, .i32 }, result),
-
-            .proc_exit => .initComptime(&.{.i32}, &.{}),
-        };
-    }
-
-    fn ValTypeType(comptime ty: Module.ValType) type {
-        return switch (ty) {
-            .i32,
-            .i64,
-            .f32,
-            .f64,
-            .funcref,
-            .externref,
-            => |tag| @FieldType(Interpreter.TaggedValue, @tagName(tag)),
-            .v128 => unreachable,
-        };
-    }
-
-    fn ParamTuple(comptime api: Api) type {
-        const params = api.signature().parameters();
-        var field_types: [params.len]type = undefined;
-        for (&field_types, params) |*dst, ty| {
-            dst.* = ValTypeType(ty);
-        }
-
-        return std.meta.Tuple(&field_types);
-    }
-
-    fn taggedValuesToParamTuple(
-        comptime api: Api,
-        src: []const Interpreter.TaggedValue,
-    ) ParamTuple(api) {
-        var tuple: ParamTuple(api) = undefined;
-        inline for (0.., comptime api.signature().parameters()) |i, ty| {
-            tuple[i] = @field(src[i], @tagName(ty));
-        }
-        return tuple;
-    }
-
-    pub fn name(api: Api) Module.Name {
-        return switch (api) {
-            inline else => |tag| comptime .init(@tagName(tag)),
-        };
-    }
-
-    const all = std.enums.values(Api);
-
-    const min_name_len: comptime_int = max: {
-        var len = std.math.maxInt(u16);
-        for (all) |api| {
-            len = @min(len, api.name().len);
-        }
-        break :max len;
-    };
-
-    const max_name_len: comptime_int = max: {
-        var len = 0;
-        for (all) |api| {
-            len = @max(len, api.name().len);
-        }
-        break :max len;
-    };
-
-    const host_func_table: [all.len]wasmstint.runtime.FuncAddr.Host = table: {
-        var host_funcs: [all.len]wasmstint.runtime.FuncAddr.Host = undefined;
-        for (&host_funcs, all) |*dst, api| {
-            dst.* = .{ .signature = api.signature() };
-        }
-        break :table host_funcs;
-    };
-
-    fn fromHostFunc(ptr: *const wasmstint.runtime.FuncAddr.Host) Api {
-        return @enumFromInt(
-            ptr - @as([]const wasmstint.runtime.FuncAddr.Host, &host_func_table).ptr,
-        );
-    }
-
-    fn hostFunc(api: Api) *const wasmstint.runtime.FuncAddr.Host {
-        return &host_func_table[@intFromEnum(api)];
-    }
-
-    comptime {
-        for (all) |api| {
-            std.debug.assert(api.hostFunc().signature.matches(&api.signature()));
-        }
-    }
-
-    const Lookup = struct {
-        map: std.HashMapUnmanaged(
-            Api,
-            void,
-            InitContext,
-            std.hash_map.default_max_load_percentage,
-        ),
-        hash_seed: u64,
-
-        const GetContext = struct {
-            hash_seed: u64,
-
-            pub fn hash(ctx: GetContext, function_name: Module.Name) u64 {
-                std.debug.assert(min_name_len <= function_name.len);
-                std.debug.assert(function_name.len <= max_name_len);
-                return @call(
-                    .always_inline,
-                    std.hash.XxHash3.hash,
-                    .{ ctx.hash_seed, function_name.bytes() },
-                );
-            }
-
-            pub fn eql(ctx: GetContext, function_name: Module.Name, api: Api) bool {
-                _ = ctx;
-                const api_name = api.name();
-                std.debug.assert(min_name_len <= api_name.len);
-                std.debug.assert(api_name.len <= max_name_len);
-                std.debug.assert(min_name_len <= function_name.len);
-                std.debug.assert(function_name.len <= max_name_len);
-                return std.mem.eql(u8, api_name.bytes(), function_name.bytes());
-            }
-        };
-
-        const InitContext = struct {
-            hash_seed: u64,
-
-            pub fn hash(ctx: InitContext, a: Api) u64 {
-                return GetContext.hash(.{ .hash_seed = ctx.hash_seed }, a.name());
-            }
-
-            pub fn eql(ctx: InitContext, x: Api, y: Api) bool {
-                _ = ctx;
-                return x == y;
-            }
-        };
-
-        fn init(allocator: Allocator, hash_seed: u64) Allocator.Error!Lookup {
-            var lookup = Lookup{ .map = .empty, .hash_seed = hash_seed };
-            const ctx = InitContext{ .hash_seed = hash_seed };
-            try lookup.map.ensureTotalCapacityContext(allocator, all.len, ctx);
-            errdefer comptime unreachable;
-            for (all) |api| {
-                lookup.map.putAssumeCapacityNoClobberContext(api, {}, ctx);
-            }
-
-            std.debug.assert(lookup.map.size == all.len);
-            return lookup;
-        }
-
-        fn get(lookup: *const Lookup, function_name: Module.Name) ?Api {
-            return if (function_name.len > max_name_len or function_name.len < min_name_len)
-                null
-            else
-                lookup.map.getKeyAdapted(
-                    function_name,
-                    GetContext{ .hash_seed = lookup.hash_seed },
-                );
-        }
-
-        fn deinit(lookup: *Lookup, allocator: Allocator) void {
-            lookup.map.deinit(allocator);
-            lookup.* = undefined;
-        }
-    };
-};
-
 allocator: Allocator,
+scratch: struct {
+    state: std.heap.ArenaAllocator.State,
+    lock: std.debug.SafetyLock = .{},
+},
 api_lookup: Api.Lookup,
 csprng: Csprng,
 fd_table: Fd.Table,
@@ -434,6 +232,7 @@ pub fn init(allocator: Allocator, options: InitOptions) InitError!WasiPreview1 {
         .fd_table = fd_table,
         .api_lookup = api_lookup,
         .allocator = allocator,
+        .scratch = .{ .state = std.heap.ArenaAllocator.init(allocator).state },
         .csprng = options.csprng,
     };
 }
@@ -460,32 +259,78 @@ pub fn importProvider(state: *WasiPreview1) wasmstint.runtime.ImportProvider {
     };
 }
 
+fn acquireScratch(state: *WasiPreview1) std.heap.ArenaAllocator {
+    state.scratch.lock.lock();
+    return state.scratch.state.promote(state.allocator);
+}
+
+fn releaseScratch(state: *WasiPreview1, arena: std.heap.ArenaAllocator) void {
+    var scratch = arena;
+    _ = scratch.reset(.retain_capacity);
+    state.scratch.state = scratch.state;
+    state.scratch.lock.unlock();
+}
+
 // Note handlers here can just use `Errno.fault`, which is nice since `AwaitingHost` doesn't
 // support trapping yet.
 
 fn fd_write(
     wasi: *WasiPreview1,
-    memory: *MemInst,
+    mem: *MemInst,
     raw_fd: i32,
     raw_iovs: i32,
     raw_iovs_len: i32,
     raw_ret: i32,
 ) Errno {
-    const fd = Fd.initRaw(raw_fd) catch |e| switch (e) {
-        error.BadFd => return .badf,
-    };
-    _ = wasi;
-    _ = memory;
-    std.debug.print(
-        "TODO: fd_write({f}, 0x{X}, 0x{X}, 0x{X})\n",
+    const iovs_ptr = pointer.ConstPointer(Ciovec){ .addr = @bitCast(raw_iovs) };
+    const ret_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
+
+    std.log.debug(
+        "fd_write({}, {f}, {}, {f})\n",
         .{
-            fd,
-            @as(u32, @bitCast(raw_iovs)),
+            @as(u32, @bitCast(raw_fd)),
+            iovs_ptr,
             @as(u32, @bitCast(raw_iovs_len)),
-            @as(u32, @bitCast(raw_ret)),
+            ret_ptr,
         },
     );
-    return .nosys;
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    const iovs = pointer.ConstSlice(Ciovec).init(
+        mem,
+        iovs_ptr,
+        @as(u32, @bitCast(raw_iovs_len)),
+    ) catch |e| return .mapError(e);
+
+    const ret_bytes = ret_ptr.bytes(mem) catch |e| return .mapError(e);
+
+    var scratch = wasi.acquireScratch();
+    defer wasi.releaseScratch(scratch);
+
+    var ciovs = std.ArrayListUnmanaged(File.Ciovec).initCapacity(
+        scratch.allocator(),
+        iovs.items.len,
+    ) catch |e| return .mapError(e);
+    var total_len: u32 = 0;
+    for (0..iovs.items.len) |i| {
+        if (i > 0) {
+            @branchHint(.cold);
+        }
+
+        const ciovec = iovs.read(i).bytes(mem) catch |e| return .mapError(e);
+        const ciovec_len = std.math.cast(u32, ciovec.len) orelse break;
+        total_len = std.math.add(u32, total_len, ciovec_len) catch |e| switch (e) {
+            error.Overflow => break, // return .inval,
+        };
+        ciovs.appendAssumeCapacity(File.Ciovec.init(ciovec));
+    }
+
+    const ret = file.fd_write(ciovs.items, total_len) catch |e| return .mapError(e);
+    pointer.writeFromBytes(u32, ret_bytes, ret);
+    return .success;
 }
 
 /// Asserts that `state` indicates a host function is currently being called.
@@ -529,6 +374,9 @@ pub fn dispatch(
 
 pub fn deinit(state: *WasiPreview1) void {
     state.fd_table.deinit(state.allocator);
+    state.api_lookup.deinit(state.allocator);
+    state.scratch.lock.assertUnlocked();
+    state.scratch.state.promote(state.allocator).deinit();
     state.* = undefined;
 }
 
@@ -538,6 +386,7 @@ const wasmstint = @import("wasmstint");
 const Interpreter = wasmstint.Interpreter;
 const MemInst = wasmstint.runtime.MemInst;
 const Module = wasmstint.Module;
+const pointer = wasmstint.pointer;
 
 test {
     _ = WasiPreview1;

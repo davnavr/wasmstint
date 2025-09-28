@@ -111,22 +111,84 @@ pub const StandardStreams = struct {
 
 pub const os = @import("File/os.zig");
 
+pub const Ciovec = extern struct {
+    inner: std.posix.iovec_const,
+
+    pub fn init(b: []const u8) Ciovec {
+        return .{
+            .inner = .{ .base = b.ptr, .len = b.len },
+        };
+    }
+
+    pub fn bytes(ciov: Ciovec) []const u8 {
+        return ciov.inner.base[0..ciov.inner.len];
+    }
+
+    pub fn castSlice(ciovecs: []const Ciovec) []const std.posix.iovec_const {
+        return @ptrCast(ciovecs);
+    }
+};
+
+pub const Error = @import("errno.zig").Error;
+
+/// Called when an Zig `std` OS abstract returns an unexpected error.
+pub fn unexpectedError(err: anyerror) std.posix.UnexpectedError {
+    if (std.posix.unexpected_error_tracing) {
+        std.log.err("unexpected error: {t}", .{err});
+        if (@errorReturnTrace()) |trace| {
+            std.debug.dumpStackTrace(trace.*);
+        }
+    }
+
+    return error.Unexpected;
+}
+
 pub const VTable = struct {
+    /// Do not call function pointers without checking the `File`'s `rights`.
     const Api = struct {
-        // fd_write: *const fn(ctx: Ctx, ),
+        padding: [6]*anyopaque = undefined,
+        // Could add scratch: *ArenaAllocator
+        fd_write: *const fn (ctx: Ctx, iovs: []const Ciovec, total_len: u32) Error!u32,
     };
 
-    api: Api,
+    api: VTable.Api,
     deinit: *const fn (ctx: Ctx, allocator: Allocator) void,
 
     // Ensure that rights checks get compiled down to an array access + bitwise AND, for fun
     comptime {
-        for (@typeInfo(Api).@"struct".fields) |f| {
-            const fn_offset = @offsetOf(VTable, @tagName(f)) / @sizeOf(*const fn () void);
-            std.debug.assert(fn_offset == @bitOffsetOf(Rights, @tagName(f)));
+        for (@typeInfo(VTable.Api).@"struct".fields) |f| {
+            if (std.mem.startsWith(u8, f.name, "padding")) {
+                continue;
+            }
+            const fn_offset = @offsetOf(VTable.Api, f.name) / @sizeOf(*const fn () void);
+            const bit_offset = @bitOffsetOf(Rights, f.name);
+            if (fn_offset != bit_offset) {
+                @compileError(
+                    std.fmt.comptimePrint(
+                        "offset {} for field {s} in vtable not equal to bit offset {}",
+                        .{ fn_offset, f.name, bit_offset },
+                    ),
+                );
+            }
         }
     }
 };
+
+const Api = @import("api.zig").Api;
+
+fn api(
+    file: *const File,
+    comptime func: Api,
+) error{AccessDenied}!@FieldType(VTable.Api, @tagName(func)) {
+    return if (@field(file.rights, @tagName(func)))
+        @field(file.impl.vtable.api, @tagName(func))
+    else
+        error.AccessDenied;
+}
+
+pub fn fd_write(file: *File, iovs: []const Ciovec, total_len: u32) Error!u32 {
+    return (try file.api(.fd_write))(file.impl.ctx, iovs, total_len);
+}
 
 pub fn deinit(file: *File, allocator: Allocator) void {
     file.impl.vtable.deinit(file.impl.ctx, allocator);

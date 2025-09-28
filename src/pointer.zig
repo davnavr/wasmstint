@@ -3,7 +3,7 @@
 // caution: big endian code is untested
 const native_endian = builtin.cpu.arch.endian();
 
-fn Bytes(comptime T: type) type {
+fn ConstBytes(comptime T: type) type {
     return *align(1) const [@sizeOf(T)]u8;
 }
 
@@ -32,7 +32,7 @@ fn structFields(comptime T: type) StructField.Array(T) {
 
 pub fn readFromBytes(
     comptime T: type,
-    bytes: Bytes(T),
+    bytes: ConstBytes(T),
 ) T {
     if (@sizeOf(T) * 8 != @bitSizeOf(T)) {
         @compileError("bit size of " ++ @typeName(T) ++ " must be multiple of a byte");
@@ -73,9 +73,44 @@ test readFromBytes {
     );
 }
 
+fn Bytes(comptime T: type) type {
+    return *align(1) [@sizeOf(T)]u8;
+}
+
+pub fn writeFromBytes(
+    comptime T: type,
+    bytes: Bytes(T),
+    value: T,
+) void {
+    if (@sizeOf(T) * 8 != @bitSizeOf(T)) {
+        @compileError("bit size of " ++ @typeName(T) ++ " must be multiple of a byte");
+    }
+
+    switch (@typeInfo(T)) {
+        .int => std.mem.writeInt(T, bytes, value, .little),
+        .@"enum" => |enumeration| if (enumeration.is_exhaustive)
+            @compileError("unsupported exhaustive enum " ++ @typeName(T))
+        else
+            writeFromBytes(enumeration.tag_type, bytes, @intFromEnum(value)),
+        .@"struct" => |structure| switch (structure.layout) {
+            .@"packed" => writeFromBytes(structure.backing_integer.?, bytes, @bitCast(value)),
+            .@"extern" => {
+                inline for (structFields(T)) |f| {
+                    const field_bytes = bytes[f.offset..][0..@sizeOf(f.type)];
+                    writeFromBytes(f.type, field_bytes, @field(value, f.name));
+                }
+            },
+            .auto => @compileError(
+                "struct " ++ @typeName(T) ++ " needs packed or extern layout",
+            ),
+        },
+        else => |bad| @compileError("unsupported " ++ @tagName(bad) ++ " " ++ @typeName(T)),
+    }
+}
+
 pub const OobError = MemInst.OobError;
 
-pub fn loadSlice(mem: *const MemInst, addr: usize, size: usize) OobError![]u8 {
+pub fn accessSlice(mem: *const MemInst, addr: usize, size: usize) OobError![]u8 {
     if (addr >= mem.size) {
         return error.MemoryAccessOutOfBounds;
     }
@@ -88,8 +123,8 @@ pub fn loadSlice(mem: *const MemInst, addr: usize, size: usize) OobError![]u8 {
     return remainder[0..size];
 }
 
-pub fn loadArray(mem: *const MemInst, addr: usize, comptime size: usize) OobError!*[size]u8 {
-    return (try loadSlice(mem, addr, size))[0..size];
+pub fn accessArray(mem: *const MemInst, addr: usize, comptime size: usize) OobError!*[size]u8 {
+    return (try accessSlice(mem, addr, size))[0..size];
 }
 
 // Could parameterize to support 64-bit pointers.
@@ -110,6 +145,14 @@ pub fn Pointer(comptime T: type) type {
         pub fn read(ptr: Self, mem: *const MemInst) OobError!T {
             return ptr.constCast().read(mem);
         }
+
+        pub fn bytes(ptr: Self, mem: *const MemInst) OobError!Bytes(T) {
+            return accessArray(mem, ptr.addr, @sizeOf(T));
+        }
+
+        pub fn format(ptr: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            try writer.print(@typeName(T) ++ "@{X:0>8}", .{ptr.addr});
+        }
     };
 }
 
@@ -126,7 +169,11 @@ pub fn ConstPointer(comptime T: type) type {
         }
 
         pub fn read(ptr: Self, mem: *const MemInst) OobError!T {
-            return readFromBytes(T, try loadArray(mem, ptr.addr, @sizeOf(T)));
+            return readFromBytes(T, try accessArray(mem, ptr.addr, @sizeOf(T)));
+        }
+
+        pub fn format(ptr: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            return ptr.constCast().format(writer);
         }
     };
 }
@@ -138,7 +185,7 @@ pub fn Slice(comptime T: type) type {
         const Self = @This();
 
         pub fn init(mem: *const MemInst, ptr: Pointer(T), len: usize) OobError!Self {
-            return .{ .items = @ptrCast(try loadSlice(mem, ptr.addr, len * @sizeOf(T))) };
+            return .{ .items = @ptrCast(try accessSlice(mem, ptr.addr, len * @sizeOf(T))) };
         }
     };
 }

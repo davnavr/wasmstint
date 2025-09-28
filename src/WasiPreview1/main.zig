@@ -173,7 +173,7 @@ pub fn main() u8 {
 
     const argv_0 = WasiPreview1.Arguments.String.initTruncated(fmt_wasm_path);
     var wasi = WasiPreview1.init(
-        arena.allocator(),
+        std.heap.page_allocator,
         .{
             .arguments = WasiPreview1.Arguments.applicationName(&argv_0),
             .fd_rng_seed = rt_rng_seeds[1],

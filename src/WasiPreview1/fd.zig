@@ -16,7 +16,9 @@ pub const Fd = packed struct(u32) {
 
     pub const Table = FdTable;
 
-    pub fn initRaw(n: i32) error{BadFd}!Fd {
+    pub const Error = error{BadFd};
+
+    pub fn initRaw(n: i32) Error!Fd {
         return if (0 <= n)
             .{ .n = @intCast(n) }
         else
@@ -50,10 +52,25 @@ const FdTable = struct {
         }
     };
 
+    pub fn unlockTable(table: *FdTable) void {
+        table.entries.unlockPointers();
+    }
+
+    const create_max_attempts = 8;
+
+    pub const CreateError = Allocator.Error || error{
+        /// Too many open file descriptors.
+        ProcessFdQuotaExceeded,
+    };
+
     /// Callers must write to the returned pointer to initialize the `File`.
-    pub fn create(table: *FdTable, allocator: Allocator) Allocator.Error!*File {
+    ///
+    /// Don't forget to call `unlockTable()`!
+    pub fn create(table: *FdTable, allocator: Allocator) CreateError!*File {
         try table.entries.ensureUnusedCapacity(allocator, 1);
-        while (true) {
+        for (0..create_max_attempts) |_| {
+            errdefer comptime unreachable;
+
             // For simplicity, never pick the standard stream numbers.
             const chosen = Fd{
                 .n = table.rng.random().intRangeAtMost(u31, 3, std.math.maxInt(u31)),
@@ -66,9 +83,20 @@ const FdTable = struct {
                 continue;
             } else {
                 entry.value_ptr.* = undefined;
+                table.entries.lockPointers();
                 return entry.value_ptr;
             }
+        } else {
+            @branchHint(.cold);
+            // exceeded attempt count, too many open FDs to effectively pick a new random one
+            return error.ProcessFdQuotaExceeded;
         }
+    }
+
+    /// Don't forget to call `unlockTable()`!
+    pub fn get(table: *FdTable, fd: Fd) Fd.Error!*File {
+        table.entries.lockPointers();
+        return table.entries.getPtr(fd) orelse error.BadFd;
     }
 
     /// Returns `true` if `fd` was valid and successfully removed.
