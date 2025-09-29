@@ -59,19 +59,55 @@ const ErrorCode = enum(u8) {
     failure = 1,
     bad_arg = 2,
 
-    fn print(code: ErrorCode, comptime fmt: []const u8, args: anytype) u8 {
+    fn printInitialMessage(
+        comptime fmt: []const u8,
+        args: anytype,
+        color: std.Io.tty.Config,
+        stderr: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        color.setColor(stderr, .bright_red) catch {};
+        stderr.writeAll("error: ") catch {};
+        color.setColor(stderr, .reset) catch {};
+        stderr.print(fmt ++ "\n", args) catch {};
+    }
+
+    fn printWithFollowup(
+        code: ErrorCode,
+        comptime fmt: []const u8,
+        args: anytype,
+        context: anytype,
+        comptime printFollowupMessage: fn (
+            @TypeOf(context),
+            std.Io.tty.Config,
+            *std.Io.Writer,
+        ) std.Io.Writer.Error!void,
+    ) u8 {
         @branchHint(.cold);
         var buf: [256]u8 align(16) = undefined;
         const stderr = std.debug.lockStderrWriter(&buf);
         const color = std.Io.tty.detectConfig(
             @as(*std.fs.File.Writer, @fieldParentPtr("interface", stderr)).file,
         );
-        color.setColor(stderr, .bright_red) catch {};
-        stderr.writeAll("error: ") catch {};
-        color.setColor(stderr, .reset) catch {};
-        stderr.print(fmt ++ "\n", args) catch {};
+        printInitialMessage(fmt, args, color, stderr) catch {};
+        printFollowupMessage(context, color, stderr) catch {};
         stderr.flush() catch {};
         return @intFromEnum(code);
+    }
+
+    fn print(code: ErrorCode, comptime fmt: []const u8, args: anytype) u8 {
+        return printWithFollowup(
+            code,
+            fmt,
+            args,
+            {},
+            struct {
+                fn nothing(
+                    _: void,
+                    _: std.Io.tty.Config,
+                    _: *std.Io.Writer,
+                ) std.Io.Writer.Error!void {}
+            }.nothing,
+        );
     }
 };
 
@@ -295,9 +331,42 @@ pub fn main() u8 {
         }
 
         break :exports .{
-            .entrypoint = entrypoint orelse return ErrorCode.failure.print(
+            .entrypoint = entrypoint orelse return ErrorCode.failure.printWithFollowup(
                 "could not find exported entrypoint {f}",
                 .{fmt_entrypoint},
+                all_exports,
+                struct {
+                    fn printFollowupMessage(
+                        available_exports: wasmstint.runtime.ModuleInst.ExportVals,
+                        color: std.Io.tty.Config,
+                        out: *std.Io.Writer,
+                    ) std.Io.Writer.Error!void {
+                        color.setColor(out, .bright_cyan) catch {};
+                        try out.writeAll("note: ");
+                        color.setColor(out, .reset) catch {};
+                        if (available_exports.len == 0) {
+                            try out.writeAll("module does not provide any exports\n");
+                        } else {
+                            try out.writeAll("module's available entry points are:\n");
+                            for (0..available_exports.len) |i| {
+                                const exp = available_exports.at(i);
+                                if (exp.val != .func) {
+                                    continue;
+                                }
+
+                                const func = exp.val.func.signature();
+                                if (func.param_count != 0 or func.result_count != 0) {
+                                    continue;
+                                }
+
+                                try out.print(
+                                    "{f}\n",
+                                    .{std.unicode.fmtUtf8(exp.name.bytes())},
+                                );
+                            }
+                        }
+                    }
+                }.printFollowupMessage,
             ),
             .memory = memory orelse
                 return ErrorCode.failure.print("could not find exported memory", .{}),
