@@ -2,7 +2,7 @@ const default_invoke = "_start";
 const memory_export = "memory";
 
 const Arguments = cli_args.CliArgs(.{
-    .description = "WebAssembly specification JSON test interpreter.",
+    .description = "Interpreters WebAssembly programs using the `wasi_snapshot_preview1` ABI",
     .flags = &[_]cli_args.Flag{
         cli_args.Flag.string(
             .{
@@ -11,7 +11,7 @@ const Arguments = cli_args.CliArgs(.{
                 .description = "Path to .wasm program to execute",
             },
             "PATH",
-        ),
+        ).required(),
         cli_args.Flag.string(
             .{
                 .long = "invoke",
@@ -25,29 +25,27 @@ const Arguments = cli_args.CliArgs(.{
             .description = "Prints the application's unmodified exit code to stderr",
         }),
 
-        cli_args.Flag.intUnsigned(
+        cli_args.Flag.integer(
             .{
                 .long = "rt-rng-seed",
                 .description = "RNG seed used for internal data structures",
             },
             "SEED",
             u128,
-        ).optional(),
+        ),
 
-        cli_args.Flag.intUnsigned(
+        cli_args.Flag.integerSizeSuffix(
             .{
                 .long = "max-stack-size",
                 .description = "Limits the size of the WASM value/call stack",
             },
-            "AMOUNT",
             u32,
         ).withDefault(8192),
-        cli_args.Flag.intUnsigned(
+        cli_args.Flag.integerSizeSuffix(
             .{
                 .long = "max-memory-size",
                 .description = "Upper bound on the size of WASM linear memory, in bytes",
             },
-            "SIZE",
             usize,
         ).withDefault(1 * 1024 * 1024 * 1024), // 1 GiB
     },
@@ -86,7 +84,8 @@ pub fn main() u8 {
     defer scratch.deinit();
 
     const arguments = args: {
-        const parser = Arguments.init(arena.allocator()) catch oom("CLI argument lookup");
+        var parser: Arguments = undefined;
+        parser.init();
         break :args parser.programArguments(&scratch, &arena) catch oom("CLI arguments");
     };
 

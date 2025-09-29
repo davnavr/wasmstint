@@ -3,22 +3,22 @@
 const Arguments = cli_args.CliArgs(.{
     .description = "WebAssembly specification JSON test interpreter.",
     .flags = &[_]cli_args.Flag{
-        .string(
+        cli_args.Flag.string(
             .{
                 .long = "run",
                 .short = 'r',
                 .description = "Path to .json specification test file",
             },
             "PATH",
-        ),
+        ).required(),
 
-        cli_args.Flag.intUnsigned(
+        cli_args.Flag.integer(
             .{ .long = "rng-seed", .description = "Specifies the RNG seed to use" },
             "SEED",
             u256,
-        ).optional(),
+        ),
 
-        cli_args.Flag.intUnsigned(
+        cli_args.Flag.integer(
             .{
                 .long = "fuel",
                 .description = "Limits the number of WASM instructions executed",
@@ -27,34 +27,25 @@ const Arguments = cli_args.CliArgs(.{
             u64,
         ).withDefault(3_000_000),
 
-        cli_args.Flag.intUnsigned(
+        cli_args.Flag.integerSizeSuffix(
             .{
                 .long = "max-stack-size",
                 .description = "Limits the size of the WASM value/call stack",
             },
-            "AMOUNT",
             u32,
         ).withDefault(5000),
 
-        cli_args.Flag.intUnsigned(
+        cli_args.Flag.integerSizeSuffix(
             .{
                 .long = "max-memory-size",
                 .description = "Upper bound on the size of a WASM linear memory, in bytes",
             },
-            "SIZE",
             usize,
         ).withDefault(1000 * 65536),
 
         .boolean(.{ .long = "wait-for-debugger" }),
     },
 });
-
-fn parseProgramArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) Arguments.Parsed {
-    var buf: [512]u8 align(16) = undefined;
-    var buf_allocator = std.heap.FixedBufferAllocator.init(&buf);
-    const parser = Arguments.init(buf_allocator.allocator()) catch @panic("oom");
-    return parser.programArguments(scratch, arena) catch @panic("oom");
-}
 
 pub fn main() u8 {
     var scratch = ArenaAllocator.init(std.heap.page_allocator);
@@ -63,7 +54,11 @@ pub fn main() u8 {
     var arena = ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
-    const arguments = parseProgramArguments(&scratch, &arena);
+    const arguments = args: {
+        var parser: Arguments = undefined;
+        parser.init();
+        break :args parser.programArguments(&scratch, &arena) catch @panic("oom");
+    };
     _ = scratch.reset(.retain_capacity);
 
     if (arguments.@"wait-for-debugger") {
