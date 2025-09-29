@@ -48,6 +48,8 @@ const Arguments = cli_args.CliArgs(.{
             },
             usize,
         ).withDefault(1 * 1024 * 1024 * 1024), // 1 GiB
+
+        cli_args.Flag.remainder,
     },
 });
 
@@ -111,6 +113,34 @@ const ErrorCode = enum(u8) {
     }
 };
 
+const ParsedArguments = struct {
+    forwarded: WasiPreview1.Arguments.List,
+    flags: Arguments.Parsed,
+};
+
+fn parseArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) ParsedArguments {
+    var parser: Arguments = undefined;
+    parser.init();
+
+    var args = cli_args.ArgIterator.initProcessArgs(scratch) catch oom("argv");
+    _ = args.next().?;
+    const parsed = parser.remainingArguments(&args, arena) catch oom("CLI arguments");
+
+    var forwarded = WasiPreview1.Arguments.List.initCapacity(
+        arena.allocator(),
+        std.math.cast(u32, args.remaining.len + 1) orelse
+            return oom("too many CLI arguments to forward"),
+    ) catch oom("forwarded CLI argument list");
+
+    forwarded.appendBounded(.empty) catch unreachable; // reserve space for program name
+
+    while (args.nextDupe(arena) catch oom("forwarded CLI argument")) |a| {
+        forwarded.appendBounded(.initTruncated(a)) catch oom("forwarded CLI argument");
+    }
+
+    return .{ .flags = parsed, .forwarded = forwarded };
+}
+
 const max_fuel = wasmstint.Interpreter.Fuel{ .remaining = std.math.maxInt(u32) };
 
 pub fn main() u8 {
@@ -119,11 +149,8 @@ pub fn main() u8 {
     var scratch = ArenaAllocator.init(std.heap.page_allocator);
     defer scratch.deinit();
 
-    const arguments = args: {
-        var parser: Arguments = undefined;
-        parser.init();
-        break :args parser.programArguments(&scratch, &arena) catch oom("CLI arguments");
-    };
+    const all_arguments = parseArguments(&scratch, &arena);
+    const arguments = all_arguments.flags;
 
     if (std.mem.eql(u8, arguments.invoke, memory_export)) {
         return ErrorCode.bad_arg.print("cannot use " ++ memory_export ++ " as an entrypoint", .{});
@@ -134,6 +161,22 @@ pub fn main() u8 {
         "{f}",
         .{std.unicode.fmtUtf8(arguments.module)},
     ) catch oom("path to wasm file");
+
+    const forwarded_arguments = args: {
+        var forwarded = all_arguments.forwarded;
+        const program_name = arena.allocator().dupe(
+            u8,
+            std.fs.path.basename(arguments.module),
+        ) catch oom("program name");
+
+        _ = forwarded.replaceAt(
+            0,
+            .initTruncated(program_name),
+        ) catch oom("forwarded CLI argument 0");
+
+        break :args forwarded.arguments();
+    };
+
     const wasm_binary = wasmstint.FileContent.readFileZ(
         std.fs.cwd(),
         arguments.module,
@@ -155,6 +198,7 @@ pub fn main() u8 {
 
     const rt_rng_seeds: [2]u64 = .{ @truncate(rt_rng_num), @truncate(rt_rng_num >> 64) };
 
+    _ = scratch.reset(.retain_capacity);
     var parse_diagnostics = std.Io.Writer.Allocating.init(arena.allocator());
     const parsed_module = module: {
         var wasm: []const u8 = wasm_binary.contents;
@@ -206,11 +250,10 @@ pub fn main() u8 {
 
     std.debug.assert(validation_finished);
 
-    const argv_0 = WasiPreview1.Arguments.String.initTruncated(fmt_wasm_path);
     var wasi = WasiPreview1.init(
         std.heap.page_allocator,
         .{
-            .arguments = WasiPreview1.Arguments.applicationName(&argv_0),
+            .arguments = forwarded_arguments,
             .fd_rng_seed = rt_rng_seeds[1],
             .csprng = csprng,
         },

@@ -69,57 +69,7 @@ pub fn function(state: *WasiPreview1, api: Api) wasmstint.runtime.FuncAddr {
 }
 
 pub const Char = @import("WasiPreview1/char.zig").Char;
-
-/// Command-line argument data to pass to the application.
-///
-/// Obtained by calling `args_sizes_get` and `args_get`.
-pub const Arguments = struct {
-    ptr: [*]const String,
-    count: u32,
-    /// Total size, in bytes, of all argument data.
-    ///
-    /// TODO: Probably includes null-terminators too.
-    size: u32,
-
-    pub fn applicationName(name: *const String) Arguments {
-        return .{
-            .ptr = name[0..1].ptr,
-            .count = 1,
-            .size = name.len() + 1,
-        };
-    }
-
-    pub const String = struct {
-        /// Invariant that `chars.len <= max_len`.
-        ///
-        /// `Char` guarantees no null-terminators are present.
-        chars: []const Char,
-
-        pub const max_len = std.math.maxInt(u32) - 1;
-
-        /// Takes a slice of the given bytes up to the first encountered null-terminator (`\x00`),
-        /// and truncates the length up to `max_len`.
-        pub fn initTruncated(s: []const u8) String {
-            const null_terminated = std.mem.sliceTo(s[0..@min(max_len, s.len)], 0);
-            return .{ .chars = @ptrCast(null_terminated) };
-        }
-
-        pub fn len(s: String) u32 {
-            return @intCast(s.chars.len);
-        }
-
-        pub fn bytes(s: String) []const u8 {
-            _ = s.len();
-            return @ptrCast(s.chars);
-        }
-
-        pub fn format(s: String, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-            return writer.writeAll(s.bytes());
-        }
-
-        // pub fn formatEscaped(s: String, writer: *std.Io.Writer) std.Io.Writer.Error!void {}
-    };
-};
+pub const Arguments = @import("WasiPreview1/Arguments.zig");
 
 /// Environment variable data to pass to the application.
 pub const Environ = struct {
