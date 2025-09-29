@@ -77,7 +77,7 @@ fn Bytes(comptime T: type) type {
     return *align(1) [@sizeOf(T)]u8;
 }
 
-pub fn writeFromBytes(
+pub fn writeToBytes(
     comptime T: type,
     bytes: Bytes(T),
     value: T,
@@ -91,13 +91,13 @@ pub fn writeFromBytes(
         .@"enum" => |enumeration| if (enumeration.is_exhaustive)
             @compileError("unsupported exhaustive enum " ++ @typeName(T))
         else
-            writeFromBytes(enumeration.tag_type, bytes, @intFromEnum(value)),
+            writeToBytes(enumeration.tag_type, bytes, @intFromEnum(value)),
         .@"struct" => |structure| switch (structure.layout) {
-            .@"packed" => writeFromBytes(structure.backing_integer.?, bytes, @bitCast(value)),
+            .@"packed" => writeToBytes(structure.backing_integer.?, bytes, @bitCast(value)),
             .@"extern" => {
                 inline for (structFields(T)) |f| {
                     const field_bytes = bytes[f.offset..][0..@sizeOf(f.type)];
-                    writeFromBytes(f.type, field_bytes, @field(value, f.name));
+                    writeToBytes(f.type, field_bytes, @field(value, f.name));
                 }
             },
             .auto => @compileError(
@@ -146,8 +146,8 @@ pub fn Pointer(comptime T: type) type {
             return ptr.constCast().read(mem);
         }
 
-        pub fn bytes(ptr: Self, mem: *const MemInst) OobError!Bytes(T) {
-            return accessArray(mem, ptr.addr, @sizeOf(T));
+        pub fn write(ptr: Self, mem: *const MemInst, value: T) OobError!void {
+            return writeToBytes(T, try accessArray(mem, ptr.addr, @sizeOf(T)), value);
         }
 
         pub fn format(ptr: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -187,6 +187,18 @@ pub fn Slice(comptime T: type) type {
         pub fn init(mem: *const MemInst, ptr: Pointer(T), len: usize) OobError!Self {
             return .{ .items = @ptrCast(try accessSlice(mem, ptr.addr, len * @sizeOf(T))) };
         }
+
+        pub fn bytes(slice: Self) []u8 {
+            return @ptrCast(slice.items);
+        }
+
+        pub fn constCast(slice: Self) ConstSlice(T) {
+            return .{ .items = slice.items };
+        }
+
+        pub fn write(slice: Self, idx: usize, value: T) void {
+            writeToBytes(T, &slice.items[idx], value);
+        }
     };
 }
 
@@ -197,7 +209,11 @@ pub fn ConstSlice(comptime T: type) type {
         const Self = @This();
 
         pub fn init(mem: *const MemInst, ptr: ConstPointer(T), len: usize) OobError!Self {
-            return .{ .items = (try Slice(T).init(mem, ptr.constCast(), len)).items };
+            return (try Slice(T).init(mem, ptr.constCast(), len)).constCast();
+        }
+
+        pub fn bytes(slice: Self) []const u8 {
+            return @ptrCast(slice);
         }
 
         pub fn read(slice: Self, idx: usize) T {

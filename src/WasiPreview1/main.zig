@@ -253,7 +253,7 @@ pub fn main() u8 {
     var wasi = WasiPreview1.init(
         std.heap.page_allocator,
         .{
-            .arguments = forwarded_arguments,
+            .args = forwarded_arguments,
             .fd_rng_seed = rt_rng_seeds[1],
             .csprng = csprng,
         },
@@ -270,10 +270,7 @@ pub fn main() u8 {
         &import_error,
     ) catch |e| switch (e) {
         error.OutOfMemory => oom("WASM module allocation"),
-        error.ImportFailure => return ErrorCode.failure.print(
-            "could not resolve imports: {f}",
-            .{import_error},
-        ),
+        error.ImportFailure => return ErrorCode.failure.print("{f}", .{import_error}),
     };
 
     while (module_allocating.nextMemoryType()) |ty| {

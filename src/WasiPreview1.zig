@@ -56,6 +56,7 @@ scratch: struct {
 api_lookup: Api.Lookup,
 csprng: Csprng,
 fd_table: Fd.Table,
+args: Arguments,
 
 const WasiPreview1 = @This();
 
@@ -124,7 +125,8 @@ pub const Environ = struct {
 pub const InitError = Allocator.Error;
 
 pub const InitOptions = struct {
-    arguments: Arguments, // no default value since applications expect at least an application name
+    /// No default value since most applications expect at least an application name.
+    args: Arguments,
     environ: Environ = .empty,
     //stdout: ?union(enum) { null, real, some_memory_thing },
     //stderr: ?,
@@ -156,6 +158,7 @@ pub fn init(allocator: Allocator, options: InitOptions) InitError!WasiPreview1 {
         .allocator = allocator,
         .scratch = .{ .state = ArenaAllocator.init(allocator).state },
         .csprng = options.csprng,
+        .args = options.args,
     };
 }
 
@@ -179,6 +182,61 @@ pub fn importProvider(state: *WasiPreview1) wasmstint.runtime.ImportProvider {
         .ctx = @ptrCast(state),
         .resolve = resolveImport,
     };
+}
+
+fn args_get(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_argv: i32,
+    raw_argv_buf: i32,
+) Errno {
+    const argv_ptr = pointer.ConstPointer(pointer.Pointer(u32)){
+        .addr = @as(u32, @bitCast(raw_argv)),
+    };
+    const argv_buf_ptr = pointer.Pointer(u8){ .addr = @as(u32, @bitCast(raw_argv_buf)) };
+
+    std.log.debug("args_get({f}, {f})\n", .{ argv_ptr, argv_buf_ptr });
+
+    const argv = pointer.ConstSlice(pointer.Pointer(u32)).init(
+        mem,
+        argv_ptr,
+        wasi.args.count,
+    ) catch |e| return .mapError(e);
+
+    const argv_buf = pointer.Slice(u8).init(mem, argv_buf_ptr, wasi.args.size) catch |e|
+        return .mapError(e);
+
+    var dst_buf = argv_buf.bytes();
+    var argv_addr = argv_buf_ptr.addr;
+    for (0.., wasi.args.strings()) |i, src| {
+        argv.read(i).write(mem, argv_addr) catch |e| return .mapError(e);
+
+        const dst = dst_buf[0..src.len()];
+        @memcpy(dst, src.bytes());
+        dst_buf[src.len()] = 0;
+        dst_buf = dst_buf[src.lenWithNullTerminator()..];
+        argv_addr += src.lenWithNullTerminator();
+    }
+
+    std.debug.assert(dst_buf.len == 0);
+    std.debug.assert(argv_addr - argv_buf_ptr.addr == wasi.args.size);
+    return .success;
+}
+
+fn args_sizes_get(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_ret_argc: i32,
+    raw_ret_size: i32,
+) Errno {
+    const argc = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret_argc)) };
+    const size = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret_size)) };
+
+    std.log.debug("args_sizes_get({f}, {f})\n", .{ argc, size });
+
+    argc.write(mem, wasi.args.count) catch |e| return .mapError(e);
+    size.write(mem, wasi.args.size) catch |e| return .mapError(e);
+    return .success;
 }
 
 fn acquireScratch(state: *WasiPreview1) ArenaAllocator {
@@ -262,10 +320,12 @@ fn fd_pwrite(
 
     const ciovs = Ciovs.init(mem, iovs_ptr, @bitCast(raw_iovs_len), &scratch) catch |e|
         return .mapError(e);
-    const ret_bytes = ret_ptr.bytes(mem) catch |e| return .mapError(e);
 
-    const ret = file.fd_pwrite(ciovs.list, offset, ciovs.total_len) catch |e| return .mapError(e);
-    pointer.writeFromBytes(u32, ret_bytes, ret);
+    ret_ptr.write(
+        mem,
+        file.fd_pwrite(ciovs.list, offset, ciovs.total_len) catch |e| return .mapError(e),
+    ) catch |e| return .mapError(e);
+
     return .success;
 }
 
@@ -299,10 +359,12 @@ fn fd_write(
 
     const ciovs = Ciovs.init(mem, iovs_ptr, @bitCast(raw_iovs_len), &scratch) catch |e|
         return .mapError(e);
-    const ret_bytes = ret_ptr.bytes(mem) catch |e| return .mapError(e);
 
-    const ret = file.fd_write(ciovs.list, ciovs.total_len) catch |e| return .mapError(e);
-    pointer.writeFromBytes(u32, ret_bytes, ret);
+    ret_ptr.write(
+        mem,
+        file.fd_write(ciovs.list, ciovs.total_len) catch |e| return .mapError(e),
+    ) catch |e| return .mapError(e);
+
     return .success;
 }
 
@@ -321,7 +383,9 @@ pub fn dispatch(
     const api = Api.fromHostFunc(callee.func);
     std.debug.assert(@intFromPtr(api.hostFunc()) == @intFromPtr(callee.func));
     switch (api) {
-        inline .fd_pwrite,
+        inline .args_get,
+        .args_sizes_get,
+        .fd_pwrite,
         .fd_write,
         => |id| {
             const signature = comptime id.signature();

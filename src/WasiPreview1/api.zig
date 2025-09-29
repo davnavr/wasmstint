@@ -1,6 +1,6 @@
 pub const Api = enum {
-    // args_get,
-    // args_sizes_get,
+    args_get,
+    args_sizes_get,
 
     fd_filestat_get,
 
@@ -16,7 +16,10 @@ pub const Api = enum {
     pub fn signature(api: Api) Module.FuncType {
         const result: []const Module.ValType = &.{.i32};
         return switch (api) {
-            .fd_filestat_get => .initComptime(&.{ .i32, .i32 }, result),
+            .args_get,
+            .args_sizes_get,
+            .fd_filestat_get,
+            => .initComptime(&.{ .i32, .i32 }, result),
 
             .fd_pwrite => .initComptime(&.{ .i32, .i32, .i32, .i64, .i32 }, result),
             .fd_read, .fd_write => .initComptime(&.{ .i32, .i32, .i32, .i32 }, result),
