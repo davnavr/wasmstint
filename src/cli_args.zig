@@ -189,6 +189,7 @@ pub const Flag = struct {
     pub const RemainingError = error{
         /// Stop all argument parsing to allow retrieval of the remaining CLI arguments.
         ParseRemainingArguments,
+        ParseCustomArgument,
     };
 
     pub const ParseError = HelpError || RemainingError || FinishError;
@@ -289,6 +290,32 @@ pub const Flag = struct {
         stopParsing,
         idFinish(void),
     );
+
+    fn parseCustom(
+        args: *ArgIterator,
+        arena: *ArenaAllocator,
+        diagnostics: ?*Diagnostics,
+        state: void,
+    ) ParseError!void {
+        _ = args;
+        _ = arena;
+        _ = diagnostics;
+        _ = state;
+        return error.ParseCustomArgument;
+    }
+
+    /// Use `parseRemainingWithCustom()`.
+    pub fn custom(comptime info: Info, comptime arg_help: ?ArgHelp) Flag {
+        return .init(
+            info,
+            arg_help,
+            void,
+            {},
+            void,
+            parseCustom,
+            idFinish(void),
+        );
+    }
 
     fn parseBoolean(
         args: *ArgIterator,
@@ -627,21 +654,30 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
 
         pub const ParseError = Flag.HelpError || Flag.FinishError;
 
-        pub fn parseRemaining(
+        pub fn parseRemainingWithCustom(
             self: *const Self,
             args: *ArgIterator,
             arena: *ArenaAllocator,
             diagnostics: ?*Flag.Diagnostics,
+            context: anytype,
+            comptime parseCustomArguments: fn (
+                @TypeOf(context),
+                comptime FlagEnum,
+                *ArgIterator,
+                *ArenaAllocator,
+                ?*Flag.Diagnostics,
+            ) Flag.FinishError!void,
         ) ParseError!Parsed {
             var state = State{};
             while (args.next()) |flag_arg| {
-                const chosen_flag: FlagEnum = self.flags_map.get(flag_arg) orelse
+                const chosen_flag: FlagEnum = self.flags_map.get(flag_arg) orelse {
                     return Flag.Diagnostics.reportFmt(
                         diagnostics,
                         arena,
                         "unknown flag '{f}'",
                         .{std.unicode.fmtUtf8(flag_arg)},
                     );
+                };
 
                 switch (chosen_flag) {
                     inline else => |f| {
@@ -658,6 +694,16 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
                             @field(state, known_flag.info.long),
                         ) catch |e| switch (e) {
                             error.ParseRemainingArguments => break,
+                            error.ParseCustomArgument => {
+                                try parseCustomArguments(
+                                    context,
+                                    f,
+                                    args,
+                                    arena,
+                                    diagnostics,
+                                );
+                                continue;
+                            },
                             else => |err| return err,
                         };
                     },
@@ -673,6 +719,29 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             }
 
             return result;
+        }
+
+        pub fn parseRemaining(
+            self: *const Self,
+            args: *ArgIterator,
+            arena: *ArenaAllocator,
+            diagnostics: ?*Flag.Diagnostics,
+        ) ParseError!Parsed {
+            return self.parseRemainingWithCustom(
+                args,
+                arena,
+                diagnostics,
+                {},
+                struct {
+                    fn noCustomArguments(
+                        _: void,
+                        comptime _: FlagEnum,
+                        _: *ArgIterator,
+                        _: *ArenaAllocator,
+                        _: ?*Flag.Diagnostics,
+                    ) Flag.FinishError!void {}
+                }.noCustomArguments,
+            );
         }
 
         pub fn parseProcessArgs(
