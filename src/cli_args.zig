@@ -23,14 +23,14 @@
 //     }
 // };
 
-const ArgIterator = struct {
+pub const ArgIterator = struct {
     remaining: []const [:0]const u8,
 
     fn initComptime(comptime args: []const [:0]const u8) ArgIterator {
         return .{ .remaining = args };
     }
 
-    fn initProcessArgs(arena: *ArenaAllocator) Oom!ArgIterator {
+    pub fn initProcessArgs(arena: *ArenaAllocator) Oom!ArgIterator {
         return .{
             .remaining = args: switch (builtin.os.tag) {
                 .wasi => (try std.process.ArgIteratorWasi.init(arena.allocator())).args,
@@ -174,13 +174,24 @@ pub const Flag = struct {
         }
     };
 
-    const InvalidError = error{
+    pub const InvalidError = error{
         /// Must only be returned by `Diagnostics` methods.
         InvalidCliFlag,
     };
 
     pub const FinishError = InvalidError || Oom;
-    pub const ParseError = error{PrintCliUsage} || FinishError;
+
+    pub const HelpError = error{
+        /// Used by the `--help` flag to print usage information.
+        PrintCliUsage,
+    };
+
+    pub const RemainingError = error{
+        /// Stop all argument parsing to allow retrieval of the remaining CLI arguments.
+        ParseRemainingArguments,
+    };
+
+    pub const ParseError = HelpError || RemainingError || FinishError;
 
     fn init(
         comptime info: Info,
@@ -252,6 +263,30 @@ pub const Flag = struct {
         {},
         void,
         parseHelpArgs,
+        idFinish(void),
+    );
+
+    fn stopParsing(
+        args: *ArgIterator,
+        arena: *ArenaAllocator,
+        diagnostics: ?*Diagnostics,
+        state: void,
+    ) ParseError!void {
+        _ = args;
+        _ = arena;
+        _ = diagnostics;
+        _ = state;
+        return error.ParseRemainingArguments;
+    }
+
+    /// Use `remainingArguments()` or `parseRemaining()`.
+    pub const remainder = Flag.init(
+        .{ .long = "" },
+        null,
+        void,
+        {},
+        void,
+        stopParsing,
         idFinish(void),
     );
 
@@ -478,14 +513,27 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             },
         });
 
+        const non_void_flag_result_count = count: {
+            var count = 0;
+            for (flags) |f| {
+                if (f.namespace.Result != void) {
+                    count += 1;
+                }
+            }
+            break :count count;
+        };
+
         pub const Parsed = @Type(.{
             .@"struct" = Type.Struct{
                 .layout = .auto,
                 .decls = &.{},
                 .is_tuple = false,
                 .fields = fields: {
-                    var fields: [flags.len]Type.StructField = undefined;
-                    for (&fields, flags) |*struct_field, f| {
+                    var fields: [non_void_flag_result_count]Type.StructField = undefined;
+                    var fields_idx = 0;
+                    for (&fields) |*struct_field| {
+                        const f = flags[fields_idx];
+                        std.debug.assert(f.namespace.Result != void);
                         struct_field.* = .{
                             .name = f.info.long,
                             .type = f.namespace.Result,
@@ -493,7 +541,9 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
                             .is_comptime = false,
                             .alignment = @alignOf(f.namespace.Result),
                         };
+                        fields_idx += 1;
                     }
+                    std.debug.assert(fields.len == fields_idx);
                     break :fields &fields;
                 },
             },
@@ -575,7 +625,7 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             }
         }
 
-        pub const ParseError = Flag.ParseError;
+        pub const ParseError = Flag.HelpError || Flag.FinishError;
 
         pub fn parseRemaining(
             self: *const Self,
@@ -601,20 +651,25 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
                             std.debug.assert(std.mem.eql(u8, @tagName(f), known_flag.info.long));
                         }
 
-                        @field(state, known_flag.info.long) = try known_flag.namespace.parse(
+                        @field(state, known_flag.info.long) = known_flag.namespace.parse(
                             args,
                             arena,
                             diagnostics,
                             @field(state, known_flag.info.long),
-                        );
+                        ) catch |e| switch (e) {
+                            error.ParseRemainingArguments => break,
+                            else => |err| return err,
+                        };
                     },
                 }
             }
 
             var result: Parsed = undefined;
             inline for (flags) |f| {
-                @field(result, f.info.long) =
-                    try f.namespace.finish(@field(state, f.info.long), diagnostics);
+                if (@hasField(Parsed, f.info.long)) {
+                    @field(result, f.info.long) =
+                        try f.namespace.finish(@field(state, f.info.long), diagnostics);
+                }
             }
 
             return result;
@@ -654,6 +709,10 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             try writer.writeAll("OPTIONS:\n");
 
             inline for (flags) |f| {
+                if (f.namespace == Flag.remainder.namespace) {
+                    continue;
+                }
+
                 try writer.writeByte('\n');
 
                 if (f.info.short) |short| {
@@ -681,36 +740,59 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             }
         }
 
+        fn exitBadArguments(diagnostics: ?Flag.Diagnostics) noreturn {
+            @branchHint(.cold);
+            var stderr_buffer: [1024]u8 align(16) = undefined;
+            const stderr = std.debug.lockStderrWriter(&stderr_buffer);
+            defer std.debug.unlockStderrWriter();
+
+            const color = std.Io.tty.detectConfig(std.fs.File.stderr());
+
+            if (diagnostics) |diag| {
+                diag.print(stderr, color) catch {};
+            } else {
+                printUsage(stderr, color) catch {};
+            }
+
+            std.process.exit(2);
+        }
+
+        inline fn parsedArgumentsOrExit(
+            result: ParseError!Parsed,
+            diagnostics: *const Flag.Diagnostics,
+        ) Oom!Parsed {
+            exitBadArguments(diag: {
+                // Can't store error{PrintCliUsage, InvalidCliFlag}, Zig bug?
+                return result catch |e| switch (e) {
+                    Oom.OutOfMemory => |oom| oom,
+                    Flag.HelpError.PrintCliUsage => break :diag null,
+                    Flag.FinishError.InvalidCliFlag => break :diag diagnostics.*,
+                };
+            });
+        }
+
+        pub fn remainingArguments(
+            self: *const Self,
+            args: *ArgIterator,
+            arena: *ArenaAllocator,
+        ) Oom!Parsed {
+            var diagnostics: Flag.Diagnostics = undefined;
+            return parsedArgumentsOrExit(
+                self.parseRemaining(args, arena, &diagnostics),
+                &diagnostics,
+            );
+        }
+
         pub fn programArguments(
             self: *const Self,
             scratch: *ArenaAllocator,
             arena: *ArenaAllocator,
         ) Oom!Parsed {
             var diagnostics: Flag.Diagnostics = undefined;
-            // Can't store error{PrintCliUsage, InvalidCliFlag}, Zig bug?
-            const has_diagnostics = has_diag: {
-                return self.parseProcessArgs(scratch, arena, &diagnostics) catch |e| switch (e) {
-                    Oom.OutOfMemory => |oom| oom,
-                    Flag.ParseError.PrintCliUsage => break :has_diag false,
-                    Flag.FinishError.InvalidCliFlag => break :has_diag true,
-                };
-            };
-
-            var stderr_buffer: [1024]u8 align(16) = undefined;
-            {
-                const stderr = std.debug.lockStderrWriter(&stderr_buffer);
-                defer std.debug.unlockStderrWriter();
-
-                const color = std.Io.tty.detectConfig(std.fs.File.stderr());
-
-                if (has_diagnostics) {
-                    diagnostics.print(stderr, color) catch {};
-                } else {
-                    printUsage(stderr, color) catch {};
-                }
-            }
-
-            std.process.exit(1);
+            return parsedArgumentsOrExit(
+                self.parseProcessArgs(scratch, arena, &diagnostics),
+                &diagnostics,
+            );
         }
     };
 }
@@ -735,7 +817,7 @@ fn expectPrintCliUsage(
     );
 }
 
-fn expectFlagInvalidError(
+fn expectInvalidCliFlag(
     parser: anytype,
     comptime input: []const [:0]const u8,
     expected_message: []const u8,
@@ -749,7 +831,7 @@ fn expectFlagInvalidError(
         parser.parseComptime(input, &arena, &diagnostics),
     );
 
-    try std.testing.expectEqualStrings(expected_message, diagnostics);
+    try std.testing.expectEqualStrings(expected_message, diagnostics.message);
 }
 
 test "simple" {
@@ -812,11 +894,44 @@ test "required" {
     try expectSuccessfulParse(
         &parser,
         &.{ "--bar", "456" },
-        .{ .help = {}, .bar = 456, .@"do-something" = false },
+        .{ .bar = 456, .@"do-something" = false },
     );
     try expectSuccessfulParse(
         &parser,
         &.{ "--bar", "4294967295", "--do-something" },
-        .{ .help = {}, .bar = std.math.maxInt(u32), .@"do-something" = true },
+        .{ .bar = std.math.maxInt(u32), .@"do-something" = true },
+    );
+}
+
+test "remainder" {
+    const ExampleArgs = CliArgs(.{
+        .flags = &.{
+            Flag.integer(.{ .long = "loquaciousness" }, "INTEGER", u64).required(),
+            Flag.remainder,
+        },
+    });
+
+    var parser: ExampleArgs = undefined;
+    parser.init();
+
+    try expectSuccessfulParse(
+        &parser,
+        &.{ "--loquaciousness", "999999" },
+        .{ .loquaciousness = 999999 },
+    );
+    try expectInvalidCliFlag(
+        &parser,
+        &.{ "--loquaciousness", "1", "--invalid" },
+        "unknown flag '--invalid'",
+    );
+    try expectSuccessfulParse(
+        &parser,
+        &.{ "--loquaciousness", "9999999", "--" },
+        .{ .loquaciousness = 9999999 },
+    );
+    try expectSuccessfulParse(
+        &parser,
+        &.{ "--loquaciousness", "999", "--", "--invalid" },
+        .{ .loquaciousness = 999 },
     );
 }
