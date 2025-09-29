@@ -190,14 +190,12 @@ fn args_get(
     raw_argv: i32,
     raw_argv_buf: i32,
 ) Errno {
-    const argv_ptr = pointer.ConstPointer(pointer.Pointer(u32)){
-        .addr = @as(u32, @bitCast(raw_argv)),
-    };
+    const argv_ptr = pointer.Pointer(pointer.Pointer(u32)){ .addr = @as(u32, @bitCast(raw_argv)) };
     const argv_buf_ptr = pointer.Pointer(u8){ .addr = @as(u32, @bitCast(raw_argv_buf)) };
 
-    std.log.debug("args_get({f}, {f})\n", .{ argv_ptr, argv_buf_ptr });
+    // std.log.debug("args_get({f}, {f})\n", .{ argv_ptr, argv_buf_ptr });
 
-    const argv = pointer.ConstSlice(pointer.Pointer(u32)).init(
+    const argv = pointer.Slice(pointer.Pointer(u32)).init(
         mem,
         argv_ptr,
         wasi.args.count,
@@ -209,10 +207,13 @@ fn args_get(
     var dst_buf = argv_buf.bytes();
     var argv_addr = argv_buf_ptr.addr;
     for (0.., wasi.args.strings()) |i, src| {
-        argv.read(i).write(mem, argv_addr) catch |e| return .mapError(e);
+        argv.write(i, .{ .addr = argv_addr });
 
         const dst = dst_buf[0..src.len()];
+        std.debug.assert(dst_buf.ptr - argv_buf.bytes().ptr == argv_addr - argv_buf_ptr.addr);
+
         @memcpy(dst, src.bytes());
+
         dst_buf[src.len()] = 0;
         dst_buf = dst_buf[src.lenWithNullTerminator()..];
         argv_addr += src.lenWithNullTerminator();
@@ -232,10 +233,18 @@ fn args_sizes_get(
     const argc = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret_argc)) };
     const size = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret_size)) };
 
-    std.log.debug("args_sizes_get({f}, {f})\n", .{ argc, size });
+    // std.log.debug("args_sizes_get({f}, {f})\n", .{ argc, size });
 
     argc.write(mem, wasi.args.count) catch |e| return .mapError(e);
     size.write(mem, wasi.args.size) catch |e| return .mapError(e);
+
+    // std.log.debug("args_sizes_get -> ({}, {})\n", .{ wasi.args.count, wasi.args.size });
+
+    if (builtin.mode == .Debug) {
+        std.debug.assert(argc.read(mem) catch unreachable == wasi.args.count);
+        std.debug.assert(size.read(mem) catch unreachable == wasi.args.size);
+    }
+
     return .success;
 }
 
@@ -300,16 +309,16 @@ fn fd_pwrite(
     const ret_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
     const offset = types.FileSize{ .bytes = @bitCast(raw_offset) };
 
-    std.log.debug(
-        "fd_pwrite({}, {f}, {}, {}, {f})\n",
-        .{
-            @as(u32, @bitCast(raw_fd)),
-            iovs_ptr,
-            @as(u32, @bitCast(raw_iovs_len)),
-            offset.bytes,
-            ret_ptr,
-        },
-    );
+    // std.log.debug(
+    //     "fd_pwrite({}, {f}, {}, {}, {f})\n",
+    //     .{
+    //         @as(u32, @bitCast(raw_fd)),
+    //         iovs_ptr,
+    //         @as(u32, @bitCast(raw_iovs_len)),
+    //         offset.bytes,
+    //         ret_ptr,
+    //     },
+    // );
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
     const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
@@ -340,15 +349,15 @@ fn fd_write(
     const iovs_ptr = pointer.ConstPointer(Ciovec){ .addr = @bitCast(raw_iovs) };
     const ret_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
 
-    std.log.debug(
-        "fd_write({}, {f}, {}, {f})\n",
-        .{
-            @as(u32, @bitCast(raw_fd)),
-            iovs_ptr,
-            @as(u32, @bitCast(raw_iovs_len)),
-            ret_ptr,
-        },
-    );
+    // std.log.debug(
+    //     "fd_write({}, {f}, {}, {f})\n",
+    //     .{
+    //         @as(u32, @bitCast(raw_fd)),
+    //         iovs_ptr,
+    //         @as(u32, @bitCast(raw_iovs_len)),
+    //         ret_ptr,
+    //     },
+    // );
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
     const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
@@ -420,6 +429,7 @@ pub fn deinit(state: *WasiPreview1) void {
 }
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const wasmstint = @import("wasmstint");

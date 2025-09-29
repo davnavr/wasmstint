@@ -129,6 +129,16 @@ pub fn accessArray(mem: *const MemInst, addr: usize, comptime size: usize) OobEr
 
 // Could parameterize to support 64-bit pointers.
 
+fn typeName(comptime T: type) [:0]const u8 {
+    return if (@typeInfo(T) != .@"struct" or
+        !std.mem.startsWith(u8, @typeName(T), "pointer") or
+        @typeInfo(T).@"struct".layout != .@"packed" or
+        !@hasDecl(T, "Pointee") or !@hasDecl(T, "read") or !@hasDecl(T, "constCast"))
+        @typeName(T)
+    else
+        "*" ++ (if (@hasDecl(T, "write")) "" else "const ") ++ typeName(T.Pointee);
+}
+
 pub fn Pointer(comptime T: type) type {
     return packed struct(u32) {
         addr: u32,
@@ -151,7 +161,7 @@ pub fn Pointer(comptime T: type) type {
         }
 
         pub fn format(ptr: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-            try writer.print(@typeName(T) ++ "@{X:0>8}", .{ptr.addr});
+            try writer.print(typeName(T) ++ "@{X:0>8}", .{ptr.addr});
         }
     };
 }
