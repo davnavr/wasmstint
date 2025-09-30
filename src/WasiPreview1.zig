@@ -381,9 +381,29 @@ pub fn dispatch(
     std.debug.assert(@intFromPtr(api.hostFunc()) == @intFromPtr(callee.func));
     switch (api) {
         .proc_exit => {
+            @branchHint(.cold);
             const exit_code = state.paramsTyped(struct { i32 }) catch unreachable;
             // std.log.debug("proc_exit({})", .{exit_code});
             return .{ .proc_exit = exit_code[0] };
+        },
+        .sched_yield => {
+            const errno: Errno = err: {
+                std.Thread.yield() catch |e| switch (e) {
+                    error.SystemCannotYield => switch (builtin.os.tag) {
+                        .windows, .linux => unreachable,
+                        else => break :err .nosys,
+                    },
+                };
+
+                break :err .success;
+            };
+
+            return .{
+                .@"continue" = state.returnFromHostTyped(
+                    .{@as(i32, @intFromEnum(errno))},
+                    fuel,
+                ) catch unreachable,
+            };
         },
         inline .args_get,
         .args_sizes_get,

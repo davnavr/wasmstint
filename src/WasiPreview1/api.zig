@@ -13,24 +13,32 @@ pub const Api = enum {
 
     fd_write,
 
+    // poll_oneoff,
     proc_exit,
+    // proc_raise,
+    sched_yield,
+    // random_get,
+
+    fn fallableFunction(comptime params: []const Module.ValType) Module.FuncType {
+        return .initComptime(params, &.{.i32});
+    }
 
     pub fn signature(api: Api) Module.FuncType {
-        const result: []const Module.ValType = &.{.i32};
         return switch (api) {
             .args_get,
             .args_sizes_get,
             .environ_get,
             .environ_sizes_get,
             .fd_filestat_get,
-            => .initComptime(&.{ .i32, .i32 }, result),
+            => fallableFunction(&.{ .i32, .i32 }),
 
-            .fd_pwrite => .initComptime(&.{ .i32, .i32, .i32, .i64, .i32 }, result),
-            .fd_read, .fd_write => .initComptime(&.{ .i32, .i32, .i32, .i32 }, result),
+            .fd_pwrite => fallableFunction(&.{ .i32, .i32, .i32, .i64, .i32 }),
+            .fd_read, .fd_write => fallableFunction(&.{ .i32, .i32, .i32, .i32 }),
 
-            .fd_seek => .initComptime(&.{ .i32, .i64, .i32, .i32 }, result),
+            .fd_seek => fallableFunction(&.{ .i32, .i64, .i32, .i32 }),
 
             .proc_exit => .initComptime(&.{.i32}, &.{}),
+            .sched_yield => fallableFunction(&.{}),
         };
     }
 
