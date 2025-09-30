@@ -727,6 +727,14 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             return result;
         }
 
+        fn noCustomArguments(
+            _: void,
+            comptime _: FlagEnum,
+            _: *ArgIterator,
+            _: *ArenaAllocator,
+            _: ?*Flag.Diagnostics,
+        ) Flag.FinishError!void {}
+
         pub fn parseRemaining(
             self: *const Self,
             args: *ArgIterator,
@@ -738,15 +746,7 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
                 arena,
                 diagnostics,
                 {},
-                struct {
-                    fn noCustomArguments(
-                        _: void,
-                        comptime _: FlagEnum,
-                        _: *ArgIterator,
-                        _: *ArenaAllocator,
-                        _: ?*Flag.Diagnostics,
-                    ) Flag.FinishError!void {}
-                }.noCustomArguments,
+                noCustomArguments,
             );
         }
 
@@ -870,6 +870,14 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
                 ),
                 &diagnostics,
             );
+        }
+
+        pub fn remainingArguments(
+            self: *const Self,
+            args: *ArgIterator,
+            arena: *ArenaAllocator,
+        ) Oom!Parsed {
+            return self.parseRemainingWithCustom(args, arena, {}, noCustomArguments);
         }
 
         pub fn programArguments(

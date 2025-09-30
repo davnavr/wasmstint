@@ -114,7 +114,6 @@ pub fn build(b: *Build) void {
             .wasip1 = &wasip1_module,
         },
     );
-    _ = wasip1_exe;
 
     steps.@"test-unit".dependOn(&b.addRunArtifact(wasmstint_module.unit_tests).step);
     steps.@"test-unit".dependOn(&b.addRunArtifact(cli_args_module.unit_tests).step);
@@ -131,6 +130,13 @@ pub fn build(b: *Build) void {
     }
 
     steps.@"test".dependOn(steps.@"test-spec");
+
+    buildWasip1TestRunner(
+        b,
+        &steps,
+        .{ .project = &project_options },
+        .{ .cli_args = &cli_args_module, .interpreter = &wasip1_exe },
+    );
 
     buildFuzzers(
         b,
@@ -343,6 +349,41 @@ const WasiPreview1Exe = struct {
         return .{ .exe = exe };
     }
 };
+
+fn buildWasip1TestRunner(
+    b: *Build,
+    steps: *const TopLevelSteps,
+    options: struct { project: *const ProjectOptions },
+    modules: struct { cli_args: *const CliArgsModule, interpreter: *const WasiPreview1Exe },
+) void {
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/WasiPreview1/test_driver.zig"),
+        .target = options.project.target,
+        .optimize = options.project.optimize,
+    });
+    modules.cli_args.addAsImportTo(module);
+
+    const exe = b.addExecutable(.{
+        .name = "wasmstint-wasip1-test",
+        .root_module = module,
+        .use_llvm = false,
+    });
+
+    steps.check.dependOn(&exe.step);
+    b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{}).step);
+
+    {
+        const step = b.step("run-wasip1-test", "Run WASI testsuite test interpreter");
+        const run = b.addRunArtifact(exe);
+        run.addArg("--interpreter");
+        run.addArtifactArg(modules.interpreter.exe);
+        if (b.args) |args| {
+            run.addArgs(args);
+        }
+
+        step.dependOn(&run.step);
+    }
+}
 
 fn buildFuzzers(
     b: *Build,
