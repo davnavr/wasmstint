@@ -93,7 +93,7 @@ fn fd_pwrite(
         },
         .windows => {
             // NtWriteFile allows "seek-and-write", but not proper `pwritev` or even `pwrite`
-            std.log.err("TODO: fd_pwrite on Windows");
+            std.log.err("TODO: fd_pwrite on Windows", .{});
             return error.Unimplemented;
         },
         .wasi => @compileError("WASM on WASM fd_pwrite"),

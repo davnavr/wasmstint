@@ -218,7 +218,7 @@ fn parseArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) ParsedArgume
             if (self.scanned_env_vars.getKeyAdapted(key, ScannedEnvironGetContext{})) |found| {
                 return found;
             } else if (use_windows_peb) {
-                std.debug.panic("TODO: std.unicode.calcWtf8Len");
+                @panic("TODO: std.unicode.calcWtf8Len");
             } else {
                 while (self.unscanned_env_vars.len > 0) {
                     defer self.unscanned_env_vars = self.unscanned_env_vars[1..];
@@ -298,18 +298,19 @@ fn parseArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) ParsedArgume
 }
 
 pub fn main() void {
-    const exit_code: i32 = realMain() catch |e| switch (e) {
-        error.BadCliFlag => if (builtin.os.tag == .windows) -1 else 2,
-        error.GenericError => 1,
-    };
+    const exit_code: u32 = @bitCast(
+        realMain() catch |e| switch (e) {
+            error.BadCliFlag => if (builtin.os.tag == .windows) @as(i32, -1) else 2,
+            error.GenericError => 1,
+        },
+    );
 
     if (builtin.os.tag == .windows) {
         // TODO: check exit_code != 3 (abort) https://github.com/WebAssembly/wasi-cli/issues/11
         std.os.windows.kernel32.ExitProcess(exit_code);
     } else {
         std.process.exit(
-            std.math.cast(u8, @as(u32, @bitCast(exit_code))) orelse
-                @panic("TODO: how to truncate exit code"),
+            std.math.cast(u8, exit_code) orelse @panic("TODO: how to truncate exit code"),
         );
     }
 }

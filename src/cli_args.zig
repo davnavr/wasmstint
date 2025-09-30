@@ -35,15 +35,17 @@ pub const ArgIterator = struct {
             .remaining = args: switch (builtin.os.tag) {
                 .wasi => (try std.process.ArgIteratorWasi.init(arena.allocator())).args,
                 .windows => {
+                    // Copied from `std.process.ArgIterator.initWithAllocator`.
+                    const command_line = std.os.windows.peb().ProcessParameters.CommandLine;
                     var args = try std.process.ArgIteratorWindows.init(
                         arena.allocator(),
-                        std.os.windows.peb().ProcessParameters.CommandLine,
+                        command_line.Buffer.?[0..(command_line.Length / 2)],
                     );
 
                     var arg_list = std.ArrayList([:0]const u8).empty;
                     // Arguments are allocated in separate parts of `args.buffer` in the `arena`.
                     while (args.next()) |a| {
-                        arg_list.append(arena.allocator(), a);
+                        try arg_list.append(arena.allocator(), a);
                     }
 
                     break :args arg_list.items;
@@ -830,7 +832,7 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             }
 
             if (builtin.os.tag == .windows) {
-                std.os.windows.kernel32.ExitProcess(-1);
+                std.os.windows.kernel32.ExitProcess(std.math.maxInt(u32));
             } else {
                 std.process.exit(2);
             }
