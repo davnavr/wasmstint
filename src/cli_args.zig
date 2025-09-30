@@ -815,16 +815,18 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
 
         fn exitBadArguments(diagnostics: ?Flag.Diagnostics) noreturn {
             @branchHint(.cold);
-            var stderr_buffer: [1024]u8 align(16) = undefined;
-            const stderr = std.debug.lockStderrWriter(&stderr_buffer);
-            defer std.debug.unlockStderrWriter();
+            {
+                var stderr_buffer: [1024]u8 align(16) = undefined;
+                const stderr = std.debug.lockStderrWriter(&stderr_buffer);
+                defer std.debug.unlockStderrWriter();
 
-            const color = std.Io.tty.detectConfig(std.fs.File.stderr());
+                const color = std.Io.tty.detectConfig(std.fs.File.stderr());
 
-            if (diagnostics) |diag| {
-                diag.print(stderr, color) catch {};
-            } else {
-                printUsage(stderr, color) catch {};
+                if (diagnostics) |diag| {
+                    diag.print(stderr, color) catch {};
+                } else {
+                    printUsage(stderr, color) catch {};
+                }
             }
 
             std.process.exit(2);
