@@ -80,9 +80,11 @@ fn fd_pwrite(
                     .PERM => error.PermissionDenied,
                     .PIPE => error.BrokenPipe,
                     .NXIO => error.NoDevice,
-                    .SPIPE => if (offset.bytes == 0) {
-                        return fd_write(ctx, iovs, total_len);
-                    } else error.SeekPipe,
+                    // .SPIPE => if (offset.bytes == 0)
+                    //     fd_write(ctx, iovs, total_len)
+                    // else
+                    //     error.SeekPipe,
+                    .SPIPE => error.SeekPipe,
                     .OVERFLOW => return error.Overflow,
                     .BUSY => return error.DeviceBusy,
                     else => |errno| std.posix.unexpectedErrno(errno),

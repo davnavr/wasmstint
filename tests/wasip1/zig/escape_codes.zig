@@ -6,7 +6,7 @@ fn printColor(out: *Writer, color: std.Io.tty.Color) !void {
 
 pub fn main() !void {
     var out_buf: [512]u8 align(16) = undefined;
-    var out = std.fs.File.stdout().writer(&out_buf);
+    var out = std.fs.File.stdout().writerStreaming(&out_buf);
     defer out.interface.flush() catch {};
 
     const colors = [_]std.Io.tty.Color{

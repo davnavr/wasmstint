@@ -288,7 +288,7 @@ fn fd_pwrite(
     const offset = types.FileSize{ .bytes = @bitCast(raw_offset) };
 
     // std.log.debug(
-    //     "fd_pwrite({}, {f}, {}, {}, {f})\n",
+    //     "fd_pwrite({}, {f}, {}, {}, {f})",
     //     .{
     //         @as(u32, @bitCast(raw_fd)),
     //         iovs_ptr,
@@ -386,6 +386,8 @@ pub fn dispatch(
                 @field(WasiPreview1, @tagName(id)),
                 .{ wasi, memory } ++ args_tuple,
             );
+
+            // std.log.debug(@tagName(id) ++ " -> {f}", .{errno});
 
             return state.returnFromHostTyped(.{@as(i32, @intFromEnum(errno))}, fuel) catch
                 unreachable;
