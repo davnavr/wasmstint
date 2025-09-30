@@ -110,7 +110,11 @@ pub fn build(b: *Build) void {
         b,
         &steps,
         .{ .project = &project_options },
-        .{ .cli_args = modules.cli_args, .interpreter = wasip1_exe },
+        .{
+            .cli_args = modules.cli_args,
+            .file_content = modules.file_content,
+            .interpreter = wasip1_exe,
+        },
     );
 
     buildFuzzers(
@@ -491,7 +495,11 @@ fn buildWasip1TestRunner(
     b: *Build,
     steps: *const TopLevelSteps,
     options: struct { project: *const ProjectOptions },
-    modules: struct { cli_args: Modules.CliArgs, interpreter: Wasip1Interp },
+    modules: struct {
+        cli_args: Modules.CliArgs,
+        file_content: Modules.FileContent,
+        interpreter: Wasip1Interp,
+    },
 ) void {
     const module = b.createModule(.{
         .root_source_file = b.path("src/WasiPreview1/test_driver.zig"),
@@ -499,6 +507,7 @@ fn buildWasip1TestRunner(
         .optimize = options.project.optimize,
     });
     Modules.addAsImportTo(Modules.CliArgs, modules.cli_args, module);
+    Modules.addAsImportTo(Modules.FileContent, modules.file_content, module);
 
     const exe = b.addExecutable(.{
         .name = "wasmstint-wasip1-test",
