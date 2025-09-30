@@ -23,6 +23,8 @@ const Arguments = cli_args.CliArgs(.{
             },
             "PATH",
         ).required(),
+        cli_args.Flag.integerSizeSuffix(.{ .long = "max-output-bytes" }, usize)
+            .withDefault(8192),
         cli_args.Flag.remainder, // additional arguments to pass to `wasmstint-wasip1`
     },
 });
@@ -62,9 +64,9 @@ const Specification = struct {
 };
 
 pub fn main() u8 {
-    var arena = ArenaAllocator.init(std.heap.page_allocator);
+    var arena = ArenaAllocator.init(page_allocator);
     defer arena.deinit();
-    var scratch = ArenaAllocator.init(std.heap.page_allocator);
+    var scratch = ArenaAllocator.init(page_allocator);
     defer scratch.deinit();
 
     const arguments: struct { parsed: Arguments.Parsed, forwarded: []const [:0]const u8 } = args: {
@@ -78,6 +80,14 @@ pub fn main() u8 {
         const forwarded = arena.allocator().alloc([:0]const u8, args.remaining.len) catch
             oom("forwarded argv");
         for (forwarded, args.remaining) |*dst, src| {
+            if (std.mem.eql(u8, "--", src)) {
+                return abnormalExitFmt(
+                    2,
+                    "unexpected '--' flag\nnote: use test file to pass arguments to module",
+                    .{},
+                );
+            }
+
             dst.* = arena.allocator().dupeZ(u8, src) catch oom("forwarded CLI arg");
         }
 
@@ -104,7 +114,7 @@ pub fn main() u8 {
     // TODO: Perform cleanup of test cases (maybe after open dirs are discovered?)
 
     _ = scratch.reset(.retain_capacity);
-    const spec = spec: {
+    const spec: Specification = spec: {
         var scanner = std.json.Scanner.initCompleteInput(scratch.allocator(), json_bytes.contents);
         var diagnostics = std.json.Diagnostics{};
         scanner.enableDiagnostics(&diagnostics);
@@ -124,8 +134,193 @@ pub fn main() u8 {
         };
     };
 
-    // TODO: launch the interpreter process
-    _ = spec;
+    _ = scratch.reset(.retain_capacity);
+    const argv: []const []const u8 = argv: {
+        const argv_count = 3 +
+            (spec.dirs.len * 3) +
+            (spec.env.map.count() * 2) +
+            arguments.forwarded.len +
+            (if (spec.args.len > 0) 1 + spec.args.len else 0);
+
+        var argv = std.ArrayListAligned([]const u8, .fromByteUnits(@sizeOf([]const u8)))
+            .initCapacity(scratch.allocator(), argv_count) catch
+            oom("interpreter argv");
+        defer std.debug.assert(argv.items.len == argv.capacity);
+
+        argv.appendSliceAssumeCapacity(&.{
+            arguments.parsed.interpreter,
+            "--module",
+            arguments.parsed.module,
+        });
+
+        if (spec.dirs.len > 0) {
+            @panic("TODO: arguments for preopened dirs");
+        }
+
+        var env_map = spec.env.map.iterator();
+        while (env_map.next()) |entry| {
+            argv.appendSliceAssumeCapacity(&.{
+                "--env",
+                std.fmt.allocPrint(
+                    scratch.allocator(),
+                    "{s}={s}",
+                    .{ entry.key_ptr.*, entry.value_ptr.* },
+                ) catch oom("env var"),
+            });
+        }
+
+        argv.appendSliceAssumeCapacity(arguments.forwarded);
+
+        if (spec.args.len > 0) {
+            argv.appendAssumeCapacity("--");
+            argv.appendSliceAssumeCapacity(spec.args);
+        }
+
+        break :argv argv.items;
+    };
+
+    var interp = std.process.Child.init(argv, scratch.allocator());
+    interp.stdin_behavior = .Ignore;
+    interp.stdout_behavior = .Pipe;
+    interp.stderr_behavior = .Pipe;
+
+    const page_size = std.heap.pageSize();
+    var stdout = std.ArrayList(u8).initCapacity(page_allocator, page_size) catch
+        oom("stdout buffer");
+    defer stdout.deinit(page_allocator);
+    var stderr = std.ArrayList(u8).initCapacity(page_allocator, page_size) catch
+        oom("stderr buffer");
+    defer stderr.deinit(page_allocator);
+
+    const exit_code: u8 = exit: {
+        const ArgvFormatter = struct {
+            // Bash-style escape sequences, because those are more familiar
+            fn formatString(s: []const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+                try writer.writeByte('"');
+                for (s) |b| {
+                    switch (b) {
+                        0 => try writer.writeAll("\\0"),
+                        '\x07' => try writer.writeAll("\\b"),
+                        '\x0C' => try writer.writeAll("\\f"),
+                        '\n' => try writer.writeAll("\\n"),
+                        '\r' => try writer.writeAll("\\r"),
+                        '\t' => try writer.writeAll("\\t"),
+                        '\x0B' => try writer.writeAll("\\v"),
+                        '\"' => try writer.writeAll("\\\""),
+                        else => if (std.ascii.isPrint(b)) {
+                            try writer.writeByte(b);
+                        } else {
+                            try writer.print("\\x{X:0>2}", .{b});
+                        },
+                    }
+                }
+                try writer.writeByte('"');
+            }
+
+            pub fn format(
+                args: []const []const u8,
+                writer: *std.Io.Writer,
+            ) std.Io.Writer.Error!void {
+                for (0.., args) |i, a| {
+                    if (i > 0) {
+                        try writer.writeByte(' ');
+                    }
+
+                    try formatString(a, writer);
+                }
+            }
+        };
+        const fmt_argv = std.fmt.Alt([]const []const u8, ArgvFormatter.format){ .data = argv };
+
+        interp.spawn() catch |e|
+            return abnormalExitFmt(1, "{t}: failed to spawn command {f}", .{ e, fmt_argv });
+        interp.collectOutput(
+            page_allocator,
+            &stdout,
+            &stderr,
+            arguments.parsed.@"max-output-bytes",
+        ) catch |collect_err| {
+            _ = interp.kill() catch |kill_err| return abnormalExitFmt(
+                1,
+                "failed to kill interpreter process {d} due to {t} after {t}",
+                .{
+                    if (@typeInfo(std.process.Child.Id) == .pointer)
+                        @intFromPtr(interp.id)
+                    else
+                        interp.id,
+                    kill_err,
+                    collect_err,
+                },
+            );
+        };
+
+        const term = interp.wait() catch |e|
+            return abnormalExitFmt(1, "{t}: failed to wait for process {f}", .{ e, fmt_argv });
+
+        const SignalFormatter = struct {
+            fn format(num: u32, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+                inline for (@typeInfo(std.posix.SIG).@"struct".decls) |decl| {
+                    const field = @field(std.posix.SIG, decl.name);
+                    if (@TypeOf(field) == comptime_int) {
+                        if (field == num) {
+                            try writer.writeAll(decl.name);
+                            return;
+                        }
+                    }
+                }
+
+                try writer.writeAll("unknown signal");
+            }
+        };
+
+        switch (term) {
+            .Exited => |code| break :exit code,
+            .Unknown => |n| return if (builtin.os.tag == .windows)
+                abnormalExitFmt(
+                    1,
+                    "interpreter process exited for unknown reason: {f}",
+                    .{fmt_argv},
+                )
+            else
+                abnormalExitFmt(
+                    1,
+                    "interpreter process exited with unknown status {d}: {f}",
+                    .{ n, fmt_argv },
+                ),
+            .Signal => |num| if (builtin.os.tag == .windows)
+                unreachable
+            else
+                return abnormalExitFmt(
+                    1,
+                    "interpreter process exited with signal {d} ({f}): {f}",
+                    .{ num, std.fmt.Alt(u32, SignalFormatter.format){ .data = num }, fmt_argv },
+                ),
+            .Stopped => |num| if (builtin.os.tag == .windows)
+                unreachable
+            else
+                return abnormalExitFmt(
+                    1,
+                    "interpreter process stopped {d}: {f}",
+                    .{ num, fmt_argv },
+                ),
+        }
+    };
+
+    if (exit_code != spec.exit_code) {
+        return abnormalExitFmt(
+            1,
+            "expected exit code {}, but got {}",
+            .{ spec.exit_code, exit_code },
+        );
+    }
+
+    if (std.mem.indexOfDiff(u8, stdout.items, spec.stdout)) |diff_index| {
+        std.debug.panic("TODO: print stdout diff @ {}", .{diff_index});
+    }
+
+    if (std.mem.indexOfDiff(u8, stderr.items, spec.stderr)) |diff_index| {
+        std.debug.panic("TODO: print stderr diff @ {}", .{diff_index});
+    }
 
     std.process.cleanExit();
     return 0;
@@ -134,6 +329,7 @@ pub fn main() u8 {
 const std = @import("std");
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
+const page_allocator = std.heap.page_allocator;
 const cli_args = @import("cli_args");
 const FileContent = @import("FileContent");
 
