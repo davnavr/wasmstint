@@ -829,7 +829,11 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
                 }
             }
 
-            std.process.exit(2);
+            if (builtin.os.tag == .windows) {
+                std.os.windows.kernel32.ExitProcess(-1);
+            } else {
+                std.process.exit(2);
+            }
         }
 
         inline fn parsedArgumentsOrExit(

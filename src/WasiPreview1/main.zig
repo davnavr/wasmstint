@@ -2,7 +2,7 @@ const default_invoke = "_start";
 const memory_export = "memory";
 
 const Arguments = cli_args.CliArgs(.{
-    .description = "Interpreters WebAssembly programs using the `wasi_snapshot_preview1` ABI",
+    .description = "Interpreter of WebAssembly programs using the `wasi_snapshot_preview1` ABI",
     .flags = &[_]cli_args.Flag{
         cli_args.Flag.string(
             .{
@@ -60,17 +60,16 @@ const env_flag = cli_args.Flag.custom(
     .{ .optional = false, .name = "NAME[=VAL]" },
 );
 
-// TODO: As an optimization, when env var import is required, continue a filling of a EnvMap, pausing when
-// current variable being looked for is found (this avoids making a huge EnvMap, but is this premature optimization?)
-
 fn oom(context: []const u8) noreturn {
     std.debug.panic("out of memory: {s}", .{context});
 }
 
-const ErrorCode = enum(u8) {
-    failure = 1,
-    bad_arg = 2,
+const Error = error{
+    BadCliFlag,
+    GenericError,
+};
 
+const fail = struct {
     fn printInitialMessage(
         comptime fmt: []const u8,
         args: anytype,
@@ -83,8 +82,8 @@ const ErrorCode = enum(u8) {
         stderr.print(fmt ++ "\n", args) catch {};
     }
 
-    fn printWithFollowup(
-        code: ErrorCode,
+    fn formatWithFollowup(
+        err: Error,
         comptime fmt: []const u8,
         args: anytype,
         context: anytype,
@@ -93,7 +92,7 @@ const ErrorCode = enum(u8) {
             std.Io.tty.Config,
             *std.Io.Writer,
         ) std.Io.Writer.Error!void,
-    ) u8 {
+    ) Error {
         @branchHint(.cold);
         var buf: [256]u8 align(16) = undefined;
         const stderr = std.debug.lockStderrWriter(&buf);
@@ -103,12 +102,12 @@ const ErrorCode = enum(u8) {
         printInitialMessage(fmt, args, color, stderr) catch {};
         printFollowupMessage(context, color, stderr) catch {};
         stderr.flush() catch {};
-        return @intFromEnum(code);
+        return err;
     }
 
-    fn print(code: ErrorCode, comptime fmt: []const u8, args: anytype) u8 {
-        return printWithFollowup(
-            code,
+    fn format(err: Error, comptime fmt: []const u8, args: anytype) Error {
+        return formatWithFollowup(
+            err,
             fmt,
             args,
             {},
@@ -120,6 +119,10 @@ const ErrorCode = enum(u8) {
                 ) std.Io.Writer.Error!void {}
             }.nothing,
         );
+    }
+
+    fn print(err: Error, msg: []const u8) Error {
+        return format(err, "{s}", .{msg});
     }
 };
 
@@ -294,9 +297,32 @@ fn parseArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) ParsedArgume
     };
 }
 
+pub fn main() void {
+    const exit_code: i32 = realMain() catch |e| switch (e) {
+        error.BadCliFlag => if (builtin.os.tag == .windows) -1 else 2,
+        error.GenericError => 1,
+    };
+
+    if (builtin.os.tag == .windows) {
+        // TODO: check exit_code != 3 (abort) https://github.com/WebAssembly/wasi-cli/issues/11
+        std.os.windows.kernel32.ExitProcess(exit_code);
+    } else {
+        std.process.exit(
+            std.math.cast(u8, @as(u32, @bitCast(exit_code))) orelse
+                @panic("TODO: how to truncate exit code"),
+        );
+    }
+}
+
 const max_fuel = wasmstint.Interpreter.Fuel{ .remaining = std.math.maxInt(u32) };
 
-pub fn main() u8 {
+fn printExitCode(arguments: *const Arguments.Parsed, code: i32) void {
+    if (arguments.@"print-exit-code") {
+        std.debug.print("\nExited with code: {}\n", .{code});
+    }
+}
+
+fn realMain() Error!i32 {
     var arena = ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     var scratch = ArenaAllocator.init(std.heap.page_allocator);
@@ -306,7 +332,7 @@ pub fn main() u8 {
     const arguments = all_arguments.flags;
 
     if (std.mem.eql(u8, arguments.invoke, memory_export)) {
-        return ErrorCode.bad_arg.print("cannot use " ++ memory_export ++ " as an entrypoint", .{});
+        return fail.print(error.BadCliFlag, "cannot use " ++ memory_export ++ " as an entrypoint");
     }
 
     const fmt_wasm_path = std.fmt.allocPrint(
@@ -335,7 +361,8 @@ pub fn main() u8 {
         arguments.module,
     ) catch |e| switch (e) {
         error.OutOfMemory => oom("module bytes"),
-        else => |io_err| return ErrorCode.bad_arg.print(
+        else => |io_err| return fail.format(
+            error.GenericError,
             "failed to open program file {s}, {t}",
             .{ fmt_wasm_path, io_err },
         ),
@@ -345,7 +372,7 @@ pub fn main() u8 {
     const rt_rng_num: u128 = arguments.@"rt-rng-seed" orelse seed: {
         var seed: u128 = undefined;
         csprng.get(std.mem.asBytes(&seed)) catch |e|
-            return ErrorCode.failure.print("could not access OS CSPRNG: {t}", .{e});
+            return fail.format(error.GenericError, "could not access OS CSPRNG: {t}", .{e});
         break :seed seed;
     };
 
@@ -362,15 +389,18 @@ pub fn main() u8 {
             .{ .diagnostics = .init(&parse_diagnostics.writer), .random_seed = rt_rng_seeds[0] },
         ) catch |e| switch (e) {
             error.OutOfMemory => oom("module"),
-            error.InvalidWasm => return ErrorCode.failure.print(
+            error.InvalidWasm => return fail.format(
+                error.GenericError,
                 "module {s} is invalid, {s}",
                 .{ fmt_wasm_path, parse_diagnostics.written() },
             ),
-            error.MalformedWasm => return ErrorCode.failure.print(
+            error.MalformedWasm => return fail.format(
+                error.GenericError,
                 "failed to parse module {s}: {s}",
                 .{ fmt_wasm_path, parse_diagnostics.written() },
             ),
-            else => return ErrorCode.failure.print(
+            else => return fail.format(
+                error.GenericError,
                 "could not parse module {s}: {t}",
                 .{ fmt_wasm_path, e },
             ),
@@ -386,15 +416,18 @@ pub fn main() u8 {
         .init(&parse_diagnostics.writer),
     ) catch |e| switch (e) {
         error.OutOfMemory => oom("module code entries"),
-        error.InvalidWasm => return ErrorCode.failure.print(
+        error.InvalidWasm => return fail.format(
+            error.GenericError,
             "invalid function in module {s}, {s}",
             .{ fmt_wasm_path, parse_diagnostics.written() },
         ),
-        error.MalformedWasm => return ErrorCode.failure.print(
+        error.MalformedWasm => return fail.format(
+            error.GenericError,
             "malformed function in module {s}, {s}",
             .{ fmt_wasm_path, parse_diagnostics.written() },
         ),
-        else => return ErrorCode.failure.print(
+        else => return fail.format(
+            error.GenericError,
             "failed to parse function in module {s}: {t}",
             .{ fmt_wasm_path, e },
         ),
@@ -424,7 +457,7 @@ pub fn main() u8 {
         &import_error,
     ) catch |e| switch (e) {
         error.OutOfMemory => oom("WASM module allocation"),
-        error.ImportFailure => return ErrorCode.failure.print("{f}", .{import_error}),
+        error.ImportFailure => return fail.format(error.GenericError, "{f}", .{import_error}),
     };
 
     while (module_allocating.nextMemoryType()) |ty| {
@@ -452,6 +485,7 @@ pub fn main() u8 {
     var module_allocated = module_allocating.finish() catch unreachable;
 
     var interp: wasmstint.Interpreter = undefined;
+    defer interp.deinit(std.heap.page_allocator);
     {
         // TODO: allocator for interpreter that uses windows VirtualAlloc reserve
         const start = interp.init(
@@ -466,21 +500,17 @@ pub fn main() u8 {
             &instantiate_fuel,
         ) catch oom("WASM module instantiation");
 
-        switch (mainLoop(
+        const init_result = try mainLoop(
             instantiate_state,
             .{ .limited = &instantiate_fuel },
             arena.allocator(),
             &wasi,
             null,
-        )) {
-            .finished => |done| {
-                // WASM spec says start (not to be confused with `_start`) has no results
-                std.debug.assert(done.result_types.len == 0);
-            },
-            .failure => |exit_code| {
-                @branchHint(.cold);
-                return exit_code;
-            },
+        );
+
+        if (init_result) |exit| {
+            printExitCode(&arguments, exit);
+            return exit;
         }
     }
 
@@ -503,7 +533,8 @@ pub fn main() u8 {
                 std.debug.assert(entrypoint == null);
                 entrypoint = switch (exp.val) {
                     .func => |func| func,
-                    else => return ErrorCode.failure.print(
+                    else => return fail.format(
+                        error.GenericError,
                         "expected entrypoint {f} to be a function, but got a {s}",
                         .{ fmt_entrypoint, @tagName(exp.val) },
                     ),
@@ -512,7 +543,8 @@ pub fn main() u8 {
                 std.debug.assert(memory == null);
                 memory = switch (exp.val) {
                     .mem => |mem| mem,
-                    else => return ErrorCode.failure.print(
+                    else => return fail.format(
+                        error.GenericError,
                         memory_export ++ " export was unexpectedly a {s}",
                         .{@tagName(exp.val)},
                     ),
@@ -525,7 +557,8 @@ pub fn main() u8 {
         }
 
         break :exports .{
-            .entrypoint = entrypoint orelse return ErrorCode.failure.printWithFollowup(
+            .entrypoint = entrypoint orelse return fail.formatWithFollowup(
+                error.GenericError,
                 "could not find exported entrypoint {f}",
                 .{fmt_entrypoint},
                 all_exports,
@@ -563,11 +596,11 @@ pub fn main() u8 {
                 }.printFollowupMessage,
             ),
             .memory = memory orelse
-                return ErrorCode.failure.print("could not find exported memory", .{}),
+                return fail.format(error.GenericError, "could not find exported memory", .{}),
         };
     };
 
-    switch (mainLoop(
+    const main_result = try mainLoop(
         start_call: {
             var starting_fuel = max_fuel;
             break :start_call interp.reset().awaiting_host.beginCall(
@@ -577,7 +610,8 @@ pub fn main() u8 {
                 &starting_fuel,
             ) catch |e| switch (e) {
                 error.OutOfMemory => oom("entrypoint function call"),
-                error.ValueTypeOrCountMismatch => return ErrorCode.failure.print(
+                error.ValueTypeOrCountMismatch => return fail.format(
+                    error.GenericError,
                     "expected entrypoint function {f} to have no arguments",
                     .{fmt_entrypoint},
                 ),
@@ -588,32 +622,16 @@ pub fn main() u8 {
         arena.allocator(),
         &wasi,
         exports.memory,
-    )) {
-        .finished => |done| {
-            std.debug.assert(done.result_types.len == 0);
-            // TODO: get exit code
-        },
-        .failure => |exit_code| {
-            @branchHint(.cold);
-            return exit_code;
-        },
+    );
+
+    if (main_result) |exit| {
+        printExitCode(&arguments, exit);
+        return exit;
     }
 
-    defer interp.deinit(std.heap.page_allocator);
-
-    if (arguments.@"print-exit-code") {
-        // ("\nExited with code: {}\n");
-    }
-
-    @panic("TODO");
-
-    // TODO: exit codes nonsense https://github.com/WebAssembly/wasi-cli/issues/11
+    // TODO: Should proc_exit be assumed to always be called? (indicate error do to "fallthrough"?)
+    return 0;
 }
-
-const LoopResult = union(enum) {
-    finished: wasmstint.Interpreter.State.AwaitingHost,
-    failure: u8,
-};
 
 const FuelChecking = union(enum) {
     unlimited,
@@ -626,7 +644,7 @@ fn mainLoop(
     table_allocator: std.mem.Allocator,
     wasi: *WasiPreview1,
     memory: ?*wasmstint.runtime.MemInst,
-) LoopResult {
+) !?i32 {
     var local_fuel = max_fuel;
     const fuel = switch (fuel_checking) {
         .unlimited => &local_fuel,
@@ -638,18 +656,22 @@ fn mainLoop(
         state = next: switch (state) {
             .awaiting_host => |*host| if (host.currentHostFunction() != null) {
                 if (memory) |mem_inst| {
-                    break :next wasi.dispatch(host, mem_inst, fuel);
+                    switch (wasi.dispatch(host, mem_inst, fuel)) {
+                        .@"continue" => |next| break :next next,
+                        .proc_exit => |code| return code,
+                    }
                 } else {
-                    @branchHint(.cold);
-                    return .{
-                        .failure = ErrorCode.failure.print(
-                            "WASI cannot access exports until module initializer has finished running",
-                            .{},
-                        ),
-                    };
+                    return fail.format(
+                        error.GenericError,
+                        "WASI cannot access exports until module initializer has finished running",
+                        .{},
+                    );
                 }
             } else {
-                return .{ .finished = host.* };
+                // WASM spec says start (not to be confused with `_start`) has no results
+                // All WASI entrypoints also have no results.
+                std.debug.assert(host.result_types.len == 0);
+                return null;
             },
             .awaiting_validation => unreachable,
             .call_stack_exhaustion => oom("call stack exhausted"), // TODO: print stack trace
@@ -657,9 +679,8 @@ fn mainLoop(
                 switch (interrupt.cause) {
                     .out_of_fuel => switch (fuel_checking) {
                         .limited => {
-                            @branchHint(.cold);
                             // TODO: print stack trace
-                            return .{ .failure = ErrorCode.failure.print("out of fuel", .{}) };
+                            return fail.print(error.GenericError, "out of fuel");
                         },
                         .unlimited => {},
                     },
@@ -672,10 +693,11 @@ fn mainLoop(
 
                 break :next interrupt.resumeExecution(fuel);
             },
-            .trapped => |*trapped| {
-                @branchHint(.cold);
-                return .{ .failure = ErrorCode.failure.print("trap {t}", .{trapped.trap.code}) };
-            },
+            .trapped => |*trapped| return fail.format(
+                error.GenericError,
+                "trap {t}",
+                .{trapped.trap.code},
+            ),
         };
     }
 }

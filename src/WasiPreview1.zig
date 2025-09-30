@@ -355,13 +355,23 @@ fn fd_write(
     return .success;
 }
 
+pub const DispatchResult = union(enum) {
+    @"continue": Interpreter.State,
+    /// The WASM program called `proc_exit()`.
+    ///
+    /// Don't forget to call `WasiPreview1.deinit()`.
+    proc_exit: i32,
+};
+
+/// Handles all calls to WASI API functions made by a WASM program.
+///
 /// Asserts that `state` indicates a host function is currently being called.
 pub fn dispatch(
     wasi: *WasiPreview1,
     state: *Interpreter.State.AwaitingHost,
     memory: *MemInst,
     fuel: *Interpreter.Fuel,
-) Interpreter.State {
+) DispatchResult {
     const callee = state.currentHostFunction().?;
 
     // TODO: Parameter to indicate if it safe to assume a WASI function is being called?
@@ -370,6 +380,11 @@ pub fn dispatch(
     const api = Api.fromHostFunc(callee.func);
     std.debug.assert(@intFromPtr(api.hostFunc()) == @intFromPtr(callee.func));
     switch (api) {
+        .proc_exit => {
+            const exit_code = state.paramsTyped(struct { i32 }) catch unreachable;
+            // std.log.debug("proc_exit({})", .{exit_code});
+            return .{ .proc_exit = exit_code[0] };
+        },
         inline .args_get,
         .args_sizes_get,
         .environ_get,
@@ -389,13 +404,21 @@ pub fn dispatch(
 
             // std.log.debug(@tagName(id) ++ " -> {f}", .{errno});
 
-            return state.returnFromHostTyped(.{@as(i32, @intFromEnum(errno))}, fuel) catch
-                unreachable;
+            return .{
+                .@"continue" = state.returnFromHostTyped(
+                    .{@as(i32, @intFromEnum(errno))},
+                    fuel,
+                ) catch unreachable,
+            };
         },
         else => if (std.mem.eql(Module.ValType, api.signature().results(), &.{.i32})) {
             std.log.err("TODO: handle {t}", .{api});
-            return state.returnFromHostTyped(.{@as(i32, @intFromEnum(Errno.nosys))}, fuel) catch
-                unreachable;
+            return .{
+                .@"continue" = state.returnFromHostTyped(
+                    .{@as(i32, @intFromEnum(Errno.nosys))},
+                    fuel,
+                ) catch unreachable,
+            };
         } else {
             std.debug.panic("TODO: handle {t}", .{api});
         },
