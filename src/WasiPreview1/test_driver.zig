@@ -75,9 +75,14 @@ pub fn main() void {
         arena.allocator(),
         undefined,
         .{},
-    );
+    ) catch |e| switch (e) {
+        error.OutOfMemory => oom("JSON specification"),
+        else => |bad| std.debug.panic("TODO JSON Diagnostics {t}", .{bad}),
+    };
 
     // TODO: launch the interpreter process
+    _ = arguments;
+    _ = spec;
 
     std.process.cleanExit();
 }
@@ -86,3 +91,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const cli_args = @import("cli_args");
+
+test {
+    _ = main;
+}

@@ -80,7 +80,7 @@ pub fn main() u8 {
     const fmt_json_path = std.unicode.fmtUtf8(arguments.run);
 
     const cwd = std.fs.cwd();
-    const json_file = wasmstint.FileContent.readFileZ(cwd, arguments.run) catch |e| switch (e) {
+    const json_file = FileContent.readFileZ(cwd, arguments.run) catch |e| switch (e) {
         error.OutOfMemory => @panic("oom"),
         else => |io_err| {
             stderr.writeErrorPreamble();
@@ -215,6 +215,11 @@ const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const wasmstint = @import("wasmstint");
 const cli_args = @import("cli_args");
+const FileContent = @import("FileContent");
 const Parser = @import("Parser.zig");
 const State = @import("State.zig");
 const Imports = @import("Imports.zig");
+
+test {
+    _ = main;
+}

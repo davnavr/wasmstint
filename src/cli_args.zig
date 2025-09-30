@@ -877,7 +877,7 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             args: *ArgIterator,
             arena: *ArenaAllocator,
         ) Oom!Parsed {
-            return self.parseRemainingWithCustom(args, arena, {}, noCustomArguments);
+            return self.remainingArgumentsWithCustom(args, arena, {}, noCustomArguments);
         }
 
         pub fn programArguments(

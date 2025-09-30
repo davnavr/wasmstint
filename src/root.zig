@@ -12,8 +12,6 @@ pub const pointer = @import("pointer.zig");
 pub const LimitedAllocator = @import("LimitedAllocator.zig");
 pub const PageBufferAllocator = @import("PageBufferAllocator.zig");
 
-pub const FileContent = @import("FileContent.zig");
-
 const std = @import("std");
 
 pub fn waitForDebugger() void {

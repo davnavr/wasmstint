@@ -357,7 +357,7 @@ fn realMain() Error!i32 {
         break :args forwarded.arguments();
     };
 
-    const wasm_binary = wasmstint.FileContent.readFileZ(
+    const wasm_binary = @import("FileContent").readFileZ(
         std.fs.cwd(),
         arguments.module,
     ) catch |e| switch (e) {
@@ -709,3 +709,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const wasmstint = @import("wasmstint");
 const cli_args = @import("cli_args");
 const WasiPreview1 = @import("WasiPreview1");
+
+test {
+    _ = main;
+}

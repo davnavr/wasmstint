@@ -43,106 +43,81 @@ const ToolPaths = struct {
     }
 };
 
-const top_level_steps: []const struct { [:0]const u8, [:0]const u8 } = &.{
-    .{ "check", "Check for compilation errors" },
-    .{ "install-spectest", "Translate specification tests with wast2json" },
-    .{ "run-wast", "Run the specification test interpreter" },
-    // .{ "run-wasip1", "Run the WASI (preview 1) application interpreter" },
-    .{ "test", "Run all unit and specification tests" },
-    .{ "test-unit", "Run unit tests" },
-    .{ "test-spec", "Run specification tests" },
+const TopLevelSteps = struct {
+    check: *Step,
+    @"test": *Step,
+    @"test-unit": *Step,
 };
 
-const TopLevelSteps = @Type(.{
-    .@"struct" = .{
-        .layout = .auto,
-        .is_tuple = false,
-        .decls = &.{},
-        .fields = fields: {
-            var fields: [top_level_steps.len]std.builtin.Type.StructField = undefined;
-            for (top_level_steps, &fields) |*src, *dst| {
-                dst.* = .{
-                    .name = src[0],
-                    .type = *Step,
-                    .default_value_ptr = null,
-                    .is_comptime = false,
-                    .alignment = @alignOf(*Step),
-                };
-            }
-            break :fields &fields;
-        },
-    },
-});
+const top_level_steps: []const struct { std.meta.FieldEnum(TopLevelSteps), [:0]const u8 } = &.{
+    .{ .check, "Check for compilation errors" },
+    .{ .@"test", "Run all tests" },
+    .{ .@"test-unit", "Run only unit tests" },
+};
 
 pub fn build(b: *Build) void {
     const project_options = ProjectOptions.init(b);
     const tool_paths = ToolPaths.init(b);
 
-    const steps: TopLevelSteps = steps: {
+    const steps = steps: {
         var init: TopLevelSteps = undefined;
         inline for (top_level_steps) |step| {
-            @field(init, step[0]) = b.step(step[0], step[1]);
+            const name = @tagName(step[0]);
+            @field(init, name) = b.step(name, step[1]);
         }
         break :steps init;
     };
+    steps.@"test".dependOn(steps.@"test-unit");
 
-    const wasmstint_module = WasmstintModule.build(b, &project_options);
-    const cli_args_module = CliArgsModule.build(b, &project_options);
-    const wasip1_module = WasiPreview1Module.build(b, &project_options);
-    wasmstint_module.addAsImportTo(wasip1_module.module);
-
-    const spectest_exe = SpectestInterp.build(
+    var modules = Modules{
+        .file_content = .build(b, &project_options),
+        .wasmstint = .build(b, &steps, &project_options),
+        .cli_args = Modules.CliArgs.build(b, &steps, &project_options),
+        .wasip1 = undefined,
+    };
+    modules.wasip1 = Modules.Wasip1.build(
         b,
         &project_options,
-        &wasmstint_module,
-        &cli_args_module,
+        .{ .wasmstint = modules.wasmstint },
     );
-    steps.@"run-wast".dependOn(&spectest_exe.run.step);
 
-    steps.check.dependOn(&wasmstint_module.unit_tests.step);
-    // steps.check.dependOn(&cli_args_module.unit_tests.step);
-    steps.check.dependOn(&wasip1_module.unit_tests.step);
-    steps.check.dependOn(&spectest_exe.exe.step);
-
-    const wasip1_exe = WasiPreview1Exe.build(
+    const spectest_exe = SpectestInterp.build(
         b,
         &steps,
         &project_options,
         .{
-            .wasmstint = &wasmstint_module,
-            .cli_args = &cli_args_module,
-            .wasip1 = &wasip1_module,
+            .wasmstint = modules.wasmstint,
+            .file_content = modules.file_content,
+            .cli_args = modules.cli_args,
         },
     );
 
-    steps.@"test-unit".dependOn(&b.addRunArtifact(wasmstint_module.unit_tests).step);
-    steps.@"test-unit".dependOn(&b.addRunArtifact(cli_args_module.unit_tests).step);
-    steps.@"test".dependOn(steps.@"test-unit");
+    const wasip1_exe = Wasip1Interp.build(
+        b,
+        &steps,
+        &project_options,
+        .{
+            .wasmstint = modules.wasmstint,
+            .file_content = modules.file_content,
+            .cli_args = modules.cli_args,
+            .wasip1 = modules.wasip1,
+        },
+    );
 
-    const translate_spectests = TranslateSpectests.build(b, &steps, &tool_paths);
-    for (translate_spectests.tests) |test_spec| {
-        const run_test_spec = b.addRunArtifact(spectest_exe.exe);
-        run_test_spec.setName(b.fmt("spectest/{s}.wast", .{test_spec.name}));
-        run_test_spec.addArg("--run");
-        run_test_spec.addFileArg(test_spec.json_path);
-        run_test_spec.step.dependOn(translate_spectests.translate_step);
-        steps.@"test-spec".dependOn(&run_test_spec.step);
-    }
-
-    steps.@"test".dependOn(steps.@"test-spec");
+    buildSpecificationTests(b, spectest_exe, &steps, &tool_paths);
 
     buildWasip1TestRunner(
         b,
         &steps,
         .{ .project = &project_options },
-        .{ .cli_args = &cli_args_module, .interpreter = &wasip1_exe },
+        .{ .cli_args = modules.cli_args, .interpreter = wasip1_exe },
     );
 
     buildFuzzers(
         b,
         &steps,
         .{ .project = &project_options, .tool_paths = &tool_paths },
-        .{ .wasmstint = &wasmstint_module, .cli_args = &cli_args_module },
+        .{ .wasmstint = modules.wasmstint, .cli_args = modules.cli_args },
     );
 
     buildWasiTestPrograms(
@@ -152,197 +127,359 @@ pub fn build(b: *Build) void {
     );
 }
 
-fn NamedModule(
-    comptime name: []const u8,
-    comptime root_source_file: []const u8,
-) type {
-    return struct {
-        const Self = @This();
+const ByteSize = packed struct(usize) {
+    bytes: usize,
 
+    fn kib(amt: usize) ByteSize {
+        return .{ .bytes = amt * 1024 };
+    }
+
+    fn mib(amt: usize) ByteSize {
+        return .kib(amt * 1024);
+    }
+};
+
+fn addCheck(
+    b: *Build,
+    steps: *const TopLevelSteps,
+    module: *Build.Module,
+    name: []const u8,
+    options: struct { max_rss: ByteSize, use_llvm: ?bool = null },
+) void {
+    steps.check.dependOn(
+        &b.addTest(
+            .{
+                .name = b.fmt("check-{s}", .{name}),
+                .root_module = module,
+                .max_rss = options.max_rss.bytes,
+                .use_llvm = options.use_llvm,
+            },
+        ).step,
+    );
+}
+
+const Modules = struct {
+    file_content: FileContent,
+    wasmstint: Wasmstint,
+    cli_args: CliArgs,
+    wasip1: Wasip1,
+
+    fn addAsImportTo(comptime T: type, from: T, to: *Build.Module) void {
+        to.addImport(T.name, from.module);
+    }
+
+    const FileContent = struct {
         module: *Build.Module,
-        unit_tests: *Step.Compile,
 
-        fn build(b: *Build, proj_opts: *const ProjectOptions) Self {
+        const name = "FileContent";
+
+        fn build(b: *Build, options: *const ProjectOptions) FileContent {
+            const module = b.createModule(.{
+                .root_source_file = b.path("src/FileContent.zig"),
+                .target = options.target,
+                .optimize = options.optimize,
+            });
+
+            return .{ .module = module };
+        }
+    };
+
+    const Wasmstint = struct {
+        module: *Build.Module,
+
+        const name = "wasmstint";
+
+        fn build(
+            b: *Build,
+            steps: *const TopLevelSteps,
+            options: *const ProjectOptions,
+        ) Wasmstint {
             const module = b.addModule(
                 name,
                 .{
-                    .root_source_file = b.path(root_source_file),
-                    .target = proj_opts.target,
-                    .optimize = proj_opts.optimize,
+                    .root_source_file = b.path("src/root.zig"),
+                    .target = options.target,
+                    .optimize = options.optimize,
                 },
             );
 
-            return .{
-                .module = module,
-                .unit_tests = b.addTest(.{
-                    .name = name,
-                    .root_module = module,
-                    // TODO(zig): https://github.com/ziglang/zig/issues/23423
-                    .use_llvm = true,
-                }),
-            };
-        }
-
-        fn addAsImportTo(self: *const Self, to: *Build.Module) void {
-            to.addImport(name, self.module);
-        }
-    };
-}
-
-const WasmstintModule = NamedModule("wasmstint", "src/root.zig");
-const CliArgsModule = NamedModule("cli_args", "src/cli_args.zig");
-const WasiPreview1Module = NamedModule("WasiPreview1", "src/WasiPreview1.zig");
-
-const SpectestInterp = struct {
-    exe: *Step.Compile,
-    run: *Step.Run,
-
-    fn build(
-        b: *Build,
-        proj_opts: *const ProjectOptions,
-        wasmstint_module: *const WasmstintModule,
-        cli_args_module: *const CliArgsModule,
-    ) SpectestInterp {
-        const module = b.createModule(.{
-            .root_source_file = b.path("src/spectest/main.zig"),
-            .target = proj_opts.target,
-            .optimize = proj_opts.optimize,
-        });
-        wasmstint_module.addAsImportTo(module);
-        cli_args_module.addAsImportTo(module);
-
-        const exe = b.addExecutable(.{
-            .name = "wasmstint-spectest",
-            .root_module = module,
-            .use_llvm = proj_opts.use_llvm,
-        });
-
-        const run = b.addRunArtifact(exe);
-        if (b.args) |args| {
-            run.addArgs(args);
-        }
-
-        b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{}).step);
-
-        return .{ .exe = exe, .run = run };
-    }
-};
-
-const TranslateSpectests = struct {
-    translate_step: *Step,
-    tests: []const Test,
-
-    const Test = struct {
-        name: []const u8,
-        json_path: Build.LazyPath,
-    };
-
-    fn build(
-        b: *Build,
-        top_steps: *const TopLevelSteps,
-        tool_paths: *const ToolPaths,
-    ) TranslateSpectests {
-        var spectests = std.ArrayList(Test).initCapacity(b.allocator, 147) catch
-            @panic("OOM");
-
-        const tests_dir = b.path("tests/spec");
-        const tests_dir_handle = b.build_root.handle.openDir(
-            tests_dir.src_path.sub_path,
-            .{ .iterate = true },
-        ) catch @panic("could not open tests directory");
-
-        var translate_step = b.allocator.create(Step) catch @panic("OOM");
-        translate_step.* = Step.init(.{
-            .id = .custom,
-            .name = @typeName(@This()),
-            .owner = b,
-        });
-        const translate_output = b.addWriteFiles();
-        const translate_output_dir = translate_output.getDirectory();
-        translate_step.dependOn(&translate_output.step);
-
-        var tests_iter = tests_dir_handle.iterateAssumeFirstIteration();
-        while (tests_iter.next() catch @panic("bad entry in tests directory")) |tests_entry| {
-            if (tests_entry.kind != .file or
-                !std.mem.eql(u8, ".wast", std.fs.path.extension(tests_entry.name)) or
-                std.mem.startsWith(u8, tests_entry.name, "simd_"))
-            {
-                continue;
-            }
-
-            var wast2json = b.addSystemCommand(&.{tool_paths.getOrDefault(.wast2json)});
-            translate_step.dependOn(&wast2json.step);
-            wast2json.setCwd(translate_output_dir);
-            wast2json.addFileArg(tests_dir.path(b, tests_entry.name));
-
-            const name = b.dupe(tests_entry.name[0 .. tests_entry.name.len - 5]);
-            const json_name = b.fmt("{s}.json", .{name});
-            wast2json.addArgs(&.{ "--output", json_name });
-            // addPrefixedFileArg would mean each .json is in a separate dir
-            const json_path = translate_output_dir.path(b, json_name);
-
-            spectests.append(b.allocator, .{ .name = name, .json_path = json_path }) catch
-                @panic("OOM");
-        }
-
-        const step = if (spectests.items.len == 0)
-            &b.addFail("no .wast files found in test directory").step
-        else
-            translate_step;
-
-        top_steps.@"install-spectest".dependOn(step);
-
-        if (spectests.items.len > 0) {
-            const install_spectests = b.addInstallDirectory(.{
-                .source_dir = translate_output_dir,
-                .install_dir = .{ .custom = "spectest" },
-                .install_subdir = ".",
+            // TODO(zig): https://github.com/ziglang/zig/issues/23423
+            const use_llvm = true;
+            const tests = b.addTest(.{
+                .name = name,
+                .root_module = module,
+                .use_llvm = use_llvm,
+                .max_rss = ByteSize.mib(257).bytes,
             });
 
-            install_spectests.step.dependOn(translate_step);
-            top_steps.@"install-spectest".dependOn(&install_spectests.step);
+            const tests_run = &b.addRunArtifact(tests).step;
+            tests_run.max_rss = ByteSize.mib(8).bytes;
+            steps.@"test-unit".dependOn(tests_run);
+            addCheck(b, steps, module, name, .{ .max_rss = .mib(126), .use_llvm = use_llvm });
+            return .{ .module = module };
         }
+    };
 
-        return .{
-            .translate_step = step,
-            .tests = spectests.items,
-        };
-    }
+    const CliArgs = struct {
+        module: *Build.Module,
+
+        const name = "cli_args";
+
+        fn build(
+            b: *Build,
+            steps: *const TopLevelSteps,
+            options: *const ProjectOptions,
+        ) CliArgs {
+            const module = b.addModule(
+                name,
+                .{
+                    .root_source_file = b.path("src/cli_args.zig"),
+                    .target = options.target,
+                    .optimize = options.optimize,
+                },
+            );
+
+            const tests = b.addTest(.{
+                .name = name,
+                .root_module = module,
+                // TODO(zig): https://github.com/ziglang/zig/issues/23423
+                .use_llvm = true,
+                .max_rss = ByteSize.mib(236).bytes,
+            });
+
+            const tests_run = &b.addRunArtifact(tests).step;
+            tests_run.max_rss = ByteSize.mib(8).bytes;
+            steps.@"test-unit".dependOn(tests_run);
+
+            addCheck(b, steps, module, name, .{ .max_rss = .mib(99) });
+            return .{ .module = module };
+        }
+    };
+
+    const Wasip1 = struct {
+        module: *Build.Module,
+
+        const name = "WasiPreview1";
+
+        fn build(
+            b: *Build,
+            options: *const ProjectOptions,
+            imports: struct { wasmstint: Wasmstint },
+        ) Wasip1 {
+            const module = b.addModule(
+                name,
+                .{
+                    .root_source_file = b.path("src/WasiPreview1.zig"),
+                    .target = options.target,
+                    .optimize = options.optimize,
+                },
+            );
+            addAsImportTo(Wasmstint, imports.wasmstint, module);
+
+            return .{ .module = module };
+        }
+    };
 };
 
-const WasiPreview1Exe = struct {
+const SpectestInterp = struct {
     exe: *Step.Compile,
 
     fn build(
         b: *Build,
         steps: *const TopLevelSteps,
         proj_opts: *const ProjectOptions,
-        imported_modules: struct {
-            wasmstint: *const WasmstintModule,
-            cli_args: *const CliArgsModule,
-            wasip1: *const WasiPreview1Module,
+        imports: struct {
+            file_content: Modules.FileContent,
+            wasmstint: Modules.Wasmstint,
+            cli_args: Modules.CliArgs,
         },
-    ) WasiPreview1Exe {
+    ) SpectestInterp {
+        const module = b.createModule(.{
+            .root_source_file = b.path("src/spectest/main.zig"),
+            .target = proj_opts.target,
+            .optimize = proj_opts.optimize,
+        });
+        Modules.addAsImportTo(Modules.FileContent, imports.file_content, module);
+        Modules.addAsImportTo(Modules.Wasmstint, imports.wasmstint, module);
+        Modules.addAsImportTo(Modules.CliArgs, imports.cli_args, module);
+
+        const exe = b.addExecutable(.{
+            .name = "wasmstint-spectest",
+            .root_module = module,
+            .use_llvm = proj_opts.use_llvm,
+            .max_rss = ByteSize.mib(402).bytes,
+        });
+
+        b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{}).step);
+
+        {
+            const run = b.addRunArtifact(exe);
+            if (b.args) |args| {
+                run.addArgs(args);
+            }
+
+            b.step("run-wast", "Run the specification test interpreter").dependOn(&run.step);
+        }
+
+        addCheck(
+            b,
+            steps,
+            module,
+            exe.name,
+            .{
+                .max_rss = .mib(117),
+                // Prevent compile errors due to https://github.com/ziglang/zig/issues/24044
+                .use_llvm = proj_opts.use_llvm,
+            },
+        );
+
+        return .{ .exe = exe };
+    }
+};
+
+fn buildSpecificationTests(
+    b: *Build,
+    interpreter: SpectestInterp,
+    top_steps: *const TopLevelSteps,
+    tool_paths: *const ToolPaths,
+) void {
+    const Test = struct {
+        name: []const u8,
+        json_path: Build.LazyPath,
+        run: *Build.Step.Run,
+    };
+
+    var spectests = std.ArrayList(Test).initCapacity(b.allocator, 147) catch
+        @panic("OOM");
+
+    const tests_dir = b.path("tests/spec");
+    const tests_dir_handle = b.build_root.handle.openDir(
+        tests_dir.src_path.sub_path,
+        .{ .iterate = true },
+    ) catch @panic("could not open tests directory");
+
+    var translate_step = b.allocator.create(Step) catch @panic("OOM");
+    translate_step.* = Step.init(.{
+        .id = .custom,
+        .name = @typeName(@This()),
+        .owner = b,
+    });
+    const translate_output = b.addWriteFiles();
+    const translate_output_dir = translate_output.getDirectory();
+    translate_step.dependOn(&translate_output.step);
+
+    var tests_iter = tests_dir_handle.iterateAssumeFirstIteration();
+    while (tests_iter.next() catch @panic("bad entry in tests directory")) |tests_entry| {
+        if (tests_entry.kind != .file or
+            !std.mem.eql(u8, ".wast", std.fs.path.extension(tests_entry.name)) or
+            std.mem.startsWith(u8, tests_entry.name, "simd_"))
+        {
+            continue;
+        }
+
+        var wast2json = b.addSystemCommand(&.{tool_paths.getOrDefault(.wast2json)});
+        wast2json.step.max_rss = ByteSize.mib(14).bytes;
+        translate_step.dependOn(&wast2json.step);
+        wast2json.setCwd(translate_output_dir);
+        wast2json.addFileArg(tests_dir.path(b, tests_entry.name));
+
+        const name = b.dupe(tests_entry.name[0 .. tests_entry.name.len - 5]);
+        const json_name = b.fmt("{s}.json", .{name});
+        wast2json.addArgs(&.{ "--output", json_name });
+        // addPrefixedFileArg would mean each .json is in a separate dir
+        const json_path = translate_output_dir.path(b, json_name);
+
+        spectests.append(
+            b.allocator,
+            .{ .name = name, .json_path = json_path, .run = wast2json },
+        ) catch @panic("OOM");
+    }
+
+    const step = if (spectests.items.len == 0)
+        &b.addFail("no .wast files found in test directory").step
+    else
+        translate_step;
+
+    const install_step = b.step(
+        "install-spectest",
+        "Translate specification tests with wast2json",
+    );
+    install_step.dependOn(step);
+
+    if (spectests.items.len > 0) {
+        const install_spectests = b.addInstallDirectory(.{
+            .source_dir = translate_output_dir,
+            .install_dir = .{ .custom = "spectest" },
+            .install_subdir = ".",
+        });
+
+        install_spectests.step.dependOn(translate_step);
+        install_step.dependOn(&install_spectests.step);
+    }
+
+    const test_spec_step = b.step("test-spec", "Run specification tests");
+
+    for (spectests.items) |test_spec| {
+        const run_test_spec = b.addRunArtifact(interpreter.exe);
+        run_test_spec.step.max_rss = ByteSize.mib(20).bytes;
+        run_test_spec.setName(b.fmt("spectest/{s}.wast", .{test_spec.name}));
+        run_test_spec.addArg("--run");
+        run_test_spec.addFileArg(test_spec.json_path);
+        run_test_spec.step.dependOn(&test_spec.run.step);
+        run_test_spec.expectExitCode(0);
+        test_spec_step.dependOn(&run_test_spec.step);
+    }
+
+    top_steps.@"test".dependOn(test_spec_step);
+}
+
+const Wasip1Interp = struct {
+    exe: *Step.Compile,
+
+    fn build(
+        b: *Build,
+        steps: *const TopLevelSteps,
+        proj_opts: *const ProjectOptions,
+        imports: struct {
+            file_content: Modules.FileContent,
+            wasmstint: Modules.Wasmstint,
+            cli_args: Modules.CliArgs,
+            wasip1: Modules.Wasip1,
+        },
+    ) Wasip1Interp {
+        const module = b.createModule(.{
+            .root_source_file = b.path("src/WasiPreview1/main.zig"),
+            .target = proj_opts.target,
+            .optimize = proj_opts.optimize,
+        });
+        Modules.addAsImportTo(Modules.FileContent, imports.file_content, module);
+        Modules.addAsImportTo(Modules.Wasmstint, imports.wasmstint, module);
+        Modules.addAsImportTo(Modules.CliArgs, imports.cli_args, module);
+        Modules.addAsImportTo(Modules.Wasip1, imports.wasip1, module);
+
         const exe = b.addExecutable(.{
             .name = "wasmstint-wasip1",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/WasiPreview1/main.zig"),
-                .target = proj_opts.target,
-                .optimize = proj_opts.optimize,
-            }),
+            .root_module = module,
             .use_llvm = proj_opts.use_llvm,
+            .max_rss = ByteSize.mib(383).bytes,
         });
-        imported_modules.wasmstint.addAsImportTo(exe.root_module);
-        imported_modules.cli_args.addAsImportTo(exe.root_module);
-        imported_modules.wasip1.addAsImportTo(exe.root_module);
 
-        steps.check.dependOn(&exe.step);
+        addCheck(
+            b,
+            steps,
+            module,
+            exe.name,
+            .{ .max_rss = .mib(117), .use_llvm = proj_opts.use_llvm },
+        );
 
-        const run = b.addRunArtifact(exe);
-        if (b.args) |args| {
-            run.addArgs(args);
+        {
+            const run = b.addRunArtifact(exe);
+            if (b.args) |args| {
+                run.addArgs(args);
+            }
+            b.step("run-wasip1", "Run the WASI (preview 1) application interpreter")
+                .dependOn(&run.step);
         }
-        b.step("run-wasip1", "Run WASI 0.1 program interpreter").dependOn(&run.step);
 
         b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{}).step);
 
@@ -354,19 +491,20 @@ fn buildWasip1TestRunner(
     b: *Build,
     steps: *const TopLevelSteps,
     options: struct { project: *const ProjectOptions },
-    modules: struct { cli_args: *const CliArgsModule, interpreter: *const WasiPreview1Exe },
+    modules: struct { cli_args: Modules.CliArgs, interpreter: Wasip1Interp },
 ) void {
     const module = b.createModule(.{
         .root_source_file = b.path("src/WasiPreview1/test_driver.zig"),
         .target = options.project.target,
         .optimize = options.project.optimize,
     });
-    modules.cli_args.addAsImportTo(module);
+    Modules.addAsImportTo(Modules.CliArgs, modules.cli_args, module);
 
     const exe = b.addExecutable(.{
         .name = "wasmstint-wasip1-test",
         .root_module = module,
         .use_llvm = false,
+        .max_rss = ByteSize.mib(174).bytes,
     });
 
     steps.check.dependOn(&exe.step);
@@ -389,7 +527,7 @@ fn buildFuzzers(
     b: *Build,
     steps: *const TopLevelSteps,
     options: struct { project: *const ProjectOptions, tool_paths: *const ToolPaths },
-    modules: struct { wasmstint: *const WasmstintModule, cli_args: *const CliArgsModule },
+    modules: struct { wasmstint: Modules.Wasmstint, cli_args: Modules.CliArgs },
 ) void {
     _ = b;
     _ = steps;
@@ -422,6 +560,7 @@ fn buildWasiTestPrograms(
             continue;
         }
 
+        const max_rss = ByteSize.mib(176);
         const sample_exe = b.addExecutable(.{
             .name = b.dupe(tests_entry.name[0 .. tests_entry.name.len - 4]),
             .root_module = b.createModule(.{
@@ -429,9 +568,10 @@ fn buildWasiTestPrograms(
                 .target = wasm_target,
                 .optimize = options.project.optimize,
             }),
+            .max_rss = max_rss.bytes,
         });
 
-        steps.check.dependOn(&sample_exe.step);
+        addCheck(b, steps, sample_exe.root_module, sample_exe.name, .{ .max_rss = max_rss });
 
         const install_sample = b.addInstallArtifact(
             sample_exe,

@@ -140,8 +140,8 @@ fn openModuleContents(
     state: *State,
     filename: [:0]const u8,
     output: Output,
-) Error!wasmstint.FileContent {
-    return wasmstint.FileContent.readFileZ(
+) Error!FileContent {
+    return FileContent.readFileZ(
         state.script_dir,
         filename,
     ) catch |e| switch (e) {
@@ -1092,7 +1092,7 @@ fn openAssertionModuleContents(
     state: *State,
     command: *const Parser.Command.AssertWithModule,
     output: Output,
-) Error!?wasmstint.FileContent {
+) Error!?FileContent {
     return switch (command.module_type) {
         .binary => try state.openModuleContents(command.filename, output),
         .text => null,
@@ -1449,6 +1449,7 @@ fn processAssertUnlinkable(
 const std = @import("std");
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
+const FileContent = @import("FileContent");
 const wasmstint = @import("wasmstint");
 const ModuleInst = wasmstint.runtime.ModuleInst;
 const Interpreter = wasmstint.Interpreter;
