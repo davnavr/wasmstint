@@ -57,6 +57,7 @@ api_lookup: Api.Lookup,
 csprng: Csprng,
 fd_table: Fd.Table,
 args: Arguments,
+environ: Environ,
 
 const WasiPreview1 = @This();
 
@@ -71,56 +72,7 @@ pub fn function(state: *WasiPreview1, api: Api) wasmstint.runtime.FuncAddr {
 
 pub const Char = @import("WasiPreview1/char.zig").Char;
 pub const Arguments = @import("WasiPreview1/Arguments.zig");
-
-/// Environment variable data to pass to the application.
-pub const Environ = struct {
-    ptr: [*]const Pair,
-    count: u32,
-    /// Total size, in bytes, of all argument data.
-    ///
-    /// TODO: Probably includes null-terminators too.
-    size: u32,
-
-    pub const empty = Environ{
-        .ptr = @as([]const Pair, &.{}).ptr,
-        .count = 0,
-        .size = 0,
-    };
-
-    pub const Pair = struct {
-        /// Invariant that this contains at least one (1) equals (`=`) character.
-        ///
-        /// `Char` guarantees no null-terminators are present.
-        ptr: [*]const Char,
-        /// Invariant that `len <= max_len`
-        len: u32,
-        /// Invariant that `ptr[key_len] == '='` and `key_len < len`.
-        key_len: u32,
-
-        const max_len = std.math.maxInt(u32) - 1; // only need room for null-terminator
-
-        fn chars(pair: Pair) []const Char {
-            std.debug.assert(pair.len <= max_len);
-            std.debug.assert(pair.key_len < pair.len);
-            std.debug.assert(pair.ptr[pair.key_len] == .@"=");
-            return @ptrCast(pair.ptr[0..pair.len]);
-        }
-
-        fn bytes(pair: Pair) []const u8 {
-            return @ptrCast(pair.chars());
-        }
-
-        /// Names are not allowed to contain an equals sign (`=`) character or a null-terminator
-        /// (`\x00`).
-        pub fn name(pair: Pair) [:'=']const u8 {
-            return pair.bytes[0..pair.key_len :'='];
-        }
-
-        pub fn format(pair: Pair, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-            return writer.writeAll(pair.bytes());
-        }
-    };
-};
+pub const Environ = @import("WasiPreview1/Environ.zig");
 
 pub const InitError = Allocator.Error;
 
@@ -159,6 +111,7 @@ pub fn init(allocator: Allocator, options: InitOptions) InitError!WasiPreview1 {
         .scratch = .{ .state = ArenaAllocator.init(allocator).state },
         .csprng = options.csprng,
         .args = options.args,
+        .environ = options.environ,
     };
 }
 
@@ -184,69 +137,94 @@ pub fn importProvider(state: *WasiPreview1) wasmstint.runtime.ImportProvider {
     };
 }
 
-fn args_get(
-    wasi: *WasiPreview1,
-    mem: *MemInst,
-    raw_argv: i32,
-    raw_argv_buf: i32,
-) Errno {
-    const argv_ptr = pointer.Pointer(pointer.Pointer(u32)){ .addr = @as(u32, @bitCast(raw_argv)) };
-    const argv_buf_ptr = pointer.Pointer(u8){ .addr = @as(u32, @bitCast(raw_argv_buf)) };
+fn processParametersApi(comptime field: std.meta.FieldEnum(WasiPreview1)) type {
+    return struct {
+        const field_name = @tagName(field);
 
-    // std.log.debug("args_get({f}, {f})\n", .{ argv_ptr, argv_buf_ptr });
+        fn get(
+            wasi: *WasiPreview1,
+            mem: *MemInst,
+            raw_argv: i32,
+            raw_argv_buf: i32,
+        ) Errno {
+            const argv_ptr = pointer.Pointer(pointer.Pointer(u32)){
+                .addr = @as(u32, @bitCast(raw_argv)),
+            };
+            const argv_buf_ptr = pointer.Pointer(u8){ .addr = @as(u32, @bitCast(raw_argv_buf)) };
 
-    const argv = pointer.Slice(pointer.Pointer(u32)).init(
-        mem,
-        argv_ptr,
-        wasi.args.count,
-    ) catch |e| return .mapError(e);
+            // std.log.debug(@tagName(field) ++ "_get({f}, {f})\n", .{ argv_ptr, argv_buf_ptr });
 
-    const argv_buf = pointer.Slice(u8).init(mem, argv_buf_ptr, wasi.args.size) catch |e|
-        return .mapError(e);
+            const argv = pointer.Slice(pointer.Pointer(u32)).init(
+                mem,
+                argv_ptr,
+                @field(wasi, field_name).count,
+            ) catch |e| return .mapError(e);
 
-    var dst_buf = argv_buf.bytes();
-    var argv_addr = argv_buf_ptr.addr;
-    for (0.., wasi.args.strings()) |i, src| {
-        argv.write(i, .{ .addr = argv_addr });
+            const argv_buf = pointer.Slice(u8).init(
+                mem,
+                argv_buf_ptr,
+                @field(wasi, field_name).size,
+            ) catch |e| return .mapError(e);
 
-        const dst = dst_buf[0..src.len()];
-        std.debug.assert(dst_buf.ptr - argv_buf.bytes().ptr == argv_addr - argv_buf_ptr.addr);
+            var dst_buf = argv_buf.bytes();
+            var argv_addr = argv_buf_ptr.addr;
+            for (0.., @field(wasi, field_name).entries()) |i, src| {
+                const len_with_null = src.lenWithNullTerminator();
+                argv.write(i, .{ .addr = argv_addr });
 
-        @memcpy(dst, src.bytes());
+                const dst = dst_buf[0 .. len_with_null - 1];
+                std.debug.assert( // wrong addr
+                    dst_buf.ptr - argv_buf.bytes().ptr == argv_addr - argv_buf_ptr.addr,
+                );
 
-        dst_buf[src.len()] = 0;
-        dst_buf = dst_buf[src.lenWithNullTerminator()..];
-        argv_addr += src.lenWithNullTerminator();
-    }
+                @memcpy(dst, src.bytes());
 
-    std.debug.assert(dst_buf.len == 0);
-    std.debug.assert(argv_addr - argv_buf_ptr.addr == wasi.args.size);
-    return .success;
+                dst_buf[len_with_null - 1] = 0;
+                dst_buf = dst_buf[len_with_null..];
+                argv_addr += len_with_null;
+            }
+
+            std.debug.assert(dst_buf.len == 0);
+            std.debug.assert(argv_addr - argv_buf_ptr.addr == @field(wasi, field_name).size);
+            return .success;
+        }
+
+        fn sizes_get(
+            wasi: *WasiPreview1,
+            mem: *MemInst,
+            raw_ret_count: i32,
+            raw_ret_size: i32,
+        ) Errno {
+            const count = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret_count)) };
+            const size = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret_size)) };
+
+            // std.log.debug(@tagName(field) ++ "_sizes_get({f}, {f})\n", .{ argc, size });
+
+            count.write(mem, @field(wasi, field_name).count) catch |e| return .mapError(e);
+            size.write(mem, @field(wasi, field_name).size) catch |e| return .mapError(e);
+
+            // std.log.debug(
+            //     @tagName(field) ++ "_sizes_get -> ({}, {})\n",
+            //     .{ @field(wasi, field_name).count, @field(wasi, field_name).size },
+            // );
+
+            if (builtin.mode == .Debug) {
+                std.debug.assert(count.read(mem) catch unreachable == @field(wasi, field_name).count);
+                std.debug.assert(size.read(mem) catch unreachable == @field(wasi, field_name).size);
+            }
+
+            return .success;
+        }
+    };
 }
 
-fn args_sizes_get(
-    wasi: *WasiPreview1,
-    mem: *MemInst,
-    raw_ret_argc: i32,
-    raw_ret_size: i32,
-) Errno {
-    const argc = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret_argc)) };
-    const size = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret_size)) };
+const args_api = processParametersApi(.args);
+const args_get = args_api.get;
+const args_sizes_get = args_api.sizes_get;
 
-    // std.log.debug("args_sizes_get({f}, {f})\n", .{ argc, size });
-
-    argc.write(mem, wasi.args.count) catch |e| return .mapError(e);
-    size.write(mem, wasi.args.size) catch |e| return .mapError(e);
-
-    // std.log.debug("args_sizes_get -> ({}, {})\n", .{ wasi.args.count, wasi.args.size });
-
-    if (builtin.mode == .Debug) {
-        std.debug.assert(argc.read(mem) catch unreachable == wasi.args.count);
-        std.debug.assert(size.read(mem) catch unreachable == wasi.args.size);
-    }
-
-    return .success;
-}
+const environ_api = processParametersApi(.environ);
+const environ_get = environ_api.get;
+const environ_sizes_get = environ_api.sizes_get;
 
 fn acquireScratch(state: *WasiPreview1) ArenaAllocator {
     state.scratch.lock.lock();
@@ -394,6 +372,8 @@ pub fn dispatch(
     switch (api) {
         inline .args_get,
         .args_sizes_get,
+        .environ_get,
+        .environ_sizes_get,
         .fd_pwrite,
         .fd_write,
         => |id| {

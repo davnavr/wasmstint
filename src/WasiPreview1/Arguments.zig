@@ -11,7 +11,7 @@ count: u32,
 /// This is the sum of all strings' lengths (including their null-terminators).
 size: u32,
 
-pub fn strings(args: Arguments) []const String {
+pub fn entries(args: Arguments) []const String {
     return args.ptr[0..args.count];
 }
 

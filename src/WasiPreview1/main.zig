@@ -50,8 +50,18 @@ const Arguments = cli_args.CliArgs(.{
         ).withDefault(1 * 1024 * 1024 * 1024), // 1 GiB
 
         cli_args.Flag.remainder,
+
+        env_flag,
     },
 });
+
+const env_flag = cli_args.Flag.custom(
+    .{ .long = "env", .description = "Set or inherit an environment variable for the program" },
+    .{ .optional = false, .name = "NAME[=VAL]" },
+);
+
+// TODO: As an optimization, when env var import is required, continue a filling of a EnvMap, pausing when
+// current variable being looked for is found (this avoids making a huge EnvMap, but is this premature optimization?)
 
 fn oom(context: []const u8) noreturn {
     std.debug.panic("out of memory: {s}", .{context});
@@ -116,15 +126,154 @@ const ErrorCode = enum(u8) {
 const ParsedArguments = struct {
     forwarded: WasiPreview1.Arguments.List,
     flags: Arguments.Parsed,
+    environ: WasiPreview1.Environ,
 };
 
 fn parseArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) ParsedArguments {
     var parser: Arguments = undefined;
     parser.init();
 
+    const ParseCustomArguments = struct {
+        const use_windows_peb = builtin.os.tag == .windows and !builtin.link_libc;
+        environ: WasiPreview1.Environ.List = .empty,
+        scratch: *ArenaAllocator,
+        scanned_env_vars: ScannedEnvVars = .empty,
+        unscanned_env_vars: if (use_windows_peb) ?[*:0]u16 else [][*:0]u8,
+
+        const ScannedEnvVars = std.ArrayHashMapUnmanaged(
+            WasiPreview1.Environ.Pair,
+            void,
+            ScannedEnvVarsContext,
+            true,
+        );
+
+        const ScannedEnvVarsContext = struct {
+            pub fn hash(_: @This(), key: WasiPreview1.Environ.Pair) u32 {
+                return std.hash.CityHash32.hash(key.name());
+            }
+
+            pub fn eql(
+                _: @This(),
+                a: WasiPreview1.Environ.Pair,
+                b: WasiPreview1.Environ.Pair,
+                _: usize,
+            ) bool {
+                return std.mem.eql(u8, a.name(), b.name());
+            }
+        };
+
+        fn init(args: *@This(), scratch_arena: *ArenaAllocator) void {
+            args.* = .{
+                .scratch = scratch_arena,
+                .unscanned_env_vars = if (use_windows_peb)
+                    std.os.windows.peb().ProcessParameters.Environment
+                else
+                    std.os.environ,
+            };
+
+            if (!use_windows_peb) {
+                args.scanned_env_vars.ensureTotalCapacity(
+                    scratch_arena.allocator(),
+                    args.unscanned_env_vars.len,
+                ) catch oom("scanned env vars");
+            }
+        }
+
+        fn emptyEnviron(
+            key: [:0]const u8,
+            results_arena: *ArenaAllocator,
+        ) WasiPreview1.Environ.Pair {
+            const key_truncated = key[0..@min(key.len, WasiPreview1.Environ.Pair.max_len)];
+            const s = results_arena.allocator().alloc(u8, key_truncated.len + 1) catch
+                oom("empty env var");
+            s[key_truncated.len] = '=';
+            const pair = WasiPreview1.Environ.Pair.initTruncated(s) catch unreachable;
+            std.debug.assert(pair.value().len == 0);
+            return pair;
+        }
+
+        const ScannedEnvironGetContext = struct {
+            pub fn hash(_: @This(), key: [:0]const u8) u32 {
+                return std.hash.CityHash32.hash(key);
+            }
+
+            pub fn eql(
+                _: @This(),
+                a: [:0]const u8,
+                b: WasiPreview1.Environ.Pair,
+                _: usize,
+            ) bool {
+                return std.mem.eql(u8, a, b.name());
+            }
+        };
+
+        fn scanNextInheritedEnviron(
+            self: *@This(),
+            key: [:0]const u8,
+            results_arena: *ArenaAllocator,
+        ) WasiPreview1.Environ.Pair {
+            if (self.scanned_env_vars.getKeyAdapted(key, ScannedEnvironGetContext{})) |found| {
+                return found;
+            } else if (use_windows_peb) {
+                std.debug.panic("TODO: std.unicode.calcWtf8Len");
+            } else {
+                while (self.unscanned_env_vars.len > 0) {
+                    defer self.unscanned_env_vars = self.unscanned_env_vars[1..];
+
+                    const entry = WasiPreview1.Environ.Pair.initTruncated(
+                        std.mem.sliceTo(self.unscanned_env_vars[0], 0),
+                    ) catch unreachable;
+
+                    self.scanned_env_vars.putAssumeCapacity(entry, {});
+
+                    if (std.mem.eql(u8, key, entry.name())) {
+                        return entry.dupe(results_arena.allocator()) catch
+                            oom("inherited env var");
+                    }
+                }
+
+                return emptyEnviron(key, results_arena);
+            }
+        }
+
+        fn parse(
+            self: *@This(),
+            comptime flag: Arguments.FlagEnum,
+            args: *cli_args.ArgIterator,
+            results_arena: *ArenaAllocator,
+            diag: ?*cli_args.Flag.Diagnostics,
+        ) cli_args.Flag.InvalidError!void {
+            switch (flag) {
+                .env => {
+                    const str = args.next() orelse return env_flag.info.reportMissing(
+                        diag,
+                        env_flag.arg_help.?,
+                    );
+
+                    const pair = pair: {
+                        const set = WasiPreview1.Environ.Pair.initTruncated(str) catch
+                            break :pair self.scanNextInheritedEnviron(str, results_arena);
+
+                        break :pair try set.dupe(results_arena.allocator());
+                    };
+
+                    try self.environ.append(self.scratch.allocator(), pair);
+                },
+                else => unreachable,
+            }
+        }
+    };
+
+    var custom_args: ParseCustomArguments = undefined;
+    custom_args.init(scratch);
     var args = cli_args.ArgIterator.initProcessArgs(scratch) catch oom("argv");
     _ = args.next().?;
-    const parsed = parser.remainingArguments(&args, arena) catch oom("CLI arguments");
+    const parsed = parser.remainingArgumentsWithCustom(
+        &args,
+        arena,
+        &custom_args,
+        ParseCustomArguments.parse,
+    ) catch oom("CLI arguments");
 
     var forwarded = WasiPreview1.Arguments.List.initCapacity(
         arena.allocator(),
@@ -138,7 +287,11 @@ fn parseArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) ParsedArgume
         forwarded.appendBounded(.initTruncated(a)) catch oom("forwarded CLI argument");
     }
 
-    return .{ .flags = parsed, .forwarded = forwarded };
+    return .{
+        .flags = parsed,
+        .forwarded = forwarded,
+        .environ = (custom_args.environ.dupe(arena.allocator()) catch oom("env vars")).environ(),
+    };
 }
 
 const max_fuel = wasmstint.Interpreter.Fuel{ .remaining = std.math.maxInt(u32) };
@@ -254,6 +407,7 @@ pub fn main() u8 {
         std.heap.page_allocator,
         .{
             .args = forwarded_arguments,
+            .environ = all_arguments.environ,
             .fd_rng_seed = rt_rng_seeds[1],
             .csprng = csprng,
         },

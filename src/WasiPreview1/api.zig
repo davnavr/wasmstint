@@ -1,6 +1,8 @@
 pub const Api = enum {
     args_get,
     args_sizes_get,
+    environ_get,
+    environ_sizes_get,
 
     fd_filestat_get,
 
@@ -18,6 +20,8 @@ pub const Api = enum {
         return switch (api) {
             .args_get,
             .args_sizes_get,
+            .environ_get,
+            .environ_sizes_get,
             .fd_filestat_get,
             => .initComptime(&.{ .i32, .i32 }, result),
 

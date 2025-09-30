@@ -99,7 +99,7 @@ pub const Flag = struct {
             );
         }
 
-        fn reportMissing(
+        pub fn reportMissing(
             comptime info: Info,
             diag: ?*Diagnostics,
             comptime arg_help: ArgHelp,
@@ -654,19 +654,23 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
 
         pub const ParseError = Flag.HelpError || Flag.FinishError;
 
+        fn ParseCustomArguments(comptime Context: type) type {
+            return fn (
+                Context,
+                comptime FlagEnum,
+                *ArgIterator,
+                arena: *ArenaAllocator,
+                ?*Flag.Diagnostics,
+            ) Flag.FinishError!void;
+        }
+
         pub fn parseRemainingWithCustom(
             self: *const Self,
             args: *ArgIterator,
             arena: *ArenaAllocator,
             diagnostics: ?*Flag.Diagnostics,
             context: anytype,
-            comptime parseCustomArguments: fn (
-                @TypeOf(context),
-                comptime FlagEnum,
-                *ArgIterator,
-                *ArenaAllocator,
-                ?*Flag.Diagnostics,
-            ) Flag.FinishError!void,
+            comptime parseCustomArguments: ParseCustomArguments(@TypeOf(context)),
         ) ParseError!Parsed {
             var state = State{};
             while (args.next()) |flag_arg| {
@@ -840,14 +844,22 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             });
         }
 
-        pub fn remainingArguments(
+        pub fn remainingArgumentsWithCustom(
             self: *const Self,
             args: *ArgIterator,
             arena: *ArenaAllocator,
+            context: anytype,
+            comptime parseCustomArguments: ParseCustomArguments(@TypeOf(context)),
         ) Oom!Parsed {
             var diagnostics: Flag.Diagnostics = undefined;
             return parsedArgumentsOrExit(
-                self.parseRemaining(args, arena, &diagnostics),
+                self.parseRemainingWithCustom(
+                    args,
+                    arena,
+                    &diagnostics,
+                    context,
+                    parseCustomArguments,
+                ),
                 &diagnostics,
             );
         }
