@@ -647,11 +647,6 @@ fn buildWasiTestsuite(
         install_step.dependOn(&install_test.step);
 
         // Steps to run against the test driver
-        const json_file = tests_dir.path(
-            b,
-            b.fmt("{s}.json", .{std.fs.path.stem(tests_entry.name)}),
-        );
-
         const run_test = b.addRunArtifact(dependencies.driver.exe);
         run_test.step.max_rss = ByteSize.mib(3).bytes;
         run_test.setName(b.fmt("{s}.wasm", .{tests_entry.name}));
@@ -659,8 +654,16 @@ fn buildWasiTestsuite(
         run_test.addArg("--module");
         run_test.addArtifactArg(test_exe);
 
-        run_test.addArg("--test");
-        run_test.addFileArg(json_file);
+        json: {
+            const json_file_name = b.fmt("{s}.json", .{std.fs.path.stem(tests_entry.name)});
+            tests_dir_handle.access(json_file_name, .{}) catch |e| switch (e) {
+                error.FileNotFound => break :json,
+                else => unreachable,
+            };
+
+            run_test.addArg("--test");
+            run_test.addFileArg(tests_dir.path(b, json_file_name));
+        }
 
         run_test.addArg("--interpreter");
         run_test.addArtifactArg(dependencies.interpreter.exe);

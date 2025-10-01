@@ -15,7 +15,7 @@ const Arguments = cli_args.CliArgs(.{
                 .description = "Path to .json test file",
             },
             "PATH",
-        ).required(),
+        ),
         cli_args.Flag.string(
             .{
                 .long = "interpreter",
@@ -95,27 +95,27 @@ pub fn main() u8 {
         break :args .{ .parsed = parsed, .forwarded = forwarded };
     };
 
-    const fmt_json_path = std.unicode.fmtUtf8(arguments.parsed.@"test");
-    const json_bytes = FileContent.readFileZ(
-        std.fs.cwd(),
-        arguments.parsed.@"test",
-    ) catch |e| switch (e) {
-        error.OutOfMemory => oom("JSON file bytes"),
-        else => |bad| return abnormalExitFmt(
-            1,
-            "could not open JSON file {f}: {t}",
-            .{ fmt_json_path, bad },
-        ),
-    };
-    // defer json_bytes.deinit();
-
     // The steps to perform are documented at `tests/wasi/doc/specification.md` or at
     // https://github.com/WebAssembly/wasi-testsuite/blob/60e08baeb4b098a0926fecd7aa7c5b1913413db2/doc/specification.md
 
     // TODO: Perform cleanup of test cases (maybe after open dirs are discovered?)
 
     _ = scratch.reset(.retain_capacity);
-    const spec: Specification = spec: {
+    const spec: Specification = if (arguments.parsed.@"test") |test_path| spec: {
+        const fmt_json_path = std.unicode.fmtUtf8(test_path);
+        const json_bytes = FileContent.readFileZ(
+            std.fs.cwd(),
+            test_path,
+        ) catch |e| switch (e) {
+            error.OutOfMemory => oom("JSON file bytes"),
+            else => |bad| return abnormalExitFmt(
+                1,
+                "could not open JSON file {f}: {t}",
+                .{ fmt_json_path, bad },
+            ),
+        };
+        // defer json_bytes.deinit();
+
         var scanner = std.json.Scanner.initCompleteInput(scratch.allocator(), json_bytes.contents);
         var diagnostics = std.json.Diagnostics{};
         scanner.enableDiagnostics(&diagnostics);
@@ -133,7 +133,7 @@ pub fn main() u8 {
                 .{ fmt_json_path, diagnostics.getLine(), diagnostics.getColumn(), bad },
             ),
         };
-    };
+    } else Specification{};
 
     _ = scratch.reset(.retain_capacity);
     const argv: []const []const u8 = argv: {
