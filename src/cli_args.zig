@@ -114,15 +114,10 @@ pub const Flag = struct {
     };
 
     const ArgHelp = struct {
-        optional: bool,
         name: [:0]const u8,
 
         fn string(comptime arg_help: ArgHelp) []const u8 {
-            const name: []const u8 = .{'<'} ++ arg_help.name ++ .{'>'};
-            return if (arg_help.optional)
-                [1]u8{'['} ++ name ++ [1]u8{']'}
-            else
-                name;
+            return .{'<'} ++ arg_help.name ++ .{'>'};
         }
     };
 
@@ -345,7 +340,7 @@ pub const Flag = struct {
     }
 
     pub fn string(comptime info: Info, comptime arg_name: [:0]const u8) Flag {
-        const arg_help = ArgHelp{ .name = arg_name, .optional = true };
+        const arg_help = ArgHelp{ .name = arg_name };
         const Parser = struct {
             fn parse(
                 args: *ArgIterator,
@@ -377,7 +372,7 @@ pub const Flag = struct {
         comptime T: type,
         comptime parse: fn ([:0]const u8) std.fmt.ParseIntError!T,
     ) Flag {
-        const arg_help = ArgHelp{ .name = arg_name, .optional = true };
+        const arg_help = ArgHelp{ .name = arg_name };
         const Parser = struct {
             const flag_names = info.names();
 
@@ -486,7 +481,7 @@ pub const Flag = struct {
 
         const T = @typeInfo(flag.namespace.State).optional.child;
 
-        const arg_help = ArgHelp{ .name = flag.arg_help.?.name, .optional = false };
+        const arg_help = ArgHelp{ .name = flag.arg_help.?.name };
         const Parser = struct {
             fn finish(state: ?T, diag: ?*Diagnostics) FinishError!T {
                 return state orelse flag.info.reportMissing(diag, arg_help);
