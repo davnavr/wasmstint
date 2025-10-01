@@ -33,8 +33,12 @@ fn calculateAllocationSizes(
     return .{ .unused = unused_pages, .used = used_pages };
 }
 
-pub fn readFileZ(dir: Dir, path: [:0]const u8) ReadError!FileContent {
-    const file = try dir.openFileZ(path, .{ .mode = .read_only });
+pub fn readFileZ(dir: fs.Dir, path: [:0]const u8) ReadError!FileContent {
+    const open_options = fs.File.OpenFlags{ .mode = .read_only };
+    const file = switch (builtin.os.tag) {
+        .windows, .wasi => try dir.openFile(path, open_options),
+        else => try dir.openFileZ(path, open_options),
+    };
     defer file.close();
 
     const page_size = pageSize();
@@ -62,7 +66,7 @@ pub fn readFileZ(dir: Dir, path: [:0]const u8) ReadError!FileContent {
         errdefer windows.VirtualFree(reserved, 0, windows.MEM_RELEASE);
 
         const allocated: []align(page_size_min) u8 =
-            @as([*]align(page_size_min) u8, @alignCast(@ptrCast(reserved)))[0..allocated_size];
+            @as([*]align(page_size_min) u8, @ptrCast(@alignCast(reserved)))[0..allocated_size];
 
         const actual_size = try file.readAll(allocated);
         const pages = calculateAllocationSizes(page_size, allocated, actual_size);
@@ -146,4 +150,3 @@ const Oom = std.mem.Allocator.Error;
 const pageSize = std.heap.pageSize;
 const page_size_min = std.heap.page_size_min;
 const fs = std.fs;
-const Dir = fs.Dir;
