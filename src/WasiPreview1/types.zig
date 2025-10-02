@@ -26,3 +26,34 @@ pub const ClockId = enum(u32) {
     thread_cputime_id,
     _,
 };
+
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#prestat
+pub const Prestat = extern struct {
+    /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#preopentype
+    pub const Type = enum(u8) { dir };
+
+    tag: Type,
+    payload: Payload,
+
+    pub const Payload = extern union {
+        dir: Dir,
+    };
+
+    /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#prestat_dir
+    pub const Dir = extern struct {
+        pr_name_len: Size,
+    };
+
+    pub fn init(comptime tag: Type, payload: @FieldType(Payload, @tagName(tag))) Prestat {
+        return .{
+            .tag = tag,
+            .payload = @unionInit(Payload, @tagName(tag), payload),
+        };
+    }
+
+    comptime {
+        std.debug.assert(@sizeOf(Prestat) == 8);
+    }
+};
+
+const std = @import("std");

@@ -180,6 +180,7 @@ pub const Errno = enum(u16) {
             error.Unexpected => unexpected,
 
             error.AccessDenied => .notcapable, // .acces,
+            error.NotCapable => .notcapable,
             error.BrokenPipe => .pipe,
             error.ConnectionResetByPeer => .connreset,
             error.DeviceBusy => .busy,
@@ -236,6 +237,7 @@ pub const Error = std.mem.Allocator.Error ||
 
         BadFd,
         Unimplemented,
+        NotCapable,
     };
 
 const std = @import("std");

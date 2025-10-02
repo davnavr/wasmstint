@@ -6,6 +6,8 @@ pub const Api = enum {
 
     fd_filestat_get,
 
+    fd_prestat_get,
+    fd_prestat_dir_name,
     fd_pwrite,
     fd_read,
 
@@ -30,7 +32,10 @@ pub const Api = enum {
             .environ_get,
             .environ_sizes_get,
             .fd_filestat_get,
+            .fd_prestat_get,
             => fallableFunction(&.{ .i32, .i32 }),
+
+            .fd_prestat_dir_name => fallableFunction(&.{ .i32, .i32, .i32 }),
 
             .fd_pwrite => fallableFunction(&.{ .i32, .i32, .i32, .i64, .i32 }),
             .fd_read, .fd_write => fallableFunction(&.{ .i32, .i32, .i32, .i32 }),

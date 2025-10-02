@@ -56,8 +56,6 @@ const FdTable = struct {
         table.entries.unlockPointers();
     }
 
-    const create_max_attempts = 8;
-
     pub const CreateError = Allocator.Error || error{
         /// Too many open file descriptors.
         ProcessFdQuotaExceeded,
@@ -67,13 +65,17 @@ const FdTable = struct {
     ///
     /// Don't forget to call `unlockTable()`!
     pub fn create(table: *FdTable, allocator: Allocator) CreateError!*File {
+        // Ensure the function returns evenntually even if the RNG is really messed up, or somehow,
+        // too many FDs are open
+        const create_max_attempts = 8;
+
         try table.entries.ensureUnusedCapacity(allocator, 1);
         for (0..create_max_attempts) |_| {
             errdefer comptime unreachable;
 
-            // For simplicity, never pick the standard stream numbers.
+            // For simplicity, never pick the standard stream numbers + 1st preopen.
             const chosen = Fd{
-                .n = table.rng.random().intRangeAtMost(u31, 3, std.math.maxInt(u31)),
+                .n = table.rng.random().intRangeAtMost(u31, 4, std.math.maxInt(u31)),
             };
 
             const entry = table.entries.getOrPutAssumeCapacity(chosen);
@@ -109,25 +111,51 @@ const FdTable = struct {
         }
     }
 
+    const preopens_start = 3;
+
     pub fn init(
         allocator: Allocator,
         seed: [2]u64,
         standard_streams: File.StandardStreams,
+        preopen_dirs: *[]PreopenDir,
     ) Allocator.Error!FdTable {
         var entries = Entries.empty;
-        try entries.ensureTotalCapacity(allocator, 3);
-        inline for (comptime std.meta.fieldNames(File.StandardStreams)) |stream_name| {
-            entries.putAssumeCapacityNoClobber(
-                comptime @field(Fd, stream_name),
-                @field(standard_streams, stream_name),
-            );
+
+        const reserve_count = std.math.add(
+            u31,
+            preopens_start,
+            std.math.cast(u31, preopen_dirs.len) orelse return error.OutOfMemory,
+        ) catch return error.OutOfMemory; // too many preopens
+
+        try entries.ensureTotalCapacity(allocator, reserve_count);
+        errdefer entries.deinit(allocator);
+
+        inline for (
+            0..preopens_start,
+            comptime std.meta.fieldNames(File.StandardStreams),
+        ) |i, stream_name| {
+            const fd: Fd = comptime @field(Fd, stream_name);
+            comptime {
+                std.debug.assert(fd.n == i);
+            }
+
+            entries.putAssumeCapacityNoClobber(fd, @field(standard_streams, stream_name));
         }
+
+        const preopen_count = preopen_dirs.len;
+        for (preopens_start..(preopens_start + preopen_count)) |i| {
+            const fd = Fd{ .n = @intCast(i) };
+            const preopen: *PreopenDir = &preopen_dirs.*[0];
+            entries.putAssumeCapacityNoClobber(fd, try File.preopen.init(preopen, allocator));
+            preopen_dirs.* = preopen_dirs.*[1..];
+        }
+        std.debug.assert(preopen_dirs.len == 0);
 
         return .{ .entries = entries, .rng = .{ .s = seed } };
     }
 
     pub fn deinit(table: *FdTable, allocator: Allocator) void {
-        for (table.entries.values()) |*file| {
+        for (table.entries.values()[preopens_start..]) |*file| {
             file.deinit(allocator);
         }
 
@@ -139,3 +167,4 @@ const FdTable = struct {
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const File = @import("File.zig");
+const PreopenDir = @import("PreopenDir.zig");

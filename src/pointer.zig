@@ -3,8 +3,14 @@
 // caution: big endian code is untested
 const native_endian = builtin.cpu.arch.endian();
 
-fn ConstBytes(comptime T: type) type {
-    return *align(1) const [@sizeOf(T)]u8;
+const Constness = enum { @"const", mut };
+
+fn Bytes(comptime constness: Constness, comptime T: type) type {
+    const size = @sizeOf(T);
+    return switch (constness) {
+        .mut => *align(1) [size]u8,
+        .@"const" => *align(1) const [size]u8,
+    };
 }
 
 const StructField = struct {
@@ -30,9 +36,62 @@ fn structFields(comptime T: type) StructField.Array(T) {
     return all_fields;
 }
 
+const TaggedUnion = struct {
+    Type: type,
+    Payload: type,
+    Tag: type,
+
+    fn tagBytes(
+        comptime u: TaggedUnion,
+        comptime constness: Constness,
+        bytes: Bytes(constness, u.Type),
+    ) Bytes(constness, u.Tag) {
+        const tag_offset = @offsetOf(u.Type, "tag");
+        return bytes[tag_offset..(tag_offset + @sizeOf(u.Tag))];
+    }
+
+    fn payloadBytes(
+        comptime u: TaggedUnion,
+        comptime constness: Constness,
+        bytes: Bytes(constness, u.Type),
+    ) Bytes(constness, u.Payload) {
+        const payload_offset = @offsetOf(u.Type, "payload");
+        return bytes[payload_offset..(payload_offset + @sizeOf(u.Payload))];
+    }
+
+    fn ChosenPayload(comptime u: TaggedUnion, comptime tag: u.Tag) type {
+        return @FieldType(u.Payload, @tagName(tag));
+    }
+
+    fn chosenPayloadBytes(
+        comptime u: TaggedUnion,
+        comptime tag: u.Tag,
+        comptime constness: Constness,
+        payload_bytes: Bytes(constness, u.Payload),
+    ) Bytes(constness, u.ChosenPayload(tag)) {
+        return payload_bytes[0..@sizeOf(u.ChosenPayload(tag))];
+    }
+
+    fn matches(comptime T: type) ?TaggedUnion {
+        if (!@hasField(T, "payload") or @typeInfo(T.Payload) != .@"union") {
+            return null;
+        }
+
+        const Tag = @FieldType(T, "tag");
+        switch (@typeInfo(Tag)) {
+            .@"enum" => {},
+            else => |bad| @compileError(
+                @typeName(T) ++ ".Tag is a " ++ @tagName(bad) ++ ", not an enum",
+            ),
+        }
+
+        return TaggedUnion{ .Type = T, .Payload = T.Payload, .Tag = Tag };
+    }
+};
+
 pub fn readFromBytes(
     comptime T: type,
-    bytes: ConstBytes(T),
+    bytes: Bytes(.@"const", T),
 ) T {
     if (@sizeOf(T) * 8 != @bitSizeOf(T)) {
         @compileError("bit size of " ++ @typeName(T) ++ " must be multiple of a byte");
@@ -47,12 +106,40 @@ pub fn readFromBytes(
         .@"struct" => |structure| switch (structure.layout) {
             .@"packed" => @bitCast(readFromBytes(structure.backing_integer.?, bytes)),
             .@"extern" => result: {
-                var result: T = undefined;
-                inline for (structFields(T)) |f| {
-                    const field_bytes = bytes[f.offset..][0..@sizeOf(f.type)];
-                    @field(result, f.name) = readFromBytes(f.type, field_bytes);
+                if (TaggedUnion.matches(T)) |tagged_union| {
+                    const tag = readFromBytes(
+                        tagged_union.Tag,
+                        tagged_union.tagBytes(.@"const", bytes),
+                    );
+
+                    const payload_bytes = tagged_union.payloadBytes(.@"const", bytes);
+                    switch (tag) {
+                        inline else => |actual_tag| {
+                            break :result T{
+                                .tag = tag,
+                                .payload = @unionInit(
+                                    T.Payload,
+                                    @tagName(actual_tag),
+                                    readFromBytes(
+                                        tagged_union.ChosenPayload(actual_tag),
+                                        tagged_union.chosenPayloadBytes(
+                                            tag,
+                                            .@"const",
+                                            payload_bytes,
+                                        ),
+                                    ),
+                                ),
+                            };
+                        },
+                    }
+                } else {
+                    var result: T = undefined;
+                    inline for (structFields(T)) |f| {
+                        const field_bytes = bytes[f.offset..][0..@sizeOf(f.type)];
+                        @field(result, f.name) = readFromBytes(f.type, field_bytes);
+                    }
+                    break :result result;
                 }
-                break :result result;
             },
             .auto => @compileError(
                 "struct " ++ @typeName(T) ++ " needs packed or extern layout",
@@ -73,13 +160,9 @@ test readFromBytes {
     );
 }
 
-fn Bytes(comptime T: type) type {
-    return *align(1) [@sizeOf(T)]u8;
-}
-
 pub fn writeToBytes(
     comptime T: type,
-    bytes: Bytes(T),
+    bytes: Bytes(.mut, T),
     value: T,
 ) void {
     if (@sizeOf(T) * 8 != @bitSizeOf(T)) {
@@ -88,13 +171,27 @@ pub fn writeToBytes(
 
     switch (@typeInfo(T)) {
         .int => std.mem.writeInt(T, bytes, value, .little),
-        .@"enum" => |enumeration| if (enumeration.is_exhaustive)
-            @compileError("unsupported exhaustive enum " ++ @typeName(T))
-        else
-            writeToBytes(enumeration.tag_type, bytes, @intFromEnum(value)),
+        .@"enum" => |enumeration| writeToBytes(enumeration.tag_type, bytes, @intFromEnum(value)),
         .@"struct" => |structure| switch (structure.layout) {
             .@"packed" => writeToBytes(structure.backing_integer.?, bytes, @bitCast(value)),
-            .@"extern" => {
+            .@"extern" => if (TaggedUnion.matches(T)) |tagged_union| {
+                writeToBytes(
+                    tagged_union.Tag,
+                    tagged_union.tagBytes(.mut, bytes),
+                    value.tag,
+                );
+
+                const payload_bytes = tagged_union.payloadBytes(.mut, bytes);
+                switch (value.tag) {
+                    inline else => |actual_tag| {
+                        writeToBytes(
+                            tagged_union.ChosenPayload(actual_tag),
+                            tagged_union.chosenPayloadBytes(actual_tag, .mut, payload_bytes),
+                            @field(value.payload, @tagName(actual_tag)),
+                        );
+                    },
+                }
+            } else {
                 inline for (structFields(T)) |f| {
                     const field_bytes = bytes[f.offset..][0..@sizeOf(f.type)];
                     writeToBytes(f.type, field_bytes, @field(value, f.name));
@@ -104,6 +201,7 @@ pub fn writeToBytes(
                 "struct " ++ @typeName(T) ++ " needs packed or extern layout",
             ),
         },
+        // TODO: Handle extern union
         else => |bad| @compileError("unsupported " ++ @tagName(bad) ++ " " ++ @typeName(T)),
     }
 }

@@ -52,12 +52,27 @@ const Arguments = cli_args.CliArgs(.{
         cli_args.Flag.remainder,
 
         env_flag,
+
+        dir_flag,
     },
 });
 
 const env_flag = cli_args.Flag.custom(
     .{ .long = "env", .description = "Set or inherit an environment variable for the program" },
-    .{ .optional = false, .name = "NAME[=VAL]" },
+    .{ .name = "NAME[=VAL]" },
+);
+
+const dir_flag = cli_args.Flag.custom(
+    .{
+        .long = "dir",
+        .description = "Pass pre-opened directory to the program\n\n" ++
+            "    GUEST is the name of the directory from the perspective of the program.\n\n" ++
+            "    PERM is a (potentially empty) string of letters indicating the following:\n" ++
+            "     - 'w' indicates write access to the directory's contents\n" ++
+            "     - 's' indicates access to all subdirectories\n\n" ++
+            "    By default, read-only access to only the directory's files is allowed.",
+    },
+    .{ .name = "HOST GUEST PERM" },
 );
 
 fn oom(context: []const u8) noreturn {
@@ -130,6 +145,17 @@ const ParsedArguments = struct {
     forwarded: WasiPreview1.Arguments.List,
     flags: Arguments.Parsed,
     environ: WasiPreview1.Environ,
+    preopen_dirs: []const PreopenDir,
+};
+
+const PreopenDir = struct {
+    /// Path to open.
+    ///
+    /// Opened before execution of WASM begins.
+    host: [:0]const u8,
+    /// Path of the directory from the point of view of the guest.
+    guest: WasiPreview1.Path,
+    permissions: WasiPreview1.PreopenDir.Permissions = .default,
 };
 
 fn parseArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) ParsedArguments {
@@ -138,10 +164,12 @@ fn parseArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) ParsedArgume
 
     const ParseCustomArguments = struct {
         const use_windows_peb = builtin.os.tag == .windows and !builtin.link_libc;
-        environ: WasiPreview1.Environ.List = .empty,
+
         scratch: *ArenaAllocator,
+        environ: WasiPreview1.Environ.List = .empty,
         scanned_env_vars: ScannedEnvVars = .empty,
         unscanned_env_vars: if (use_windows_peb) ?[*:0]u16 else [][*:0]u8,
+        preopen_dirs: std.ArrayList(PreopenDir) = .empty,
 
         const ScannedEnvVars = std.ArrayHashMapUnmanaged(
             WasiPreview1.Environ.Pair,
@@ -262,6 +290,80 @@ fn parseArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) ParsedArgume
 
                     try self.environ.append(self.scratch.allocator(), pair);
                 },
+                .dir => {
+                    const host = try args.nextDupe(results_arena) orelse {
+                        return cli_args.Flag.Diagnostics.report(
+                            diag,
+                            "missing HOST directory path for --dir flag",
+                        );
+                    };
+
+                    const host_fmt = std.unicode.fmtUtf8(host);
+                    const guest = try args.nextDupe(results_arena) orelse {
+                        return cli_args.Flag.Diagnostics.reportFmt(
+                            diag,
+                            results_arena,
+                            "missing GUEST directory name for --dir {f}",
+                            .{host_fmt},
+                        );
+                    };
+                    const guest_fmt = std.unicode.fmtUtf8(guest);
+                    const guest_utf8 = WasiPreview1.Path.init(guest) catch |e| return switch (e) {
+                        error.InvalidUtf8 => cli_args.Flag.Diagnostics.reportFmt(
+                            diag,
+                            results_arena,
+                            "GUEST directory {[guest]f} must be valid UTF-8 in --dir {[host]f}",
+                            .{ .host = host_fmt, .guest = guest_fmt },
+                        ),
+                        error.PathTooLong => cli_args.Flag.Diagnostics.reportFmt(
+                            diag,
+                            results_arena,
+                            "length of GUEST directory is too long in --dir {[host]f} {[guest]f}",
+                            .{ .host = host_fmt, .guest = guest_fmt },
+                        ),
+                    };
+
+                    const entry = try self.preopen_dirs.addOne(self.scratch.allocator());
+                    entry.* = PreopenDir{ .host = host, .guest = guest_utf8 };
+
+                    const perm = args.next() orelse {
+                        return cli_args.Flag.Diagnostics.reportFmt(
+                            diag,
+                            results_arena,
+                            "missing PERM string for --dir {f} {s}\n" ++
+                                "note: pass 'ws' for read-write access to all subdirectories",
+                            .{ host_fmt, guest },
+                        );
+                    };
+
+                    for (perm) |b| {
+                        const AsciiFormatter = struct {
+                            fn format(c: u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+                                if (std.ascii.isPrint(c)) {
+                                    try writer.writeByte(c);
+                                } else {
+                                    try writer.print("0x{X:0>2}", .{c});
+                                }
+                            }
+                        };
+
+                        switch (b) {
+                            'w' => entry.permissions.mode = .read_write,
+                            's' => entry.permissions.subdirectories = .available,
+                            else => return cli_args.Flag.Diagnostics.reportFmt(
+                                diag,
+                                results_arena,
+                                "unknown permission {f} in --dir {f} {s} {f}",
+                                .{
+                                    std.fmt.Alt(u8, AsciiFormatter.format){ .data = b },
+                                    host_fmt,
+                                    guest,
+                                    std.unicode.fmtUtf8(perm),
+                                },
+                            ),
+                        }
+                    }
+                },
                 else => unreachable,
             }
         }
@@ -294,6 +396,8 @@ fn parseArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) ParsedArgume
         .flags = parsed,
         .forwarded = forwarded,
         .environ = (custom_args.environ.dupe(arena.allocator()) catch oom("env vars")).environ(),
+        .preopen_dirs = arena.allocator().dupe(PreopenDir, custom_args.preopen_dirs.items) catch
+            oom("preopen dirs"),
     };
 }
 
@@ -357,10 +461,8 @@ fn realMain() Error!i32 {
         break :args forwarded.arguments();
     };
 
-    const wasm_binary = @import("FileContent").readFileZ(
-        std.fs.cwd(),
-        arguments.module,
-    ) catch |e| switch (e) {
+    const cwd = std.fs.cwd();
+    const wasm_binary = @import("FileContent").readFileZ(cwd, arguments.module) catch |e| switch (e) {
         error.OutOfMemory => oom("module bytes"),
         else => |io_err| return fail.format(
             error.GenericError,
@@ -437,6 +539,24 @@ fn realMain() Error!i32 {
 
     std.debug.assert(validation_finished);
 
+    var preopens = scratch.allocator().alloc(
+        WasiPreview1.PreopenDir,
+        all_arguments.preopen_dirs.len,
+    ) catch oom("preopen list");
+
+    for (preopens, all_arguments.preopen_dirs) |*dst, *src| {
+        dst.* = WasiPreview1.PreopenDir.openAtZ(
+            cwd,
+            src.host,
+            src.permissions,
+            src.guest,
+        ) catch |e| return fail.format(
+            error.GenericError,
+            "{t}: failed to open preopen directory {f}",
+            .{ e, std.unicode.fmtUtf8(src.host) },
+        );
+    }
+
     var wasi = WasiPreview1.init(
         std.heap.page_allocator,
         .{
@@ -445,10 +565,14 @@ fn realMain() Error!i32 {
             .fd_rng_seed = rt_rng_seeds[1],
             .csprng = csprng,
         },
+        &preopens,
     ) catch |e| switch (e) {
         error.OutOfMemory => oom("WASIp1 state"),
     };
     defer wasi.deinit();
+
+    std.debug.assert(preopens.len == 0); // `wasi` now responsible for closing preopen handles
+    // _ = scratch.reset(.retain_capacity);
 
     var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
     var module_allocating = wasmstint.runtime.ModuleAllocating.begin(

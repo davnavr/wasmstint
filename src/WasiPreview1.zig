@@ -47,6 +47,8 @@ const File = @import("WasiPreview1/File.zig");
 const Api = @import("WasiPreview1/api.zig").Api;
 
 pub const Csprng = @import("WasiPreview1/Csprng.zig");
+pub const Path = @import("WasiPreview1/Path.zig");
+pub const PreopenDir = @import("WasiPreview1/PreopenDir.zig");
 
 allocator: Allocator,
 scratch: struct {
@@ -91,14 +93,23 @@ pub const InitOptions = struct {
 /// per [the application ABI].
 ///
 /// [the application ABI]: https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/application-abi.md
-pub fn init(allocator: Allocator, options: InitOptions) InitError!WasiPreview1 {
+pub fn init(
+    allocator: Allocator,
+    options: InitOptions,
+    // Can't put in `InitOptions` since these are file handles that need to be closed.
+    preopen_dirs: *[]PreopenDir,
+) InitError!WasiPreview1 {
+    defer std.debug.assert(preopen_dirs.len == 0);
+
     var rng = std.Random.SplitMix64.init(options.fd_rng_seed);
     var fd_table = try Fd.Table.init(
         allocator,
         .{ rng.next(), rng.next() },
         File.os.wrapStandardStreams(),
+        preopen_dirs,
     );
     errdefer fd_table.deinit(allocator);
+    std.debug.assert(preopen_dirs.len == 0); // `fd_table` handles cleanup
 
     var api_lookup = try Api.Lookup.init(allocator, rng.next());
     errdefer api_lookup.deinit(allocator);
@@ -274,6 +285,51 @@ const Ciovs = struct {
     }
 };
 
+fn fd_prestat_get(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_buf: i32,
+) Errno {
+    const buf_ptr = pointer.Pointer(types.Prestat){ .addr = @as(u32, @bitCast(raw_buf)) };
+
+    // std.log.debug("fd_prestat_get({}, {f})", .{ @as(u32, @bitCast(raw_fd)), buf_ptr });
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    const prestat = file.fd_prestat_get() catch |e| return .mapError(e);
+    buf_ptr.write(mem, prestat) catch |e| return .mapError(e);
+
+    return .success;
+}
+
+fn fd_prestat_dir_name(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_path: i32,
+    raw_path_len: i32,
+) Errno {
+    const path_ptr = pointer.Pointer(u8){ .addr = @as(u32, @bitCast(raw_path)) };
+    const path_len: u32 = @bitCast(raw_path_len);
+
+    // std.log.debug(
+    //     "fd_prestat_dir_name({}, {f}, {d})",
+    //     .{ @as(u32, @bitCast(raw_fd)), path_ptr, path_len },
+    // );
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    const path = pointer.Slice(u8).init(mem, path_ptr, path_len) catch |e| return .mapError(e);
+    file.fd_prestat_dir_name(path.bytes()) catch |e| return .mapError(e);
+
+    return .success;
+}
+
 fn fd_pwrite(
     wasi: *WasiPreview1,
     mem: *MemInst,
@@ -409,6 +465,8 @@ pub fn dispatch(
         .args_sizes_get,
         .environ_get,
         .environ_sizes_get,
+        .fd_prestat_get,
+        .fd_prestat_dir_name,
         .fd_pwrite,
         .fd_write,
         => |id| {
@@ -422,7 +480,9 @@ pub fn dispatch(
                 .{ wasi, memory } ++ args_tuple,
             );
 
-            // std.log.debug(@tagName(id) ++ " -> {f}", .{errno});
+            // if (errno != .success) {
+            //     std.log.debug(@tagName(id) ++ " -> {f}", .{errno});
+            // }
 
             return .{
                 .@"continue" = state.returnFromHostTyped(

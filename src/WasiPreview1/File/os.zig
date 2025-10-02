@@ -1,15 +1,15 @@
 //! Unbuffered access to a real, genuine, 100% all-natural OS file descriptor.
 
 /// Callers must ensure that `fd` is an open file handle.
-pub fn wrapFile(fd: std.fs.File, rights: Rights) File {
+pub fn wrapFile(fd: std.fs.File, rights: Rights.Valid) File {
     return .{
         .rights = rights,
-        .impl = .{ .ctx = .{ .real = fd }, .vtable = &vtable },
+        .impl = .{ .ctx = .{ .os = fd }, .vtable = &vtable },
     };
 }
 
 pub fn wrapStandardStreams() File.StandardStreams {
-    const write_rights: Rights = .{ .fd_write = true };
+    const write_rights: Rights.Valid = .{ .fd_write = true };
     return .{
         .stdin = wrapFile(std.fs.File.stdin(), .{ .fd_read = true }),
         .stdout = wrapFile(std.fs.File.stdout(), write_rights),
@@ -19,7 +19,7 @@ pub fn wrapStandardStreams() File.StandardStreams {
 
 fn deinit(ctx: Ctx, allocator: std.mem.Allocator) void {
     _ = allocator;
-    ctx.real.close();
+    ctx.os.close();
 }
 
 fn fd_pwrite(
@@ -28,7 +28,7 @@ fn fd_pwrite(
     offset: types.FileSize,
     total_len: u32,
 ) Error!u32 {
-    const file = ctx.real;
+    const file = ctx.os;
     switch (builtin.os.tag) {
         .linux,
         .freebsd,
@@ -123,7 +123,7 @@ fn fd_write(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!u32 {
     // }
 
     // TODO: How to handle Windows? multiple WriteFile calls?
-    const written = ctx.real.writev(File.Ciovec.castSlice(iovs)) catch |e| return switch (e) {
+    const written = ctx.os.writev(File.Ciovec.castSlice(iovs)) catch |e| return switch (e) {
         error.NotOpenForWriting => error.BadFd,
         else => |known| known,
     };
@@ -133,8 +133,10 @@ fn fd_write(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!u32 {
 
 const vtable = File.VTable{
     .api = .{
-        .fd_pwrite = &fd_pwrite,
+        .fd_prestat_get = File.not_capable.fd_prestat_get,
+        .fd_prestat_dir_name = File.not_capable.fd_prestat_dir_name,
         .fd_write = &fd_write,
+        .fd_pwrite = &fd_pwrite,
     },
     .deinit = &deinit,
 };
