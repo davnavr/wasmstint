@@ -558,7 +558,7 @@ fn realMain() Error!i32 {
     }
 
     var wasi = WasiPreview1.init(
-        std.heap.page_allocator,
+        std.heap.page_allocator, // std.heap.smp_allocator,
         .{
             .args = forwarded_arguments,
             .environ = all_arguments.environ,

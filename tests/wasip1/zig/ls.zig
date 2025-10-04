@@ -38,13 +38,15 @@ pub fn main() !void {
     });
 
     var iterator = cwd.iterateAssumeFirstIteration();
-    try stdout.print("total {}\n", .{iterator.end_index - iterator.index});
+    var total: u64 = 0;
     while (try iterator.next()) |entry| {
         try stdout.print(
             "{[kind]t: >" ++ kind_width ++ "} {[name]s}\n",
             .{ .kind = entry.kind, .name = entry.name },
         );
+        total += 1;
     }
+    try stdout.print("total {}\n", .{total});
 }
 
 const std = @import("std");

@@ -158,13 +158,17 @@ pub fn unexpectedError(err: anyerror) std.posix.UnexpectedError {
     return error.Unexpected;
 }
 
-pub const not_capable = struct {
+pub const invalid = struct {
     pub fn fd_prestat_get(_: Ctx) Error!types.Prestat {
-        return Error.NotCapable;
+        return Error.NotDir;
     }
 
     pub fn fd_prestat_dir_name(_: Ctx, _: []u8) Error!void {
-        return Error.NotCapable;
+        return Error.NotDir;
+    }
+
+    pub fn fd_readdir(_: Ctx, _: []u8, _: types.DirCookie) Error!types.Size {
+        return Error.NotDir;
     }
 };
 
@@ -181,6 +185,13 @@ pub const VTable = struct {
             offset: types.FileSize,
             total_len: u32,
         ) Error!u32,
+        // fd_read
+        fd_readdir: *const fn (
+            ctx: Ctx,
+            // allocator: Allocator,
+            buf: []u8,
+            cookie: types.DirCookie,
+        ) Error!types.Size,
         fd_write: *const fn (ctx: Ctx, iovs: []const Ciovec, total_len: u32) Error!u32,
     };
 
@@ -213,14 +224,37 @@ pub fn fd_prestat_get(file: *File) Error!types.Prestat {
     if (manual_function_devirtualization and file.hasVTable(&preopen.vtable)) {
         @branchHint(.likely);
         return preopen.fd_prestat_get(file.impl.ctx);
-    } else return file.impl.vtable.api.fd_prestat_get(file.impl.ctx);
+    } else {
+        return file.impl.vtable.api.fd_prestat_get(file.impl.ctx);
+    }
 }
 
 pub fn fd_prestat_dir_name(file: *File, path: []u8) Error!void {
     if (manual_function_devirtualization and file.hasVTable(&preopen.vtable)) {
         @branchHint(.likely);
         return preopen.fd_prestat_dir_name(file.impl.ctx, path);
-    } else return file.impl.vtable.api.fd_prestat_dir_name(file.impl.ctx, path);
+    } else {
+        return file.impl.vtable.api.fd_prestat_dir_name(file.impl.ctx, path);
+    }
+}
+
+pub fn fd_readdir(
+    file: *File,
+    // allocator: Allocator,
+    buf: []u8,
+    cookie: types.DirCookie,
+) Error!types.Size {
+    if (!file.rights.fd_readdir) {
+        return error.AccessDenied;
+    }
+
+    const args = .{ file.impl.ctx, buf, cookie };
+    if (manual_function_devirtualization and file.hasVTable(&preopen.vtable)) {
+        @branchHint(.likely);
+        return @call(.auto, preopen.fd_readdir, args);
+    } else {
+        return @call(.auto, file.impl.vtable.api.fd_readdir, args);
+    }
 }
 
 pub fn fd_pwrite(

@@ -56,4 +56,43 @@ pub const Prestat = extern struct {
     }
 };
 
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#dircookie
+pub const DirCookie = packed struct(u64) {
+    n: u64,
+
+    pub const start = DirCookie{ .n = 0 };
+
+    pub fn format(cookie: DirCookie, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (cookie.n == start.n) {
+            try writer.writeAll("start");
+        } else {
+            try writer.print("{d}", .{cookie.n});
+        }
+    }
+};
+
+pub const INode = u64;
+
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#dirent
+pub const DirEnt = extern struct {
+    next: DirCookie,
+    ino: INode,
+    namlen: u32,
+    type: FileType,
+};
+
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#filetype
+pub const FileType = enum(u8) {
+    unknown,
+    block_device,
+    character_device,
+    directory,
+    regular_file,
+    /// The file descriptor or file refers to a datagram socket.
+    socket_dgram,
+    /// The file descriptor or file refers to a byte-stream socket.
+    socket_stream,
+    symbolic_link,
+};
+
 const std = @import("std");

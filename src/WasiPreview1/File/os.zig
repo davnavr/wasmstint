@@ -133,8 +133,9 @@ fn fd_write(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!u32 {
 
 const vtable = File.VTable{
     .api = .{
-        .fd_prestat_get = File.not_capable.fd_prestat_get,
-        .fd_prestat_dir_name = File.not_capable.fd_prestat_dir_name,
+        .fd_prestat_get = File.invalid.fd_prestat_get,
+        .fd_prestat_dir_name = File.invalid.fd_prestat_dir_name,
+        .fd_readdir = File.invalid.fd_readdir,
         .fd_write = &fd_write,
         .fd_pwrite = &fd_pwrite,
     },

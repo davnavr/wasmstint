@@ -10,6 +10,7 @@ pub const Api = enum {
     fd_prestat_dir_name,
     fd_pwrite,
     fd_read,
+    fd_readdir,
 
     fd_seek,
 
@@ -37,7 +38,9 @@ pub const Api = enum {
 
             .fd_prestat_dir_name => fallableFunction(&.{ .i32, .i32, .i32 }),
 
-            .fd_pwrite => fallableFunction(&.{ .i32, .i32, .i32, .i64, .i32 }),
+            .fd_pwrite,
+            .fd_readdir,
+            => fallableFunction(&.{ .i32, .i32, .i32, .i64, .i32 }),
             .fd_read, .fd_write => fallableFunction(&.{ .i32, .i32, .i32, .i32 }),
 
             .fd_seek => fallableFunction(&.{ .i32, .i64, .i32, .i32 }),

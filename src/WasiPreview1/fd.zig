@@ -115,7 +115,7 @@ const FdTable = struct {
 
     pub fn init(
         allocator: Allocator,
-        seed: [2]u64,
+        rng_init: *std.Random.SplitMix64,
         standard_streams: File.StandardStreams,
         preopen_dirs: *[]PreopenDir,
     ) Allocator.Error!FdTable {
@@ -142,16 +142,21 @@ const FdTable = struct {
             entries.putAssumeCapacityNoClobber(fd, @field(standard_streams, stream_name));
         }
 
+        var rng = std.Random.Xoroshiro128{ .s = .{ rng_init.next(), rng_init.next() } };
+
         const preopen_count = preopen_dirs.len;
         for (preopens_start..(preopens_start + preopen_count)) |i| {
             const fd = Fd{ .n = @intCast(i) };
             const preopen: *PreopenDir = &preopen_dirs.*[0];
-            entries.putAssumeCapacityNoClobber(fd, try File.preopen.init(preopen, allocator));
+            entries.putAssumeCapacityNoClobber(
+                fd,
+                try File.preopen.init(preopen, rng.next(), allocator),
+            );
             preopen_dirs.* = preopen_dirs.*[1..];
         }
         std.debug.assert(preopen_dirs.len == 0);
 
-        return .{ .entries = entries, .rng = .{ .s = seed } };
+        return .{ .entries = entries, .rng = rng };
     }
 
     pub fn deinit(table: *FdTable, allocator: Allocator) void {

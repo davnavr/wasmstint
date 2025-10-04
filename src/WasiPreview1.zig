@@ -104,7 +104,7 @@ pub fn init(
     var rng = std.Random.SplitMix64.init(options.fd_rng_seed);
     var fd_table = try Fd.Table.init(
         allocator,
-        .{ rng.next(), rng.next() },
+        &rng,
         File.os.wrapStandardStreams(),
         preopen_dirs,
     );
@@ -372,6 +372,42 @@ fn fd_pwrite(
     return .success;
 }
 
+fn fd_readdir(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_buf: i32,
+    raw_buf_len: i32,
+    raw_cookie: i64,
+    raw_ret: i32,
+) Errno {
+    const buf_ptr = pointer.Pointer(u8){ .addr = @bitCast(raw_buf) };
+    const buf_len: u32 = @bitCast(raw_buf_len);
+    const cookie = types.DirCookie{ .n = @bitCast(raw_cookie) };
+    const ret_ptr = pointer.Pointer(types.Size){ .addr = @as(u32, @bitCast(raw_ret)) };
+
+    // std.log.debug(
+    //     "fd_readdir({}, {f}, {}, {f}, {f})",
+    //     .{ @as(u32, @bitCast(raw_fd)), buf_ptr, buf_len, cookie, ret_ptr },
+    // );
+
+    const buf = pointer.Slice(u8).init(mem, buf_ptr, buf_len) catch |e| return .mapError(e);
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    const size = file.fd_readdir(
+        // wasi.allocator,
+        buf.bytes(),
+        cookie,
+    ) catch |e| return .mapError(e);
+
+    ret_ptr.write(mem, size) catch |e| return .mapError(e);
+
+    return .success;
+}
+
 fn fd_write(
     wasi: *WasiPreview1,
     mem: *MemInst,
@@ -467,6 +503,7 @@ pub fn dispatch(
         .environ_sizes_get,
         .fd_prestat_get,
         .fd_prestat_dir_name,
+        .fd_readdir,
         .fd_pwrite,
         .fd_write,
         => |id| {

@@ -6,6 +6,9 @@ const Context = struct {
     // Guest `Path` is split to reduce padding
     guest_path_len: Path.Len, // maybe u1 bit in Path.Len to indicate ownership/constness?
     guest_path_ptr: Path.Ptr,
+    read_next_cookie: types.DirCookie,
+    read_state: ReadState,
+    inode_hasher: std.hash.XxHash64,
 
     fn guestPath(ctx: *const Context) Path {
         return .{ .ptr = ctx.guest_path_ptr, .len = ctx.guest_path_len };
@@ -16,7 +19,7 @@ inline fn context(ctx: Ctx) *Context {
     return @ptrCast(@alignCast(ctx.ptr));
 }
 
-pub fn init(preopen: *PreopenDir, allocator: std.mem.Allocator) std.mem.Allocator.Error!File {
+pub fn init(preopen: *PreopenDir, hash_seed: u64, allocator: Allocator) Allocator.Error!File {
     defer preopen.* = undefined;
 
     const can_write = preopen.permissions.mode == .read_write;
@@ -25,12 +28,24 @@ pub fn init(preopen: *PreopenDir, allocator: std.mem.Allocator) std.mem.Allocato
     // Right now `main.zig` allocates paths in an `arena`, so no `dupe` call is necessary
     const ctx = try allocator.create(Context);
     errdefer comptime unreachable;
+
     ctx.* = Context{
         .dir = preopen.dir,
         .permissions = preopen.permissions,
         .guest_path_len = preopen.guest_path.len,
         .guest_path_ptr = preopen.guest_path.ptr,
+        .read_next_cookie = .start,
+        .read_state = ReadState{
+            .iter = preopen.dir.iterate(),
+            .name_buf = undefined,
+            .cached = .current_dir,
+        },
+        .inode_hasher = std.hash.XxHash64.init(hash_seed),
     };
+
+    std.hash.autoHash(&ctx.inode_hasher, @as(u16, preopen.guest_path.len));
+    ctx.inode_hasher.update(preopen.guest_path.bytes());
+    std.hash.autoHash(&ctx.inode_hasher, preopen.dir);
 
     return File{
         .rights = File.Rights.Valid{
@@ -71,17 +86,210 @@ pub fn fd_prestat_dir_name(ctx: Ctx, path: []u8) File.Error!void {
     @memcpy(path[0..self.guest_path_len], self.guestPath().bytes());
 }
 
+const EntryBuf = struct {
+    bytes: []u8,
+
+    const WriteEntryResult = enum { full, partial, none };
+
+    fn entrySize(name: Path) u17 {
+        return @sizeOf(types.DirEnt) + name.len;
+    }
+
+    fn writeEntry(
+        buf: *EntryBuf,
+        next: types.DirCookie,
+        inode: types.INode,
+        name: Path,
+        @"type": types.FileType,
+    ) WriteEntryResult {
+        if (buf.bytes.len == 0) {
+            return .none;
+        }
+
+        const entry_size = entrySize(name);
+        const written: WriteEntryResult = if (entry_size > buf.bytes.len) .partial else .full;
+
+        var ent_buf: [@sizeOf(types.DirEnt)]u8 align(@alignOf(types.DirEnt)) = undefined;
+        pointer.writeToBytes(
+            types.DirEnt,
+            &ent_buf,
+            types.DirEnt{ .next = next, .ino = inode, .namlen = name.len, .type = @"type" },
+        );
+        const ent_len = @min(ent_buf.len, buf.bytes.len);
+        @memcpy(buf.bytes[0..ent_len], ent_buf[0..ent_len]);
+        buf.bytes = buf.bytes[ent_len..];
+
+        const name_len = @min(name.len, buf.bytes.len);
+        @memcpy(buf.bytes[0..name_len], name.bytes()[0..name_len]);
+        buf.bytes = buf.bytes[name_len..];
+
+        return written;
+    }
+};
+
+const ReadState = struct {
+    iter: std.fs.Dir.Iterator,
+    name_buf: [std.fs.max_name_bytes]u8 align(16),
+    cached: Cached,
+
+    const Cached = union(enum) {
+        current_dir,
+        parent_dir,
+        entry: struct {
+            kind: std.fs.File.Kind,
+            name_len: std.math.IntFittingRange(0, std.fs.max_name_bytes),
+        },
+        none,
+    };
+
+    fn peekCached(state: *const ReadState) ?std.fs.Dir.Entry {
+        return switch (state.cached) {
+            .current_dir => .{ .name = ".", .kind = .directory },
+            .parent_dir => .{ .name = "..", .kind = .directory },
+            .entry => |entry| .{ .name = state.name_buf[0..entry.name_len], .kind = entry.kind },
+            .none => null,
+        };
+    }
+
+    const NextError = std.fs.Dir.Iterator.Error || error{
+        /// `std.fs.Dir.Iterator.ErrorLinux`.
+        ///
+        /// Corresponds to `ENOENT`.
+        DirNotFound,
+    };
+
+    fn nextCached(state: *ReadState) ?std.fs.Dir.Entry {
+        if (state.peekCached()) |entry| {
+            state.cached = switch (state.cached) {
+                .current_dir => .parent_dir,
+                .parent_dir, .entry, .none => .none,
+            };
+            return entry;
+        } else {
+            return null;
+        }
+    }
+
+    fn next(state: *ReadState) NextError!?std.fs.Dir.Entry {
+        return state.nextCached() orelse switch (builtin.os.tag) {
+            .linux => state.iter.nextLinux(),
+            else => state.iter.next(),
+        };
+    }
+
+    fn reset(state: *ReadState) void {
+        state.iter.reset();
+        @memset(&state.name_buf, undefined);
+        state.cached = .current_dir;
+    }
+};
+
+pub fn fd_readdir(
+    ctx: Ctx,
+    // allocator: Allocator,
+    buf: []u8,
+    cookie: types.DirCookie,
+) File.Error!types.Size {
+    const self = context(ctx);
+
+    // TODO: Buffer required to support `fd_readdir` seeking, especially on Windows
+    // See https://github.com/WebAssembly/wasi-filesystem/issues/7
+
+    if (cookie.n <= self.read_next_cookie.n) {
+        @branchHint(.unlikely);
+        self.read_state.reset();
+
+        if (cookie.n != types.DirCookie.start.n) {
+            // Seek forwards to previous position
+            var seek_cookie = types.DirCookie.start;
+            while (seek_cookie.n < cookie.n) {
+                defer seek_cookie.n += 1;
+                _ = (try self.read_state.next()) orelse return error.InvalidArgument;
+            }
+        }
+    } else if (self.read_next_cookie.n < cookie.n) {
+        @branchHint(.unlikely);
+
+        // Seek to skip some entries
+        var seek_cookie = cookie;
+        while (seek_cookie.n < self.read_next_cookie.n) {
+            defer seek_cookie.n += 1;
+            _ = (try self.read_state.next()) orelse return error.InvalidArgument;
+        }
+    }
+
+    var current_cookie = cookie;
+    defer self.read_next_cookie = current_cookie;
+    var entries = EntryBuf{ .bytes = buf };
+    const inode_hasher_init = self.inode_hasher;
+    while (entries.bytes.len > 0) {
+        const next = (try self.read_state.next()) orelse break;
+        const name = Path.init(next.name) catch |e| switch (e) {
+            error.PathTooLong => unreachable, // no supported OS's allow names this long
+            // Could silently skip non-UTF-8 entries, but Zig `std` feels the need to catch it
+            error.InvalidUtf8 => |err| return err,
+        };
+
+        errdefer comptime unreachable;
+
+        const is_windows = builtin.os.tag == .windows;
+        const @"type": types.FileType = switch (next.kind) {
+            .block_device => if (!is_windows) .block_device else unreachable,
+            .character_device => if (!is_windows) .character_device else unreachable,
+            .directory => .directory,
+            .named_pipe => if (!is_windows) .unknown else unreachable,
+            .sym_link => if (!is_windows) .symbolic_link else unreachable,
+            .file => .regular_file,
+            .unix_domain_socket => if (!is_windows)
+                .unknown // TODO: need `fstat()` to determine exact type of socket
+            else
+                unreachable,
+            .whiteout => if (!is_windows) .unknown else unreachable, // BSD thing
+            .door, .event_port => if (builtin.os.tag == .solaris) .unknown else unreachable,
+            .unknown => .unknown,
+        };
+
+        // Zig doesn't expose POSIX inode in `Dir.Iterator`, but WASI doesn't seem to do anything
+        // with inodes anyway.
+        var inode_hasher = inode_hasher_init;
+        std.hash.autoHash(&inode_hasher, @as(u16, name.len));
+        inode_hasher.update(name.bytes());
+
+        const next_cookie = types.DirCookie{ .n = current_cookie.n + 1 };
+        const written = entries.writeEntry(
+            next_cookie,
+            inode_hasher.final(),
+            name,
+            @"type",
+        );
+        switch (written) {
+            .none => unreachable,
+            .full => current_cookie = next_cookie,
+            .partial => {
+                @memcpy(self.read_state.name_buf[0..name.len], name.bytes());
+                self.read_state.cached = .{
+                    .entry = .{ .kind = next.kind, .name_len = @intCast(name.len) },
+                };
+                break;
+            },
+        }
+    }
+
+    return @intCast(buf.len - entries.bytes.len);
+}
+
 pub const vtable = File.VTable{
     .api = .{
         .fd_write = undefined,
         .fd_pwrite = undefined,
+        .fd_readdir = fd_readdir,
         .fd_prestat_get = fd_prestat_get,
         .fd_prestat_dir_name = fd_prestat_dir_name,
     },
     .deinit = deinit,
 };
 
-fn deinit(ctx: Ctx, allocator: std.mem.Allocator) void {
+fn deinit(ctx: Ctx, allocator: Allocator) void {
     const self = context(ctx);
     self.dir.close();
     // self.guestPath is not deallocated
@@ -89,7 +297,11 @@ fn deinit(ctx: Ctx, allocator: std.mem.Allocator) void {
 }
 
 const std = @import("std");
+const builtin = @import("builtin");
+const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const types = @import("../types.zig");
+const pointer = @import("wasmstint").pointer;
 const PreopenDir = @import("../PreopenDir.zig");
 const Path = @import("../Path.zig");
 const File = @import("../File.zig");
