@@ -138,7 +138,7 @@ pub fn main() u8 {
     _ = scratch.reset(.retain_capacity);
     const argv: []const []const u8 = argv: {
         const argv_count = 3 +
-            (spec.dirs.len * 3) +
+            (spec.dirs.len * 4) +
             (spec.env.map.count() * 2) +
             arguments.forwarded.len +
             (if (spec.args.len > 0) 1 + spec.args.len else 0);
@@ -155,7 +155,9 @@ pub fn main() u8 {
         });
 
         if (spec.dirs.len > 0) {
-            @panic("TODO: arguments for preopened dirs");
+            for (spec.dirs) |dir| {
+                argv.appendSliceAssumeCapacity(&.{ "--dir", dir, dir, "rw" });
+            }
         }
 
         var env_map = spec.env.map.iterator();
@@ -307,14 +309,6 @@ pub fn main() u8 {
         }
     };
 
-    if (exit_code != spec.exit_code) {
-        return abnormalExitFmt(
-            1,
-            "expected exit code {}, but got {}",
-            .{ spec.exit_code, exit_code },
-        );
-    }
-
     var output_difference = false;
     if (std.mem.indexOfDiff(u8, stdout.items, spec.stdout)) |diff_index| {
         output_difference = true;
@@ -324,6 +318,14 @@ pub fn main() u8 {
     if (std.mem.indexOfDiff(u8, stderr.items, spec.stderr)) |diff_index| {
         output_difference = true;
         printDiff("stderr", spec.stderr, @alignCast(stderr.items), diff_index);
+    }
+
+    if (exit_code != spec.exit_code) {
+        return abnormalExitFmt(
+            1,
+            "expected exit code {}, but got {}",
+            .{ spec.exit_code, exit_code },
+        );
     }
 
     if (output_difference) {
