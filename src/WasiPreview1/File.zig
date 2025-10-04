@@ -112,7 +112,7 @@ const Impl = struct {
 pub const Ctx = union {
     ptr: *anyopaque,
     /// Unbuffered access to an OS file descriptor.
-    os: std.fs.File,
+    os: struct { file: std.fs.File, close: os.Close },
 };
 
 pub const StandardStreams = struct {

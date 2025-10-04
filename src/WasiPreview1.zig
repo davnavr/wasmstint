@@ -249,41 +249,18 @@ fn releaseScratch(state: *WasiPreview1, arena: ArenaAllocator) void {
     state.scratch.lock.unlock();
 }
 
+fn fd_close(wasi: *WasiPreview1, _: *MemInst, raw_fd: i32) Errno {
+    std.debug.log("fd_close({d})", .{@as(u32, @bitCast(raw_fd))});
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    wasi.fd_table.close(fd, wasi.allocator) catch |e| return .mapError(e);
+
+    // Zig's `std.fs.File.close()` doesn't return an error
+    return .success;
+}
+
 // Note handlers here can just use `Errno.fault` for OOB memory accesses, which is nice since
 // `AwaitingHost` doesn't support trapping yet.
-
-const Ciovs = struct {
-    list: []const File.Ciovec,
-    total_len: u32,
-
-    fn init(
-        mem: *MemInst,
-        ptr: pointer.ConstPointer(Ciovec),
-        len: u32,
-        scratch: *ArenaAllocator,
-    ) !Ciovs {
-        const iovs = try pointer.ConstSlice(Ciovec).init(mem, ptr, len);
-        var list = try std.ArrayListUnmanaged(File.Ciovec).initCapacity(
-            scratch.allocator(),
-            iovs.items.len,
-        );
-        var total_len: u32 = 0;
-        for (0..iovs.items.len) |i| {
-            if (i > 0) {
-                @branchHint(.cold);
-            }
-
-            const ciovec = try iovs.read(i).bytes(mem);
-            const ciovec_len = std.math.cast(u32, ciovec.len) orelse break;
-            total_len = std.math.add(u32, total_len, ciovec_len) catch |e| switch (e) {
-                error.Overflow => return error.InvalidArgument,
-            };
-            list.appendAssumeCapacity(File.Ciovec.init(ciovec));
-        }
-
-        return .{ .list = list.items, .total_len = total_len };
-    }
-};
 
 fn fd_prestat_get(
     wasi: *WasiPreview1,
@@ -329,6 +306,39 @@ fn fd_prestat_dir_name(
 
     return .success;
 }
+
+const Ciovs = struct {
+    list: []const File.Ciovec,
+    total_len: u32,
+
+    fn init(
+        mem: *MemInst,
+        ptr: pointer.ConstPointer(Ciovec),
+        len: u32,
+        scratch: *ArenaAllocator,
+    ) !Ciovs {
+        const iovs = try pointer.ConstSlice(Ciovec).init(mem, ptr, len);
+        var list = try std.ArrayListUnmanaged(File.Ciovec).initCapacity(
+            scratch.allocator(),
+            iovs.items.len,
+        );
+        var total_len: u32 = 0;
+        for (0..iovs.items.len) |i| {
+            if (i > 0) {
+                @branchHint(.cold);
+            }
+
+            const ciovec = try iovs.read(i).bytes(mem);
+            const ciovec_len = std.math.cast(u32, ciovec.len) orelse break;
+            total_len = std.math.add(u32, total_len, ciovec_len) catch |e| switch (e) {
+                error.Overflow => return error.InvalidArgument,
+            };
+            list.appendAssumeCapacity(File.Ciovec.init(ciovec));
+        }
+
+        return .{ .list = list.items, .total_len = total_len };
+    }
+};
 
 fn fd_pwrite(
     wasi: *WasiPreview1,

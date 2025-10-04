@@ -1,25 +1,34 @@
 //! Unbuffered access to a real, genuine, 100% all-natural OS file descriptor.
 
+pub const Close = enum { close, leave_open };
+
 /// Callers must ensure that `fd` is an open file handle.
-pub fn wrapFile(fd: std.fs.File, rights: Rights.Valid) File {
+pub fn wrapFile(fd: std.fs.File, close: Close, rights: Rights.Valid) File {
     return .{
         .rights = rights,
-        .impl = .{ .ctx = .{ .os = fd }, .vtable = &vtable },
+        .impl = .{
+            .ctx = .{ .os = .{ .file = fd, .close = close } },
+            .vtable = &vtable,
+        },
     };
 }
 
 pub fn wrapStandardStreams() File.StandardStreams {
     const write_rights: Rights.Valid = .{ .fd_write = true };
+    // Leave standard streams open in case an interpreter error/panic occurs
     return .{
-        .stdin = wrapFile(std.fs.File.stdin(), .{ .fd_read = true }),
-        .stdout = wrapFile(std.fs.File.stdout(), write_rights),
-        .stderr = wrapFile(std.fs.File.stderr(), write_rights),
+        .stdin = wrapFile(std.fs.File.stdin(), .leave_open, .{ .fd_read = true }),
+        .stdout = wrapFile(std.fs.File.stdout(), .leave_open, write_rights),
+        .stderr = wrapFile(std.fs.File.stderr(), .leave_open, write_rights),
     };
 }
 
 fn deinit(ctx: Ctx, allocator: std.mem.Allocator) void {
     _ = allocator;
-    ctx.os.close();
+    switch (ctx.os.close) {
+        .leave_open => {},
+        .close => ctx.os.file.close(),
+    }
 }
 
 fn fd_pwrite(
@@ -28,7 +37,7 @@ fn fd_pwrite(
     offset: types.FileSize,
     total_len: u32,
 ) Error!u32 {
-    const file = ctx.os;
+    const file = ctx.os.file;
     switch (builtin.os.tag) {
         .linux,
         .freebsd,
@@ -123,7 +132,7 @@ fn fd_write(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!u32 {
     // }
 
     // TODO: How to handle Windows? multiple WriteFile calls?
-    const written = ctx.os.writev(File.Ciovec.castSlice(iovs)) catch |e| return switch (e) {
+    const written = ctx.os.file.writev(File.Ciovec.castSlice(iovs)) catch |e| return switch (e) {
         error.NotOpenForWriting => error.BadFd,
         else => |known| known,
     };

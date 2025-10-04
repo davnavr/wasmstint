@@ -4,6 +4,8 @@ pub const Api = enum {
     environ_get,
     environ_sizes_get,
 
+    fd_close,
+
     fd_filestat_get,
 
     fd_prestat_get,
@@ -22,7 +24,7 @@ pub const Api = enum {
     sched_yield,
     // random_get,
 
-    fn fallableFunction(comptime params: []const Module.ValType) Module.FuncType {
+    fn returnsErrno(comptime params: []const Module.ValType) Module.FuncType {
         return .initComptime(params, &.{.i32});
     }
 
@@ -34,19 +36,21 @@ pub const Api = enum {
             .environ_sizes_get,
             .fd_filestat_get,
             .fd_prestat_get,
-            => fallableFunction(&.{ .i32, .i32 }),
+            => returnsErrno(&.{ .i32, .i32 }),
 
-            .fd_prestat_dir_name => fallableFunction(&.{ .i32, .i32, .i32 }),
+            .fd_close => returnsErrno(&.{.i32}),
+
+            .fd_prestat_dir_name => returnsErrno(&.{ .i32, .i32, .i32 }),
 
             .fd_pwrite,
             .fd_readdir,
-            => fallableFunction(&.{ .i32, .i32, .i32, .i64, .i32 }),
-            .fd_read, .fd_write => fallableFunction(&.{ .i32, .i32, .i32, .i32 }),
+            => returnsErrno(&.{ .i32, .i32, .i32, .i64, .i32 }),
+            .fd_read, .fd_write => returnsErrno(&.{ .i32, .i32, .i32, .i32 }),
 
-            .fd_seek => fallableFunction(&.{ .i32, .i64, .i32, .i32 }),
+            .fd_seek => returnsErrno(&.{ .i32, .i64, .i32, .i32 }),
 
             .proc_exit => .initComptime(&.{.i32}, &.{}),
-            .sched_yield => fallableFunction(&.{}),
+            .sched_yield => returnsErrno(&.{}),
         };
     }
 

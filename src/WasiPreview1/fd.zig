@@ -41,7 +41,7 @@ const FdTable = struct {
     const EntryContext = struct {
         pub fn hash(ctx: EntryContext, fd: Fd) u32 {
             _ = ctx;
-            // `Fd` keys are random anyways, so a simple fast hash works fine.
+            // `Fd` keys are random anyways, so a simple hash works fine.
             return std.hash.int(@as(u32, fd.n));
         }
 
@@ -99,6 +99,12 @@ const FdTable = struct {
     pub fn get(table: *FdTable, fd: Fd) Fd.Error!*File {
         table.entries.lockPointers();
         return table.entries.getPtr(fd) orelse error.BadFd;
+    }
+
+    pub fn close(table: *FdTable, file_allocator: Allocator, fd: Fd) Fd.Error!void {
+        const removed = table.entries.fetchSwapRemove(fd) orelse return error.BadFd;
+        removed.value.deinit(file_allocator);
+        table.entries.pointer_stability.assertUnlocked();
     }
 
     /// Returns `true` if `fd` was valid and successfully removed.
