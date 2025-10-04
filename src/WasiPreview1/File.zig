@@ -97,10 +97,20 @@ pub const Rights = packed struct(u64) {
     fn assumeValid(rights: Rights) Valid {
         return rights.checkValid() catch unreachable;
     }
+
+    pub const Applied = packed struct(u60) {
+        base: Rights.Valid,
+        /// Applies to `File` descriptors that inherit from this one.
+        inheriting: Rights.Valid,
+
+        pub fn init(base: Rights.Valid) Applied {
+            return .{ .base = base, .inheriting = base };
+        }
+    };
 };
 
 impl: Impl,
-rights: Rights.Valid,
+rights: Rights.Applied,
 
 const File = @This();
 
@@ -214,7 +224,7 @@ fn api(
     comptime right: Api,
     comptime func: std.meta.FieldEnum(VTable.Api),
 ) error{AccessDenied}!@FieldType(VTable.Api, @tagName(func)) {
-    return if (@field(file.rights, @tagName(right)))
+    return if (@field(file.rights.base, @tagName(right)))
         @field(file.impl.vtable.api, @tagName(func))
     else
         error.AccessDenied;
@@ -251,7 +261,7 @@ pub fn fd_readdir(
     buf: []u8,
     cookie: types.DirCookie,
 ) Error!types.Size {
-    if (!file.rights.fd_readdir) {
+    if (!file.rights.base.fd_readdir) {
         return error.AccessDenied;
     }
 

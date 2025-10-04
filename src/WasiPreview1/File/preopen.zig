@@ -41,7 +41,7 @@ pub fn init(preopen: *PreopenDir, allocator: Allocator) Allocator.Error!File {
     };
 
     return File{
-        .rights = File.Rights.Valid{
+        .rights = .init(File.Rights.Valid{
             .path_create_directory = perm.write,
             .path_create_file = perm.write,
             .path_link_source = true,
@@ -55,7 +55,7 @@ pub fn init(preopen: *PreopenDir, allocator: Allocator) Allocator.Error!File {
             .path_symlink = perm.write,
             .path_remove_directory = perm.write,
             .path_unlink_file = perm.write,
-        },
+        }),
         .impl = .{
             .ctx = Ctx{ .ptr = @ptrCast(ctx) },
             .vtable = &vtable,

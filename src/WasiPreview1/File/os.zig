@@ -5,7 +5,7 @@ pub const Close = enum { close, leave_open };
 /// Callers must ensure that `fd` is an open file handle.
 pub fn wrapFile(fd: std.fs.File, close: Close, rights: Rights.Valid) File {
     return .{
-        .rights = rights,
+        .rights = .init(rights),
         .impl = .{
             .ctx = .{ .os = .{ .file = fd, .close = close } },
             .vtable = &vtable,
