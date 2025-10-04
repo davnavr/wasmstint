@@ -60,6 +60,7 @@ csprng: Csprng,
 fd_table: Fd.Table,
 args: Arguments,
 environ: Environ,
+inode_hash_seed: types.INode.HashSeed,
 
 const WasiPreview1 = @This();
 
@@ -123,6 +124,7 @@ pub fn init(
         .csprng = options.csprng,
         .args = options.args,
         .environ = options.environ,
+        .inode_hash_seed = @enumFromInt(rng.next()),
     };
 }
 
@@ -409,6 +411,7 @@ fn fd_readdir(
 
     const size = file.fd_readdir(
         // wasi.allocator,
+        wasi.inode_hash_seed,
         buf.bytes(),
         cookie,
     ) catch |e| return .mapError(e);

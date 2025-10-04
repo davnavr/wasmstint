@@ -8,7 +8,6 @@ const Context = struct {
     guest_path_ptr: Path.Ptr,
     read_next_cookie: types.DirCookie, // TODO: Hash cookies? Could use `std.hash.int`
     read_state: ReadState,
-    inode_hasher: std.hash.XxHash64,
 
     fn guestPath(ctx: *const Context) Path {
         return .{ .ptr = ctx.guest_path_ptr, .len = ctx.guest_path_len };
@@ -19,7 +18,7 @@ inline fn context(ctx: Ctx) *Context {
     return @ptrCast(@alignCast(ctx.ptr));
 }
 
-pub fn init(preopen: *PreopenDir, hash_seed: u64, allocator: Allocator) Allocator.Error!File {
+pub fn init(preopen: *PreopenDir, allocator: Allocator) Allocator.Error!File {
     defer preopen.* = undefined;
 
     const perm = preopen.permissions;
@@ -39,12 +38,7 @@ pub fn init(preopen: *PreopenDir, hash_seed: u64, allocator: Allocator) Allocato
             .name_buf = undefined,
             .cached = .current_dir,
         },
-        .inode_hasher = std.hash.XxHash64.init(hash_seed),
     };
-
-    std.hash.autoHash(&ctx.inode_hasher, @as(u16, preopen.guest_path.len));
-    ctx.inode_hasher.update(preopen.guest_path.bytes());
-    std.hash.autoHash(&ctx.inode_hasher, preopen.dir);
 
     return File{
         .rights = File.Rights.Valid{
@@ -184,6 +178,7 @@ const ReadState = struct {
 
 pub fn fd_readdir(
     ctx: Ctx,
+    inode_hash_seed: types.INode.HashSeed,
     // allocator: Allocator,
     buf: []u8,
     cookie: types.DirCookie,
@@ -219,7 +214,6 @@ pub fn fd_readdir(
     var current_cookie = cookie;
     defer self.read_next_cookie = current_cookie;
     var entries = EntryBuf{ .bytes = buf };
-    const inode_hasher_init = self.inode_hasher;
     while (entries.bytes.len > 0) {
         const next = (try self.read_state.next()) orelse break;
         const name = Path.init(next.name) catch |e| switch (e) {
@@ -247,16 +241,16 @@ pub fn fd_readdir(
             .unknown => .unknown,
         };
 
-        // Zig doesn't expose POSIX inode in `Dir.Iterator`, but WASI doesn't seem to do anything
-        // with inodes anyway.
-        var inode_hasher = inode_hasher_init;
-        std.hash.autoHash(&inode_hasher, @as(u16, name.len));
-        inode_hasher.update(name.bytes());
+        // Zig doesn't expose POSIX inode/Windows IndexNumber in `Dir.Iterator`, but WASI doesn't
+        // seem to do anything with inodes anyway.
+
+        // TODO: Copy `std.fs.Dir.Iterator` impls to obtain inode information that it skips
+        // TODO: This returns different results than fd_fdstat_get impl, maybe do a `stat()` here (needed to find socket type anyway)?
 
         const next_cookie = types.DirCookie{ .n = current_cookie.n + 1 };
         const written = entries.writeEntry(
             next_cookie,
-            inode_hasher.final(),
+            .init(inode_hash_seed, 0x0123_4567_89AB_CDEF),
             name,
             @"type",
         );

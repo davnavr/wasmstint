@@ -71,7 +71,17 @@ pub const DirCookie = packed struct(u64) {
     }
 };
 
-pub const INode = u64;
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#inode
+pub const INode = packed struct(u64) {
+    n: u64,
+
+    pub const HashSeed = enum(u64) { _ };
+
+    /// `inode` numbers exposed to WASI guests are hashed
+    pub fn init(seed: HashSeed, n: u64) INode {
+        return .{ .n = std.hash.Wyhash.hash(@intFromEnum(seed), std.mem.asBytes(&n)) };
+    }
+};
 
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#dirent
 pub const DirEnt = extern struct {

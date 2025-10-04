@@ -167,7 +167,12 @@ pub const invalid = struct {
         return Error.NotDir;
     }
 
-    pub fn fd_readdir(_: Ctx, _: []u8, _: types.DirCookie) Error!types.Size {
+    pub fn fd_readdir(
+        _: Ctx,
+        _: types.INode.HashSeed,
+        _: []u8,
+        _: types.DirCookie,
+    ) Error!types.Size {
         return Error.NotDir;
     }
 };
@@ -188,6 +193,7 @@ pub const VTable = struct {
         // fd_read
         fd_readdir: *const fn (
             ctx: Ctx,
+            inode_hash_seed: types.INode.HashSeed,
             // allocator: Allocator,
             buf: []u8,
             cookie: types.DirCookie,
@@ -240,6 +246,7 @@ pub fn fd_prestat_dir_name(file: *File, path: []u8) Error!void {
 
 pub fn fd_readdir(
     file: *File,
+    inode_hash_seed: types.INode.HashSeed,
     // allocator: Allocator,
     buf: []u8,
     cookie: types.DirCookie,
@@ -248,7 +255,7 @@ pub fn fd_readdir(
         return error.AccessDenied;
     }
 
-    const args = .{ file.impl.ctx, buf, cookie };
+    const args = .{ file.impl.ctx, inode_hash_seed, buf, cookie };
     if (manual_function_devirtualization and file.hasVTable(&preopen.vtable)) {
         @branchHint(.likely);
         return @call(.auto, preopen.fd_readdir, args);

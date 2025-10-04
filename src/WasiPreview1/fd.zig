@@ -148,21 +148,19 @@ const FdTable = struct {
             entries.putAssumeCapacityNoClobber(fd, @field(standard_streams, stream_name));
         }
 
-        var rng = std.Random.Xoroshiro128{ .s = .{ rng_init.next(), rng_init.next() } };
-
         const preopen_count = preopen_dirs.len;
         for (preopens_start..(preopens_start + preopen_count)) |i| {
             const fd = Fd{ .n = @intCast(i) };
             const preopen: *PreopenDir = &preopen_dirs.*[0];
-            entries.putAssumeCapacityNoClobber(
-                fd,
-                try File.preopen.init(preopen, rng.next(), allocator),
-            );
+            entries.putAssumeCapacityNoClobber(fd, try File.preopen.init(preopen, allocator));
             preopen_dirs.* = preopen_dirs.*[1..];
         }
         std.debug.assert(preopen_dirs.len == 0);
 
-        return .{ .entries = entries, .rng = rng };
+        return .{
+            .entries = entries,
+            .rng = std.Random.Xoroshiro128{ .s = .{ rng_init.next(), rng_init.next() } },
+        };
     }
 
     pub fn deinit(table: *FdTable, allocator: Allocator) void {
