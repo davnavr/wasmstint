@@ -6,7 +6,7 @@ const Context = struct {
     // Guest `Path` is split to reduce padding
     guest_path_len: Path.Len, // maybe u1 bit in Path.Len to indicate ownership/constness?
     guest_path_ptr: Path.Ptr,
-    read_next_cookie: types.DirCookie,
+    read_next_cookie: types.DirCookie, // TODO: Hash cookies? Could use `std.hash.int`
     read_state: ReadState,
     inode_hasher: std.hash.XxHash64,
 
@@ -22,8 +22,7 @@ inline fn context(ctx: Ctx) *Context {
 pub fn init(preopen: *PreopenDir, hash_seed: u64, allocator: Allocator) Allocator.Error!File {
     defer preopen.* = undefined;
 
-    const can_write = preopen.permissions.mode == .read_write;
-    const can_access_subdirs = preopen.permissions.subdirectories == .available;
+    const perm = preopen.permissions;
 
     // Right now `main.zig` allocates paths in an `arena`, so no `dupe` call is necessary
     const ctx = try allocator.create(Context);
@@ -31,7 +30,7 @@ pub fn init(preopen: *PreopenDir, hash_seed: u64, allocator: Allocator) Allocato
 
     ctx.* = Context{
         .dir = preopen.dir,
-        .permissions = preopen.permissions,
+        .permissions = perm,
         .guest_path_len = preopen.guest_path.len,
         .guest_path_ptr = preopen.guest_path.ptr,
         .read_next_cookie = .start,
@@ -49,20 +48,19 @@ pub fn init(preopen: *PreopenDir, hash_seed: u64, allocator: Allocator) Allocato
 
     return File{
         .rights = File.Rights.Valid{
-            // TODO: remove subdirs access, it is too confusing
-            .path_create_directory = can_access_subdirs & can_write,
-            .path_create_file = can_write,
-            .path_link_source = can_write,
-            .path_link_target = can_write,
+            .path_create_directory = perm.write,
+            .path_create_file = perm.write,
+            .path_link_source = true,
+            .path_link_target = perm.write,
             .path_open = true,
             .fd_readdir = true,
             .path_readlink = true,
-            .path_rename_source = can_write,
-            .path_rename_target = can_write,
+            .path_rename_source = perm.write,
+            .path_rename_target = perm.write,
             .path_filestat_get = true,
-            .path_symlink = can_write,
-            .path_remove_directory = can_write,
-            .path_unlink_file = can_write,
+            .path_symlink = perm.write,
+            .path_remove_directory = perm.write,
+            .path_unlink_file = perm.write,
         },
         .impl = .{
             .ctx = Ctx{ .ptr = @ptrCast(ctx) },

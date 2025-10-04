@@ -4,27 +4,12 @@ guest_path: Path,
 
 const PreopenDir = @This();
 
-pub const Permissions = packed struct(u2) {
-    mode: Mode,
-    subdirectories: Subdirectories,
+pub const Permissions = packed struct(u1) {
+    write: bool,
     // maybe a bit to indicate if allow-list of files should be used?
 
-    pub const default = Permissions{
-        .mode = .read_only,
-        .subdirectories = .none,
-    };
-
-    pub const Mode = enum(u1) {
-        read_only,
-        read_write,
-        // most OS's don't support write_only
-    };
-
-    pub const Subdirectories = enum(u1) {
-        /// All subdirectories are accessible with the same permissions as the opened directory.
-        available,
-        /// Only the files in the directory are available, not its subdirectories.
-        none,
+    pub const none = Permissions{
+        .write = false,
     };
 };
 

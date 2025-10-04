@@ -67,10 +67,7 @@ const dir_flag = cli_args.Flag.custom(
         .long = "dir",
         .description = "Pass pre-opened directory to the program\n\n" ++
             "    GUEST is the name of the directory from the perspective of the program.\n\n" ++
-            "    PERM is a (potentially empty) string of letters indicating the following:\n" ++
-            "     - 'w' indicates write access to the directory's contents\n" ++
-            "     - 's' indicates access to all subdirectories\n\n" ++
-            "    By default, read-only access to only the directory's files is allowed.",
+            "    PERM is either \"ro\" for read-only access, or \"rw\" for read-write access.",
     },
     .{ .name = "HOST GUEST PERM" },
 );
@@ -155,7 +152,7 @@ const PreopenDir = struct {
     host: [:0]const u8,
     /// Path of the directory from the point of view of the guest.
     guest: WasiPreview1.Path,
-    permissions: WasiPreview1.PreopenDir.Permissions = .default,
+    permissions: WasiPreview1.PreopenDir.Permissions = .none,
 };
 
 fn parseArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) ParsedArguments {
@@ -326,42 +323,31 @@ fn parseArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) ParsedArgume
                     const entry = try self.preopen_dirs.addOne(self.scratch.allocator());
                     entry.* = PreopenDir{ .host = host, .guest = guest_utf8 };
 
+                    const bad_perm_note =
+                        "note: pass 'ro' for read-only access, or 'rw' for read-write access";
+
                     const perm = args.next() orelse {
                         return cli_args.Flag.Diagnostics.reportFmt(
                             diag,
                             results_arena,
-                            "missing PERM string for --dir {f} {s}\n" ++
-                                "note: pass 'ws' for read-write access to all subdirectories",
+                            "missing PERM string for --dir {f} {s}\n" ++ bad_perm_note,
                             .{ host_fmt, guest },
                         );
                     };
 
-                    for (perm) |b| {
-                        const AsciiFormatter = struct {
-                            fn format(c: u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-                                if (std.ascii.isPrint(c)) {
-                                    try writer.writeByte(c);
-                                } else {
-                                    try writer.print("0x{X:0>2}", .{c});
-                                }
-                            }
-                        };
-
-                        switch (b) {
-                            'w' => entry.permissions.mode = .read_write,
-                            's' => entry.permissions.subdirectories = .available,
-                            else => return cli_args.Flag.Diagnostics.reportFmt(
-                                diag,
-                                results_arena,
-                                "unknown permission {f} in --dir {f} {s} {f}",
-                                .{
-                                    std.fmt.Alt(u8, AsciiFormatter.format){ .data = b },
-                                    host_fmt,
-                                    guest,
-                                    std.unicode.fmtUtf8(perm),
-                                },
-                            ),
-                        }
+                    if (std.mem.eql(u8, perm, "rw")) {
+                        entry.permissions.write = true;
+                    } else if (!std.mem.eql(u8, perm, "ro")) {
+                        return cli_args.Flag.Diagnostics.reportFmt(
+                            diag,
+                            results_arena,
+                            "unknown permission {f} in --dir {f} {s}",
+                            .{
+                                std.unicode.fmtUtf8(perm),
+                                host_fmt,
+                                guest,
+                            },
+                        );
                     }
                 },
                 else => unreachable,
