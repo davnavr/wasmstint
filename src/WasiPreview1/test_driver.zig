@@ -101,12 +101,10 @@ pub fn main() u8 {
     // TODO: Perform cleanup of test cases (maybe after open dirs are discovered?)
 
     _ = scratch.reset(.retain_capacity);
+    const cwd = std.fs.cwd();
     const spec: Specification = if (arguments.parsed.@"test") |test_path| spec: {
         const fmt_json_path = std.unicode.fmtUtf8(test_path);
-        const json_bytes = FileContent.readFileZ(
-            std.fs.cwd(),
-            test_path,
-        ) catch |e| switch (e) {
+        const json_bytes = FileContent.readFileZ(cwd, test_path) catch |e| switch (e) {
             error.OutOfMemory => oom("JSON file bytes"),
             else => |bad| return abnormalExitFmt(
                 1,
@@ -135,6 +133,24 @@ pub fn main() u8 {
         };
     } else Specification{};
 
+    const interpreter_real_path = cwd.realpathAlloc(
+        arena.allocator(),
+        arguments.parsed.interpreter,
+    ) catch |e| return abnormalExitFmt(
+        1,
+        "{t}: could not get path to interpreter {f}",
+        .{ e, std.unicode.fmtUtf8(arguments.parsed.interpreter) },
+    );
+
+    const module_real_path = cwd.realpathAlloc(
+        arena.allocator(),
+        arguments.parsed.module,
+    ) catch |e| return abnormalExitFmt(
+        1,
+        "{t}: could not get path to module {f}",
+        .{ e, std.unicode.fmtUtf8(arguments.parsed.module) },
+    );
+
     _ = scratch.reset(.retain_capacity);
     const argv: []const []const u8 = argv: {
         const argv_count = 3 +
@@ -149,14 +165,16 @@ pub fn main() u8 {
         defer std.debug.assert(argv.items.len == argv.capacity);
 
         argv.appendSliceAssumeCapacity(&.{
-            arguments.parsed.interpreter,
+            interpreter_real_path,
             "--module",
-            arguments.parsed.module,
+            module_real_path,
         });
 
         if (spec.dirs.len > 0) {
             for (spec.dirs) |dir| {
-                argv.appendSliceAssumeCapacity(&.{ "--dir", dir, dir, "rw" });
+                const dir_rel = std.mem.concat(arena.allocator(), u8, &.{ "./", dir }) catch
+                    oom("relative dir path");
+                argv.appendSliceAssumeCapacity(&.{ "--dir", dir_rel, dir, "rw" });
             }
         }
 
@@ -186,6 +204,11 @@ pub fn main() u8 {
     interp.stdin_behavior = .Ignore;
     interp.stdout_behavior = .Pipe;
     interp.stderr_behavior = .Pipe;
+
+    if (arguments.parsed.@"test") |test_path| {
+        // TODO(zig): https://github.com/ziglang/zig/issues/5190
+        interp.cwd = std.fs.path.dirname(test_path);
+    }
 
     const page_size = std.heap.pageSize();
     var stdout = std.ArrayList(u8).initCapacity(page_allocator, page_size) catch
