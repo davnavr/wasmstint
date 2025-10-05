@@ -252,17 +252,34 @@ fn releaseScratch(state: *WasiPreview1, arena: ArenaAllocator) void {
 }
 
 fn fd_close(wasi: *WasiPreview1, _: *MemInst, raw_fd: i32) Errno {
-    std.debug.log("fd_close({d})", .{@as(u32, @bitCast(raw_fd))});
+    // std.log.debug("fd_close({d})", .{@as(u32, @bitCast(raw_fd))});
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
-    wasi.fd_table.close(fd, wasi.allocator) catch |e| return .mapError(e);
+    wasi.fd_table.close(wasi.allocator, fd) catch |e| return .mapError(e);
 
     // Zig's `std.fs.File.close()` doesn't return an error
     return .success;
 }
 
+// fn fd_datasync
+
 // Note handlers here can just use `Errno.fault` for OOB memory accesses, which is nice since
 // `AwaitingHost` doesn't support trapping yet.
+
+fn fd_fdstat_get(wasi: *WasiPreview1, mem: *MemInst, raw_fd: i32, raw_ret: i32) Errno {
+    const ret_ptr = pointer.Pointer(types.FdStat){ .addr = @as(u32, @bitCast(raw_ret)) };
+
+    std.log.debug("fd_fdstat_get({d}, {f})", .{ @as(u32, @bitCast(raw_fd)), ret_ptr });
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    const stat = file.fd_fdstat_get() catch |e| return .mapError(e);
+    ret_ptr.write(mem, stat) catch |e| return .mapError(e);
+
+    return .success;
+}
 
 fn fd_prestat_get(
     wasi: *WasiPreview1,
@@ -514,6 +531,8 @@ pub fn dispatch(
         .args_sizes_get,
         .environ_get,
         .environ_sizes_get,
+        .fd_close,
+        .fd_fdstat_get,
         .fd_prestat_get,
         .fd_prestat_dir_name,
         .fd_readdir,

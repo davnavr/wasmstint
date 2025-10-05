@@ -1,116 +1,15 @@
-/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#rights
-pub const Rights = packed struct(u64) {
-    pub const Valid = packed struct(u30) {
-        /// The right to invoke `fd_datasync`.
-        ///
-        /// If `path_open` is set, includes the right to invoke `path_open` with `fdflags::dsync`.
-        fd_datasync: bool = false,
-        /// The right to invoke `fd_read` and `sock_recv`.
-        ///
-        /// If `rights::fd_seek` is set, includes the right to invoke `fd_pread`.
-        fd_read: bool = false,
-        /// The right to invoke `fd_seek`. This flag implies `rights::fd_tell`.
-        fd_seek: bool = false,
-        /// The right to invoke `fd_fdstat_set_flags`.
-        fd_fdstat_set_flags: bool = false,
-        /// The right to invoke `fd_sync`.
-        ///
-        /// If `path_open` is set, includes the right to invoke
-        /// `path_open` with `fdflags::rsync` and `fdflags::dsync`.
-        fd_sync: bool = false,
-        /// The right to invoke `fd_seek` in such a way that the file offset
-        /// remains unaltered (i.e., `whence::cur` with offset zero), or to
-        /// invoke `fd_tell`.
-        fd_tell: bool = false,
-        /// The right to invoke `fd_write` and `sock_send`.
-        /// If `rights::fd_seek` is set, includes the right to invoke `fd_pwrite`.
-        fd_write: bool = false,
-        /// The right to invoke `fd_advise`.
-        fd_advise: bool = false,
-        /// The right to invoke `fd_allocate`.
-        fd_allocate: bool = false,
-        /// The right to invoke `path_create_directory`.
-        path_create_directory: bool = false,
-        /// If `path_open` is set, the right to invoke `path_open` with `oflags::creat`.
-        path_create_file: bool = false,
-        /// The right to invoke `path_link` with the file descriptor as the
-        /// source directory.
-        path_link_source: bool = false,
-        /// The right to invoke `path_link` with the file descriptor as the
-        /// target directory.
-        path_link_target: bool = false,
-        /// The right to invoke `path_open`.
-        path_open: bool = false,
-        /// The right to invoke `fd_readdir`.
-        fd_readdir: bool = false,
-        /// The right to invoke `path_readlink`.
-        path_readlink: bool = false,
-        /// The right to invoke `path_rename` with the file descriptor as the source directory.
-        path_rename_source: bool = false,
-        /// The right to invoke `path_rename` with the file descriptor as the target directory.
-        path_rename_target: bool = false,
-        /// The right to invoke `path_filestat_get`.
-        path_filestat_get: bool = false,
-        /// The right to change a file's size.
-        ///
-        /// If `path_open` is set, includes the right to invoke `path_open` with `oflags::trunc`.
-        ///
-        /// Note: there is no function named `path_filestat_set_size`. This follows POSIX design,
-        /// which only has `ftruncate` and does not provide `ftruncateat`.
-        /// While such function would be desirable from the API design perspective, there are virtually
-        /// no use cases for it since no code written for POSIX systems would use it.
-        /// Moreover, implementing it would require multiple syscalls, leading to inferior performance.
-        path_filestat_set_size: bool = false,
-        /// The right to invoke `path_filestat_set_times`.
-        path_filestat_set_times: bool = false,
-        /// The right to invoke `fd_filestat_get`.
-        fd_filestat_get: bool = false,
-        /// The right to invoke `fd_filestat_set_size`.
-        fd_filestat_set_size: bool = false,
-        /// The right to invoke `fd_filestat_set_times`.
-        fd_filestat_set_times: bool = false,
-        /// The right to invoke `path_symlink`.
-        path_symlink: bool = false,
-        /// The right to invoke `path_remove_directory`.
-        path_remove_directory: bool = false,
-        /// The right to invoke `path_unlink_file`.
-        path_unlink_file: bool = false,
-        /// If `rights::fd_read` is set, includes the right to invoke `poll_oneoff` to subscribe to
-        /// `eventtype::fd_read`.
-        ///
-        /// If `rights::fd_write` is set, includes the right to invoke `poll_oneoff` to subscribe to
-        /// `eventtype::fd_write`.
-        poll_fd_readwrite: bool = false,
-        /// The right to invoke `sock_shutdown`.
-        sock_shutdown: bool = false,
-        /// The right to invoke `sock_accept`.
-        sock_accept: bool = false,
-    };
+pub const Rights = packed struct(u60) {
+    base: types.Rights.Valid,
+    /// Applies to `File` descriptors that inherit from this one.
+    inheriting: types.Rights.Valid,
 
-    valid: Valid = .{},
-    padding: u34 = 0,
-
-    fn checkValid(rights: Rights) error{InvalidRightsFlags}!Valid {
-        return if (rights.padding == 0) rights.valid else error.InvalidRightsFlags;
+    pub fn init(base: types.Rights.Valid) Rights {
+        return .{ .base = base, .inheriting = base };
     }
-
-    fn assumeValid(rights: Rights) Valid {
-        return rights.checkValid() catch unreachable;
-    }
-
-    pub const Applied = packed struct(u60) {
-        base: Rights.Valid,
-        /// Applies to `File` descriptors that inherit from this one.
-        inheriting: Rights.Valid,
-
-        pub fn init(base: Rights.Valid) Applied {
-            return .{ .base = base, .inheriting = base };
-        }
-    };
 };
 
 impl: Impl,
-rights: Rights.Applied,
+rights: Rights,
 
 const File = @This();
 
@@ -119,6 +18,7 @@ const Impl = struct {
     vtable: *const VTable,
 };
 
+// TODO: Make this a [2]usize align(@sizeOf([2]usize)),
 pub const Ctx = union {
     ptr: *anyopaque,
     /// Unbuffered access to an OS file descriptor.
@@ -191,7 +91,7 @@ pub const VTable = struct {
     /// Do not call function pointers without checking the `File`'s `rights`.
     const Api = struct {
         // Could add scratch: *ArenaAllocator parameter
-
+        fd_fdstat_get: *const fn (ctx: Ctx) Error!types.FdStat.File,
         fd_prestat_get: *const fn (ctx: Ctx) Error!types.Prestat,
         fd_prestat_dir_name: *const fn (ctx: Ctx, path: []u8) Error!void,
         fd_pwrite: *const fn (
@@ -212,7 +112,7 @@ pub const VTable = struct {
     };
 
     api: VTable.Api,
-    deinit: *const fn (ctx: Ctx, allocator: Allocator) void,
+    deinit: *const fn (ctx: Ctx, allocator: Allocator) void, // TODO: Make this just fd_close
 };
 
 fn hasVTable(file: *const File, vtable: *const VTable) bool {
@@ -235,6 +135,16 @@ const manual_function_devirtualization = switch (builtin.mode) {
     .ReleaseSafe, .ReleaseFast => true,
     .Debug, .ReleaseSmall => false,
 };
+
+pub fn fd_fdstat_get(file: *File) Error!types.FdStat {
+    // No corresponding rights flag for this function.
+
+    return .{
+        .file = try file.impl.vtable.api.fd_fdstat_get(file.impl.ctx),
+        .rights_base = types.Rights{ .valid = file.rights.base },
+        .rights_inheriting = types.Rights{ .valid = file.rights.base },
+    };
+}
 
 pub fn fd_prestat_get(file: *File) Error!types.Prestat {
     if (manual_function_devirtualization and file.hasVTable(&preopen.vtable)) {

@@ -102,7 +102,7 @@ const FdTable = struct {
     }
 
     pub fn close(table: *FdTable, file_allocator: Allocator, fd: Fd) Fd.Error!void {
-        const removed = table.entries.fetchSwapRemove(fd) orelse return error.BadFd;
+        var removed = table.entries.fetchSwapRemove(fd) orelse return error.BadFd;
         removed.value.deinit(file_allocator);
         table.entries.pointer_stability.assertUnlocked();
     }

@@ -41,7 +41,7 @@ pub fn init(preopen: *PreopenDir, allocator: Allocator) Allocator.Error!File {
     };
 
     return File{
-        .rights = .init(File.Rights.Valid{
+        .rights = .init(types.Rights.Valid{
             .path_create_directory = perm.write,
             .path_create_file = perm.write,
             .path_link_source = true,
@@ -61,6 +61,13 @@ pub fn init(preopen: *PreopenDir, allocator: Allocator) Allocator.Error!File {
             .vtable = &vtable,
         },
     };
+}
+
+fn fd_fdstat_get(ctx: Ctx) File.Error!types.FdStat.File {
+    _ = ctx;
+    std.log.debug("TODO: proper implementation of fd_fdstat_get for directory", .{});
+    // return .{ .type = .directory };
+    return File.Error.NotDir;
 }
 
 pub fn fd_prestat_get(ctx: Ctx) File.Error!types.Prestat {
@@ -224,21 +231,9 @@ pub fn fd_readdir(
 
         errdefer comptime unreachable;
 
-        const is_windows = builtin.os.tag == .windows;
-        const @"type": types.FileType = switch (next.kind) {
-            .block_device => if (!is_windows) .block_device else unreachable,
-            .character_device => if (!is_windows) .character_device else unreachable,
-            .directory => .directory,
-            .named_pipe => if (!is_windows) .unknown else unreachable,
-            .sym_link => if (!is_windows) .symbolic_link else unreachable,
-            .file => .regular_file,
-            .unix_domain_socket => if (!is_windows)
-                .unknown // TODO: need `fstat()` to determine exact type of socket
-            else
-                unreachable,
-            .whiteout => if (!is_windows) .unknown else unreachable, // BSD thing
-            .door, .event_port => if (builtin.os.tag == .solaris) .unknown else unreachable,
-            .unknown => .unknown,
+        const @"type" = types.FileType.fromZigKind(next.kind) catch |e| switch (e) {
+            // TODO: need `getsockopt()` to determine exact type of socket
+            error.UnknownSocketType => .unknown,
         };
 
         // Zig doesn't expose POSIX inode/Windows IndexNumber in `Dir.Iterator`, but WASI doesn't
@@ -246,6 +241,7 @@ pub fn fd_readdir(
 
         // TODO: Copy `std.fs.Dir.Iterator` impls to obtain inode information that it skips
         // TODO: This returns different results than fd_fdstat_get impl, maybe do a `stat()` here (needed to find socket type anyway)?
+        // TODO: Could use NtQueryInformationFile & FILE_INTERNAL_INFORMATION on Windows
 
         const next_cookie = types.DirCookie{ .n = current_cookie.n + 1 };
         const written = entries.writeEntry(
@@ -272,11 +268,12 @@ pub fn fd_readdir(
 
 pub const vtable = File.VTable{
     .api = .{
-        .fd_write = undefined,
-        .fd_pwrite = undefined,
-        .fd_readdir = fd_readdir,
+        .fd_fdstat_get = fd_fdstat_get,
         .fd_prestat_get = fd_prestat_get,
         .fd_prestat_dir_name = fd_prestat_dir_name,
+        .fd_pwrite = undefined,
+        .fd_readdir = fd_readdir,
+        .fd_write = undefined,
     },
     .deinit = deinit,
 };

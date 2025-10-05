@@ -3,7 +3,7 @@
 pub const Close = enum { close, leave_open };
 
 /// Callers must ensure that `fd` is an open file handle.
-pub fn wrapFile(fd: std.fs.File, close: Close, rights: Rights.Valid) File {
+pub fn wrapFile(fd: std.fs.File, close: Close, rights: types.Rights.Valid) File {
     return .{
         .rights = .init(rights),
         .impl = .{
@@ -14,7 +14,7 @@ pub fn wrapFile(fd: std.fs.File, close: Close, rights: Rights.Valid) File {
 }
 
 pub fn wrapStandardStreams() File.StandardStreams {
-    const write_rights: Rights.Valid = .{ .fd_write = true };
+    const write_rights = types.Rights.Valid{ .fd_write = true };
     // Leave standard streams open in case an interpreter error/panic occurs
     return .{
         .stdin = wrapFile(std.fs.File.stdin(), .leave_open, .{ .fd_read = true }),
@@ -29,6 +29,45 @@ fn deinit(ctx: Ctx, allocator: std.mem.Allocator) void {
         .leave_open => {},
         .close => ctx.os.file.close(),
     }
+}
+
+fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
+    // TODO: On Windows, more efficient to use NtQueryInformationFile: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryinformationfile
+    // TODO: On Linux, more efficient to use statx, asking only for mode
+    const @"type" = types.FileType.fromZigKind(
+        (try ctx.os.file.stat()).kind,
+    ) catch |e| switch (e) {
+        error.UnknownSocketType => .unknown, // TODO: Requires getsockopt
+    };
+
+    // TODO: On Windows, check for FILE_APPEND_DATA (might be in FILE_ACCESS_INFORMATION via NtQueryInformationFile)
+    const access: std.posix.O = @bitCast(@as(
+        @typeInfo(std.posix.O).@"struct".backing_integer.?,
+        @intCast(
+            std.posix.fcntl(
+                ctx.os.file.handle,
+                std.posix.F.GETFL,
+                undefined,
+            ) catch |e| return switch (e) {
+                error.Locked => error.WouldBlock,
+                else => |err| err,
+            },
+        ),
+    ));
+
+    return .{
+        .type = @"type",
+        .flags = types.FdFlags{
+            .valid = .{
+                .append = access.APPEND,
+                .dsync = if (@hasField(std.posix.O, "DSYNC")) access.DSYNC else false,
+                .nonblock = access.NONBLOCK,
+                // O_RSYNC not implemented on Linux
+                .rsync = if (@hasField(std.posix.O, "RSYNC")) access.RSYNC else false,
+                .sync = access.SYNC, // FILE_FLAG_WRITE_THROUGH on Windows? https://github.com/golang/go/issues/35358
+            },
+        },
+    };
 }
 
 fn fd_pwrite(
@@ -142,13 +181,14 @@ fn fd_write(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!u32 {
 
 const vtable = File.VTable{
     .api = .{
+        .fd_fdstat_get = fd_fdstat_get,
         .fd_prestat_get = File.invalid.fd_prestat_get,
         .fd_prestat_dir_name = File.invalid.fd_prestat_dir_name,
         .fd_readdir = File.invalid.fd_readdir,
-        .fd_write = &fd_write,
-        .fd_pwrite = &fd_pwrite,
+        .fd_write = fd_write,
+        .fd_pwrite = fd_pwrite,
     },
-    .deinit = &deinit,
+    .deinit = deinit,
 };
 
 const std = @import("std");
@@ -156,5 +196,4 @@ const builtin = @import("builtin");
 const File = @import("../File.zig");
 const types = @import("../types.zig");
 const Ctx = File.Ctx;
-const Rights = File.Rights;
 const Error = File.Error;

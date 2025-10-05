@@ -6,6 +6,8 @@ pub const Api = enum {
 
     fd_close,
 
+    fd_fdstat_get,
+
     fd_filestat_get,
 
     fd_prestat_get,
@@ -34,6 +36,7 @@ pub const Api = enum {
             .args_sizes_get,
             .environ_get,
             .environ_sizes_get,
+            .fd_fdstat_get,
             .fd_filestat_get,
             .fd_prestat_get,
             => returnsErrno(&.{ .i32, .i32 }),
