@@ -152,7 +152,10 @@ const FdTable = struct {
         for (preopens_start..(preopens_start + preopen_count)) |i| {
             const fd = Fd{ .n = @intCast(i) };
             const preopen: *PreopenDir = &preopen_dirs.*[0];
-            entries.putAssumeCapacityNoClobber(fd, try File.preopen.init(preopen, allocator));
+            entries.putAssumeCapacityNoClobber(
+                fd,
+                try File.host_dir.initPreopened(preopen, allocator),
+            );
             preopen_dirs.* = preopen_dirs.*[1..];
         }
         std.debug.assert(preopen_dirs.len == 0);

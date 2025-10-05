@@ -106,7 +106,7 @@ pub fn init(
     var fd_table = try Fd.Table.init(
         allocator,
         &rng,
-        File.os.wrapStandardStreams(),
+        File.host_file.wrapStandardStreams(),
         preopen_dirs,
     );
     errdefer fd_table.deinit(allocator);

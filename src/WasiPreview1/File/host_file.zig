@@ -2,22 +2,25 @@
 
 pub const Close = enum { close, leave_open };
 
-const Context = struct {
+const HostFile = struct {
     file: std.fs.File,
     close: Close,
 };
 
 /// Callers must ensure that `fd` is an open file handle.
+///
+/// Ownership of `fd` is transferred to the `File`.
 pub fn wrapFile(fd: std.fs.File, close: Close, rights: types.Rights.Valid) File {
     return File{
         .rights = File.Rights.init(rights),
         .impl = File.Impl{
-            .ctx = Ctx.init(Context{ .file = fd, .close = close }),
+            .ctx = Ctx.init(HostFile{ .file = fd, .close = close }),
             .vtable = &vtable,
         },
     };
 }
 
+/// Creates wrappers for the standard streams, and makes guest calls to `fd_close` a no-op.
 pub fn wrapStandardStreams() File.StandardStreams {
     const write_rights = types.Rights.Valid{ .fd_write = true };
     // Leave standard streams open in case an interpreter error/panic occurs
@@ -44,7 +47,7 @@ pub fn closeHandle(handle: std.posix.fd_t) Error!void {
 }
 
 fn fd_close(ctx: Ctx, allocator: std.mem.Allocator) Error!void {
-    const self = ctx.get(Context);
+    const self = ctx.get(HostFile);
     _ = allocator;
     switch (self.close) {
         .leave_open => {},
@@ -53,7 +56,7 @@ fn fd_close(ctx: Ctx, allocator: std.mem.Allocator) Error!void {
 }
 
 fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
-    const self = ctx.get(Context);
+    const self = ctx.get(HostFile);
     // TODO: On Windows, more efficient to use NtQueryInformationFile: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryinformationfile
     // TODO: On Linux, more efficient to use statx, asking only for mode
     const @"type" = types.FileType.fromZigKind(
@@ -98,7 +101,7 @@ fn fd_pwrite(
     offset: types.FileSize,
     total_len: u32,
 ) Error!u32 {
-    const self = ctx.get(Context);
+    const self = ctx.get(HostFile);
     const file = self.file;
     switch (builtin.os.tag) {
         .linux,
@@ -187,7 +190,7 @@ fn fd_pwrite(
 }
 
 fn fd_write(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!u32 {
-    const self = ctx.get(Context);
+    const self = ctx.get(HostFile);
 
     // OS needs a chance to return errors, even if length is 0
     _ = total_len;

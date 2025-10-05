@@ -1,3 +1,5 @@
+//! Implementation of a WASI file descriptor and its operations.
+
 pub const Rights = packed struct(u60) {
     base: types.Rights.Valid,
     /// Applies to `File` descriptors that inherit from this one.
@@ -55,8 +57,8 @@ pub const StandardStreams = struct {
     stderr: File,
 };
 
-pub const os = @import("File/os.zig");
-pub const preopen = @import("File/preopen.zig");
+pub const host_file = @import("File/host_file.zig");
+pub const host_dir = @import("File/host_dir.zig");
 
 pub const Ciovec = extern struct {
     inner: std.posix.iovec_const,
@@ -167,18 +169,18 @@ pub fn fd_fdstat_get(file: *File) Error!types.FdStat {
 }
 
 pub fn fd_prestat_get(file: *File) Error!types.Prestat {
-    if (manual_function_devirtualization and file.hasVTable(&preopen.vtable)) {
+    if (manual_function_devirtualization and file.hasVTable(&host_dir.vtable)) {
         @branchHint(.likely);
-        return preopen.fd_prestat_get(file.impl.ctx);
+        return host_dir.fd_prestat_get(file.impl.ctx);
     } else {
         return file.impl.vtable.fd_prestat_get(file.impl.ctx);
     }
 }
 
 pub fn fd_prestat_dir_name(file: *File, path: []u8) Error!void {
-    if (manual_function_devirtualization and file.hasVTable(&preopen.vtable)) {
+    if (manual_function_devirtualization and file.hasVTable(&host_dir.vtable)) {
         @branchHint(.likely);
-        return preopen.fd_prestat_dir_name(file.impl.ctx, path);
+        return host_dir.fd_prestat_dir_name(file.impl.ctx, path);
     } else {
         return file.impl.vtable.fd_prestat_dir_name(file.impl.ctx, path);
     }
@@ -196,9 +198,9 @@ pub fn fd_readdir(
     }
 
     const args = .{ file.impl.ctx, inode_hash_seed, buf, cookie };
-    if (manual_function_devirtualization and file.hasVTable(&preopen.vtable)) {
+    if (manual_function_devirtualization and file.hasVTable(&host_dir.vtable)) {
         @branchHint(.likely);
-        return @call(.auto, preopen.fd_readdir, args);
+        return @call(.auto, host_dir.fd_readdir, args);
     } else {
         return @call(.auto, file.impl.vtable.fd_readdir, args);
     }
