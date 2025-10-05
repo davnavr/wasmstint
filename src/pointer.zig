@@ -201,7 +201,6 @@ pub fn writeToBytes(
                 "struct " ++ @typeName(T) ++ " needs packed or extern layout",
             ),
         },
-        // TODO: Handle extern union
         else => |bad| @compileError("unsupported " ++ @tagName(bad) ++ " " ++ @typeName(T)),
     }
 }

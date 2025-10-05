@@ -13,16 +13,40 @@ rights: Rights,
 
 const File = @This();
 
-const Impl = struct {
+pub const Impl = struct {
     ctx: Ctx,
     vtable: *const VTable,
 };
 
-// TODO: Make this a [2]usize align(@sizeOf([2]usize)),
-pub const Ctx = union {
-    ptr: *anyopaque,
-    /// Unbuffered access to an OS file descriptor.
-    os: struct { file: std.fs.File, close: os.Close },
+pub const Ctx = struct {
+    const ctx_size = 16;
+
+    bytes: [ctx_size]u8 align(ctx_size),
+
+    fn checkSize(comptime T: type) void {
+        if (@sizeOf(T) > ctx_size) {
+            @compileError(@typeName(T) ++ " is too big");
+        }
+    }
+
+    pub fn init(context: anytype) Ctx {
+        const T = @TypeOf(context);
+        comptime {
+            checkSize(T);
+        }
+
+        var ctx = Ctx{ .bytes = undefined };
+        @as(*align(ctx_size) T, @ptrCast(&ctx.bytes)).* = context;
+        return ctx;
+    }
+
+    pub fn get(ctx: Ctx, comptime T: type) T {
+        comptime {
+            checkSize(T);
+        }
+
+        return @as(*align(ctx_size) const T, @ptrCast(&ctx.bytes)).*;
+    }
 };
 
 pub const StandardStreams = struct {

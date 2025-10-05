@@ -2,12 +2,17 @@
 
 pub const Close = enum { close, leave_open };
 
+const Context = struct {
+    file: std.fs.File,
+    close: Close,
+};
+
 /// Callers must ensure that `fd` is an open file handle.
 pub fn wrapFile(fd: std.fs.File, close: Close, rights: types.Rights.Valid) File {
-    return .{
-        .rights = .init(rights),
-        .impl = .{
-            .ctx = .{ .os = .{ .file = fd, .close = close } },
+    return File{
+        .rights = File.Rights.init(rights),
+        .impl = File.Impl{
+            .ctx = Ctx.init(Context{ .file = fd, .close = close }),
             .vtable = &vtable,
         },
     };
@@ -27,6 +32,7 @@ pub fn closeHandle(handle: std.posix.fd_t) Error!void {
     switch (builtin.os.tag) {
         .windows => std.os.windows.CloseHandle(handle),
         else => switch (std.posix.errno(std.posix.system.close(handle))) {
+            .SUCCESS => {},
             .BADF => unreachable,
             .INTR => {}, // https://github.com/ziglang/zig/issues/2425
             .IO => return error.InputOutput,
@@ -38,18 +44,20 @@ pub fn closeHandle(handle: std.posix.fd_t) Error!void {
 }
 
 fn fd_close(ctx: Ctx, allocator: std.mem.Allocator) Error!void {
+    const self = ctx.get(Context);
     _ = allocator;
-    switch (ctx.os.close) {
+    switch (self.close) {
         .leave_open => {},
-        .close => try closeHandle(ctx.os.file.handle),
+        .close => try closeHandle(self.file.handle),
     }
 }
 
 fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
+    const self = ctx.get(Context);
     // TODO: On Windows, more efficient to use NtQueryInformationFile: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryinformationfile
     // TODO: On Linux, more efficient to use statx, asking only for mode
     const @"type" = types.FileType.fromZigKind(
-        (try ctx.os.file.stat()).kind,
+        (try self.file.stat()).kind,
     ) catch |e| switch (e) {
         error.UnknownSocketType => .unknown, // TODO: Requires getsockopt
     };
@@ -59,7 +67,7 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
         @typeInfo(std.posix.O).@"struct".backing_integer.?,
         @intCast(
             std.posix.fcntl(
-                ctx.os.file.handle,
+                self.file.handle,
                 std.posix.F.GETFL,
                 undefined,
             ) catch |e| return switch (e) {
@@ -90,7 +98,8 @@ fn fd_pwrite(
     offset: types.FileSize,
     total_len: u32,
 ) Error!u32 {
-    const file = ctx.os.file;
+    const self = ctx.get(Context);
+    const file = self.file;
     switch (builtin.os.tag) {
         .linux,
         .freebsd,
@@ -178,6 +187,8 @@ fn fd_pwrite(
 }
 
 fn fd_write(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!u32 {
+    const self = ctx.get(Context);
+
     // OS needs a chance to return errors, even if length is 0
     _ = total_len;
     // if (total_len == 0) {
@@ -185,7 +196,7 @@ fn fd_write(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!u32 {
     // }
 
     // TODO: How to handle Windows? multiple WriteFile calls?
-    const written = ctx.os.file.writev(File.Ciovec.castSlice(iovs)) catch |e| return switch (e) {
+    const written = self.file.writev(File.Ciovec.castSlice(iovs)) catch |e| return switch (e) {
         error.NotOpenForWriting => error.BadFd,
         else => |known| known,
     };

@@ -2,21 +2,21 @@
 
 const Context = struct {
     dir: std.fs.Dir,
-    permissions: PreopenDir.Permissions,
-    // Guest `Path` is split to reduce padding
-    guest_path_len: Path.Len, // maybe u1 bit in Path.Len to indicate ownership/constness?
-    guest_path_ptr: Path.Ptr,
-    read_next_cookie: types.DirCookie, // TODO: Hash cookies? Could use `std.hash.int`
-    read_state: ReadState,
+    allocated: *Allocated,
+
+    const Allocated = struct {
+        permissions: PreopenDir.Permissions,
+        // Guest `Path` is split to reduce padding
+        guest_path_len: Path.Len, // maybe u1 bit in Path.Len to indicate ownership/constness?
+        guest_path_ptr: Path.Ptr,
+        read_next_cookie: types.DirCookie, // TODO: Hash cookies? Could use `std.hash.int`
+        read_state: ReadState,
+    };
 
     fn guestPath(ctx: *const Context) Path {
-        return .{ .ptr = ctx.guest_path_ptr, .len = ctx.guest_path_len };
+        return .{ .ptr = ctx.allocated.guest_path_ptr, .len = ctx.allocated.guest_path_len };
     }
 };
-
-inline fn context(ctx: Ctx) *Context {
-    return @ptrCast(@alignCast(ctx.ptr));
-}
 
 pub fn init(preopen: *PreopenDir, allocator: Allocator) Allocator.Error!File {
     defer preopen.* = undefined;
@@ -24,11 +24,10 @@ pub fn init(preopen: *PreopenDir, allocator: Allocator) Allocator.Error!File {
     const perm = preopen.permissions;
 
     // Right now `main.zig` allocates paths in an `arena`, so no `dupe` call is necessary
-    const ctx = try allocator.create(Context);
+    const allocated = try allocator.create(Context.Allocated);
     errdefer comptime unreachable;
 
-    ctx.* = Context{
-        .dir = preopen.dir,
+    allocated.* = Context.Allocated{
         .permissions = perm,
         .guest_path_len = preopen.guest_path.len,
         .guest_path_ptr = preopen.guest_path.ptr,
@@ -41,7 +40,7 @@ pub fn init(preopen: *PreopenDir, allocator: Allocator) Allocator.Error!File {
     };
 
     return File{
-        .rights = .init(types.Rights.Valid{
+        .rights = File.Rights.init(types.Rights.Valid{
             .path_create_directory = perm.write,
             .path_create_file = perm.write,
             .path_link_source = true,
@@ -56,8 +55,8 @@ pub fn init(preopen: *PreopenDir, allocator: Allocator) Allocator.Error!File {
             .path_remove_directory = perm.write,
             .path_unlink_file = perm.write,
         }),
-        .impl = .{
-            .ctx = Ctx{ .ptr = @ptrCast(ctx) },
+        .impl = File.Impl{
+            .ctx = Ctx.init(Context{ .dir = preopen.dir, .allocated = allocated }),
             .vtable = &vtable,
         },
     };
@@ -71,7 +70,7 @@ fn fd_fdstat_get(ctx: Ctx) File.Error!types.FdStat.File {
 }
 
 pub fn fd_prestat_get(ctx: Ctx) File.Error!types.Prestat {
-    const self = context(ctx);
+    const self = ctx.get(Context);
     return .init(
         types.Prestat.Type.dir,
         types.Prestat.Dir{ .pr_name_len = self.guestPath().len },
@@ -79,10 +78,12 @@ pub fn fd_prestat_get(ctx: Ctx) File.Error!types.Prestat {
 }
 
 pub fn fd_prestat_dir_name(ctx: Ctx, path: []u8) File.Error!void {
-    const self = context(ctx);
-    if (self.guest_path_len < path.len) return File.Error.InvalidArgument;
+    const self = ctx.get(Context);
+    if (self.allocated.guest_path_len < path.len) {
+        return File.Error.InvalidArgument;
+    }
 
-    @memcpy(path[0..self.guest_path_len], self.guestPath().bytes());
+    @memcpy(path[0..self.allocated.guest_path_len], self.guestPath().bytes());
 }
 
 const EntryBuf = struct {
@@ -190,39 +191,39 @@ pub fn fd_readdir(
     buf: []u8,
     cookie: types.DirCookie,
 ) File.Error!types.Size {
-    const self = context(ctx);
+    const self = ctx.get(Context);
 
     // TODO: Buffer required to support `fd_readdir` seeking, especially on Windows
     // See https://github.com/WebAssembly/wasi-filesystem/issues/7
 
-    if (cookie.n <= self.read_next_cookie.n) {
+    if (cookie.n <= self.allocated.read_next_cookie.n) {
         @branchHint(.unlikely);
-        self.read_state.reset();
+        self.allocated.read_state.reset();
 
         if (cookie.n != types.DirCookie.start.n) {
             // Seek forwards to previous position
             var seek_cookie = types.DirCookie.start;
             while (seek_cookie.n < cookie.n) {
                 defer seek_cookie.n += 1;
-                _ = (try self.read_state.next()) orelse return error.InvalidArgument;
+                _ = (try self.allocated.read_state.next()) orelse return error.InvalidArgument;
             }
         }
-    } else if (self.read_next_cookie.n < cookie.n) {
+    } else if (self.allocated.read_next_cookie.n < cookie.n) {
         @branchHint(.unlikely);
 
         // Seek to skip some entries
         var seek_cookie = cookie;
-        while (seek_cookie.n < self.read_next_cookie.n) {
+        while (seek_cookie.n < self.allocated.read_next_cookie.n) {
             defer seek_cookie.n += 1;
-            _ = (try self.read_state.next()) orelse return error.InvalidArgument;
+            _ = (try self.allocated.read_state.next()) orelse return error.InvalidArgument;
         }
     }
 
     var current_cookie = cookie;
-    defer self.read_next_cookie = current_cookie;
+    defer self.allocated.read_next_cookie = current_cookie;
     var entries = EntryBuf{ .bytes = buf };
     while (entries.bytes.len > 0) {
-        const next = (try self.read_state.next()) orelse break;
+        const next = (try self.allocated.read_state.next()) orelse break;
         const name = Path.init(next.name) catch |e| switch (e) {
             error.PathTooLong => unreachable, // no supported OS's allow names this long
             // Could silently skip non-UTF-8 entries, but Zig `std` feels the need to catch it
@@ -254,8 +255,8 @@ pub fn fd_readdir(
             .none => unreachable,
             .full => current_cookie = next_cookie,
             .partial => {
-                @memcpy(self.read_state.name_buf[0..name.len], name.bytes());
-                self.read_state.cached = .{
+                @memcpy(self.allocated.read_state.name_buf[0..name.len], name.bytes());
+                self.allocated.read_state.cached = .{
                     .entry = .{ .kind = next.kind, .name_len = @intCast(name.len) },
                 };
                 break;
@@ -277,9 +278,9 @@ pub const vtable = File.VTable{
 };
 
 fn fd_close(ctx: Ctx, allocator: Allocator) File.Error!void {
-    const self = context(ctx);
+    const self = ctx.get(Context);
     // self.guestPath is not deallocated
-    defer allocator.destroy(self);
+    defer allocator.destroy(self.allocated);
     try os_file.closeHandle(self.dir.fd);
 }
 
