@@ -256,8 +256,6 @@ fn fd_close(wasi: *WasiPreview1, _: *MemInst, raw_fd: i32) Errno {
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
     wasi.fd_table.close(wasi.allocator, fd) catch |e| return .mapError(e);
-
-    // Zig's `std.fs.File.close()` doesn't return an error
     return .success;
 }
 

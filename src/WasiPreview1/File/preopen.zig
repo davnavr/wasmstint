@@ -267,22 +267,20 @@ pub fn fd_readdir(
 }
 
 pub const vtable = File.VTable{
-    .api = .{
-        .fd_fdstat_get = fd_fdstat_get,
-        .fd_prestat_get = fd_prestat_get,
-        .fd_prestat_dir_name = fd_prestat_dir_name,
-        .fd_pwrite = undefined,
-        .fd_readdir = fd_readdir,
-        .fd_write = undefined,
-    },
-    .deinit = deinit,
+    .fd_fdstat_get = fd_fdstat_get,
+    .fd_prestat_get = fd_prestat_get,
+    .fd_prestat_dir_name = fd_prestat_dir_name,
+    .fd_pwrite = undefined,
+    .fd_readdir = fd_readdir,
+    .fd_write = undefined,
+    .fd_close = fd_close,
 };
 
-fn deinit(ctx: Ctx, allocator: Allocator) void {
+fn fd_close(ctx: Ctx, allocator: Allocator) File.Error!void {
     const self = context(ctx);
-    self.dir.close();
     // self.guestPath is not deallocated
-    allocator.destroy(self);
+    defer allocator.destroy(self);
+    try os_file.closeHandle(self.dir.fd);
 }
 
 const std = @import("std");
@@ -295,3 +293,4 @@ const PreopenDir = @import("../PreopenDir.zig");
 const Path = @import("../Path.zig");
 const File = @import("../File.zig");
 const Ctx = File.Ctx;
+const os_file = @import("os.zig");

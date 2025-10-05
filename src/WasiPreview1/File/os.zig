@@ -23,11 +23,25 @@ pub fn wrapStandardStreams() File.StandardStreams {
     };
 }
 
-fn deinit(ctx: Ctx, allocator: std.mem.Allocator) void {
+pub fn closeHandle(handle: std.posix.fd_t) Error!void {
+    switch (builtin.os.tag) {
+        .windows => std.os.windows.CloseHandle(handle),
+        else => switch (std.posix.errno(std.posix.system.close(handle))) {
+            .BADF => unreachable,
+            .INTR => {}, // https://github.com/ziglang/zig/issues/2425
+            .IO => return error.InputOutput,
+            .NOSPC => return error.NoSpaceLeft,
+            .DQUOT => return error.DiskQuota,
+            else => |unknown| return std.posix.unexpectedErrno(unknown),
+        },
+    }
+}
+
+fn fd_close(ctx: Ctx, allocator: std.mem.Allocator) Error!void {
     _ = allocator;
     switch (ctx.os.close) {
         .leave_open => {},
-        .close => ctx.os.file.close(),
+        .close => try closeHandle(ctx.os.file.handle),
     }
 }
 
@@ -180,15 +194,13 @@ fn fd_write(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!u32 {
 }
 
 const vtable = File.VTable{
-    .api = .{
-        .fd_fdstat_get = fd_fdstat_get,
-        .fd_prestat_get = File.invalid.fd_prestat_get,
-        .fd_prestat_dir_name = File.invalid.fd_prestat_dir_name,
-        .fd_readdir = File.invalid.fd_readdir,
-        .fd_write = fd_write,
-        .fd_pwrite = fd_pwrite,
-    },
-    .deinit = deinit,
+    .fd_fdstat_get = fd_fdstat_get,
+    .fd_prestat_get = File.invalid.fd_prestat_get,
+    .fd_prestat_dir_name = File.invalid.fd_prestat_dir_name,
+    .fd_readdir = File.invalid.fd_readdir,
+    .fd_write = fd_write,
+    .fd_pwrite = fd_pwrite,
+    .fd_close = fd_close,
 };
 
 const std = @import("std");

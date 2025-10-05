@@ -101,10 +101,10 @@ const FdTable = struct {
         return table.entries.getPtr(fd) orelse error.BadFd;
     }
 
-    pub fn close(table: *FdTable, file_allocator: Allocator, fd: Fd) Fd.Error!void {
+    pub fn close(table: *FdTable, file_allocator: Allocator, fd: Fd) File.Error!void {
+        defer table.entries.pointer_stability.assertUnlocked();
         var removed = table.entries.fetchSwapRemove(fd) orelse return error.BadFd;
-        removed.value.deinit(file_allocator);
-        table.entries.pointer_stability.assertUnlocked();
+        try removed.value.fd_close(file_allocator);
     }
 
     /// Returns `true` if `fd` was valid and successfully removed.
@@ -165,7 +165,7 @@ const FdTable = struct {
 
     pub fn deinit(table: *FdTable, allocator: Allocator) void {
         for (table.entries.values()[preopens_start..]) |*file| {
-            file.deinit(allocator);
+            file.fd_close(allocator) catch {};
         }
 
         table.entries.deinit(allocator);

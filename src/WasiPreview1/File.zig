@@ -87,32 +87,28 @@ pub const invalid = struct {
     }
 };
 
+/// Do not call function pointers without checking the corresponding `File`'s `rights`.
 pub const VTable = struct {
-    /// Do not call function pointers without checking the `File`'s `rights`.
-    const Api = struct {
-        // Could add scratch: *ArenaAllocator parameter
-        fd_fdstat_get: *const fn (ctx: Ctx) Error!types.FdStat.File,
-        fd_prestat_get: *const fn (ctx: Ctx) Error!types.Prestat,
-        fd_prestat_dir_name: *const fn (ctx: Ctx, path: []u8) Error!void,
-        fd_pwrite: *const fn (
-            ctx: Ctx,
-            iovs: []const Ciovec,
-            offset: types.FileSize,
-            total_len: u32,
-        ) Error!u32,
-        // fd_read
-        fd_readdir: *const fn (
-            ctx: Ctx,
-            inode_hash_seed: types.INode.HashSeed,
-            // allocator: Allocator,
-            buf: []u8,
-            cookie: types.DirCookie,
-        ) Error!types.Size,
-        fd_write: *const fn (ctx: Ctx, iovs: []const Ciovec, total_len: u32) Error!u32,
-    };
-
-    api: VTable.Api,
-    deinit: *const fn (ctx: Ctx, allocator: Allocator) void, // TODO: Make this just fd_close
+    // Could add scratch: *ArenaAllocator parameter
+    fd_fdstat_get: *const fn (ctx: Ctx) Error!types.FdStat.File,
+    fd_prestat_get: *const fn (ctx: Ctx) Error!types.Prestat,
+    fd_prestat_dir_name: *const fn (ctx: Ctx, path: []u8) Error!void,
+    fd_pwrite: *const fn (
+        ctx: Ctx,
+        iovs: []const Ciovec,
+        offset: types.FileSize,
+        total_len: u32,
+    ) Error!u32,
+    // fd_read
+    fd_readdir: *const fn (
+        ctx: Ctx,
+        inode_hash_seed: types.INode.HashSeed,
+        // allocator: Allocator,
+        buf: []u8,
+        cookie: types.DirCookie,
+    ) Error!types.Size,
+    fd_write: *const fn (ctx: Ctx, iovs: []const Ciovec, total_len: u32) Error!u32,
+    fd_close: *const fn (ctx: Ctx, allocator: Allocator) Error!void,
 };
 
 fn hasVTable(file: *const File, vtable: *const VTable) bool {
@@ -122,10 +118,10 @@ fn hasVTable(file: *const File, vtable: *const VTable) bool {
 fn api(
     file: *const File,
     comptime right: Api,
-    comptime func: std.meta.FieldEnum(VTable.Api),
-) error{AccessDenied}!@FieldType(VTable.Api, @tagName(func)) {
+    comptime func: std.meta.FieldEnum(VTable),
+) error{AccessDenied}!@FieldType(VTable, @tagName(func)) {
     return if (@field(file.rights.base, @tagName(right)))
-        @field(file.impl.vtable.api, @tagName(func))
+        @field(file.impl.vtable, @tagName(func))
     else
         error.AccessDenied;
 }
@@ -140,7 +136,7 @@ pub fn fd_fdstat_get(file: *File) Error!types.FdStat {
     // No corresponding rights flag for this function.
 
     return .{
-        .file = try file.impl.vtable.api.fd_fdstat_get(file.impl.ctx),
+        .file = try file.impl.vtable.fd_fdstat_get(file.impl.ctx),
         .rights_base = types.Rights{ .valid = file.rights.base },
         .rights_inheriting = types.Rights{ .valid = file.rights.base },
     };
@@ -151,7 +147,7 @@ pub fn fd_prestat_get(file: *File) Error!types.Prestat {
         @branchHint(.likely);
         return preopen.fd_prestat_get(file.impl.ctx);
     } else {
-        return file.impl.vtable.api.fd_prestat_get(file.impl.ctx);
+        return file.impl.vtable.fd_prestat_get(file.impl.ctx);
     }
 }
 
@@ -160,7 +156,7 @@ pub fn fd_prestat_dir_name(file: *File, path: []u8) Error!void {
         @branchHint(.likely);
         return preopen.fd_prestat_dir_name(file.impl.ctx, path);
     } else {
-        return file.impl.vtable.api.fd_prestat_dir_name(file.impl.ctx, path);
+        return file.impl.vtable.fd_prestat_dir_name(file.impl.ctx, path);
     }
 }
 
@@ -180,7 +176,7 @@ pub fn fd_readdir(
         @branchHint(.likely);
         return @call(.auto, preopen.fd_readdir, args);
     } else {
-        return @call(.auto, file.impl.vtable.api.fd_readdir, args);
+        return @call(.auto, file.impl.vtable.fd_readdir, args);
     }
 }
 
@@ -202,8 +198,8 @@ pub fn fd_write(file: *File, iovs: []const Ciovec, total_len: u32) Error!u32 {
 // if actual rights contains (do bitwise &) rights they want => OK
 // otherwise => error
 
-pub fn deinit(file: *File, allocator: Allocator) void {
-    file.impl.vtable.deinit(file.impl.ctx, allocator);
+pub fn fd_close(file: *File, allocator: Allocator) Error!void {
+    try file.impl.vtable.fd_close(file.impl.ctx, allocator);
     file.* = undefined;
 }
 
