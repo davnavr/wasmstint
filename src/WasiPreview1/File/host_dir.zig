@@ -63,25 +63,25 @@ pub fn initPreopened(preopen: *PreopenDir, allocator: Allocator) Allocator.Error
     };
 }
 
-fn fd_fdstat_get(ctx: Ctx) File.Error!types.FdStat.File {
+fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
     _ = ctx;
     std.log.debug("TODO: proper implementation of fd_fdstat_get for directory", .{});
     // return .{ .type = .directory };
-    return File.Error.NotDir;
+    return Error.Unimplemented;
 }
 
-pub fn fd_prestat_get(ctx: Ctx) File.Error!types.Prestat {
+pub fn fd_prestat_get(ctx: Ctx) Error!types.PreStat {
     const self = ctx.get(HostDir);
     return .init(
-        types.Prestat.Type.dir,
-        types.Prestat.Dir{ .pr_name_len = self.guestPath().len },
+        types.PreStat.Type.dir,
+        types.PreStat.Dir{ .pr_name_len = self.guestPath().len },
     );
 }
 
-pub fn fd_prestat_dir_name(ctx: Ctx, path: []u8) File.Error!void {
+pub fn fd_prestat_dir_name(ctx: Ctx, path: []u8) Error!void {
     const self = ctx.get(HostDir);
     if (self.info.guest_path_len < path.len) {
-        return File.Error.InvalidArgument;
+        return Error.InvalidArgument;
     }
 
     @memcpy(path[0..self.info.guest_path_len], self.guestPath().bytes());
@@ -191,7 +191,7 @@ pub fn fd_readdir(
     // allocator: Allocator,
     buf: []u8,
     cookie: types.DirCookie,
-) File.Error!types.Size {
+) Error!types.Size {
     const self = ctx.get(HostDir);
 
     // TODO: Buffer required to support `fd_readdir` seeking, especially on Windows
@@ -268,21 +268,80 @@ pub fn fd_readdir(
     return @intCast(buf.len - entries.bytes.len);
 }
 
-pub const vtable = File.VTable{
-    .fd_fdstat_get = fd_fdstat_get,
-    .fd_prestat_get = fd_prestat_get,
-    .fd_prestat_dir_name = fd_prestat_dir_name,
-    .fd_pwrite = undefined,
-    .fd_readdir = fd_readdir,
-    .fd_write = undefined,
-    .fd_close = fd_close,
-};
-
-fn fd_close(ctx: Ctx, allocator: Allocator) File.Error!void {
+fn fd_close(ctx: Ctx, allocator: Allocator) Error!void {
     const self = ctx.get(HostDir);
     // self.guestPath is not deallocated
     defer allocator.destroy(self.info);
     try host_file.closeHandle(self.dir.fd);
+}
+
+pub const vtable = File.VTable{
+    .fd_advise = fd_advise,
+    .fd_allocate = fd_allocate,
+    .fd_close = fd_close,
+    .fd_datasync = fd_datasync,
+    .fd_fdstat_get = fd_fdstat_get,
+    .fd_fdstat_set_flags = fd_fdstat_set_flags,
+    .fd_filestat_get = File.unimplemented.fd_filestat_get,
+    .fd_filestat_set_size = fd_filestat_set_size,
+    .fd_filestat_set_times = File.unimplemented.fd_filestat_set_times,
+    .fd_pread = fd_pread,
+    .fd_prestat_get = fd_prestat_get,
+    .fd_prestat_dir_name = fd_prestat_dir_name,
+    .fd_pwrite = fd_pwrite,
+    .fd_read = fd_read,
+    .fd_readdir = fd_readdir,
+    .fd_seek = fd_seek,
+    .fd_sync = File.unimplemented.fd_sync,
+    .fd_tell = fd_tell,
+    // TODO
+    .fd_write = fd_write,
+};
+
+fn fd_advise(_: Ctx, _: types.FileSize, _: types.FileSize, _: types.Advice) Error!void {
+    @trap();
+}
+
+fn fd_allocate(_: Ctx, _: types.FileSize, _: types.FileSize) Error!void {
+    @trap();
+}
+
+fn fd_datasync(_: Ctx) Error!void {
+    @trap();
+}
+
+fn fd_fdstat_set_flags(_: Ctx, _: types.FdFlags.Valid) Error!void {
+    @trap();
+}
+
+fn fd_filestat_set_size(_: Ctx, _: types.FileSize) Error!void {
+    @trap();
+}
+
+fn fd_pread(_: Ctx, _: []const File.Iovec, _: types.FileSize, _: u32) Error!u32 {
+    @trap();
+}
+
+fn fd_read(_: Ctx, _: []const File.Iovec, _: u32) Error!u32 {
+    @trap();
+}
+
+fn fd_pwrite(_: Ctx, _: []const File.Ciovec, _: types.FileSize, _: u32) Error!u32 {
+    @trap();
+}
+
+fn fd_seek(_: Ctx, _: types.FileDelta, _: types.Whence) Error!types.FileSize {
+    @trap();
+}
+
+fn fd_tell(_: Ctx) Error!types.FileSize {
+    @trap();
+}
+
+// TODO
+
+fn fd_write(_: Ctx, _: []const File.Ciovec, _: u32) Error!u32 {
+    @trap();
 }
 
 const std = @import("std");
@@ -294,5 +353,6 @@ const pointer = @import("wasmstint").pointer;
 const PreopenDir = @import("../PreopenDir.zig");
 const Path = @import("../Path.zig");
 const File = @import("../File.zig");
+const Error = File.Error;
 const Ctx = File.Ctx;
 const host_file = @import("host_file.zig");

@@ -1,16 +1,24 @@
+/// Equivalent of `usize` or `size_t`.
+///
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#size
 pub const Size = u32;
 
+/// Non-negative file size or length of a region within a file.
+///
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#filesize
 pub const FileSize = packed struct(u64) { bytes: u64 };
 
+/// Timestamp in nanoseconds.
+///
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#timestamp
 pub const Timestamp = packed struct(u64) { ns: u64 };
 
+/// Identifiers for clocks.
+///
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#clockid
 pub const ClockId = enum(u32) {
     /// The clock measuring real time. Time value zero corresponds with `1970-01-01T00:00:00Z`.
-    realtime,
+    real_time,
     /// The store-wide monotonic clock, which is defined as a clock measuring real time, whose
     /// value cannot be adjusted and which cannot have negative clock jumps.
     ///
@@ -27,6 +35,90 @@ pub const ClockId = enum(u32) {
     _,
 };
 
+/// File or memory access pattern advisory information.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#advice
+pub const Advice = enum(u8) {
+    /// The application has no advice to give on its behavior with respect to the specified data.
+    normal,
+    /// The application expects to access the specified data sequentially from lower offsets to
+    /// higher offsets.
+    sequential,
+    /// The application expects to access the specified data in a random order.
+    random,
+    ///  The application expects to access the specified data in the near future.
+    will_need,
+    /// The application expects that it will not access the specified data in the near future.
+    dont_need,
+    /// The application expects to access the specified data once and then not reuse it thereafter.
+    no_reuse,
+};
+
+/// Relative offset within a file.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#filedelta
+pub const FileDelta = packed struct(i64) { offset: i64 };
+
+/// The position relative to which to set the offset of the file descriptor.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#whence
+pub const Whence = enum(u8) {
+    /// Seek relative to start-of-file.
+    set,
+    /// Seek relative to current position.
+    cur,
+    /// Seek relative to end-of-file.
+    end,
+};
+
+fn flagsFormatter(comptime T: type) fn (T, *std.Io.Writer) std.Io.Writer.Error!void {
+    return struct {
+        fn format(flags: T, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            if (@as(@typeInfo(T).@"struct".backing_integer.?, @bitCast(flags)) == 0) {
+                try writer.writeByte('0');
+            } else {
+                inline for (0.., @typeInfo(T).@"struct".fields) |i, f| {
+                    if (@field(flags, f.name)) {
+                        if (i > 0) {
+                            try writer.writeAll("|");
+                        }
+
+                        try writer.writeAll(f.name);
+                    }
+                }
+            }
+        }
+    }.format;
+}
+
+fn flagsFormatterWithInvalid(comptime T: type) fn (T, *std.Io.Writer) std.Io.Writer.Error!void {
+    return struct {
+        fn format(flags: T, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            const Valid = @FieldType(T, "valid");
+
+            if (@as(@typeInfo(Valid).@"struct".backing_integer.?, @bitCast(flags.valid)) == 0) {
+                try writer.print("0x{X}", .{flags.padding});
+            } else {
+                if (flags.padding != 0) {
+                    try writer.print("0x{X}|", .{flags.padding});
+                }
+
+                try flagsFormatter(Valid)(flags.valid, writer);
+            }
+        }
+    }.format;
+}
+
+fn validateFlags(comptime T: type) fn (T) ?@FieldType(T, "valid") {
+    return struct {
+        fn validate(flags: T) ?@FieldType(T, "valid") {
+            return if (flags.padding == 0) flags.valid else null;
+        }
+    }.validate;
+}
+
+/// File descriptor rights, determining which actions may be performed.
+///
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#rights
 pub const Rights = packed struct(u64) {
     pub const Valid = packed struct(u30) {
@@ -114,22 +206,66 @@ pub const Rights = packed struct(u64) {
         sock_shutdown: bool = false,
         /// The right to invoke `sock_accept`.
         sock_accept: bool = false,
+
+        pub const format = flagsFormatter(Valid);
+
+        pub fn contains(super: Valid, sub: Valid) bool {
+            const super_bits: u30 = @bitCast(super);
+            return super_bits | @as(u30, @bitCast(sub)) == super_bits;
+        }
     };
 
     valid: Valid = .{},
     padding: u34 = 0,
 
-    fn checkValid(rights: Rights) error{InvalidRightsFlags}!Valid {
-        return if (rights.padding == 0) rights.valid else error.InvalidRightsFlags;
-    }
+    pub const format = flagsFormatterWithInvalid(Rights);
 
-    fn assumeValid(rights: Rights) Valid {
-        return rights.checkValid() catch unreachable;
+    pub const validate = validateFlags(Rights);
+};
+
+/// Identifier for a device containing a file system.
+///
+/// Can be used in combination with `INode` to uniquely identify a file or directory in the
+/// filesystem.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#device
+pub const Device = packed struct(u64) {
+    n: u64,
+};
+
+/// File attributes.
+///
+/// This is similar to `struct stat` in POSIX.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#filestat
+pub const FileStat = extern struct {
+    /// Device ID of device containing the file.
+    dev: Device,
+    /// File serial number.
+    ino: INode,
+    type: FileType,
+    /// Number of hard links to the file.
+    nlink: u64,
+    /// For regular files, the file size in bytes.
+    /// For symbolic links, the length in bytes of the pathname contained in the symbolic link.
+    size: FileSize,
+    /// Last data access timestamp.
+    atim: Timestamp,
+    /// Last data modification timestamp.
+    mtim: Timestamp,
+    /// Last file status change timestamp.
+    ctim: Timestamp,
+
+    comptime {
+        std.debug.assert(@sizeOf(FileStat) == 64);
+        std.debug.assert(@offsetOf(FileStat, "ctim") == 56);
     }
 };
 
+/// Information about a pre-opened capability.
+///
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#prestat
-pub const Prestat = extern struct {
+pub const PreStat = extern struct {
     /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#preopentype
     pub const Type = enum(u8) { dir };
 
@@ -145,7 +281,7 @@ pub const Prestat = extern struct {
         pr_name_len: Size,
     };
 
-    pub fn init(comptime tag: Type, payload: @FieldType(Payload, @tagName(tag))) Prestat {
+    pub fn init(comptime tag: Type, payload: @FieldType(Payload, @tagName(tag))) PreStat {
         return .{
             .tag = tag,
             .payload = @unionInit(Payload, @tagName(tag), payload),
@@ -153,7 +289,7 @@ pub const Prestat = extern struct {
     }
 
     comptime {
-        std.debug.assert(@sizeOf(Prestat) == 8);
+        std.debug.assert(@sizeOf(PreStat) == 8);
     }
 };
 
@@ -172,6 +308,8 @@ pub const DirCookie = packed struct(u64) {
     }
 };
 
+/// File serial number that is unique within its file system.
+///
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#inode
 pub const INode = packed struct(u64) {
     n: u64,
@@ -232,16 +370,48 @@ pub const FdFlags = packed struct(u16) {
         dsync: bool,
         nonblock: bool,
         rsync: bool,
+        // FILE_FLAG_WRITE_THROUGH on Windows? https://github.com/golang/go/issues/35358
         sync: bool,
+
+        pub const format = flagsFormatter(Valid);
+
+        const has_dsync = @hasField(std.posix.O, "DSYNC");
+        const has_rsync = @hasField(std.posix.O, "RSYNC");
+
+        pub fn fromFlagsPosix(flags: std.posix.O) Valid {
+            return Valid{
+                .append = flags.APPEND,
+                .dsync = if (has_dsync) flags.DSYNC else false,
+                .nonblock = flags.NONBLOCK,
+                // O_RSYNC not implemented on Linux
+                .rsync = if (has_rsync) flags.RSYNC else false,
+                .sync = flags.SYNC,
+            };
+        }
+
+        // pub fn fromFlagsPosix
     };
 
     valid: Valid,
     padding: u11 = 0,
+
+    pub const Param = packed struct(u32) {
+        valid: Valid,
+        padding: u27 = 0,
+
+        pub const format = flagsFormatterWithInvalid(Param);
+        pub const validate = validateFlags(Param);
+    };
 };
 
+/// File descriptor attributes.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#fdstat
 pub const FdStat = extern struct {
     file: File,
     rights_base: Rights,
+    /// Maximum set of rights that may be installed on new file descriptors that are created through
+    /// this file descriptor, e.g., through `path_open`.
     rights_inheriting: Rights,
 
     pub const File = extern struct {
@@ -254,6 +424,35 @@ pub const FdStat = extern struct {
         std.debug.assert(@offsetOf(File, "flags") == 2);
         std.debug.assert(@offsetOf(FdStat, "rights_base") == 8);
     }
+};
+
+/// Which file time attributes to adjust.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#fstflags
+pub const FstFlags = packed struct(u16) {
+    pub const Valid = packed struct(u4) {
+        /// Adjust the last data access timestamp to the value stored in `FileStat.atim`.
+        atim: bool,
+        /// Adjust the last data access timestamp to the time of clock `ClockId.real_time`.
+        atim_now: bool,
+        /// Adjust the last data modification timestamp to the value stored in `FileStat.mtim`.
+        mtim: bool,
+        /// Adjust the last data modification timestamp to the time of clock `ClockId.real_time`.
+        mtim_now: bool,
+
+        pub const format = flagsFormatter(Valid);
+    };
+
+    valid: Valid,
+    padding: u12,
+
+    pub const Param = packed struct(u32) {
+        valid: Valid,
+        padding: u28 = 0,
+
+        pub const format = flagsFormatterWithInvalid(Param);
+        pub const validate = validateFlags(Param);
+    };
 };
 
 const std = @import("std");

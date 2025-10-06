@@ -24,6 +24,10 @@ const Iovec = extern struct {
     buf: pointer.Pointer(u8),
     /// The length of the buffer to be filled.
     buf_len: types.Size,
+
+    fn bytes(iovec: Iovec, mem: *const MemInst) pointer.OobError![]u8 {
+        return pointer.accessSlice(mem, iovec.buf.addr, iovec.buf_len);
+    }
 };
 
 /// A region of memory for scatter/gather **writes**.
@@ -39,8 +43,6 @@ const Ciovec = extern struct {
         return pointer.accessSlice(mem, ciovec.buf.addr, ciovec.buf_len);
     }
 };
-
-// TODO: Add more WASI API types
 
 const File = @import("WasiPreview1/File.zig");
 
@@ -88,6 +90,7 @@ pub const InitOptions = struct {
     //stdin: ?,
     fd_rng_seed: u64,
     csprng: Csprng = .os,
+    // TODO: std.EnumSet(types.ClockId) to indicate available clocks
 };
 
 /// After initialization, hosts should call the entry point of the application (e.g. `_start`) as
@@ -149,6 +152,9 @@ pub fn importProvider(state: *WasiPreview1) wasmstint.runtime.ImportProvider {
         .resolve = resolveImport,
     };
 }
+
+// Note: handlers here can just use `Errno.fault` for OOB memory accesses, which is nice since
+// `AwaitingHost` doesn't support trapping yet.
 
 fn processParametersApi(comptime field: std.meta.FieldEnum(WasiPreview1)) type {
     return struct {
@@ -232,12 +238,181 @@ fn processParametersApi(comptime field: std.meta.FieldEnum(WasiPreview1)) type {
 }
 
 const args_api = processParametersApi(.args);
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#args_get
 const args_get = args_api.get;
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#args_sizes_get
 const args_sizes_get = args_api.sizes_get;
 
 const environ_api = processParametersApi(.environ);
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#environ_get
 const environ_get = environ_api.get;
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#environ_sizes_get
 const environ_sizes_get = environ_api.sizes_get;
+
+const InitIovsError = pointer.OobError || error{InvalidArgument};
+
+// TODO: std.heap.stackFallback + only do portion of ciovecs; if OOM happens, do not return Errno.nomem to guest!
+// ^ stack buffer to allow minimum of 1 (C)Iovec
+fn initIoVectorList(
+    comptime List: type,
+    comptime GuestVec: type,
+    comptime HostVec: type,
+) fn (*MemInst, pointer.ConstPointer(GuestVec), len: u32, *ArenaAllocator) InitIovsError!List {
+    return struct {
+        fn init(
+            mem: *MemInst,
+            ptr: pointer.ConstPointer(GuestVec),
+            len: u32,
+            // Should be *std.heap.StackBufferAllocator
+            scratch: *ArenaAllocator,
+        ) InitIovsError!List {
+            const iovs = try pointer.ConstSlice(GuestVec).init(mem, ptr, len);
+            var list = std.ArrayListUnmanaged(HostVec).empty;
+            list.ensureTotalCapacityPrecise(scratch.allocator(), iovs.items.len) catch {};
+            var total_len: u32 = 0;
+            for (0..iovs.items.len) |i| {
+                if (i > 0) {
+                    @branchHint(.cold);
+                }
+
+                const ciovec = try iovs.read(i).bytes(mem);
+                const ciovec_len = std.math.cast(u32, ciovec.len) orelse break;
+                total_len = std.math.add(u32, total_len, ciovec_len) catch |e| switch (e) {
+                    error.Overflow => return error.InvalidArgument,
+                };
+                list.appendAssumeCapacity(HostVec.init(ciovec)); // Should be list.append, breaking on OOM
+            }
+
+            return .{ .list = list.items, .total_len = total_len };
+        }
+    }.init;
+}
+
+const Iovs = struct {
+    list: []const File.Iovec,
+    total_len: u32,
+
+    const init = initIoVectorList(Iovs, Iovec, File.Iovec);
+};
+
+const Ciovs = struct {
+    list: []const File.Ciovec,
+    total_len: u32,
+
+    const init = initIoVectorList(Ciovs, Ciovec, File.Ciovec);
+};
+
+/// Return the resolution of a clock.
+///
+/// Implementations are required to provide a non-zero value for supported clocks. For unsupported
+/// clocks, return `Errno.inval`. This is similar to `clock_getres` in POSIX.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#clock_res_get
+fn clock_res_get(wasi: *WasiPreview1, mem: *MemInst, raw_clock_id: i32, raw_ret: i32) Errno {
+    const clock_id: types.ClockId = @enumFromInt(@as(u32, @bitCast(raw_clock_id)));
+    const ret_ptr = pointer.Pointer(types.Timestamp){ .addr = @as(u32, @bitCast(raw_ret)) };
+
+    std.log.debug("clock_res_get({t}, {f})", .{ clock_id, ret_ptr });
+
+    // TODO: Check allowed clocks
+
+    _ = wasi;
+    const resolution: types.Timestamp = switch (clock_id) {
+        .real_time => if (true) {
+            return Errno.nosys; // TODO: clock_res_get impl
+        },
+        .monotonic,
+        .process_cputime_id,
+        .thread_cputime_id,
+        _,
+        => return Errno.inval,
+    };
+
+    ret_ptr.write(mem, resolution) catch |e| return .mapError(e);
+
+    return Errno.success;
+}
+
+/// Return the time value of a clock.
+///
+/// This is similar to `clock_gettime` in POSIX.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#clock_time_get
+fn clock_time_get(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_clock_id: i32,
+    /// A `types.Timestamp` indicating the maximum lag (exclusive) that the returned time value may
+    /// have, compared to its actual value.
+    raw_precision: i64,
+    raw_ret: i32,
+) Errno {
+    const clock_id: types.ClockId = @enumFromInt(@as(u32, @bitCast(raw_clock_id)));
+    const precision = types.Timestamp{ .ns = @as(u64, @bitCast(raw_precision)) };
+    const ret_ptr = pointer.Pointer(types.Timestamp){ .addr = @as(u32, @bitCast(raw_ret)) };
+
+    std.log.debug("clock_time_get({t}, {d}, {f})", .{ clock_id, precision.ns, ret_ptr });
+
+    // TODO: Check allowed clocks
+    _ = wasi;
+    _ = mem;
+    return .nosys; // TODO: clock_time_get impl
+}
+
+fn fd_advise(
+    wasi: *WasiPreview1,
+    _: *MemInst,
+    raw_fd: i32,
+    raw_offset: i64,
+    raw_len: i64,
+    raw_advice: i32,
+) Errno {
+    const offset = types.FileSize{ .bytes = @as(u64, @bitCast(raw_offset)) };
+    const len = types.FileSize{ .bytes = @as(u64, @bitCast(raw_len)) };
+    const advice_bits: u32 = @bitCast(raw_advice);
+    const advice_casted = std.enums.fromInt(types.Advice, advice_bits);
+
+    std.log.debug(
+        "fd_advise({[fd]d}, {[offset]d}, {[len]d}, {[advice_bits]d} ({[advice_name]s}))",
+        .{
+            .fd = @as(u32, @intCast(raw_fd)),
+            .offset = offset.bytes,
+            .len = len.bytes,
+            .advice_bits = advice_bits,
+            .advice_name = if (advice_casted) |adv| @tagName(adv) else "invalid",
+        },
+    );
+
+    const advice: types.Advice = advice_casted orelse return .inval;
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+    file.fd_advise(offset, len, advice) catch |e| return .mapError(e);
+
+    return Errno.success;
+}
+
+fn fd_allocate(
+    wasi: *WasiPreview1,
+    _: *MemInst,
+    raw_fd: i32,
+    raw_offset: i64,
+    raw_len: i64,
+) Errno {
+    const offset = types.FileSize{ .bytes = @as(u64, @bitCast(raw_offset)) };
+    const len = types.FileSize{ .bytes = @as(u64, @bitCast(raw_len)) };
+    std.log.debug(
+        "fd_advise({d}, {d}, {d})",
+        .{ @as(u32, @intCast(raw_fd)), offset.bytes, len.bytes },
+    );
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+    file.fd_allocate(offset, len) catch |e| return .mapError(e);
+
+    return Errno.success;
+}
 
 fn acquireScratch(state: *WasiPreview1) ArenaAllocator {
     state.scratch.lock.lock();
@@ -256,13 +431,19 @@ fn fd_close(wasi: *WasiPreview1, _: *MemInst, raw_fd: i32) Errno {
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
     wasi.fd_table.close(wasi.allocator, fd) catch |e| return .mapError(e);
-    return .success;
+    return Errno.success;
 }
 
-// fn fd_datasync
+fn fd_datasync(wasi: *WasiPreview1, _: *MemInst, raw_fd: i32) Errno {
+    std.log.debug("fd_datasync({d})", .{@as(u32, @bitCast(raw_fd))});
 
-// Note handlers here can just use `Errno.fault` for OOB memory accesses, which is nice since
-// `AwaitingHost` doesn't support trapping yet.
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+    file.fd_datasync() catch |e| return .mapError(e);
+
+    return Errno.success;
+}
 
 fn fd_fdstat_get(wasi: *WasiPreview1, mem: *MemInst, raw_fd: i32, raw_ret: i32) Errno {
     const ret_ptr = pointer.Pointer(types.FdStat){ .addr = @as(u32, @bitCast(raw_ret)) };
@@ -276,6 +457,166 @@ fn fd_fdstat_get(wasi: *WasiPreview1, mem: *MemInst, raw_fd: i32, raw_ret: i32) 
     const stat = file.fd_fdstat_get() catch |e| return .mapError(e);
     ret_ptr.write(mem, stat) catch |e| return .mapError(e);
 
+    return Errno.success;
+}
+
+fn fd_fdstat_set_flags(wasi: *WasiPreview1, _: *MemInst, raw_fd: i32, raw_flags: i32) Errno {
+    const flags_param: types.FdFlags.Param = @bitCast(raw_flags);
+
+    std.log.debug(
+        "fd_fdstat_set_flags({d}, {f})",
+        .{ @as(u32, @bitCast(raw_fd)), flags_param },
+    );
+
+    const flags = flags_param.validate() orelse return Errno.inval;
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    file.fd_fdstat_set_flags(flags) catch |e| return .mapError(e);
+
+    return Errno.success;
+}
+
+fn fd_fdstat_set_rights(
+    wasi: *WasiPreview1,
+    _: *MemInst,
+    raw_fd: i32,
+    raw_rights_base: i64,
+    raw_rights_inheriting: i64,
+) Errno {
+    const abi_rights_base: types.Rights = @bitCast(raw_rights_base);
+    const abi_rights_inheriting: types.Rights = @bitCast(raw_rights_inheriting);
+
+    std.log.debug(
+        "fd_fdstat_set_rights({d}, {f}, {f})",
+        .{ @as(u32, @bitCast(raw_fd)), abi_rights_base, abi_rights_inheriting },
+    );
+
+    const rights_base: types.Rights.Valid = abi_rights_base.validate() orelse
+        return Errno.inval;
+    const rights_inheriting: types.Rights.Valid = abi_rights_inheriting.validate() orelse
+        return Errno.inval;
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    file.fd_fdstat_set_rights(rights_base, rights_inheriting) catch |e| return .mapError(e);
+
+    return Errno.success;
+}
+
+fn fd_filestat_get(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_ret: i32,
+) Errno {
+    const ret_ptr = pointer.Pointer(types.FileStat){ .addr = @as(u32, @bitCast(raw_ret)) };
+
+    std.log.debug("fd_filestat_get({}, {f})", .{ @as(u32, @bitCast(raw_fd)), ret_ptr });
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    ret_ptr.write(
+        mem,
+        file.fd_filestat_get() catch |e| return .mapError(e),
+    ) catch |e| return .mapError(e);
+
+    return Errno.success;
+}
+
+fn fd_filestat_set_size(
+    wasi: *WasiPreview1,
+    _: *MemInst,
+    raw_fd: i32,
+    raw_size: i64,
+) Errno {
+    const size = types.FileSize{ .bytes = @as(u64, @bitCast(raw_size)) };
+
+    std.log.debug(
+        "fd_filestat_set_size({d}, {d})",
+        .{ @as(u32, @bitCast(raw_fd)), size.bytes },
+    );
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    file.fd_filestat_set_size(size) catch |e| return .mapError(e);
+
+    return Errno.success;
+}
+
+fn fd_filestat_set_times(
+    wasi: *WasiPreview1,
+    _: *MemInst,
+    raw_fd: i32,
+    raw_atim: i64,
+    raw_mtim: i64,
+    raw_fst_flags: i32,
+) Errno {
+    const atim = types.Timestamp{ .ns = @as(u64, @bitCast(raw_atim)) };
+    const mtim = types.Timestamp{ .ns = @as(u64, @bitCast(raw_mtim)) };
+    const flags_param: types.FstFlags.Param = @bitCast(raw_fst_flags);
+
+    std.log.debug(
+        "fd_filestat_set_times({d}, {d}, {d}, {f})",
+        .{ @as(u32, @bitCast(raw_fd)), atim.ns, mtim.ns, flags_param },
+    );
+
+    const flags: types.FstFlags.Valid = flags_param.validate() orelse return Errno.inval;
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    file.fd_filestat_set_times(atim, mtim, flags) catch |e| return .mapError(e);
+
+    return Errno.success;
+}
+
+fn fd_pread(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_iovs: i32,
+    raw_iovs_len: i32,
+    raw_offset: i64,
+    raw_ret: i32,
+) Errno {
+    const iovs_ptr = pointer.ConstPointer(Iovec){ .addr = @bitCast(raw_iovs) };
+    const iovs_len: u32 = @bitCast(raw_iovs_len);
+    const ret_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
+    const offset = types.FileSize{ .bytes = @bitCast(raw_offset) };
+
+    std.log.debug(
+        "fd_pread({d}, {f}, {d}, {d}, {f})",
+        .{
+            @as(u32, @bitCast(raw_fd)),
+            iovs_ptr,
+            iovs_len,
+            offset.bytes,
+            ret_ptr,
+        },
+    );
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    var scratch = wasi.acquireScratch();
+    defer wasi.releaseScratch(scratch);
+
+    const iovs = Iovs.init(mem, iovs_ptr, iovs_len, &scratch) catch |e| return .mapError(e);
+
+    ret_ptr.write(
+        mem,
+        file.fd_pread(iovs.list, offset, iovs.total_len) catch |e| return .mapError(e),
+    ) catch |e| return .mapError(e);
+
     return .success;
 }
 
@@ -285,7 +626,7 @@ fn fd_prestat_get(
     raw_fd: i32,
     raw_buf: i32,
 ) Errno {
-    const buf_ptr = pointer.Pointer(types.Prestat){ .addr = @as(u32, @bitCast(raw_buf)) };
+    const buf_ptr = pointer.Pointer(types.PreStat){ .addr = @as(u32, @bitCast(raw_buf)) };
 
     // std.log.debug("fd_prestat_get({}, {f})", .{ @as(u32, @bitCast(raw_fd)), buf_ptr });
 
@@ -324,39 +665,6 @@ fn fd_prestat_dir_name(
     return .success;
 }
 
-const Ciovs = struct {
-    list: []const File.Ciovec,
-    total_len: u32,
-
-    fn init(
-        mem: *MemInst,
-        ptr: pointer.ConstPointer(Ciovec),
-        len: u32,
-        scratch: *ArenaAllocator,
-    ) !Ciovs {
-        const iovs = try pointer.ConstSlice(Ciovec).init(mem, ptr, len);
-        var list = try std.ArrayListUnmanaged(File.Ciovec).initCapacity(
-            scratch.allocator(),
-            iovs.items.len,
-        );
-        var total_len: u32 = 0;
-        for (0..iovs.items.len) |i| {
-            if (i > 0) {
-                @branchHint(.cold);
-            }
-
-            const ciovec = try iovs.read(i).bytes(mem);
-            const ciovec_len = std.math.cast(u32, ciovec.len) orelse break;
-            total_len = std.math.add(u32, total_len, ciovec_len) catch |e| switch (e) {
-                error.Overflow => return error.InvalidArgument,
-            };
-            list.appendAssumeCapacity(File.Ciovec.init(ciovec));
-        }
-
-        return .{ .list = list.items, .total_len = total_len };
-    }
-};
-
 fn fd_pwrite(
     wasi: *WasiPreview1,
     mem: *MemInst,
@@ -367,6 +675,7 @@ fn fd_pwrite(
     raw_ret: i32,
 ) Errno {
     const iovs_ptr = pointer.ConstPointer(Ciovec){ .addr = @bitCast(raw_iovs) };
+    const iovs_len: u32 = @bitCast(raw_iovs_len);
     const ret_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
     const offset = types.FileSize{ .bytes = @bitCast(raw_offset) };
 
@@ -375,7 +684,7 @@ fn fd_pwrite(
     //     .{
     //         @as(u32, @bitCast(raw_fd)),
     //         iovs_ptr,
-    //         @as(u32, @bitCast(raw_iovs_len)),
+    //         iovs_len,
     //         offset.bytes,
     //         ret_ptr,
     //     },
@@ -388,12 +697,45 @@ fn fd_pwrite(
     var scratch = wasi.acquireScratch();
     defer wasi.releaseScratch(scratch);
 
-    const ciovs = Ciovs.init(mem, iovs_ptr, @bitCast(raw_iovs_len), &scratch) catch |e|
-        return .mapError(e);
+    const ciovs = Ciovs.init(mem, iovs_ptr, iovs_len, &scratch) catch |e| return .mapError(e);
 
     ret_ptr.write(
         mem,
         file.fd_pwrite(ciovs.list, offset, ciovs.total_len) catch |e| return .mapError(e),
+    ) catch |e| return .mapError(e);
+
+    return .success;
+}
+
+fn fd_read(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_iovs: i32,
+    raw_iovs_len: i32,
+    raw_ret: i32,
+) Errno {
+    const iovs_ptr = pointer.ConstPointer(Iovec){ .addr = @bitCast(raw_iovs) };
+    const iovs_len: u32 = @bitCast(raw_iovs_len);
+    const ret_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
+
+    std.log.debug(
+        "fd_read({}, {f}, {}, {f})\n",
+        .{ @as(u32, @bitCast(raw_fd)), iovs_ptr, iovs_len, ret_ptr },
+    );
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    var scratch = wasi.acquireScratch();
+    defer wasi.releaseScratch(scratch);
+
+    const iovs = Iovs.init(mem, iovs_ptr, iovs_len, &scratch) catch |e| return .mapError(e);
+
+    ret_ptr.write(
+        mem,
+        file.fd_read(iovs.list, iovs.total_len) catch |e| return .mapError(e),
     ) catch |e| return .mapError(e);
 
     return .success;
@@ -436,6 +778,100 @@ fn fd_readdir(
     return .success;
 }
 
+/// Atomically replace a file descriptor by renumbering another file descriptor.
+///
+/// Due to the strong focus on thread safety, this environment does not provide a mechanism to
+/// duplicate or renumber a file descriptor to an arbitrary number, like `dup2()`. This would be
+/// prone to race conditions, as an actual file descriptor with the same number could be allocated
+/// by a different thread at the same time. This function provides a way to atomically renumber
+/// file descriptors, which would disappear if `dup2()` were to be removed entirely.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#fd_renumber
+fn fd_renumber(
+    wasi: *WasiPreview1,
+    _: *MemInst,
+    raw_fd: i32,
+    raw_to: i32,
+) Errno {
+    std.log.debug(
+        "fd_renumber({d}, {d})",
+        .{ @as(u32, @bitCast(raw_fd)), @as(u32, @bitCast(raw_to)) },
+    );
+
+    const old_fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const new_fd = Fd.initRaw(raw_to) catch |e| return .mapError(e);
+    _ = wasi;
+    // wasi.fd_table.renumber(old_fd, new_fd) catch |e| return .mapError(e);
+    _ = old_fd;
+    _ = new_fd;
+
+    return .nosys; // TODO: figure out semantics of `fd_renumber`
+}
+
+fn fd_seek(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_filedelta: i64,
+    raw_whence: i32,
+    raw_ret: i32,
+) Errno {
+    const delta = types.FileDelta{ .offset = raw_filedelta };
+    const whence_bits: u32 = @bitCast(raw_whence);
+    const whence_casted = std.enums.fromInt(types.Whence, raw_whence);
+    const ret_ptr = pointer.Pointer(types.FileSize){ .addr = @as(u32, @bitCast(raw_ret)) };
+
+    std.log.debug(
+        "fd_seek({d}, {d}, {d} ({s}), {f})",
+        .{
+            @as(u32, @bitCast(raw_fd)),
+            delta.offset,
+            whence_bits,
+            if (whence_casted) |whence| @tagName(whence) else "invalid",
+            ret_ptr,
+        },
+    );
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    ret_ptr.write(
+        mem,
+        file.fd_seek(delta, whence_casted orelse return .inval) catch |e| return .mapError(e),
+    ) catch |e| return .mapError(e);
+
+    return .success;
+}
+
+fn fd_sync(wasi: *WasiPreview1, _: *MemInst, raw_fd: i32) Errno {
+    std.log.debug("fd_seek({d})", .{@as(u32, @bitCast(raw_fd))});
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    file.fd_sync() catch |e| return .mapError(e);
+
+    return .success;
+}
+
+fn fd_tell(wasi: *WasiPreview1, mem: *MemInst, raw_fd: i32, raw_ret: i32) Errno {
+    const ret_ptr = pointer.Pointer(types.FileSize){ .addr = @as(u32, @bitCast(raw_ret)) };
+    std.log.debug("fd_tell({d}, {f})", .{ @as(u32, @bitCast(raw_fd)), ret_ptr });
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    ret_ptr.write(
+        mem,
+        file.fd_tell() catch |e| return .mapError(e),
+    ) catch |e| return .mapError(e);
+
+    return .success;
+}
+
 fn fd_write(
     wasi: *WasiPreview1,
     mem: *MemInst,
@@ -445,16 +881,12 @@ fn fd_write(
     raw_ret: i32,
 ) Errno {
     const iovs_ptr = pointer.ConstPointer(Ciovec){ .addr = @bitCast(raw_iovs) };
+    const iovs_len: u32 = @bitCast(raw_iovs_len);
     const ret_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
 
     // std.log.debug(
     //     "fd_write({}, {f}, {}, {f})\n",
-    //     .{
-    //         @as(u32, @bitCast(raw_fd)),
-    //         iovs_ptr,
-    //         @as(u32, @bitCast(raw_iovs_len)),
-    //         ret_ptr,
-    //     },
+    //     .{ @as(u32, @bitCast(raw_fd)), iovs_ptr, iovs_len, ret_ptr },
     // );
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
@@ -464,8 +896,7 @@ fn fd_write(
     var scratch = wasi.acquireScratch();
     defer wasi.releaseScratch(scratch);
 
-    const ciovs = Ciovs.init(mem, iovs_ptr, @bitCast(raw_iovs_len), &scratch) catch |e|
-        return .mapError(e);
+    const ciovs = Ciovs.init(mem, iovs_ptr, iovs_len, &scratch) catch |e| return .mapError(e);
 
     ret_ptr.write(
         mem,
@@ -529,12 +960,28 @@ pub fn dispatch(
         .args_sizes_get,
         .environ_get,
         .environ_sizes_get,
+        .clock_res_get,
+        .clock_time_get,
+        .fd_advise,
+        .fd_allocate,
         .fd_close,
+        .fd_datasync,
         .fd_fdstat_get,
+        .fd_fdstat_set_flags,
+        .fd_fdstat_set_rights,
+        .fd_filestat_get,
+        .fd_filestat_set_size,
+        .fd_filestat_set_times,
+        .fd_pread,
         .fd_prestat_get,
         .fd_prestat_dir_name,
-        .fd_readdir,
         .fd_pwrite,
+        .fd_read,
+        .fd_readdir,
+        .fd_renumber,
+        .fd_seek,
+        .fd_sync,
+        .fd_tell,
         .fd_write,
         => |id| {
             const signature = comptime id.signature();
@@ -557,17 +1004,6 @@ pub fn dispatch(
                     fuel,
                 ) catch unreachable,
             };
-        },
-        else => if (std.mem.eql(Module.ValType, api.signature().results(), &.{.i32})) {
-            std.log.err("TODO: handle {t}", .{api});
-            return .{
-                .@"continue" = state.returnFromHostTyped(
-                    .{@as(i32, @intFromEnum(Errno.nosys))},
-                    fuel,
-                ) catch unreachable,
-            };
-        } else {
-            std.debug.panic("TODO: handle {t}", .{api});
         },
     }
 }

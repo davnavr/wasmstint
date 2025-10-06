@@ -82,16 +82,7 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
 
     return .{
         .type = @"type",
-        .flags = types.FdFlags{
-            .valid = .{
-                .append = access.APPEND,
-                .dsync = if (@hasField(std.posix.O, "DSYNC")) access.DSYNC else false,
-                .nonblock = access.NONBLOCK,
-                // O_RSYNC not implemented on Linux
-                .rsync = if (@hasField(std.posix.O, "RSYNC")) access.RSYNC else false,
-                .sync = access.SYNC, // FILE_FLAG_WRITE_THROUGH on Windows? https://github.com/golang/go/issues/35358
-            },
-        },
+        .flags = types.FdFlags{ .valid = types.FdFlags.Valid.fromFlagsPosix(access) },
     };
 }
 
@@ -208,13 +199,26 @@ fn fd_write(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!u32 {
 }
 
 const vtable = File.VTable{
-    .fd_fdstat_get = fd_fdstat_get,
-    .fd_prestat_get = File.invalid.fd_prestat_get,
-    .fd_prestat_dir_name = File.invalid.fd_prestat_dir_name,
-    .fd_readdir = File.invalid.fd_readdir,
-    .fd_write = fd_write,
-    .fd_pwrite = fd_pwrite,
+    .fd_advise = File.unimplemented.fd_advise,
+    .fd_allocate = File.unimplemented.fd_allocate,
     .fd_close = fd_close,
+    .fd_datasync = File.unimplemented.fd_datasync,
+    .fd_fdstat_get = fd_fdstat_get,
+    .fd_fdstat_set_flags = File.unimplemented.fd_fdstat_set_flags,
+    .fd_filestat_get = File.unimplemented.fd_filestat_get,
+    .fd_filestat_set_size = File.unimplemented.fd_filestat_set_size,
+    .fd_filestat_set_times = File.unimplemented.fd_filestat_set_times,
+    .fd_pread = File.unimplemented.fd_pread,
+    .fd_prestat_get = File.not_dir.fd_prestat_get,
+    .fd_prestat_dir_name = File.not_dir.fd_prestat_dir_name,
+    .fd_pwrite = fd_pwrite,
+    .fd_read = File.unimplemented.fd_read,
+    .fd_readdir = File.not_dir.fd_readdir,
+    .fd_seek = File.unimplemented.fd_seek,
+    .fd_sync = File.unimplemented.fd_sync,
+    .fd_tell = File.unimplemented.fd_tell,
+    // TODO
+    .fd_write = fd_write,
 };
 
 const std = @import("std");

@@ -3,21 +3,28 @@ pub const Api = enum {
     args_sizes_get,
     environ_get,
     environ_sizes_get,
-
+    clock_res_get,
+    clock_time_get,
+    fd_advise,
+    fd_allocate,
     fd_close,
-
+    fd_datasync,
     fd_fdstat_get,
-
+    fd_fdstat_set_flags,
+    fd_fdstat_set_rights,
     fd_filestat_get,
-
+    fd_filestat_set_size,
+    fd_filestat_set_times,
+    fd_pread,
     fd_prestat_get,
     fd_prestat_dir_name,
     fd_pwrite,
     fd_read,
     fd_readdir,
-
+    fd_renumber,
     fd_seek,
-
+    fd_sync,
+    fd_tell,
     fd_write,
 
     // poll_oneoff,
@@ -25,6 +32,9 @@ pub const Api = enum {
     // proc_raise,
     sched_yield,
     // random_get,
+
+    // /// https://github.com/WebAssembly/wasi-threads/blob/main/wasi-threads.abi.md
+    // @"thread-spawn", // in "wasi" module, not "wasi_snapshot_preview1"
 
     fn returnsErrno(comptime params: []const Module.ValType) Module.FuncType {
         return .initComptime(params, &.{.i32});
@@ -36,20 +46,32 @@ pub const Api = enum {
             .args_sizes_get,
             .environ_get,
             .environ_sizes_get,
+            .clock_res_get,
             .fd_fdstat_get,
+            .fd_fdstat_set_flags,
             .fd_filestat_get,
             .fd_prestat_get,
+            .fd_renumber,
+            .fd_tell,
             => returnsErrno(&.{ .i32, .i32 }),
-
-            .fd_close => returnsErrno(&.{.i32}),
-
+            .clock_time_get => returnsErrno(&.{ .i32, .i64, .i32 }),
+            .fd_advise,
+            .fd_filestat_set_times,
+            => returnsErrno(&.{ .i32, .i64, .i64, .i32 }),
+            .fd_allocate,
+            .fd_fdstat_set_rights,
+            => returnsErrno(&.{ .i32, .i64, .i64 }),
+            .fd_filestat_set_size => returnsErrno(&.{ .i32, .i64 }),
+            .fd_close,
+            .fd_datasync,
+            .fd_sync,
+            => returnsErrno(&.{.i32}),
             .fd_prestat_dir_name => returnsErrno(&.{ .i32, .i32, .i32 }),
-
+            .fd_pread,
             .fd_pwrite,
             .fd_readdir,
             => returnsErrno(&.{ .i32, .i32, .i32, .i64, .i32 }),
             .fd_read, .fd_write => returnsErrno(&.{ .i32, .i32, .i32, .i32 }),
-
             .fd_seek => returnsErrno(&.{ .i32, .i64, .i32, .i32 }),
 
             .proc_exit => .initComptime(&.{.i32}, &.{}),
