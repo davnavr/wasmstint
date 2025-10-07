@@ -487,7 +487,7 @@ const Wasip1Interp = struct {
             .name = "wasmstint-wasip1",
             .root_module = module,
             .use_llvm = proj_opts.use_llvm,
-            .max_rss = ByteSize.mib(388).bytes,
+            .max_rss = ByteSize.mib(420).bytes,
         });
 
         addCheck(

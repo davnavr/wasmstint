@@ -40,7 +40,7 @@ const Arguments = cli_args.CliArgs(.{
                 .description = "Limits the size of the WASM value/call stack",
             },
             u32,
-        ).withDefault(8192),
+        ).withDefault(1024 * 256),
         cli_args.Flag.integerSizeSuffix(
             .{
                 .long = "max-memory-size",
