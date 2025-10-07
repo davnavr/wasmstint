@@ -198,6 +198,38 @@ fn fd_write(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!u32 {
     return @intCast(written);
 }
 
+fn sock_accept(ctx: Ctx, flags: types.FdFlags.Valid) Error!File {
+    _ = ctx;
+    _ = flags;
+    return Error.Unimplemented;
+}
+
+fn sock_recv(
+    ctx: Ctx,
+    iovs: []const File.Iovec,
+    total_len: u32,
+    flags: types.RiFlags.Valid,
+) Error!File.SockRecvResult {
+    _ = ctx;
+    _ = iovs;
+    _ = total_len;
+    _ = flags;
+    return Error.Unimplemented;
+}
+
+fn sock_send(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!types.Size {
+    _ = ctx;
+    _ = iovs;
+    _ = total_len;
+    return Error.Unimplemented;
+}
+
+pub fn sock_shutdown(ctx: Ctx, how: types.SdFlags.Valid) Error!void {
+    _ = ctx;
+    _ = how;
+    return Error.Unimplemented;
+}
+
 const vtable = File.VTable{
     .fd_advise = File.unimplemented.fd_advise,
     .fd_allocate = File.unimplemented.fd_allocate,
@@ -226,6 +258,10 @@ const vtable = File.VTable{
     .path_remove_directory = path_remove_directory,
     .path_symlink = path_symlink,
     .path_unlink_file = path_unlink_file,
+    .sock_accept = sock_accept,
+    .sock_recv = sock_recv,
+    .sock_send = sock_send,
+    .sock_shutdown = sock_shutdown,
 };
 
 fn path_create_directory(_: Ctx, _: []const u8) Error!void {

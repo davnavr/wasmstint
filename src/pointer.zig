@@ -253,8 +253,12 @@ pub fn Pointer(comptime T: type) type {
             return ptr.constCast().read(mem);
         }
 
+        pub fn access(ptr: Self, mem: *const MemInst) OobError!*[@sizeOf(T)]u8 {
+            return accessArray(mem, ptr.addr, @sizeOf(T));
+        }
+
         pub fn write(ptr: Self, mem: *const MemInst, value: T) OobError!void {
-            return writeToBytes(T, try accessArray(mem, ptr.addr, @sizeOf(T)), value);
+            return writeToBytes(T, try ptr.access(mem), value);
         }
 
         pub fn format(ptr: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {

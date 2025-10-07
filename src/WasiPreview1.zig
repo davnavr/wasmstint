@@ -1081,10 +1081,15 @@ fn typedPathOpen(
     rights_inheriting: types.Rights.Valid,
     fs_flags: types.FdFlags.Valid,
 ) !Fd {
-    const dir = try wasi.fd_table.get(dir_fd);
+    const new_fd = try wasi.fd_table.create(wasi.allocator);
     wasi.fd_table.unlockTable();
+    errdefer {
+        std.debug.assert(wasi.fd_table.removeWithoutClosing(new_fd.fd));
+    }
+    const dir = try wasi.fd_table.get(dir_fd);
+    defer wasi.fd_table.unlockTable();
 
-    var new_file = try dir.path_open(
+    new_fd.file.* = try dir.path_open(
         dir_flags,
         path,
         open_flags,
@@ -1092,13 +1097,7 @@ fn typedPathOpen(
         rights_inheriting,
         fs_flags,
     );
-    const new_fd = wasi.fd_table.create(wasi.allocator) catch |e| {
-        new_file.fd_close(wasi.allocator) catch |err| return err;
-        return e;
-    };
-    errdefer comptime unreachable;
 
-    new_fd.file.* = new_file;
     return new_fd.fd;
 }
 
@@ -1151,6 +1150,8 @@ fn path_open(
     const rights_inheriting = rights_inheriting_param.validate() orelse return Errno.inval;
     const fs_flags = fs_flags_param.validate() orelse return Errno.inval;
 
+    const ret_fd_bytes = ret_fd_ptr.access(mem) catch |e| return .mapError(e);
+
     const new_fd = wasi.typedPathOpen(
         dir_fd,
         dir_flags,
@@ -1161,7 +1162,7 @@ fn path_open(
         fs_flags,
     ) catch |e| return .mapError(e);
 
-    ret_fd_ptr.write(mem, @as(u32, @bitCast(new_fd))) catch |e| return .mapError(e);
+    pointer.writeToBytes(u32, ret_fd_bytes, @bitCast(new_fd));
 
     return .success;
 }
@@ -1441,6 +1442,148 @@ fn random_get(
     return .success;
 }
 
+fn typedSockAccept(
+    wasi: *WasiPreview1,
+    socket_fd: Fd,
+    flags: types.FdFlags.Valid,
+) !Fd {
+    const new_fd = try wasi.fd_table.create(wasi.allocator);
+    wasi.fd_table.unlockTable();
+    errdefer {
+        std.debug.assert(wasi.fd_table.removeWithoutClosing(new_fd.fd));
+    }
+    const socket = try wasi.fd_table.get(socket_fd);
+    defer wasi.fd_table.unlockTable();
+
+    new_fd.file.* = try socket.sock_accept(flags);
+    return new_fd.fd;
+}
+
+fn sock_accept(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_flags: i32,
+    raw_ret: i32,
+) Errno {
+    const flags_param: types.FdFlags.Param = @bitCast(raw_flags);
+    const ret_fd_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
+
+    std.log.debug(
+        "sock_accept({d}, {f}, {f})",
+        .{ @as(u32, @bitCast(raw_fd)), flags_param, ret_fd_ptr },
+    );
+
+    const flags = flags_param.validate() orelse return Errno.inval;
+    const socket_fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+
+    const ret_fd_bytes = ret_fd_ptr.access(mem) catch |e| return .mapError(e);
+    const new_fd = wasi.typedSockAccept(socket_fd, flags) catch |e| return .mapError(e);
+    pointer.writeToBytes(u32, ret_fd_bytes, @bitCast(new_fd));
+    return .success;
+}
+
+fn sock_recv(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_iovs: i32,
+    raw_iovs_len: i32,
+    raw_flags: i32,
+    raw_ret_size: i32,
+    raw_ret_flags: i32,
+) Errno {
+    const iovs_ptr = pointer.ConstPointer(Iovec){ .addr = @bitCast(raw_iovs) };
+    const iovs_len: u32 = @bitCast(raw_iovs_len);
+    const flags_param: types.RiFlags.Param = @bitCast(raw_flags);
+    const ret_size = pointer.Pointer(types.Size){ .addr = @as(u32, @bitCast(raw_ret_size)) };
+    const ret_flags = pointer.Pointer(types.RoFlags){ .addr = @as(u32, @bitCast(raw_ret_flags)) };
+
+    std.log.debug(
+        "sock_recv({d}, {f}, {d}, {f}, {f}, {f})",
+        .{ @as(u32, @bitCast(raw_fd)), iovs_ptr, iovs_len, flags_param, ret_size, ret_flags },
+    );
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const socket = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    const ri_flags = flags_param.validate() orelse return .inval;
+
+    var scratch = wasi.acquireScratch();
+    defer wasi.releaseScratch(scratch);
+
+    const iovs = Iovs.init(mem, iovs_ptr, iovs_len, &scratch) catch |e| return .mapError(e);
+
+    const result = socket.sock_recv(iovs.list, iovs.total_len, ri_flags) catch |e|
+        return .mapError(e);
+
+    ret_size.write(mem, result.len) catch |e| return .mapError(e);
+    ret_flags.write(mem, result.flags) catch |e| return .mapError(e);
+
+    return .success;
+}
+
+fn sock_send(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_iovs: i32,
+    raw_iovs_len: i32,
+    /// Message flags (`siflags`). No flags are defined so this must be set to zero.
+    raw_flags: i32,
+    raw_ret: i32,
+) Errno {
+    const iovs_ptr = pointer.ConstPointer(Ciovec){ .addr = @bitCast(raw_iovs) };
+    const iovs_len: u32 = @bitCast(raw_iovs_len);
+    const flags: u32 = @bitCast(raw_flags);
+    const ret_ptr = pointer.Pointer(types.Size){ .addr = @as(u32, @bitCast(raw_ret)) };
+
+    std.log.debug(
+        "sock_send({d}, {f}, {d}, 0x{X}, {f})\n",
+        .{ @as(u32, @bitCast(raw_fd)), iovs_ptr, iovs_len, flags, ret_ptr },
+    );
+
+    if (flags != 0) {
+        return Errno.inval;
+    }
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    var scratch = wasi.acquireScratch();
+    defer wasi.releaseScratch(scratch);
+
+    const ciovs = Ciovs.init(mem, iovs_ptr, iovs_len, &scratch) catch |e| return .mapError(e);
+
+    ret_ptr.write(
+        mem,
+        file.sock_send(ciovs.list, ciovs.total_len) catch |e| return .mapError(e),
+    ) catch |e| return .mapError(e);
+
+    return .success;
+}
+
+fn sock_shutdown(
+    wasi: *WasiPreview1,
+    _: *MemInst,
+    raw_fd: i32,
+    raw_flags: i32,
+) Errno {
+    const flags_param: types.SdFlags.Param = @bitCast(raw_flags);
+
+    std.log.debug("sock_shutdown({d}, {f})", .{ @as(u32, @bitCast(raw_fd)), flags_param });
+
+    const flags = flags_param.validate() orelse return Errno.inval;
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    file.sock_shutdown(flags) catch |e| return .mapError(e);
+    return .success;
+}
+
 pub const DispatchResult = union(enum) {
     @"continue": Interpreter.State,
     /// The WASM program called `proc_exit()`.
@@ -1532,6 +1675,10 @@ pub fn dispatch(
         .poll_oneoff,
         .proc_raise,
         .random_get,
+        .sock_accept,
+        .sock_recv,
+        .sock_send,
+        .sock_shutdown,
         => |id| {
             const signature = comptime id.signature();
             var args_values: [signature.param_count]Interpreter.TaggedValue = undefined;

@@ -124,27 +124,28 @@ pub const Rights = packed struct(u64) {
     pub const Valid = packed struct(u30) {
         /// The right to invoke `fd_datasync`.
         ///
-        /// If `path_open` is set, includes the right to invoke `path_open` with `fdflags::dsync`.
+        /// If `path_open` is set, includes the right to invoke `path_open` with
+        /// `FdFlags.Valid.dsync`.
         fd_datasync: bool = false,
         /// The right to invoke `fd_read` and `sock_recv`.
         ///
-        /// If `rights::fd_seek` is set, includes the right to invoke `fd_pread`.
+        /// If `Rights.Valid.fd_seek` is set, includes the right to invoke `fd_pread`.
         fd_read: bool = false,
-        /// The right to invoke `fd_seek`. This flag implies `rights::fd_tell`.
+        /// The right to invoke `fd_seek`. This flag implies `Rights.Valid.fd_tell`.
         fd_seek: bool = false,
         /// The right to invoke `fd_fdstat_set_flags`.
         fd_fdstat_set_flags: bool = false,
         /// The right to invoke `fd_sync`.
         ///
         /// If `path_open` is set, includes the right to invoke
-        /// `path_open` with `fdflags::rsync` and `fdflags::dsync`.
+        /// `path_open` with `FdFlags.Valid.rsync` and `FdFlags.Validdsync`.
         fd_sync: bool = false,
         /// The right to invoke `fd_seek` in such a way that the file offset
-        /// remains unaltered (i.e., `whence::cur` with offset zero), or to
+        /// remains unaltered (i.e., `Whence.cur` with offset zero), or to
         /// invoke `fd_tell`.
         fd_tell: bool = false,
         /// The right to invoke `fd_write` and `sock_send`.
-        /// If `rights::fd_seek` is set, includes the right to invoke `fd_pwrite`.
+        /// If `Rights.Valid.fd_seek` is set, includes the right to invoke `fd_pwrite`.
         fd_write: bool = false,
         /// The right to invoke `fd_advise`.
         fd_advise: bool = false,
@@ -174,13 +175,15 @@ pub const Rights = packed struct(u64) {
         path_filestat_get: bool = false,
         /// The right to change a file's size.
         ///
-        /// If `path_open` is set, includes the right to invoke `path_open` with `oflags::trunc`.
+        /// If `path_open` is set, includes the right to invoke `path_open` with
+        /// `OpenFlags.Valid.trunc`.
         ///
         /// Note: there is no function named `path_filestat_set_size`. This follows POSIX design,
         /// which only has `ftruncate` and does not provide `ftruncateat`.
-        /// While such function would be desirable from the API design perspective, there are virtually
-        /// no use cases for it since no code written for POSIX systems would use it.
-        /// Moreover, implementing it would require multiple syscalls, leading to inferior performance.
+        /// While such function would be desirable from the API design perspective, there are
+        /// virtually no use cases for it since no code written for POSIX systems would use it.
+        /// Moreover, implementing it would require multiple syscalls, leading to inferior
+        /// performance.
         path_filestat_set_size: bool = false,
         /// The right to invoke `path_filestat_set_times`.
         path_filestat_set_times: bool = false,
@@ -196,11 +199,11 @@ pub const Rights = packed struct(u64) {
         path_remove_directory: bool = false,
         /// The right to invoke `path_unlink_file`.
         path_unlink_file: bool = false,
-        /// If `rights::fd_read` is set, includes the right to invoke `poll_oneoff` to subscribe to
-        /// `eventtype::fd_read`.
+        /// If `Rights.Valid.fd_read` is set, includes the right to invoke `poll_oneoff` to
+        /// subscribe to `EventType.fd_read`.
         ///
-        /// If `rights::fd_write` is set, includes the right to invoke `poll_oneoff` to subscribe to
-        /// `eventtype::fd_write`.
+        /// If `Rights.Valid.fd_write` is set, includes the right to invoke `poll_oneoff` to
+        /// subscribe to `EventType.fd_write`.
         poll_fd_readwrite: bool = false,
         /// The right to invoke `sock_shutdown`.
         sock_shutdown: bool = false,
@@ -644,7 +647,7 @@ pub const Event = extern struct {
         };
 
         valid: Valid,
-        padding: u15,
+        padding: u15 = 0,
 
         pub const format = flagsFormatterWithInvalid(RwFlags);
 
@@ -747,6 +750,67 @@ pub const Signal = enum(u8) {
     /// Bad system call.
     /// Action: Terminates the process.
     sys,
+};
+
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#riflags
+pub const RiFlags = packed struct(u16) {
+    pub const Valid = packed struct(u2) {
+        /// Returns the message without removing it from the socket's receive queue.
+        recv_peek: bool,
+        /// On byte-stream sockets, block until the full amount of data can be returned.
+        recv_wait_all: bool,
+
+        pub const format = flagsFormatter(Valid);
+    };
+
+    valid: Valid,
+    padding: u14 = 0,
+
+    pub const Param = packed struct(u32) {
+        valid: Valid,
+        padding: u30 = 0,
+
+        pub const format = flagsFormatterWithInvalid(Param);
+        pub const validate = validateFlags(Param);
+    };
+};
+
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#roflags
+pub const RoFlags = packed struct(u16) {
+    pub const Valid = packed struct(u1) {
+        /// Message data has been truncated.
+        recv_data_truncated: bool,
+
+        pub const format = flagsFormatter(Valid);
+    };
+
+    valid: Valid,
+    padding: u15 = 0,
+};
+
+/// Which channels on a socket to shut down.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#sdflags
+pub const SdFlags = packed struct(u8) {
+    pub const Valid = packed struct(u2) {
+        /// Disables further receive operations.
+        rd: bool,
+        /// Disables further send operations.
+        wr: bool,
+
+        pub const format = flagsFormatter(Valid);
+    };
+
+    valid: Valid,
+    padding: u6,
+
+    pub const Param = packed struct(u32) {
+        valid: Valid,
+        padding: u30 = 0,
+
+        pub const format = flagsFormatterWithInvalid(Param);
+        pub const validate = validateFlags(Param);
+    };
 };
 
 const std = @import("std");

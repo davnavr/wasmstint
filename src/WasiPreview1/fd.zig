@@ -114,12 +114,7 @@ const FdTable = struct {
 
     /// Returns `true` if `fd` was valid and successfully removed.
     pub fn removeWithoutClosing(table: *FdTable, fd: Fd) bool {
-        if (table.entries.fetchSwapRemove(fd)) |removed| {
-            removed.value.deinit();
-            return true;
-        } else {
-            return false;
-        }
+        return table.entries.swapRemove(fd);
     }
 
     const preopens_start = 3;

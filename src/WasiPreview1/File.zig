@@ -95,7 +95,7 @@ pub const Iovec = extern struct {
         };
     }
 
-    pub fn bytes(iov: Iovec) []const u8 {
+    pub fn bytes(iov: Iovec) []u8 {
         return iov.inner.base[0..iov.inner.len];
     }
 
@@ -197,6 +197,8 @@ pub const unimplemented = struct {
         return Error.Unimplemented;
     }
 };
+
+pub const SockRecvResult = struct { len: types.Size, flags: types.RoFlags };
 
 /// Do not call function pointers without checking the corresponding `File`'s `rights`.
 pub const VTable = struct {
@@ -308,6 +310,19 @@ pub const VTable = struct {
     path_symlink: *const fn (ctx: Ctx, old_path: []const u8, new_path: []const u8) Error!void,
 
     path_unlink_file: *const fn (ctx: Ctx, path: []const u8) Error!void,
+
+    sock_accept: *const fn (ctx: Ctx, flags: types.FdFlags.Valid) Error!File,
+
+    sock_recv: *const fn (
+        ctx: Ctx,
+        iovs: []const Iovec,
+        total_len: u32,
+        flags: types.RiFlags.Valid,
+    ) Error!SockRecvResult,
+
+    sock_send: *const fn (ctx: Ctx, iovs: []const Ciovec, total_len: u32) Error!types.Size,
+
+    sock_shutdown: *const fn (ctx: Ctx, how: types.SdFlags.Valid) Error!void,
 };
 
 fn hasVTable(file: *const File, vtable: *const VTable) bool {
@@ -535,7 +550,7 @@ pub fn fd_read(
     file: *File,
     /// List of scatter/gather vectors to which to store data.
     iovs: []const Iovec,
-    /// Total length of all data in `iovs`, in bytes.
+    /// Total length of all buffers in `iovs`.
     total_len: u32,
 ) Error!u32 {
     return (try file.api(.fd_read, .fd_read))(file.impl.ctx, iovs, total_len);
@@ -747,12 +762,77 @@ pub fn path_symlink(
     try (try file.api(.path_symlink, .path_symlink))(file.impl.ctx, old_path, new_path);
 }
 
+/// Unlink a file. Returns `Error.IsDir` if the path refers to a directory.
+///
+/// This is similar to `unlinkat(fd, path, 0)` in POSIX.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#path_unlink_file
 pub fn path_unlink_file(
     file: *File,
     /// The path to a file to unlink.
     path: []const u8,
 ) Error!void {
     try (try file.api(.path_unlink_file, .path_unlink_file))(file.impl.ctx, path);
+}
+
+/// Accept a new incoming connection.
+///
+/// This is similar to `accept` in POSIX.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#sock_accept
+pub fn sock_accept(
+    socket: *File,
+    /// The desired values of the file descriptor flags.
+    flags: types.FdFlags.Valid,
+) Error!File {
+    return (try socket.api(.sock_accept, .sock_accept))(socket.impl.ctx, flags);
+}
+
+/// Receive a message from a socket.
+///
+/// This is similar to `recv` in POSIX, though it also supports reading the data into multiple
+/// buffers in the manner of `readv`.
+///
+/// Returns the number of bytes stored in `iovs` and message flags.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#sock_recv
+pub fn sock_recv(
+    socket: *File,
+    /// List of scatter/gather vectors to which to store data.
+    iovs: []const Iovec,
+    /// Total length of all buffers in `iovs`.
+    total_len: u32,
+    /// Message flags.
+    flags: types.RiFlags.Valid,
+) Error!SockRecvResult {
+    return (try socket.api(.fd_read, .sock_recv))(socket.impl.ctx, iovs, total_len, flags);
+}
+
+/// Send a message on a socket.
+///
+/// Returns the number of bytes transmitted.
+///
+/// This is similar to `send` in POSIX, though it also supports writing the data from multiple
+/// buffers in the manner of `writev`.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#sock_send
+pub fn sock_send(
+    socket: *File,
+    /// List of scatter/gather vectors to which to retrieve data
+    iovs: []const Ciovec,
+    /// Total length, in bytes, of all of the data to send.
+    total_len: u32,
+    // flags: types.SiFlags.Valid, // No flags are defined
+) Error!types.Size {
+    return (try socket.api(.fd_write, .sock_send))(socket.impl.ctx, iovs, total_len);
+}
+
+pub fn sock_shutdown(
+    socket: *File,
+    /// Which channels on the socket to shut down.
+    how: types.SdFlags.Valid,
+) Error!void {
+    try (try socket.api(.sock_shutdown, .sock_shutdown))(socket.impl.ctx, how);
 }
 
 const std = @import("std");

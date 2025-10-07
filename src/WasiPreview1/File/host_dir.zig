@@ -375,6 +375,10 @@ pub const vtable = File.VTable{
     .path_remove_directory = path_remove_directory,
     .path_symlink = path_symlink,
     .path_unlink_file = path_unlink_file,
+    .sock_accept = sock_accept,
+    .sock_recv = sock_recv,
+    .sock_send = sock_send,
+    .sock_shutdown = sock_shutdown,
 };
 
 fn fd_advise(_: Ctx, _: types.FileSize, _: types.FileSize, _: types.Advice) Error!void {
@@ -418,6 +422,27 @@ fn fd_tell(_: Ctx) Error!types.FileSize {
 }
 
 fn fd_write(_: Ctx, _: []const File.Ciovec, _: u32) Error!u32 {
+    @trap();
+}
+
+fn sock_accept(_: Ctx, _: types.FdFlags.Valid) Error!File {
+    @trap();
+}
+
+fn sock_recv(
+    _: Ctx,
+    _: []const File.Iovec,
+    _: u32,
+    _: types.RiFlags.Valid,
+) Error!File.SockRecvResult {
+    @trap();
+}
+
+fn sock_send(_: Ctx, _: []const File.Ciovec, _: u32) Error!types.Size {
+    @trap();
+}
+
+fn sock_shutdown(_: Ctx, _: types.SdFlags.Valid) Error!void {
     @trap();
 }
 

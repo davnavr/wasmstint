@@ -48,6 +48,10 @@ pub const Api = enum {
     /// This is similar to `sched_yield` in POSIX.
     sched_yield,
     random_get,
+    sock_accept,
+    sock_recv,
+    sock_send,
+    sock_shutdown,
 
     // /// https://github.com/WebAssembly/wasi-threads/blob/main/wasi-threads.abi.md
     // @"thread-spawn", // in "wasi" module, not "wasi_snapshot_preview1"
@@ -70,6 +74,7 @@ pub const Api = enum {
             .fd_renumber,
             .fd_tell,
             .random_get,
+            .sock_shutdown,
             => returnsErrno(&.{ .i32, .i32 }),
             .clock_time_get => returnsErrno(&.{ .i32, .i64, .i32 }),
             .fd_advise,
@@ -88,6 +93,7 @@ pub const Api = enum {
             .path_create_directory,
             .path_remove_directory,
             .path_unlink_file,
+            .sock_accept,
             => returnsErrno(&.{ .i32, .i32, .i32 }),
             .fd_pread,
             .fd_pwrite,
@@ -100,6 +106,7 @@ pub const Api = enum {
             .fd_seek => returnsErrno(&.{ .i32, .i64, .i32, .i32 }),
             .path_filestat_get,
             .path_symlink,
+            .sock_send,
             => returnsErrno(&.{ .i32, .i32, .i32, .i32, .i32 }),
             .path_filestat_set_times => returnsErrno(
                 &.{ .i32, .i32, .i32, .i32, .i64, .i64, .i32 },
@@ -112,6 +119,7 @@ pub const Api = enum {
             ),
             .path_readlink,
             .path_rename,
+            .sock_recv,
             => returnsErrno(&.{ .i32, .i32, .i32, .i32, .i32, .i32 }),
 
             .proc_exit => .initComptime(&.{.i32}, &.{}),
@@ -154,14 +162,13 @@ pub const Api = enum {
     }
 
     pub fn name(api: Api) Module.Name {
-        return switch (api) {
-            inline else => |tag| comptime .init(@tagName(tag)),
-        };
+        return Module.Name.init(@tagName(api));
     }
 
     const all = std.enums.values(Api);
 
     const min_name_len: comptime_int = max: {
+        @setEvalBranchQuota(3000);
         var len = std.math.maxInt(u16);
         for (all) |api| {
             len = @min(len, api.name().len);
@@ -170,6 +177,7 @@ pub const Api = enum {
     };
 
     const max_name_len: comptime_int = max: {
+        @setEvalBranchQuota(3000);
         var len = 0;
         for (all) |api| {
             len = @max(len, api.name().len);
