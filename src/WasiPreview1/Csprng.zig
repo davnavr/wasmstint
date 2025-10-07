@@ -9,7 +9,19 @@ const Csprng = @This();
 
 pub const FillError = error{
     Unexpected,
+    Unimplemented,
+
+    // Subset of `std.posix.GetRandomError`
+    AccessDenied,
+    FileNotFound,
+    IsDir,
+    NotDir,
+    PermissionDenied,
     ProcessFdQuotaExceeded,
+    SymLinkLoop,
+    SystemFdQuotaExceeded,
+    SystemResources,
+    WouldBlock,
 };
 
 pub fn get(csprng: Csprng, buf: []u8) FillError!void {
@@ -18,8 +30,23 @@ pub fn get(csprng: Csprng, buf: []u8) FillError!void {
 
 fn osFill(_: *anyopaque, buf: []u8) FillError!void {
     return std.posix.getrandom(buf) catch |e| switch (e) {
-        error.ProcessFdQuotaExceeded => |err| err,
-        else => error.Unexpected,
+        error.Unexpected,
+        error.AccessDenied,
+        error.IsDir,
+        error.NotDir,
+        error.FileNotFound,
+        error.ProcessFdQuotaExceeded,
+        error.SymLinkLoop,
+        error.SystemFdQuotaExceeded,
+        error.SystemResources,
+        error.WouldBlock,
+        => |err| err,
+        else => |unexpected| {
+            if (std.posix.unexpected_error_tracing) {
+                std.debug.print("unexpected getrandom error: {t}\n", .{unexpected});
+            }
+            return error.Unexpected;
+        },
     };
 }
 

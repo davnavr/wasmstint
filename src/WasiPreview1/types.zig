@@ -414,16 +414,16 @@ pub const FdStat = extern struct {
     /// this file descriptor, e.g., through `path_open`.
     rights_inheriting: Rights,
 
-    pub const File = extern struct {
-        type: FileType,
-        flags: FdFlags,
-    };
-
     comptime {
         std.debug.assert(@sizeOf(FdStat) == 24);
         std.debug.assert(@offsetOf(File, "flags") == 2);
         std.debug.assert(@offsetOf(FdStat, "rights_base") == 8);
     }
+
+    pub const File = extern struct {
+        type: FileType,
+        flags: FdFlags,
+    };
 };
 
 /// Which file time attributes to adjust.
@@ -500,5 +500,255 @@ pub const OpenFlags = packed struct(u16) {
     };
 };
 
+/// User-provided value that may be attached to objects that is retained when extracted from
+/// the implementation.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#userdata
+pub const UserData = u64;
+
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#eventtype
+pub const EventType = enum(u8) {
+    /// The time value of clock `Subscription.Clock.id` has reached timestamp
+    /// `Subscription.Clock.timeout`.
+    clock,
+    /// `Subscription.FdReadWrite.file_descriptor` has data available for reading. This event
+    /// always triggers for regular files.
+    fd_read,
+    /// `Subscription.FdReadWrite.file_descriptor` has capacity available for writing. This event
+    /// always triggers for regular files.
+    fd_write,
+};
+
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#subscription
+pub const Subscription = extern struct {
+    /// User-provided value that is attached to the subscription in the implementation and returned
+    /// through `Event.user_data`.
+    user_data: UserData,
+    /// The type of the event to which to subscribe, and its contents.
+    u: Union,
+
+    comptime {
+        std.debug.assert(@sizeOf(Subscription) == 48);
+        std.debug.assert(@offsetOf(Subscription, "user_data") == 0);
+        std.debug.assert(@offsetOf(Subscription, "u") == 8);
+    }
+
+    /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#subscription_u
+    pub const Union = extern struct {
+        tag: EventType,
+        payload: Payload,
+
+        comptime {
+            std.debug.assert(@sizeOf(Union) == 40);
+            std.debug.assert(@sizeOf(Payload) == 32);
+            std.debug.assert(@offsetOf(Union, "payload") == 8);
+        }
+
+        pub const Payload = extern union {
+            clock: Clock,
+            fd_read: FdReadWrite,
+            fd_write: FdReadWrite,
+        };
+    };
+
+    /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#subscription_clock
+    pub const Clock = extern struct {
+        /// The clock against which to compare the timestamp.
+        id: ClockId,
+        /// The absolute or relative timestamp.
+        timeout: Timestamp,
+        /// The amount of time that the implementation may wait additionally to coalesce with other
+        /// events.
+        precision: Timestamp,
+        /// Flags specifying whether the timeout is absolute or relative.
+        flags: SubclockFlags,
+
+        comptime {
+            std.debug.assert(@sizeOf(Clock) == 32);
+        }
+    };
+
+    /// Flags determining how to interpret the timestamp provided in `Subscription.Clock.timeout`.
+    ///
+    /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#subclockflags
+    pub const SubclockFlags = packed struct(u16) {
+        pub const Valid = packed struct(u1) {
+            /// If set, treat the timestamp provided in `Subscription.Clock.timeout` as an absolute
+            /// timestamp of clock `Subscription.Clock.id`.
+            ///
+            /// If clear, treat the timestamp provided in `Subscription.Clock.timeout` relative to
+            /// the current time value of clock `Subscription.Clock.id`.
+            subscription_clock_abstime: bool,
+
+            pub const format = flagsFormatter(Valid);
+        };
+
+        valid: Valid,
+        padding: u15 = 0,
+
+        pub const format = flagsFormatterWithInvalid(SubclockFlags);
+
+        pub const validate = validateFlags(SubclockFlags);
+    };
+
+    /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#subscription_fd_readwrite
+    pub const FdReadWrite = extern struct {
+        /// The file descriptor on which to wait for it to become ready for reading or writing.
+        file_descriptor: u32,
+
+        comptime {
+            std.debug.assert(@sizeOf(FdReadWrite) == 4);
+        }
+    };
+};
+
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#event
+pub const Event = extern struct {
+    /// User-provided value that got attached to `Subscription.user_data`.
+    user_data: UserData,
+    /// If non-zero, an error that occurred while processing the subscription request.
+    @"error": Errno,
+    /// The type of event that occured.
+    type: EventType,
+    /// The contents of the event, if it is an `EventType.fd_read` or `EventType.fd_write`.
+    /// `EventType.clock` events ignore this field.
+    fd_read_write: FdReadWrite,
+
+    comptime {
+        std.debug.assert(@sizeOf(Event) == 32);
+        std.debug.assert(@offsetOf(Event, "user_data") == 0);
+        std.debug.assert(@offsetOf(Event, "error") == 8);
+        std.debug.assert(@offsetOf(Event, "type") == 10);
+        std.debug.assert(@offsetOf(Event, "fd_read_write") == 16);
+    }
+
+    /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#event_fd_readwrite
+    pub const FdReadWrite = extern struct {
+        /// The number of bytes available for reading or writing.
+        num_bytes: FileSize,
+        /// The state of the file descriptor.
+        flags: RwFlags,
+
+        comptime {
+            std.debug.assert(@sizeOf(FdReadWrite) == 16);
+        }
+    };
+
+    /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#eventrwflags
+    pub const RwFlags = packed struct(u16) {
+        pub const Valid = packed struct(u1) {
+            /// The peer of this socket has closed or disconnected.
+            fd_read_write_hangup: bool,
+
+            pub const format = flagsFormatter(Valid);
+        };
+
+        valid: Valid,
+        padding: u15,
+
+        pub const format = flagsFormatterWithInvalid(RwFlags);
+
+        pub const validate = validateFlags(RwFlags);
+    };
+};
+
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#signal
+pub const Signal = enum(u8) {
+    /// No signal. Note that POSIX has special semantics for `kill(pid, 0)`,
+    /// so this value is reserved.
+    none,
+    /// Hangup.
+    /// Action: Terminates the process.
+    hup,
+    /// Terminate interrupt signal.
+    /// Action: Terminates the process.
+    int,
+    /// Terminal quit signal.
+    /// Action: Terminates the process.
+    quit,
+    /// Illegal instruction.
+    /// Action: Terminates the process.
+    ill,
+    /// Trace/breakpoint trap.
+    /// Action: Terminates the process.
+    trap,
+    /// Process abort signal.
+    /// Action: Terminates the process.
+    abrt,
+    /// Access to an undefined portion of a memory object.
+    /// Action: Terminates the process.
+    bus,
+    /// Erroneous arithmetic operation.
+    /// Action: Terminates the process.
+    fpe,
+    /// Kill.
+    /// Action: Terminates the process.
+    kill,
+    /// User-defined signal 1.
+    /// Action: Terminates the process.
+    usr1,
+    /// Invalid memory reference.
+    /// Action: Terminates the process.
+    segv,
+    /// User-defined signal 2.
+    /// Action: Terminates the process.
+    usr2,
+    /// Write on a pipe with no one to read it.
+    /// Action: Ignored.
+    pipe,
+    /// Alarm clock.
+    /// Action: Terminates the process.
+    alrm,
+    /// Termination signal.
+    /// Action: Terminates the process.
+    term,
+    /// Child process terminated, stopped, or continued.
+    /// Action: Ignored.
+    chld,
+    /// Continue executing, if stopped.
+    /// Action: Continues executing, if stopped.
+    cont,
+    /// Stop executing.
+    /// Action: Stops executing.
+    stop,
+    /// Terminal stop signal.
+    /// Action: Stops executing.
+    tstp,
+    /// Background process attempting read.
+    /// Action: Stops executing.
+    ttin,
+    /// Background process attempting write.
+    /// Action: Stops executing.
+    ttou,
+    /// High bandwidth data is available at a socket.
+    /// Action: Ignored.
+    urg,
+    /// CPU time limit exceeded.
+    /// Action: Terminates the process.
+    xcpu,
+    /// File size limit exceeded.
+    /// Action: Terminates the process.
+    xfsz,
+    /// Virtual timer expired.
+    /// Action: Terminates the process.
+    vtalrm,
+    /// Profiling timer expired.
+    /// Action: Terminates the process.
+    prof,
+    /// Window changed.
+    /// Action: Ignored.
+    winch,
+    /// I/O possible.
+    /// Action: Terminates the process.
+    poll,
+    /// Power failure.
+    /// Action: Terminates the process.
+    pwr,
+    /// Bad system call.
+    /// Action: Terminates the process.
+    sys,
+};
+
 const std = @import("std");
 const builtin = @import("builtin");
+const Errno = @import("errno.zig").Errno;

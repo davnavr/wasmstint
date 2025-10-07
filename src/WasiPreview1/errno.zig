@@ -192,6 +192,7 @@ pub const Errno = enum(u16) {
             error.InputOutput => .io,
             error.InvalidArgument => .inval,
             error.InvalidUtf8 => .ilseq,
+            error.IsDir => .isdir,
             error.LockedRegionLimitExceeded => .nolck,
             error.MessageTooBig => .msgsize,
             error.NoDevice => .nxio,
@@ -203,6 +204,8 @@ pub const Errno = enum(u16) {
             error.ProcessFdQuotaExceeded => .mfile,
             error.ProcessNotFound => .srch,
             error.SeekPipe => .pipe,
+            error.SymLinkLoop => .loop,
+            error.SystemFdQuotaExceeded => .nfile,
             error.WouldBlock,
             error.LockViolation,
             => .again,
@@ -232,6 +235,7 @@ pub const Error = std.mem.Allocator.Error ||
         InputOutput,
         InvalidArgument,
         InvalidUtf8,
+        IsDir,
         LockedRegionLimitExceeded,
         MessageTooBig,
         NoDevice,
@@ -243,6 +247,8 @@ pub const Error = std.mem.Allocator.Error ||
         ProcessFdQuotaExceeded,
         ProcessNotFound,
         SeekPipe,
+        SymLinkLoop,
+        SystemFdQuotaExceeded,
         WouldBlock,
 
         // Windows-specific

@@ -36,12 +36,18 @@ pub const Api = enum {
     path_rename,
     path_symlink,
     path_unlink_file,
-
-    // poll_oneoff,
+    poll_oneoff,
+    /// Terminate the process normally.
+    ///
+    /// An exit code of 0 indicates successful termination of the program. The meanings of other
+    /// values is dependent on the environment.
     proc_exit,
-    // proc_raise,
+    proc_raise,
+    /// Temporarily yield execution of the calling thread.
+    ///
+    /// This is similar to `sched_yield` in POSIX.
     sched_yield,
-    // random_get,
+    random_get,
 
     // /// https://github.com/WebAssembly/wasi-threads/blob/main/wasi-threads.abi.md
     // @"thread-spawn", // in "wasi" module, not "wasi_snapshot_preview1"
@@ -63,6 +69,7 @@ pub const Api = enum {
             .fd_prestat_get,
             .fd_renumber,
             .fd_tell,
+            .random_get,
             => returnsErrno(&.{ .i32, .i32 }),
             .clock_time_get => returnsErrno(&.{ .i32, .i64, .i32 }),
             .fd_advise,
@@ -75,6 +82,7 @@ pub const Api = enum {
             .fd_close,
             .fd_datasync,
             .fd_sync,
+            .proc_raise,
             => returnsErrno(&.{.i32}),
             .fd_prestat_dir_name,
             .path_create_directory,
@@ -85,7 +93,10 @@ pub const Api = enum {
             .fd_pwrite,
             .fd_readdir,
             => returnsErrno(&.{ .i32, .i32, .i32, .i64, .i32 }),
-            .fd_read, .fd_write => returnsErrno(&.{ .i32, .i32, .i32, .i32 }),
+            .fd_read,
+            .fd_write,
+            .poll_oneoff,
+            => returnsErrno(&.{ .i32, .i32, .i32, .i32 }),
             .fd_seek => returnsErrno(&.{ .i32, .i64, .i32, .i32 }),
             .path_filestat_get,
             .path_symlink,

@@ -1346,6 +1346,101 @@ fn path_unlink_file(
     return .success;
 }
 
+/// Concurrently poll for the occurrence of a set of events.
+///
+/// Returns the number of events stored.
+///
+/// If nsubscriptions is 0, returns `Errno.inval`.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#poll_oneoff
+fn poll_oneoff(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    /// The events to which to subscribe.
+    raw_in: i32,
+    /// The events that have occurred.
+    raw_out: i32,
+    /// Both the number of subscriptions and events.
+    raw_nsubscriptions: i32,
+    raw_ret: i32,
+) Errno {
+    const in_ptr = pointer.ConstPointer(types.Subscription){ .addr = @as(u32, @bitCast(raw_in)) };
+    const out_ptr = pointer.Pointer(types.Event){ .addr = @as(u32, @bitCast(raw_out)) };
+    const num_subscriptions: types.Size = @bitCast(raw_nsubscriptions);
+    const ret_ptr = pointer.Pointer(types.Size){ .addr = @as(u32, @bitCast(raw_ret)) };
+
+    std.log.debug("poll_oneoff({f}, {f}, {d})", .{ in_ptr, out_ptr, num_subscriptions });
+
+    if (num_subscriptions == 0) {
+        return Errno.inval;
+    }
+
+    const subscriptions = pointer.ConstSlice(types.Subscription).init(
+        mem,
+        in_ptr,
+        num_subscriptions,
+    ) catch |e| return .mapError(e);
+
+    const events = pointer.Slice(types.Event).init(mem, out_ptr, num_subscriptions) catch |e|
+        return .mapError(e);
+
+    if (true) {
+        return .nosys;
+    }
+
+    _ = wasi;
+    _ = subscriptions;
+    _ = events;
+
+    ret_ptr.write(mem, 0xFFFF_FFFF) catch |e| return .mapError(e);
+
+    return .success;
+}
+
+// `proc_exit` handled in `dispatch()`
+
+fn proc_raise(
+    _: *WasiPreview1,
+    _: *MemInst,
+    /// The signal condition to trigger.
+    raw_sig: i32,
+) Errno {
+    const sig_casted = std.enums.fromInt(types.Signal, raw_sig);
+
+    std.log.debug(
+        "proc_raise({d} ({s}))",
+        .{ raw_sig, if (sig_casted) |s| @tagName(s) else "???" },
+    );
+
+    if (sig_casted == null) {
+        return Errno.inval;
+    }
+
+    // Basically no one supports this function.
+    // https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/README.md
+    return Errno.nosys;
+}
+
+// `sched_yield` handled in `dispatch()`.
+
+fn random_get(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_buf_ptr: i32,
+    raw_buf_len: i32,
+) Errno {
+    const buf_ptr = pointer.Pointer(u8){ .addr = @bitCast(raw_buf_ptr) };
+    const buf_len: u32 = @bitCast(raw_buf_len);
+
+    std.log.debug("random_get({f}, {d})", .{ buf_ptr, buf_len });
+
+    const buf = pointer.Slice(u8).init(mem, buf_ptr, buf_len) catch |e| return .mapError(e);
+
+    wasi.csprng.get(buf.bytes()) catch |e| return .mapError(e);
+
+    return .success;
+}
+
 pub const DispatchResult = union(enum) {
     @"continue": Interpreter.State,
     /// The WASM program called `proc_exit()`.
@@ -1372,12 +1467,13 @@ pub fn dispatch(
     std.debug.assert(@intFromPtr(api.hostFunc()) == @intFromPtr(callee.func));
     switch (api) {
         .proc_exit => {
-            @branchHint(.cold);
+            // rval - The exit code returned by the process.
             const exit_code = state.paramsTyped(struct { i32 }) catch unreachable;
             // std.log.debug("proc_exit({})", .{exit_code});
             return .{ .proc_exit = exit_code[0] };
         },
         .sched_yield => {
+            // Could pass control to host instead (new DispatchResult case)
             const errno: Errno = err: {
                 std.Thread.yield() catch |e| switch (e) {
                     error.SystemCannotYield => switch (builtin.os.tag) {
@@ -1433,6 +1529,9 @@ pub fn dispatch(
         .path_rename,
         .path_symlink,
         .path_unlink_file,
+        .poll_oneoff,
+        .proc_raise,
+        .random_get,
         => |id| {
             const signature = comptime id.signature();
             var args_values: [signature.param_count]Interpreter.TaggedValue = undefined;
