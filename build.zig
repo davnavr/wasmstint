@@ -153,20 +153,27 @@ const ByteSize = packed struct(usize) {
 fn addCheck(
     b: *Build,
     steps: *const TopLevelSteps,
+    comptime kind: enum { @"test", exe },
     module: *Build.Module,
     name: []const u8,
     options: struct { max_rss: ByteSize, use_llvm: ?bool = null },
 ) void {
-    steps.check.dependOn(
-        &b.addTest(
-            .{
-                .name = b.fmt("check-{s}", .{name}),
-                .root_module = module,
-                .max_rss = options.max_rss.bytes,
-                .use_llvm = options.use_llvm,
-            },
-        ).step,
-    );
+    const Args = switch (kind) {
+        .@"test" => Build.TestOptions,
+        .exe => Build.ExecutableOptions,
+    };
+
+    const args = Args{
+        .name = b.fmt("check-{s}", .{name}),
+        .root_module = module,
+        .max_rss = options.max_rss.bytes,
+        .use_llvm = options.use_llvm,
+    };
+
+    steps.check.dependOn(switch (kind) {
+        .@"test" => &b.addTest(args).step,
+        .exe => &b.addExecutable(args).step,
+    });
 }
 
 const Modules = struct {
@@ -226,7 +233,14 @@ const Modules = struct {
             const tests_run = &b.addRunArtifact(tests).step;
             tests_run.max_rss = ByteSize.mib(8).bytes;
             steps.@"test-unit".dependOn(tests_run);
-            addCheck(b, steps, module, name, .{ .max_rss = .mib(126), .use_llvm = use_llvm });
+            addCheck(
+                b,
+                steps,
+                .@"test",
+                module,
+                name,
+                .{ .max_rss = .mib(126), .use_llvm = use_llvm },
+            );
             return .{ .module = module };
         }
     };
@@ -262,7 +276,7 @@ const Modules = struct {
             tests_run.max_rss = ByteSize.mib(8).bytes;
             steps.@"test-unit".dependOn(tests_run);
 
-            addCheck(b, steps, module, name, .{ .max_rss = .mib(99) });
+            addCheck(b, steps, .@"test", module, name, .{ .max_rss = .mib(99) });
             return .{ .module = module };
         }
     };
@@ -335,6 +349,7 @@ const SpectestInterp = struct {
         addCheck(
             b,
             steps,
+            .exe,
             module,
             exe.name,
             .{
@@ -478,9 +493,10 @@ const Wasip1Interp = struct {
         addCheck(
             b,
             steps,
+            .exe,
             module,
             exe.name,
-            .{ .max_rss = .mib(117), .use_llvm = proj_opts.use_llvm },
+            .{ .max_rss = .mib(146), .use_llvm = proj_opts.use_llvm },
         );
 
         {
@@ -591,7 +607,7 @@ fn buildWasiSamplePrograms(
             .max_rss = max_rss.bytes,
         });
 
-        addCheck(b, steps, sample_exe.root_module, sample_exe.name, .{ .max_rss = max_rss });
+        addCheck(b, steps, .exe, sample_exe.root_module, sample_exe.name, .{ .max_rss = max_rss });
 
         const install_sample = b.addInstallArtifact(
             sample_exe,
