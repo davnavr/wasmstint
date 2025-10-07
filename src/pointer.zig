@@ -320,7 +320,7 @@ pub fn ConstSlice(comptime T: type) type {
         }
 
         pub fn bytes(slice: Self) []const u8 {
-            return @ptrCast(slice);
+            return @ptrCast(slice.items);
         }
 
         pub fn read(slice: Self, idx: usize) T {

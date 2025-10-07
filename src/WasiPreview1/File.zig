@@ -192,6 +192,10 @@ pub const unimplemented = struct {
     pub fn fd_tell(_: Ctx) Error!types.FileSize {
         return Error.Unimplemented;
     }
+
+    pub fn path_readlink(_: Ctx, _: []const u8, _: []u8) Error!types.Size {
+        return Error.Unimplemented;
+    }
 };
 
 /// Do not call function pointers without checking the corresponding `File`'s `rights`.
@@ -269,6 +273,41 @@ pub const VTable = struct {
     fd_tell: *const fn (ctx: Ctx) Error!types.FileSize,
 
     fd_write: *const fn (ctx: Ctx, iovs: []const Ciovec, total_len: u32) Error!u32,
+
+    path_create_directory: *const fn (ctx: Ctx, path: []const u8) Error!void,
+
+    path_filestat_get: *const fn (
+        ctx: Ctx,
+        flags: types.LookupFlags.Valid,
+        path: []const u8,
+    ) Error!types.FileStat,
+
+    path_filestat_set_times: *const fn (
+        ctx: Ctx,
+        lookup_flags: types.LookupFlags.Valid,
+        path: []const u8,
+        atim: types.Timestamp,
+        mtim: types.Timestamp,
+        fst_flags: types.FstFlags.Valid,
+    ) Error!void,
+
+    path_open: *const fn (
+        ctx: Ctx,
+        dir_flags: types.LookupFlags.Valid,
+        path: []const u8,
+        open_flags: types.OpenFlags.Valid,
+        rights_base: types.Rights.Valid,
+        rights_inheriting: types.Rights.Valid,
+        fd_flags: types.FdFlags.Valid,
+    ) Error!File,
+
+    path_readlink: *const fn (ctx: Ctx, path: []const u8, buf: []u8) Error!types.Size,
+
+    path_remove_directory: *const fn (ctx: Ctx, path: []const u8) Error!void,
+
+    path_symlink: *const fn (ctx: Ctx, old_path: []const u8, new_path: []const u8) Error!void,
+
+    path_unlink_file: *const fn (ctx: Ctx, path: []const u8) Error!void,
 };
 
 fn hasVTable(file: *const File, vtable: *const VTable) bool {
@@ -580,6 +619,140 @@ pub fn fd_write(
     total_len: u32,
 ) Error!u32 {
     return (try file.api(.fd_write, .fd_write))(file.impl.ctx, iovs, total_len);
+}
+
+/// Create a directory.
+///
+/// This is similar to `mkdirat` in POSIX.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#path_create_directory
+pub fn path_create_directory(file: *File, path: []const u8) Error!void {
+    try (try file.api(.path_create_directory, .path_create_directory))(file.impl.ctx, path);
+}
+
+/// Return the attributes of a file or directory.
+///
+/// This is similar to `stat` in POSIX.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#path_filestat_get
+pub fn path_filestat_get(
+    file: *File,
+    /// Flags determining the method of how the path is resolved.
+    flags: types.LookupFlags.Valid,
+    /// The path of the file or directory to inspect.
+    path: []const u8,
+) Error!types.FileStat {
+    return (try file.api(.path_filestat_get, .path_filestat_get))(file.impl.ctx, flags, path);
+}
+
+/// Adjust the timestamps of a file or directory.
+///
+/// This is similar to `utimensat` in POSIX.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#path_filestat_set_times
+pub fn path_filestat_set_times(
+    file: *File,
+    /// Flags determining the method of how the path is resolved.
+    lookup_flags: types.LookupFlags.Valid,
+    path: []const u8,
+    /// The desired values of the data access timestamp.
+    atim: types.Timestamp,
+    /// The desired values of the data modification timestamp.
+    mtim: types.Timestamp,
+    /// A bitmask indicating which timestamps to adjust.
+    fst_flags: types.FstFlags.Valid,
+) Error!void {
+    const set_times = try file.api(.path_filestat_set_times, .path_filestat_set_times);
+    return set_times(file.impl.ctx, lookup_flags, path, atim, mtim, fst_flags);
+}
+
+// pub fn path_link
+
+/// Open a file or directory.
+///
+/// This is similar to `openat` in POSIX.
+///
+/// The returned file descriptor is not guaranteed to be the lowest-numbered file descriptor not
+/// currently open; it is randomized to prevent applications from depending on making assumptions
+/// about indexes, since this is error-prone in multi-threaded contexts. The returned file
+/// descriptor is guaranteed to be less than `std.math.maxInt(i32) + 1`.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#path_open
+pub fn path_open(
+    dir: *File,
+    dir_flags: types.LookupFlags.Valid,
+    path: []const u8,
+    open_flags: types.OpenFlags.Valid,
+    rights_base: types.Rights.Valid,
+    rights_inheriting: types.Rights.Valid,
+    fd_flags: types.FdFlags.Valid,
+) Error!File {
+    const pathOpen = try dir.api(.path_open, .path_open);
+    return pathOpen(
+        dir.impl.ctx,
+        dir_flags,
+        path,
+        open_flags,
+        rights_base,
+        rights_inheriting,
+        fd_flags,
+    );
+}
+
+/// Read the contents of a symbolic link.
+///
+/// Returns the number of bytes placed in the buffer.
+///
+/// This is similar to readlinkat in POSIX.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#path_readlink
+pub fn path_readlink(
+    file: *File,
+    path: []const u8,
+    /// Buffer in guest memory to which to write the contents of the symbolic link.
+    buf: []u8,
+) Error!types.Size {
+    const readLink = try file.api(.path_readlink, .path_readlink);
+    return readLink(file.impl.ctx, path, buf);
+}
+
+/// Remove a directory.
+///
+/// Returns `Error.DirNotEmpty` if the directory is not empty.
+///
+/// This is similar to `unlinkat(fd, path, AT_REMOVEDIR)` in POSIX.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#path_remove_directory
+pub fn path_remove_directory(
+    file: *File,
+    /// The path to a directory to remove.
+    path: []const u8,
+) Error!void {
+    const removeDirectory = try file.api(.path_remove_directory, .path_remove_directory);
+    try removeDirectory(file.impl.ctx, path);
+}
+
+/// Create a symbolic link.
+///
+/// This is similar to `symlinkat` in POSIX.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#path_symlink
+pub fn path_symlink(
+    file: *File,
+    /// The contents of the symbolic link.
+    old_path: []const u8,
+    /// The destination path at which to create the symbolic link.
+    new_path: []const u8,
+) Error!void {
+    try (try file.api(.path_symlink, .path_symlink))(file.impl.ctx, old_path, new_path);
+}
+
+pub fn path_unlink_file(
+    file: *File,
+    /// The path to a file to unlink.
+    path: []const u8,
+) Error!void {
+    try (try file.api(.path_unlink_file, .path_unlink_file))(file.impl.ctx, path);
 }
 
 const std = @import("std");

@@ -906,6 +906,446 @@ fn fd_write(
     return .success;
 }
 
+fn path_create_directory(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_path_ptr: i32,
+    raw_path_len: i32,
+) Errno {
+    const path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_path_ptr)) };
+    const path_len: u32 = @bitCast(raw_path_len);
+
+    std.log.debug(
+        "path_create_directory({d}, {f}, {d})",
+        .{ @as(u32, @bitCast(raw_fd)), path_ptr, path_len },
+    );
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    const path = pointer.ConstSlice(u8).init(mem, path_ptr, path_len) catch |e|
+        return .mapError(e);
+
+    file.path_create_directory(path.bytes()) catch |e| return .mapError(e);
+
+    return .success;
+}
+
+fn path_filestat_get(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_flags: i32,
+    raw_path_ptr: i32,
+    raw_path_len: i32,
+    raw_ret: i32,
+) Errno {
+    const flags_param: types.LookupFlags = @bitCast(raw_flags);
+    const path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_path_ptr)) };
+    const path_len: u32 = @bitCast(raw_path_len);
+    const ret_ptr = pointer.Pointer(types.FileStat){ .addr = @as(u32, @bitCast(raw_ret)) };
+
+    std.log.debug(
+        "path_filestat_get({d}, {f}, {f}, {d}, {f})",
+        .{ @as(u32, @bitCast(raw_fd)), flags_param, path_ptr, path_len, ret_ptr },
+    );
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    const path = pointer.ConstSlice(u8).init(mem, path_ptr, path_len) catch |e|
+        return .mapError(e);
+
+    const flags = flags_param.validate() orelse return Errno.inval;
+
+    ret_ptr.write(
+        mem,
+        file.path_filestat_get(flags, path.bytes()) catch |e| return .mapError(e),
+    ) catch |e| return .mapError(e);
+
+    return .success;
+}
+
+fn path_filestat_set_times(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_lookup_flags: i32,
+    raw_path_ptr: i32,
+    raw_path_len: i32,
+    raw_atim: i64,
+    raw_mtim: i64,
+    raw_fst_flags: i32,
+) Errno {
+    const lookup_param: types.LookupFlags = @bitCast(raw_lookup_flags);
+    const path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_path_ptr)) };
+    const path_len: u32 = @bitCast(raw_path_len);
+    const atim = types.Timestamp{ .ns = @as(u64, @bitCast(raw_atim)) };
+    const mtim = types.Timestamp{ .ns = @as(u64, @bitCast(raw_mtim)) };
+    const fst_param: types.FstFlags.Param = @bitCast(raw_fst_flags);
+
+    std.log.debug(
+        "path_filestat_set_times({[fd]d}, {[lookup_flags]f}, {[path_ptr]f}, {[path_len]d}), " ++
+            "{[atim]d}, {[mtim]d}, {[fst_flags]f}",
+        .{
+            .fd = @as(u32, @bitCast(raw_fd)),
+            .lookup_flags = lookup_param,
+            .path_ptr = path_ptr,
+            .path_len = path_len,
+            .atim = atim.ns,
+            .mtim = mtim.ns,
+            .fst_flags = fst_param,
+        },
+    );
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    const path = pointer.ConstSlice(u8).init(mem, path_ptr, path_len) catch |e|
+        return .mapError(e);
+
+    const lookup_flags = lookup_param.validate() orelse return Errno.inval;
+    const fst_flags = fst_param.validate() orelse return Errno.inval;
+
+    file.path_filestat_set_times(lookup_flags, path.bytes(), atim, mtim, fst_flags) catch |e|
+        return .mapError(e);
+
+    return .success;
+}
+
+fn path_link(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_old_fd: i32,
+    raw_flags: i32,
+    raw_old_path_ptr: i32,
+    raw_old_path_len: i32,
+    raw_new_fd: i32,
+    raw_new_path_ptr: i32,
+    raw_new_path_len: i32,
+) Errno {
+    const lookup_param: types.LookupFlags = @bitCast(raw_flags);
+    const old_path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_old_path_ptr)) };
+    const old_path_len: u32 = @bitCast(raw_old_path_len);
+    const new_path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_new_path_ptr)) };
+    const new_path_len: u32 = @bitCast(raw_new_path_len);
+
+    std.log.debug(
+        "path_link({[old_fd]d}, {[flags]f}, {[old_path_ptr]f}, {[old_path_len]d}, {[new_fd]d}, " ++
+            "{[new_path_ptr]f}, {[new_path_len]d})",
+        .{
+            .old_fd = @as(u32, @bitCast(raw_old_fd)),
+            .flags = lookup_param,
+            .old_path_ptr = old_path_ptr,
+            .old_path_len = old_path_len,
+            .new_fd = @as(u32, @bitCast(raw_new_fd)),
+            .new_path_ptr = new_path_ptr,
+            .new_path_len = new_path_len,
+        },
+    );
+
+    const old_fd = Fd.initRaw(raw_old_fd) catch |e| return .mapError(e);
+    const new_fd = Fd.initRaw(raw_new_fd) catch |e| return .mapError(e);
+    const old_file = wasi.fd_table.get(old_fd) catch |e| return .mapError(e);
+    wasi.fd_table.unlockTable();
+    const new_file = wasi.fd_table.get(new_fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    const old_path = pointer.ConstSlice(u8).init(mem, old_path_ptr, old_path_len) catch |e|
+        return .mapError(e);
+    const new_path = pointer.ConstSlice(u8).init(mem, new_path_ptr, new_path_len) catch |e|
+        return .mapError(e);
+
+    const lookup_flags = lookup_param.validate() orelse return Errno.inval;
+
+    _ = old_file;
+    _ = new_file;
+    _ = old_path;
+    _ = new_path;
+    _ = lookup_flags;
+
+    return Errno.nosys; // TODO: path_link implementation, two FD's? How daring...
+}
+
+fn typedPathOpen(
+    wasi: *WasiPreview1,
+    dir_fd: Fd,
+    dir_flags: types.LookupFlags.Valid,
+    path: []const u8,
+    open_flags: types.OpenFlags.Valid,
+    rights_base: types.Rights.Valid,
+    rights_inheriting: types.Rights.Valid,
+    fs_flags: types.FdFlags.Valid,
+) !Fd {
+    const dir = try wasi.fd_table.get(dir_fd);
+    wasi.fd_table.unlockTable();
+
+    var new_file = try dir.path_open(
+        dir_flags,
+        path,
+        open_flags,
+        rights_base,
+        rights_inheriting,
+        fs_flags,
+    );
+    const new_fd = wasi.fd_table.create(wasi.allocator) catch |e| {
+        new_file.fd_close(wasi.allocator) catch |err| return err;
+        return e;
+    };
+    errdefer comptime unreachable;
+
+    new_fd.file.* = new_file;
+    return new_fd.fd;
+}
+
+fn path_open(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_dir_fd: i32,
+    raw_dir_flags: i32,
+    raw_path_ptr: i32,
+    raw_path_len: i32,
+    raw_open_flags: i32,
+    raw_rights_base: i64,
+    raw_rights_inheriting: i64,
+    raw_fs_flags: i32,
+    raw_ret: i32,
+) Errno {
+    const dir_flags_param: types.LookupFlags = @bitCast(raw_dir_flags);
+    const path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_path_ptr)) };
+    const path_len: u32 = @bitCast(raw_path_len);
+    const open_flags_param: types.OpenFlags.Param = @bitCast(raw_open_flags);
+    const rights_base_param: types.Rights = @bitCast(raw_rights_base);
+    const rights_inheriting_param: types.Rights = @bitCast(raw_rights_inheriting);
+    const fs_flags_param: types.FdFlags.Param = @bitCast(raw_fs_flags);
+    const ret_fd_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
+
+    std.log.debug(
+        "path_open({[dir_fd]d}, {[dir_flags]f}, {[path_ptr]f}, {[path_len]d}), {[open_flags]f}, " ++
+            "{[rights_base]f}, {[rights_inheriting]f}, {[fs_flags]f}, {[ret_ptr]f})",
+        .{
+            .dir_fd = @as(u32, @bitCast(raw_dir_fd)),
+            .dir_flags = dir_flags_param,
+            .path_ptr = path_ptr,
+            .path_len = path_len,
+            .open_flags = open_flags_param,
+            .rights_base = rights_base_param,
+            .rights_inheriting = rights_inheriting_param,
+            .fs_flags = fs_flags_param,
+            .ret_ptr = ret_fd_ptr,
+        },
+    );
+
+    const dir_fd = Fd.initRaw(raw_dir_fd) catch |e| return .mapError(e);
+
+    const path = pointer.ConstSlice(u8).init(mem, path_ptr, path_len) catch |e|
+        return .mapError(e);
+
+    const dir_flags = dir_flags_param.validate() orelse return Errno.inval;
+    const open_flags = open_flags_param.validate() orelse return Errno.inval;
+    const rights_base = rights_base_param.validate() orelse return Errno.inval;
+    const rights_inheriting = rights_inheriting_param.validate() orelse return Errno.inval;
+    const fs_flags = fs_flags_param.validate() orelse return Errno.inval;
+
+    const new_fd = wasi.typedPathOpen(
+        dir_fd,
+        dir_flags,
+        path.bytes(),
+        open_flags,
+        rights_base,
+        rights_inheriting,
+        fs_flags,
+    ) catch |e| return .mapError(e);
+
+    ret_fd_ptr.write(mem, @as(u32, @bitCast(new_fd))) catch |e| return .mapError(e);
+
+    return .success;
+}
+
+fn path_readlink(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_path_ptr: i32,
+    raw_path_len: i32,
+    raw_buf_ptr: i32,
+    raw_buf_len: i32,
+    raw_ret: i32,
+) Errno {
+    const path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_path_ptr)) };
+    const path_len: u32 = @bitCast(raw_path_len);
+    const buf_ptr = pointer.Pointer(u8){ .addr = @as(u32, @bitCast(raw_buf_ptr)) };
+    const buf_len: u32 = @bitCast(raw_buf_len);
+    const ret_ptr = pointer.Pointer(types.Size){ .addr = @as(u32, @bitCast(raw_ret)) };
+
+    std.log.debug(
+        "path_readlink({d}, {f}, {d}, {f}, {d}, {f})",
+        .{ @as(u32, @bitCast(raw_fd)), path_ptr, path_len, buf_ptr, buf_len, ret_ptr },
+    );
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    const path = pointer.ConstSlice(u8).init(mem, path_ptr, path_len) catch |e|
+        return .mapError(e);
+    const buf = pointer.Slice(u8).init(mem, buf_ptr, buf_len) catch |e|
+        return .mapError(e);
+
+    ret_ptr.write(
+        mem,
+        file.path_readlink(path.bytes(), buf.bytes()) catch |e| return .mapError(e),
+    ) catch |e| return .mapError(e);
+
+    return .success;
+}
+
+fn path_remove_directory(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_path_ptr: i32,
+    raw_path_len: i32,
+) Errno {
+    const path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_path_ptr)) };
+    const path_len: u32 = @bitCast(raw_path_len);
+
+    std.log.debug(
+        "path_readlink({d}, {f}, {d})",
+        .{ @as(u32, @bitCast(raw_fd)), path_ptr, path_len },
+    );
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    const path = pointer.ConstSlice(u8).init(mem, path_ptr, path_len) catch |e|
+        return .mapError(e);
+
+    file.path_remove_directory(path.bytes()) catch |e| return .mapError(e);
+
+    return .success;
+}
+
+fn path_rename(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_old_fd: i32,
+    raw_old_path_ptr: i32,
+    raw_old_path_len: i32,
+    raw_new_fd: i32,
+    raw_new_path_ptr: i32,
+    raw_new_path_len: i32,
+) Errno {
+    const old_path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_old_path_ptr)) };
+    const old_path_len: u32 = @bitCast(raw_old_path_len);
+    const new_path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_new_path_ptr)) };
+    const new_path_len: u32 = @bitCast(raw_new_path_len);
+
+    std.log.debug(
+        "path_rename({[old_fd]d}, {[old_path_ptr]f}, {[old_path_len]d}, {[new_fd]d}, " ++
+            "{[new_path_ptr]f}, {[new_path_len]d})",
+        .{
+            .old_fd = @as(u32, @bitCast(raw_old_fd)),
+            .old_path_ptr = old_path_ptr,
+            .old_path_len = old_path_len,
+            .new_fd = @as(u32, @bitCast(raw_new_fd)),
+            .new_path_ptr = new_path_ptr,
+            .new_path_len = new_path_len,
+        },
+    );
+
+    const old_fd = Fd.initRaw(raw_old_fd) catch |e| return .mapError(e);
+    const new_fd = Fd.initRaw(raw_new_fd) catch |e| return .mapError(e);
+    const old_file = wasi.fd_table.get(old_fd) catch |e| return .mapError(e);
+    wasi.fd_table.unlockTable();
+    const new_file = wasi.fd_table.get(new_fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    const old_path = pointer.ConstSlice(u8).init(mem, old_path_ptr, old_path_len) catch |e|
+        return .mapError(e);
+    const new_path = pointer.ConstSlice(u8).init(mem, new_path_ptr, new_path_len) catch |e|
+        return .mapError(e);
+
+    _ = old_file;
+    _ = new_file;
+    _ = old_path;
+    _ = new_path;
+
+    return Errno.nosys; // TODO: path_rename implementation, two FD's? How daring...
+}
+
+fn path_symlink(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_old_path_ptr: i32,
+    raw_old_path_len: i32,
+    raw_fd: i32,
+    raw_new_path_ptr: i32,
+    raw_new_path_len: i32,
+) Errno {
+    const old_path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_old_path_ptr)) };
+    const old_path_len: u32 = @bitCast(raw_old_path_len);
+    const new_path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_new_path_ptr)) };
+    const new_path_len: u32 = @bitCast(raw_new_path_len);
+
+    std.log.debug(
+        "path_symlink({[old_path_ptr]f}, {[old_path_len]d}, {[fd]d}, {[new_path_ptr]f}, " ++
+            "{[new_path_len]d})",
+        .{
+            .old_path_ptr = old_path_ptr,
+            .old_path_len = old_path_len,
+            .fd = @as(u32, @bitCast(raw_fd)),
+            .new_path_ptr = new_path_ptr,
+            .new_path_len = new_path_len,
+        },
+    );
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    const old_path = pointer.ConstSlice(u8).init(mem, old_path_ptr, old_path_len) catch |e|
+        return .mapError(e);
+    const new_path = pointer.ConstSlice(u8).init(mem, new_path_ptr, new_path_len) catch |e|
+        return .mapError(e);
+
+    file.path_symlink(old_path.bytes(), new_path.bytes()) catch |e| return .mapError(e);
+
+    return .success;
+}
+
+fn path_unlink_file(
+    wasi: *WasiPreview1,
+    mem: *MemInst,
+    raw_fd: i32,
+    raw_path_ptr: i32,
+    raw_path_len: i32,
+) Errno {
+    const path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_path_ptr)) };
+    const path_len: u32 = @bitCast(raw_path_len);
+
+    std.log.debug(
+        "path_unlink_file({d}, {f}, {d})",
+        .{ @as(u32, @bitCast(raw_fd)), path_ptr, path_len },
+    );
+
+    const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
+    const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
+    defer wasi.fd_table.unlockTable();
+
+    const path = pointer.ConstSlice(u8).init(mem, path_ptr, path_len) catch |e|
+        return .mapError(e);
+
+    file.path_unlink_file(path.bytes()) catch |e| return .mapError(e);
+
+    return .success;
+}
+
 pub const DispatchResult = union(enum) {
     @"continue": Interpreter.State,
     /// The WASM program called `proc_exit()`.
@@ -983,6 +1423,16 @@ pub fn dispatch(
         .fd_sync,
         .fd_tell,
         .fd_write,
+        .path_create_directory,
+        .path_filestat_get,
+        .path_filestat_set_times,
+        .path_link,
+        .path_open,
+        .path_readlink,
+        .path_remove_directory,
+        .path_rename,
+        .path_symlink,
+        .path_unlink_file,
         => |id| {
             const signature = comptime id.signature();
             var args_values: [signature.param_count]Interpreter.TaggedValue = undefined;

@@ -61,10 +61,15 @@ const FdTable = struct {
         ProcessFdQuotaExceeded,
     };
 
+    const NewFd = struct {
+        fd: Fd,
+        file: *File,
+    };
+
     /// Callers must write to the returned pointer to initialize the `File`.
     ///
     /// Don't forget to call `unlockTable()`!
-    pub fn create(table: *FdTable, allocator: Allocator) CreateError!*File {
+    pub fn create(table: *FdTable, allocator: Allocator) CreateError!NewFd {
         // Ensure the function returns evenntually even if the RNG is really messed up, or somehow,
         // too many FDs are open
         const create_max_attempts = 8;
@@ -86,7 +91,7 @@ const FdTable = struct {
             } else {
                 entry.value_ptr.* = undefined;
                 table.entries.lockPointers();
-                return entry.value_ptr;
+                return NewFd{ .fd = chosen, .file = entry.value_ptr };
             }
         } else {
             @branchHint(.cold);
@@ -108,7 +113,7 @@ const FdTable = struct {
     }
 
     /// Returns `true` if `fd` was valid and successfully removed.
-    pub fn remove(table: *FdTable, fd: Fd) bool {
+    pub fn removeWithoutClosing(table: *FdTable, fd: Fd) bool {
         if (table.entries.fetchSwapRemove(fd)) |removed| {
             removed.value.deinit();
             return true;

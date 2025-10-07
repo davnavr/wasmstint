@@ -217,9 +217,59 @@ const vtable = File.VTable{
     .fd_seek = File.unimplemented.fd_seek,
     .fd_sync = File.unimplemented.fd_sync,
     .fd_tell = File.unimplemented.fd_tell,
-    // TODO
     .fd_write = fd_write,
+    .path_create_directory = path_create_directory,
+    .path_filestat_get = path_filestat_get,
+    .path_filestat_set_times = path_filestat_set_times,
+    .path_open = path_open,
+    .path_readlink = File.unimplemented.path_readlink,
+    .path_remove_directory = path_remove_directory,
+    .path_symlink = path_symlink,
+    .path_unlink_file = path_unlink_file,
 };
+
+fn path_create_directory(_: Ctx, _: []const u8) Error!void {
+    @trap();
+}
+
+fn path_filestat_get(_: Ctx, _: types.LookupFlags.Valid, _: []const u8) Error!types.FileStat {
+    @trap();
+}
+
+fn path_filestat_set_times(
+    _: Ctx,
+    _: types.LookupFlags.Valid,
+    _: []const u8,
+    _: types.Timestamp,
+    _: types.Timestamp,
+    _: types.FstFlags.Valid,
+) Error!void {
+    @trap();
+}
+
+fn path_open(
+    _: Ctx,
+    _: types.LookupFlags.Valid,
+    _: []const u8,
+    _: types.OpenFlags.Valid,
+    _: types.Rights.Valid,
+    _: types.Rights.Valid,
+    _: types.FdFlags.Valid,
+) Error!File {
+    @trap();
+}
+
+fn path_remove_directory(_: Ctx, _: []const u8) Error!void {
+    @trap();
+}
+
+fn path_symlink(_: Ctx, _: []const u8, _: []const u8) Error!void {
+    @trap();
+}
+
+fn path_unlink_file(_: Ctx, _: []const u8) Error!void {
+    @trap();
+}
 
 const std = @import("std");
 const builtin = @import("builtin");

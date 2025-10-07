@@ -152,7 +152,7 @@ pub const Rights = packed struct(u64) {
         fd_allocate: bool = false,
         /// The right to invoke `path_create_directory`.
         path_create_directory: bool = false,
-        /// If `path_open` is set, the right to invoke `path_open` with `oflags::creat`.
+        /// If `path_open` is set, the right to invoke `path_open` with `OpenFlags.creat`.
         path_create_file: bool = false,
         /// The right to invoke `path_link` with the file descriptor as the
         /// source directory.
@@ -439,6 +439,51 @@ pub const FstFlags = packed struct(u16) {
         mtim: bool,
         /// Adjust the last data modification timestamp to the time of clock `ClockId.real_time`.
         mtim_now: bool,
+
+        pub const format = flagsFormatter(Valid);
+    };
+
+    valid: Valid,
+    padding: u12,
+
+    pub const Param = packed struct(u32) {
+        valid: Valid,
+        padding: u28 = 0,
+
+        pub const format = flagsFormatterWithInvalid(Param);
+        pub const validate = validateFlags(Param);
+    };
+};
+
+/// Flags determining the method of how paths are resolved.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#lookupflags
+pub const LookupFlags = packed struct(u32) {
+    pub const Valid = packed struct(u1) {
+        /// As long as the resolved path corresponds to a symbolic link, it is expanded.
+        symlink_follow: bool,
+
+        pub const format = flagsFormatter(Valid);
+    };
+
+    valid: Valid,
+    padding: u31,
+
+    pub const format = flagsFormatterWithInvalid(LookupFlags);
+    pub const validate = validateFlags(LookupFlags);
+};
+
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#oflags
+pub const OpenFlags = packed struct(u16) {
+    pub const Valid = packed struct(u4) {
+        /// Create file if it does not exist.
+        creat: bool,
+        /// Fail if not a directory.
+        directory: bool,
+        /// Fail if file already exists.
+        excl: bool,
+        /// Truncate file to size `0`.
+        trunc: bool,
 
         pub const format = flagsFormatter(Valid);
     };

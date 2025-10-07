@@ -275,6 +275,78 @@ fn fd_close(ctx: Ctx, allocator: Allocator) Error!void {
     try host_file.closeHandle(self.dir.fd);
 }
 
+fn path_create_directory(ctx: Ctx, path: []const u8) Error!void {
+    _ = ctx;
+    _ = path;
+    return Error.Unimplemented;
+}
+
+fn path_filestat_get(
+    ctx: Ctx,
+    flags: types.LookupFlags.Valid,
+    path: []const u8,
+) Error!types.FileStat {
+    _ = ctx;
+    _ = flags;
+    _ = path;
+    return Error.Unimplemented;
+}
+
+fn path_filestat_set_times(
+    ctx: Ctx,
+    lookup_flags: types.LookupFlags.Valid,
+    path: []const u8,
+    atim: types.Timestamp,
+    mtim: types.Timestamp,
+    fst_flags: types.FstFlags.Valid,
+) Error!void {
+    _ = ctx;
+    _ = lookup_flags;
+    _ = path;
+    _ = atim;
+    _ = mtim;
+    _ = fst_flags;
+    return Error.Unimplemented;
+}
+
+fn path_open(
+    ctx: Ctx,
+    dir_flags: types.LookupFlags.Valid,
+    path: []const u8,
+    open_flags: types.OpenFlags.Valid,
+    rights_base: types.Rights.Valid,
+    rights_inheriting: types.Rights.Valid,
+    fd_flags: types.FdFlags.Valid,
+) Error!File {
+    _ = ctx;
+    _ = dir_flags;
+    _ = path;
+    _ = open_flags;
+    _ = rights_base;
+    _ = rights_inheriting;
+    _ = fd_flags;
+    return Error.Unimplemented;
+}
+
+fn path_remove_directory(ctx: Ctx, path: []const u8) Error!void {
+    _ = ctx;
+    _ = path;
+    return Error.Unimplemented;
+}
+
+pub fn path_symlink(ctx: Ctx, old_path: []const u8, new_path: []const u8) Error!void {
+    _ = ctx;
+    _ = old_path;
+    _ = new_path;
+    return Error.Unimplemented;
+}
+
+pub fn path_unlink_file(ctx: Ctx, path: []const u8) Error!void {
+    _ = ctx;
+    _ = path;
+    return Error.Unimplemented;
+}
+
 pub const vtable = File.VTable{
     .fd_advise = fd_advise,
     .fd_allocate = fd_allocate,
@@ -294,8 +366,15 @@ pub const vtable = File.VTable{
     .fd_seek = fd_seek,
     .fd_sync = File.unimplemented.fd_sync,
     .fd_tell = fd_tell,
-    // TODO
     .fd_write = fd_write,
+    .path_create_directory = path_create_directory,
+    .path_filestat_get = path_filestat_get,
+    .path_filestat_set_times = path_filestat_set_times,
+    .path_open = path_open,
+    .path_readlink = File.unimplemented.path_readlink,
+    .path_remove_directory = path_remove_directory,
+    .path_symlink = path_symlink,
+    .path_unlink_file = path_unlink_file,
 };
 
 fn fd_advise(_: Ctx, _: types.FileSize, _: types.FileSize, _: types.Advice) Error!void {
@@ -337,8 +416,6 @@ fn fd_seek(_: Ctx, _: types.FileDelta, _: types.Whence) Error!types.FileSize {
 fn fd_tell(_: Ctx) Error!types.FileSize {
     @trap();
 }
-
-// TODO
 
 fn fd_write(_: Ctx, _: []const File.Ciovec, _: u32) Error!u32 {
     @trap();
