@@ -100,10 +100,11 @@ const FdTable = struct {
         }
     }
 
-    /// Don't forget to call `unlockTable()`!
+    /// Don't forget to call `unlockTable()` when this function returns **successfully**!
     pub fn get(table: *FdTable, fd: Fd) Fd.Error!*File {
+        const file = table.entries.getPtr(fd) orelse return error.BadFd;
         table.entries.lockPointers();
-        return table.entries.getPtr(fd) orelse error.BadFd;
+        return file;
     }
 
     pub fn close(table: *FdTable, file_allocator: Allocator, fd: Fd) File.Error!void {
