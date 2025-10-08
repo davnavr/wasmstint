@@ -65,7 +65,7 @@ pub const Pair = struct {
 
     pub fn lenWithNullTerminator(pair: Pair) u32 {
         pair.checkInvariants();
-        return pair.len;
+        return pair.len + 1;
     }
 
     pub fn dupe(pair: Pair, allocator: Allocator) Allocator.Error!Pair {
