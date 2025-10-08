@@ -92,7 +92,6 @@ pub const InitOptions = struct {
     //stdin: ?,
     fd_rng_seed: u64,
     csprng: Csprng = .os,
-    // TODO: std.EnumSet(types.ClockId) to indicate available clocks
 };
 
 /// After initialization, hosts should call the entry point of the application (e.g. `_start`) as
@@ -316,8 +315,6 @@ fn clock_res_get(wasi: *WasiPreview1, mem: *MemInst, raw_clock_id: i32, raw_ret:
 
     log.debug("clock_res_get({t}, {f})", .{ clock_id, ret_ptr });
 
-    // TODO: Check allowed clocks
-
     _ = wasi;
     const resolution: types.Timestamp = switch (clock_id) {
         .real_time => if (true) {
@@ -355,10 +352,31 @@ fn clock_time_get(
 
     log.debug("clock_time_get({t}, {d}, {f})", .{ clock_id, precision.ns, ret_ptr });
 
-    // TODO: Check allowed clocks
     _ = wasi;
-    _ = mem;
-    return .nosys; // TODO: clock_time_get impl
+    const time: u64 = switch (clock_id) {
+        .real_time => return Errno.nosys, // TODO clock_time_get(realtime)
+        // Zig tries to use a monotonic clock
+        .monotonic => monotonic: {
+            const inst = std.time.Instant.now() catch return Errno.inval;
+            switch (@FieldType(std.time.Instant, "timestamp")) {
+                u64 => break :monotonic inst.timestamp,
+                std.posix.timespec => {
+                    const spec: std.posix.timespec = inst.timestamp;
+                    break :monotonic (@as(u64, @intCast(spec.sec)) * std.time.ns_per_s) +
+                        @as(u64, @intCast(spec.nsec));
+                },
+                else => |bad| @compileError("clock_time_get monotonic for " ++ @typeName(bad)),
+            }
+        },
+        .process_cputime_id,
+        .thread_cputime_id,
+        _,
+        => return .inval,
+    };
+
+    ret_ptr.write(mem, types.Timestamp{ .ns = time }) catch |e| return .mapError(e);
+
+    return .success;
 }
 
 fn fd_advise(
