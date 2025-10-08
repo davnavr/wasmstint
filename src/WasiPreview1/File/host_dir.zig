@@ -65,9 +65,7 @@ pub fn initPreopened(preopen: *PreopenDir, allocator: Allocator) Allocator.Error
 
 fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
     _ = ctx;
-    std.log.debug("TODO: proper implementation of fd_fdstat_get for directory", .{});
-    // return .{ .type = .directory };
-    return Error.Unimplemented;
+    return .{ .type = .directory, .flags = std.mem.zeroes(types.FdFlags) };
 }
 
 pub fn fd_prestat_get(ctx: Ctx) Error!types.PreStat {
