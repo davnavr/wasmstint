@@ -5,13 +5,20 @@ const Step = Build.Step;
 const ProjectOptions = struct {
     target: Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    optimize_interpreter: std.builtin.OptimizeMode,
     // TODO(zig): https://github.com/ziglang/zig/issues/24044
     comptime use_llvm: bool = true,
 
     fn init(b: *Build) ProjectOptions {
+        const optimize = b.standardOptimizeOption(.{});
         return .{
             .target = b.standardTargetOptions(.{}),
-            .optimize = b.standardOptimizeOption(.{}),
+            .optimize = optimize,
+            .optimize_interpreter = b.option(
+                std.builtin.OptimizeMode,
+                "optimize-interpreter",
+                "Override optimization level for interpreter",
+            ) orelse optimize,
         };
     }
 };
@@ -217,7 +224,7 @@ const Modules = struct {
                 .{
                     .root_source_file = b.path("src/root.zig"),
                     .target = options.target,
-                    .optimize = options.optimize,
+                    .optimize = options.optimize_interpreter,
                 },
             );
 
@@ -487,7 +494,7 @@ const Wasip1Interp = struct {
             .name = "wasmstint-wasip1",
             .root_module = module,
             .use_llvm = proj_opts.use_llvm,
-            .max_rss = ByteSize.mib(480).bytes,
+            .max_rss = ByteSize.mib(755).bytes,
         });
 
         addCheck(
