@@ -557,7 +557,10 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
                     var fields_idx = 0;
                     for (&fields) |*struct_field| {
                         const f = flags[fields_idx];
-                        std.debug.assert(f.namespace.Result != void);
+                        if (f.namespace.Result == void) {
+                            @compileError(f.info.long ++ " has invalid result");
+                        }
+
                         struct_field.* = .{
                             .name = f.info.long,
                             .type = f.namespace.Result,

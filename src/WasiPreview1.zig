@@ -16,6 +16,8 @@ const types = @import("WasiPreview1/types.zig");
 const Errno = @import("WasiPreview1/errno.zig").Errno;
 const Fd = @import("WasiPreview1/fd.zig").Fd;
 
+const log = std.log.scoped(.wasi);
+
 /// A region of memory for scatter/gather **reads**.
 ///
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#iovec
@@ -171,7 +173,7 @@ fn processParametersApi(comptime field: std.meta.FieldEnum(WasiPreview1)) type {
             };
             const argv_buf_ptr = pointer.Pointer(u8){ .addr = @as(u32, @bitCast(raw_argv_buf)) };
 
-            // std.log.debug(@tagName(field) ++ "_get({f}, {f})\n", .{ argv_ptr, argv_buf_ptr });
+            log.debug(@tagName(field) ++ "_get({f}, {f})", .{ argv_ptr, argv_buf_ptr });
 
             const argv = pointer.Slice(pointer.Pointer(u32)).init(
                 mem,
@@ -217,15 +219,15 @@ fn processParametersApi(comptime field: std.meta.FieldEnum(WasiPreview1)) type {
             const count = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret_count)) };
             const size = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret_size)) };
 
-            // std.log.debug(@tagName(field) ++ "_sizes_get({f}, {f})\n", .{ argc, size });
+            log.debug(@tagName(field) ++ "_sizes_get({f}, {f})", .{ count, size });
 
             count.write(mem, @field(wasi, field_name).count) catch |e| return .mapError(e);
             size.write(mem, @field(wasi, field_name).size) catch |e| return .mapError(e);
 
-            // std.log.debug(
-            //     @tagName(field) ++ "_sizes_get -> ({}, {})\n",
-            //     .{ @field(wasi, field_name).count, @field(wasi, field_name).size },
-            // );
+            log.debug(
+                @tagName(field) ++ "_sizes_get -> ({}, {})",
+                .{ @field(wasi, field_name).count, @field(wasi, field_name).size },
+            );
 
             if (builtin.mode == .Debug) {
                 std.debug.assert(count.read(mem) catch unreachable == @field(wasi, field_name).count);
@@ -312,7 +314,7 @@ fn clock_res_get(wasi: *WasiPreview1, mem: *MemInst, raw_clock_id: i32, raw_ret:
     const clock_id: types.ClockId = @enumFromInt(@as(u32, @bitCast(raw_clock_id)));
     const ret_ptr = pointer.Pointer(types.Timestamp){ .addr = @as(u32, @bitCast(raw_ret)) };
 
-    std.log.debug("clock_res_get({t}, {f})", .{ clock_id, ret_ptr });
+    log.debug("clock_res_get({t}, {f})", .{ clock_id, ret_ptr });
 
     // TODO: Check allowed clocks
 
@@ -351,7 +353,7 @@ fn clock_time_get(
     const precision = types.Timestamp{ .ns = @as(u64, @bitCast(raw_precision)) };
     const ret_ptr = pointer.Pointer(types.Timestamp){ .addr = @as(u32, @bitCast(raw_ret)) };
 
-    std.log.debug("clock_time_get({t}, {d}, {f})", .{ clock_id, precision.ns, ret_ptr });
+    log.debug("clock_time_get({t}, {d}, {f})", .{ clock_id, precision.ns, ret_ptr });
 
     // TODO: Check allowed clocks
     _ = wasi;
@@ -372,7 +374,7 @@ fn fd_advise(
     const advice_bits: u32 = @bitCast(raw_advice);
     const advice_casted = std.enums.fromInt(types.Advice, advice_bits);
 
-    std.log.debug(
+    log.debug(
         "fd_advise({[fd]d}, {[offset]d}, {[len]d}, {[advice_bits]d} ({[advice_name]s}))",
         .{
             .fd = @as(u32, @intCast(raw_fd)),
@@ -401,7 +403,7 @@ fn fd_allocate(
 ) Errno {
     const offset = types.FileSize{ .bytes = @as(u64, @bitCast(raw_offset)) };
     const len = types.FileSize{ .bytes = @as(u64, @bitCast(raw_len)) };
-    std.log.debug(
+    log.debug(
         "fd_advise({d}, {d}, {d})",
         .{ @as(u32, @intCast(raw_fd)), offset.bytes, len.bytes },
     );
@@ -427,7 +429,7 @@ fn releaseScratch(state: *WasiPreview1, arena: ArenaAllocator) void {
 }
 
 fn fd_close(wasi: *WasiPreview1, _: *MemInst, raw_fd: i32) Errno {
-    // std.log.debug("fd_close({d})", .{@as(u32, @bitCast(raw_fd))});
+    log.debug("fd_close({d})", .{@as(u32, @bitCast(raw_fd))});
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
     wasi.fd_table.close(wasi.allocator, fd) catch |e| return .mapError(e);
@@ -435,7 +437,7 @@ fn fd_close(wasi: *WasiPreview1, _: *MemInst, raw_fd: i32) Errno {
 }
 
 fn fd_datasync(wasi: *WasiPreview1, _: *MemInst, raw_fd: i32) Errno {
-    std.log.debug("fd_datasync({d})", .{@as(u32, @bitCast(raw_fd))});
+    log.debug("fd_datasync({d})", .{@as(u32, @bitCast(raw_fd))});
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
     const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
@@ -448,7 +450,7 @@ fn fd_datasync(wasi: *WasiPreview1, _: *MemInst, raw_fd: i32) Errno {
 fn fd_fdstat_get(wasi: *WasiPreview1, mem: *MemInst, raw_fd: i32, raw_ret: i32) Errno {
     const ret_ptr = pointer.Pointer(types.FdStat){ .addr = @as(u32, @bitCast(raw_ret)) };
 
-    std.log.debug("fd_fdstat_get({d}, {f})", .{ @as(u32, @bitCast(raw_fd)), ret_ptr });
+    log.debug("fd_fdstat_get({d}, {f})", .{ @as(u32, @bitCast(raw_fd)), ret_ptr });
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
     const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
@@ -463,10 +465,7 @@ fn fd_fdstat_get(wasi: *WasiPreview1, mem: *MemInst, raw_fd: i32, raw_ret: i32) 
 fn fd_fdstat_set_flags(wasi: *WasiPreview1, _: *MemInst, raw_fd: i32, raw_flags: i32) Errno {
     const flags_param: types.FdFlags.Param = @bitCast(raw_flags);
 
-    std.log.debug(
-        "fd_fdstat_set_flags({d}, {f})",
-        .{ @as(u32, @bitCast(raw_fd)), flags_param },
-    );
+    log.debug("fd_fdstat_set_flags({d}, {f})", .{ @as(u32, @bitCast(raw_fd)), flags_param });
 
     const flags = flags_param.validate() orelse return Errno.inval;
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
@@ -488,7 +487,7 @@ fn fd_fdstat_set_rights(
     const abi_rights_base: types.Rights = @bitCast(raw_rights_base);
     const abi_rights_inheriting: types.Rights = @bitCast(raw_rights_inheriting);
 
-    std.log.debug(
+    log.debug(
         "fd_fdstat_set_rights({d}, {f}, {f})",
         .{ @as(u32, @bitCast(raw_fd)), abi_rights_base, abi_rights_inheriting },
     );
@@ -515,7 +514,7 @@ fn fd_filestat_get(
 ) Errno {
     const ret_ptr = pointer.Pointer(types.FileStat){ .addr = @as(u32, @bitCast(raw_ret)) };
 
-    std.log.debug("fd_filestat_get({}, {f})", .{ @as(u32, @bitCast(raw_fd)), ret_ptr });
+    log.debug("fd_filestat_get({}, {f})", .{ @as(u32, @bitCast(raw_fd)), ret_ptr });
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
     const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
@@ -537,10 +536,7 @@ fn fd_filestat_set_size(
 ) Errno {
     const size = types.FileSize{ .bytes = @as(u64, @bitCast(raw_size)) };
 
-    std.log.debug(
-        "fd_filestat_set_size({d}, {d})",
-        .{ @as(u32, @bitCast(raw_fd)), size.bytes },
-    );
+    log.debug("fd_filestat_set_size({d}, {d})", .{ @as(u32, @bitCast(raw_fd)), size.bytes });
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
     const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
@@ -563,7 +559,7 @@ fn fd_filestat_set_times(
     const mtim = types.Timestamp{ .ns = @as(u64, @bitCast(raw_mtim)) };
     const flags_param: types.FstFlags.Param = @bitCast(raw_fst_flags);
 
-    std.log.debug(
+    log.debug(
         "fd_filestat_set_times({d}, {d}, {d}, {f})",
         .{ @as(u32, @bitCast(raw_fd)), atim.ns, mtim.ns, flags_param },
     );
@@ -592,7 +588,7 @@ fn fd_pread(
     const ret_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
     const offset = types.FileSize{ .bytes = @bitCast(raw_offset) };
 
-    std.log.debug(
+    log.debug(
         "fd_pread({d}, {f}, {d}, {d}, {f})",
         .{
             @as(u32, @bitCast(raw_fd)),
@@ -628,7 +624,7 @@ fn fd_prestat_get(
 ) Errno {
     const buf_ptr = pointer.Pointer(types.PreStat){ .addr = @as(u32, @bitCast(raw_buf)) };
 
-    // std.log.debug("fd_prestat_get({}, {f})", .{ @as(u32, @bitCast(raw_fd)), buf_ptr });
+    log.debug("fd_prestat_get({}, {f})", .{ @as(u32, @bitCast(raw_fd)), buf_ptr });
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
     const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
@@ -650,10 +646,10 @@ fn fd_prestat_dir_name(
     const path_ptr = pointer.Pointer(u8){ .addr = @as(u32, @bitCast(raw_path)) };
     const path_len: u32 = @bitCast(raw_path_len);
 
-    // std.log.debug(
-    //     "fd_prestat_dir_name({}, {f}, {d})",
-    //     .{ @as(u32, @bitCast(raw_fd)), path_ptr, path_len },
-    // );
+    log.debug(
+        "fd_prestat_dir_name({}, {f}, {d})",
+        .{ @as(u32, @bitCast(raw_fd)), path_ptr, path_len },
+    );
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
     const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
@@ -679,16 +675,16 @@ fn fd_pwrite(
     const ret_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
     const offset = types.FileSize{ .bytes = @bitCast(raw_offset) };
 
-    // std.log.debug(
-    //     "fd_pwrite({}, {f}, {}, {}, {f})",
-    //     .{
-    //         @as(u32, @bitCast(raw_fd)),
-    //         iovs_ptr,
-    //         iovs_len,
-    //         offset.bytes,
-    //         ret_ptr,
-    //     },
-    // );
+    log.debug(
+        "fd_pwrite({}, {f}, {}, {}, {f})",
+        .{
+            @as(u32, @bitCast(raw_fd)),
+            iovs_ptr,
+            iovs_len,
+            offset.bytes,
+            ret_ptr,
+        },
+    );
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
     const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
@@ -719,8 +715,8 @@ fn fd_read(
     const iovs_len: u32 = @bitCast(raw_iovs_len);
     const ret_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
 
-    std.log.debug(
-        "fd_read({}, {f}, {}, {f})\n",
+    log.debug(
+        "fd_read({}, {f}, {}, {f})",
         .{ @as(u32, @bitCast(raw_fd)), iovs_ptr, iovs_len, ret_ptr },
     );
 
@@ -755,10 +751,10 @@ fn fd_readdir(
     const cookie = types.DirCookie{ .n = @bitCast(raw_cookie) };
     const ret_ptr = pointer.Pointer(types.Size){ .addr = @as(u32, @bitCast(raw_ret)) };
 
-    // std.log.debug(
-    //     "fd_readdir({}, {f}, {}, {f}, {f})",
-    //     .{ @as(u32, @bitCast(raw_fd)), buf_ptr, buf_len, cookie, ret_ptr },
-    // );
+    log.debug(
+        "fd_readdir({}, {f}, {}, {f}, {f})",
+        .{ @as(u32, @bitCast(raw_fd)), buf_ptr, buf_len, cookie, ret_ptr },
+    );
 
     const buf = pointer.Slice(u8).init(mem, buf_ptr, buf_len) catch |e| return .mapError(e);
 
@@ -793,7 +789,7 @@ fn fd_renumber(
     raw_fd: i32,
     raw_to: i32,
 ) Errno {
-    std.log.debug(
+    log.debug(
         "fd_renumber({d}, {d})",
         .{ @as(u32, @bitCast(raw_fd)), @as(u32, @bitCast(raw_to)) },
     );
@@ -821,7 +817,7 @@ fn fd_seek(
     const whence_casted = std.enums.fromInt(types.Whence, raw_whence);
     const ret_ptr = pointer.Pointer(types.FileSize){ .addr = @as(u32, @bitCast(raw_ret)) };
 
-    std.log.debug(
+    log.debug(
         "fd_seek({d}, {d}, {d} ({s}), {f})",
         .{
             @as(u32, @bitCast(raw_fd)),
@@ -845,7 +841,7 @@ fn fd_seek(
 }
 
 fn fd_sync(wasi: *WasiPreview1, _: *MemInst, raw_fd: i32) Errno {
-    std.log.debug("fd_seek({d})", .{@as(u32, @bitCast(raw_fd))});
+    log.debug("fd_seek({d})", .{@as(u32, @bitCast(raw_fd))});
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
     const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
@@ -858,7 +854,7 @@ fn fd_sync(wasi: *WasiPreview1, _: *MemInst, raw_fd: i32) Errno {
 
 fn fd_tell(wasi: *WasiPreview1, mem: *MemInst, raw_fd: i32, raw_ret: i32) Errno {
     const ret_ptr = pointer.Pointer(types.FileSize){ .addr = @as(u32, @bitCast(raw_ret)) };
-    std.log.debug("fd_tell({d}, {f})", .{ @as(u32, @bitCast(raw_fd)), ret_ptr });
+    log.debug("fd_tell({d}, {f})", .{ @as(u32, @bitCast(raw_fd)), ret_ptr });
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
     const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
@@ -884,10 +880,10 @@ fn fd_write(
     const iovs_len: u32 = @bitCast(raw_iovs_len);
     const ret_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
 
-    // std.log.debug(
-    //     "fd_write({}, {f}, {}, {f})\n",
-    //     .{ @as(u32, @bitCast(raw_fd)), iovs_ptr, iovs_len, ret_ptr },
-    // );
+    log.debug(
+        "fd_write({}, {f}, {}, {f})",
+        .{ @as(u32, @bitCast(raw_fd)), iovs_ptr, iovs_len, ret_ptr },
+    );
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
     const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
@@ -916,7 +912,7 @@ fn path_create_directory(
     const path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_path_ptr)) };
     const path_len: u32 = @bitCast(raw_path_len);
 
-    std.log.debug(
+    log.debug(
         "path_create_directory({d}, {f}, {d})",
         .{ @as(u32, @bitCast(raw_fd)), path_ptr, path_len },
     );
@@ -947,7 +943,7 @@ fn path_filestat_get(
     const path_len: u32 = @bitCast(raw_path_len);
     const ret_ptr = pointer.Pointer(types.FileStat){ .addr = @as(u32, @bitCast(raw_ret)) };
 
-    std.log.debug(
+    log.debug(
         "path_filestat_get({d}, {f}, {f}, {d}, {f})",
         .{ @as(u32, @bitCast(raw_fd)), flags_param, path_ptr, path_len, ret_ptr },
     );
@@ -987,7 +983,7 @@ fn path_filestat_set_times(
     const mtim = types.Timestamp{ .ns = @as(u64, @bitCast(raw_mtim)) };
     const fst_param: types.FstFlags.Param = @bitCast(raw_fst_flags);
 
-    std.log.debug(
+    log.debug(
         "path_filestat_set_times({[fd]d}, {[lookup_flags]f}, {[path_ptr]f}, {[path_len]d}), " ++
             "{[atim]d}, {[mtim]d}, {[fst_flags]f}",
         .{
@@ -1034,7 +1030,7 @@ fn path_link(
     const new_path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_new_path_ptr)) };
     const new_path_len: u32 = @bitCast(raw_new_path_len);
 
-    std.log.debug(
+    log.debug(
         "path_link({[old_fd]d}, {[flags]f}, {[old_path_ptr]f}, {[old_path_len]d}, {[new_fd]d}, " ++
             "{[new_path_ptr]f}, {[new_path_len]d})",
         .{
@@ -1123,7 +1119,7 @@ fn path_open(
     const fs_flags_param: types.FdFlags.Param = @bitCast(raw_fs_flags);
     const ret_fd_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
 
-    std.log.debug(
+    log.debug(
         "path_open({[dir_fd]d}, {[dir_flags]f}, {[path_ptr]f}, {[path_len]d}), {[open_flags]f}, " ++
             "{[rights_base]f}, {[rights_inheriting]f}, {[fs_flags]f}, {[ret_ptr]f})",
         .{
@@ -1183,7 +1179,7 @@ fn path_readlink(
     const buf_len: u32 = @bitCast(raw_buf_len);
     const ret_ptr = pointer.Pointer(types.Size){ .addr = @as(u32, @bitCast(raw_ret)) };
 
-    std.log.debug(
+    log.debug(
         "path_readlink({d}, {f}, {d}, {f}, {d}, {f})",
         .{ @as(u32, @bitCast(raw_fd)), path_ptr, path_len, buf_ptr, buf_len, ret_ptr },
     );
@@ -1215,7 +1211,7 @@ fn path_remove_directory(
     const path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_path_ptr)) };
     const path_len: u32 = @bitCast(raw_path_len);
 
-    std.log.debug(
+    log.debug(
         "path_readlink({d}, {f}, {d})",
         .{ @as(u32, @bitCast(raw_fd)), path_ptr, path_len },
     );
@@ -1247,7 +1243,7 @@ fn path_rename(
     const new_path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_new_path_ptr)) };
     const new_path_len: u32 = @bitCast(raw_new_path_len);
 
-    std.log.debug(
+    log.debug(
         "path_rename({[old_fd]d}, {[old_path_ptr]f}, {[old_path_len]d}, {[new_fd]d}, " ++
             "{[new_path_ptr]f}, {[new_path_len]d})",
         .{
@@ -1294,7 +1290,7 @@ fn path_symlink(
     const new_path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_new_path_ptr)) };
     const new_path_len: u32 = @bitCast(raw_new_path_len);
 
-    std.log.debug(
+    log.debug(
         "path_symlink({[old_path_ptr]f}, {[old_path_len]d}, {[fd]d}, {[new_path_ptr]f}, " ++
             "{[new_path_len]d})",
         .{
@@ -1330,7 +1326,7 @@ fn path_unlink_file(
     const path_ptr = pointer.ConstPointer(u8){ .addr = @as(u32, @bitCast(raw_path_ptr)) };
     const path_len: u32 = @bitCast(raw_path_len);
 
-    std.log.debug(
+    log.debug(
         "path_unlink_file({d}, {f}, {d})",
         .{ @as(u32, @bitCast(raw_fd)), path_ptr, path_len },
     );
@@ -1370,7 +1366,7 @@ fn poll_oneoff(
     const num_subscriptions: types.Size = @bitCast(raw_nsubscriptions);
     const ret_ptr = pointer.Pointer(types.Size){ .addr = @as(u32, @bitCast(raw_ret)) };
 
-    std.log.debug("poll_oneoff({f}, {f}, {d})", .{ in_ptr, out_ptr, num_subscriptions });
+    log.debug("poll_oneoff({f}, {f}, {d})", .{ in_ptr, out_ptr, num_subscriptions });
 
     if (num_subscriptions == 0) {
         return Errno.inval;
@@ -1408,7 +1404,7 @@ fn proc_raise(
 ) Errno {
     const sig_casted = std.enums.fromInt(types.Signal, raw_sig);
 
-    std.log.debug(
+    log.debug(
         "proc_raise({d} ({s}))",
         .{ raw_sig, if (sig_casted) |s| @tagName(s) else "???" },
     );
@@ -1433,7 +1429,7 @@ fn random_get(
     const buf_ptr = pointer.Pointer(u8){ .addr = @bitCast(raw_buf_ptr) };
     const buf_len: u32 = @bitCast(raw_buf_len);
 
-    std.log.debug("random_get({f}, {d})", .{ buf_ptr, buf_len });
+    log.debug("random_get({f}, {d})", .{ buf_ptr, buf_len });
 
     const buf = pointer.Slice(u8).init(mem, buf_ptr, buf_len) catch |e| return .mapError(e);
 
@@ -1469,7 +1465,7 @@ fn sock_accept(
     const flags_param: types.FdFlags.Param = @bitCast(raw_flags);
     const ret_fd_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
 
-    std.log.debug(
+    log.debug(
         "sock_accept({d}, {f}, {f})",
         .{ @as(u32, @bitCast(raw_fd)), flags_param, ret_fd_ptr },
     );
@@ -1499,7 +1495,7 @@ fn sock_recv(
     const ret_size = pointer.Pointer(types.Size){ .addr = @as(u32, @bitCast(raw_ret_size)) };
     const ret_flags = pointer.Pointer(types.RoFlags){ .addr = @as(u32, @bitCast(raw_ret_flags)) };
 
-    std.log.debug(
+    log.debug(
         "sock_recv({d}, {f}, {d}, {f}, {f}, {f})",
         .{ @as(u32, @bitCast(raw_fd)), iovs_ptr, iovs_len, flags_param, ret_size, ret_flags },
     );
@@ -1539,8 +1535,8 @@ fn sock_send(
     const flags: u32 = @bitCast(raw_flags);
     const ret_ptr = pointer.Pointer(types.Size){ .addr = @as(u32, @bitCast(raw_ret)) };
 
-    std.log.debug(
-        "sock_send({d}, {f}, {d}, 0x{X}, {f})\n",
+    log.debug(
+        "sock_send({d}, {f}, {d}, 0x{X}, {f})",
         .{ @as(u32, @bitCast(raw_fd)), iovs_ptr, iovs_len, flags, ret_ptr },
     );
 
@@ -1573,7 +1569,7 @@ fn sock_shutdown(
 ) Errno {
     const flags_param: types.SdFlags.Param = @bitCast(raw_flags);
 
-    std.log.debug("sock_shutdown({d}, {f})", .{ @as(u32, @bitCast(raw_fd)), flags_param });
+    log.debug("sock_shutdown({d}, {f})", .{ @as(u32, @bitCast(raw_fd)), flags_param });
 
     const flags = flags_param.validate() orelse return Errno.inval;
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
@@ -1612,7 +1608,7 @@ pub fn dispatch(
         .proc_exit => {
             // rval - The exit code returned by the process.
             const exit_code = state.paramsTyped(struct { i32 }) catch unreachable;
-            // std.log.debug("proc_exit({})", .{exit_code});
+            log.debug("proc_exit({})", .{exit_code});
             return .{ .proc_exit = exit_code[0] };
         },
         .sched_yield => {
@@ -1627,6 +1623,8 @@ pub fn dispatch(
 
                 break :err .success;
             };
+
+            log.debug("sched_yield() -> {f}", .{errno});
 
             return .{
                 .@"continue" = state.returnFromHostTyped(
@@ -1646,9 +1644,9 @@ pub fn dispatch(
                 .{ wasi, memory } ++ args_tuple,
             );
 
-            // if (errno != .success) {
-            // std.log.debug(@tagName(id) ++ " -> {f}", .{errno});
-            // }
+            if (errno != .success) {
+                log.debug(@tagName(id) ++ " -> {f}", .{errno});
+            }
 
             wasi.fd_table.entries.pointer_stability.assertUnlocked();
 

@@ -49,11 +49,19 @@ const Arguments = cli_args.CliArgs(.{
             usize,
         ).withDefault(1 * 1024 * 1024 * 1024), // 1 GiB
 
-        cli_args.Flag.remainder,
+        cli_args.Flag.string(
+            .{
+                .long = "log-file",
+                .description = "Write log messages to the given file. Defaults to stderr.",
+            },
+            "PATH",
+        ),
 
         env_flag,
 
         dir_flag,
+
+        cli_args.Flag.remainder,
     },
 });
 
@@ -387,6 +395,41 @@ fn parseArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) ParsedArgume
     };
 }
 
+var log_file: ?std.fs.File = null;
+var log_counter: u64 = 0;
+
+fn logger(
+    comptime level: std.log.Level,
+    comptime scope: @Type(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    var buffer: [128]u8 align(16) = undefined;
+    var log_file_writer: std.fs.File.Writer = undefined;
+    var writer: *std.Io.Writer = if (log_file) |f| writer: {
+        log_file_writer = f.writerStreaming(&buffer);
+        break :writer &log_file_writer.interface;
+    } else std.debug.lockStderrWriter(&buffer);
+
+    // Zig `std` does not yet providing printing of timestamps.
+    defer log_counter +%= 1;
+
+    const level_prefix = comptime level.asText();
+    const scope_prefix = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
+    writer.print("[{d:0>6}] " ++ level_prefix ++ scope_prefix, .{log_counter}) catch {};
+    writer.print(format ++ "\n", args) catch {};
+
+    if (log_file) |_| {
+        writer.flush() catch {};
+    } else {
+        std.debug.unlockStderrWriter();
+    }
+}
+
+pub const std_options = std.Options{
+    .logFn = logger,
+};
+
 pub fn main() void {
     const exit_code: u32 = @bitCast(
         realMain() catch |e| switch (e) {
@@ -426,6 +469,23 @@ fn realMain() Error!i32 {
         return fail.print(error.BadCliFlag, "cannot use " ++ memory_export ++ " as an entrypoint");
     }
 
+    const cwd = std.fs.cwd();
+
+    if (arguments.@"log-file") |path| {
+        // https://github.com/ziglang/zig/issues/14375
+        const flags = std.fs.File.CreateFlags{ .truncate = false };
+        const creat = if (comptime builtin.os.tag == .windows)
+            std.fs.Dir.createFile
+        else
+            std.fs.Dir.createFileZ;
+
+        log_file = creat(cwd, path, flags) catch return fail.format(
+            error.GenericError,
+            "could not create log file {f}",
+            .{std.unicode.fmtUtf8(path)},
+        );
+    }
+
     const fmt_wasm_path = std.fmt.allocPrint(
         arena.allocator(),
         "{f}",
@@ -447,7 +507,6 @@ fn realMain() Error!i32 {
         break :args forwarded.arguments();
     };
 
-    const cwd = std.fs.cwd();
     const wasm_binary = @import("FileContent").readFileZ(cwd, arguments.module) catch |e| switch (e) {
         error.OutOfMemory => oom("module bytes"),
         else => |io_err| return fail.format(
