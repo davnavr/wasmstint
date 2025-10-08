@@ -226,14 +226,18 @@ pub fn accessArray(mem: *const MemInst, addr: usize, comptime size: usize) OobEr
 
 // Could parameterize to support 64-bit pointers.
 
-fn typeName(comptime T: type) [:0]const u8 {
-    return if (@typeInfo(T) != .@"struct" or
+fn typeName(comptime T: type) []const u8 {
+    if (@typeInfo(T) != .@"struct" or
         !std.mem.startsWith(u8, @typeName(T), "pointer") or
         @typeInfo(T).@"struct".layout != .@"packed" or
         !@hasDecl(T, "Pointee") or !@hasDecl(T, "read") or !@hasDecl(T, "constCast"))
-        @typeName(T)
-    else
-        "*" ++ (if (@hasDecl(T, "write")) "" else "const ") ++ typeName(T.Pointee);
+    {
+        const full_name = @typeName(T);
+        const start = if (std.mem.lastIndexOfScalar(u8, full_name, '.')) |i| i + 1 else 0;
+        return full_name[start..full_name.len];
+    } else {
+        return "*" ++ (if (@hasDecl(T, "write")) "" else "const ") ++ typeName(T.Pointee);
+    }
 }
 
 pub fn Pointer(comptime T: type) type {
