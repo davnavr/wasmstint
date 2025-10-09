@@ -1089,7 +1089,7 @@ fn typedPathOpen(
     wasi: *WasiPreview1,
     dir_fd: Fd,
     dir_flags: types.LookupFlags.Valid,
-    path: []const u8,
+    path: Path,
     open_flags: types.OpenFlags.Valid,
     rights_base: types.Rights.Valid,
     rights_inheriting: types.Rights.Valid,
@@ -1103,7 +1103,11 @@ fn typedPathOpen(
     const dir = try wasi.fd_table.get(dir_fd);
     defer wasi.fd_table.unlockTable();
 
+    var scratch = wasi.acquireScratch();
+    defer wasi.releaseScratch(scratch);
+
     new_fd.file.* = try dir.path_open(
+        &scratch,
         dir_flags,
         path,
         open_flags,
@@ -1138,7 +1142,7 @@ fn path_open(
     const ret_fd_ptr = pointer.Pointer(u32){ .addr = @as(u32, @bitCast(raw_ret)) };
 
     log.debug(
-        "path_open({[dir_fd]d}, {[dir_flags]f}, {[path_ptr]f}, {[path_len]d}), {[open_flags]f}, " ++
+        "path_open({[dir_fd]d}, {[dir_flags]f}, {[path_ptr]f}, {[path_len]d}, {[open_flags]f}, " ++
             "{[rights_base]f}, {[rights_inheriting]f}, {[fs_flags]f}, {[ret_ptr]f})",
         .{
             .dir_fd = @as(u32, @bitCast(raw_dir_fd)),
@@ -1155,8 +1159,9 @@ fn path_open(
 
     const dir_fd = Fd.initRaw(raw_dir_fd) catch |e| return .mapError(e);
 
-    const path = pointer.ConstSlice(u8).init(mem, path_ptr, path_len) catch |e|
+    const path_slice = pointer.ConstSlice(u8).init(mem, path_ptr, path_len) catch |e|
         return .mapError(e);
+    const path = Path.init(path_slice.bytes()) catch |e| return .mapError(e);
 
     const dir_flags = dir_flags_param.validate() orelse return Errno.inval;
     const open_flags = open_flags_param.validate() orelse return Errno.inval;
@@ -1169,7 +1174,7 @@ fn path_open(
     const new_fd = wasi.typedPathOpen(
         dir_fd,
         dir_flags,
-        path.bytes(),
+        path,
         open_flags,
         rights_base,
         rights_inheriting,

@@ -216,6 +216,14 @@ pub const Rights = packed struct(u64) {
             const super_bits: u30 = @bitCast(super);
             return super_bits | @as(u30, @bitCast(sub)) == super_bits;
         }
+
+        pub fn intersection(a: Valid, b: Valid) Valid {
+            return @bitCast(@as(u30, @bitCast(a)) & @as(u30, @bitCast(b)));
+        }
+
+        pub fn canWrite(rights: Valid) bool {
+            return rights.fd_allocate and rights.fd_write;
+        }
     };
 
     valid: Valid = .{},
@@ -392,7 +400,32 @@ pub const FdFlags = packed struct(u16) {
             };
         }
 
-        // pub fn fromFlagsPosix
+        pub fn toFlagsPosix(flags: Valid) error{InvalidFlag}!std.posix.O {
+            var p = std.posix.O{
+                .APPEND = flags.append,
+                .NONBLOCK = flags.nonblock,
+                .SYNC = flags.sync,
+            };
+
+            if (flags.dsync) {
+                if (has_dsync) {
+                    p.DSYNC = true;
+                } else {
+                    return error.InvalidFlag;
+                }
+            }
+
+            // O_RSYNC not implemented on Linux
+            if (flags.rsync) {
+                if (has_rsync) {
+                    p.RSYNC = true;
+                } else {
+                    return error.InvalidFlag;
+                }
+            }
+
+            return p;
+        }
     };
 
     valid: Valid,
@@ -489,6 +522,13 @@ pub const OpenFlags = packed struct(u16) {
         trunc: bool,
 
         pub const format = flagsFormatter(Valid);
+
+        pub fn setPosixFlags(f: Valid, o: *std.posix.O) void {
+            o.CREAT = f.creat;
+            o.DIRECTORY = f.directory;
+            o.EXCL = f.excl;
+            o.TRUNC = f.trunc;
+        }
     };
 
     valid: Valid,

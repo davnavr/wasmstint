@@ -28,4 +28,35 @@ pub fn bytes(path: Path) []const u8 {
     return path.ptr[0..path.len];
 }
 
+pub const Component = packed struct(u32) {
+    start: u16,
+    len: u16,
+
+    pub fn bytes(comp: Component, path: Path) []const u8 {
+        return path.bytes()[comp.start..][0..comp.len];
+    }
+
+    pub fn toPath(comp: Component, path: Path) Path {
+        return Path{ .ptr = comp.bytes(path).ptr, .len = comp.len };
+    }
+};
+
+pub fn format(path: Path, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    for (path.bytes()) |b| {
+        switch (b) {
+            '\t' => try writer.writeAll("\\t"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\'' => try writer.writeAll("\\'"),
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            ' ' => try writer.writeAll("\\ "),
+            else => if (std.ascii.isPrint(b))
+                try writer.writeByte(b)
+            else
+                try writer.print("\\x{X:0>2}", .{b}),
+        }
+    }
+}
+
 const std = @import("std");

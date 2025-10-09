@@ -7,27 +7,51 @@ const HostFile = struct {
     close: Close,
 };
 
+pub const possible_rights = types.Rights.Valid{
+    .fd_datasync = true,
+    .fd_read = true,
+    .fd_seek = true,
+    .fd_fdstat_set_flags = true,
+    .fd_sync = true,
+    .fd_tell = true,
+    .fd_write = true,
+    .fd_advise = true,
+    .fd_allocate = true,
+    .fd_readdir = true,
+    .fd_filestat_get = true,
+    .fd_filestat_set_size = true,
+    .fd_filestat_set_times = true,
+    .sock_shutdown = true,
+    .sock_accept = true,
+};
+
 /// Callers must ensure that `fd` is an open file handle.
 ///
 /// Ownership of `fd` is transferred to the `File`.
-pub fn wrapFile(fd: std.fs.File, close: Close, rights: types.Rights.Valid) File {
-    return File{
-        .rights = File.Rights.init(rights),
-        .impl = File.Impl{
-            .ctx = Ctx.init(HostFile{ .file = fd, .close = close }),
-            .vtable = &vtable,
-        },
+pub fn wrapFile(fd: std.fs.File, close: Close) File.Impl {
+    return File.Impl{
+        .ctx = Ctx.init(HostFile{ .file = fd, .close = close }),
+        .vtable = &vtable,
     };
 }
 
 /// Creates wrappers for the standard streams, and makes guest calls to `fd_close` a no-op.
 pub fn wrapStandardStreams() File.StandardStreams {
-    const write_rights = types.Rights.Valid{ .fd_write = true };
+    const write_rights = File.Rights.init(types.Rights.Valid{ .fd_write = true });
     // Leave standard streams open in case an interpreter error/panic occurs
     return .{
-        .stdin = wrapFile(std.fs.File.stdin(), .leave_open, .{ .fd_read = true }),
-        .stdout = wrapFile(std.fs.File.stdout(), .leave_open, write_rights),
-        .stderr = wrapFile(std.fs.File.stderr(), .leave_open, write_rights),
+        .stdin = File{
+            .rights = File.Rights.init(types.Rights.Valid{ .fd_read = true }),
+            .impl = wrapFile(std.fs.File.stdin(), .leave_open),
+        },
+        .stdout = File{
+            .rights = write_rights,
+            .impl = wrapFile(std.fs.File.stdout(), .leave_open),
+        },
+        .stderr = File{
+            .rights = write_rights,
+            .impl = wrapFile(std.fs.File.stderr(), .leave_open),
+        },
     };
 }
 
@@ -198,7 +222,7 @@ fn fd_write(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!u32 {
     return @intCast(written);
 }
 
-fn sock_accept(ctx: Ctx, flags: types.FdFlags.Valid) Error!File {
+fn sock_accept(ctx: Ctx, flags: types.FdFlags.Valid) Error!File.Impl {
     _ = ctx;
     _ = flags;
     return Error.Unimplemented;
@@ -285,13 +309,13 @@ fn path_filestat_set_times(
 
 fn path_open(
     _: Ctx,
+    _: *ArenaAllocator,
     _: types.LookupFlags.Valid,
-    _: []const u8,
+    _: Path,
     _: types.OpenFlags.Valid,
     _: types.Rights.Valid,
-    _: types.Rights.Valid,
     _: types.FdFlags.Valid,
-) Error!File {
+) Error!File.OpenedPath {
     @trap();
 }
 
@@ -309,7 +333,9 @@ fn path_unlink_file(_: Ctx, _: []const u8) Error!void {
 
 const std = @import("std");
 const builtin = @import("builtin");
+const ArenaAllocator = std.heap.ArenaAllocator;
 const File = @import("../File.zig");
 const types = @import("../types.zig");
+const Path = @import("../Path.zig");
 const Ctx = File.Ctx;
 const Error = File.Error;

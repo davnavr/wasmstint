@@ -19,11 +19,15 @@ pub fn openAtZ(
     permissions: Permissions,
     guest_path: Path,
 ) std.fs.Dir.OpenError!PreopenDir {
+    if (guest_path.len == 0) {
+        return error.BadPathName;
+    }
+
     const open_options = std.fs.Dir.OpenOptions{
         .access_sub_paths = true, // always needed to e.g. access files in the directory
         .iterate = true, // guest may choose to ask for entries at any time
-        .no_follow = true, // we have to check realpaths ourselves
     };
+
     return .{
         .dir = switch (builtin.os.tag) {
             .windows, .wasi => try dir.openDir(sub_path, open_options),

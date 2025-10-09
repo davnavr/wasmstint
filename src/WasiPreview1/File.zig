@@ -198,12 +198,19 @@ pub const unimplemented = struct {
     }
 };
 
-pub const SockRecvResult = struct { len: types.Size, flags: types.RoFlags };
+pub const OpenedPath = struct {
+    file: File.Impl,
+    /// Allows restricting the rights on the file when certain operations are not supported.
+    rights: types.Rights.Valid,
+};
+
+pub const SockRecvResult = struct {
+    len: types.Size,
+    flags: types.RoFlags,
+};
 
 /// Do not call function pointers without checking the corresponding `File`'s `rights`.
 pub const VTable = struct {
-    // Could add scratch: *ArenaAllocator parameter
-
     fd_advise: *const fn (
         ctx: Ctx,
         offset: types.FileSize,
@@ -295,13 +302,13 @@ pub const VTable = struct {
 
     path_open: *const fn (
         ctx: Ctx,
+        scratch: *ArenaAllocator,
         dir_flags: types.LookupFlags.Valid,
-        path: []const u8,
+        path: Path,
         open_flags: types.OpenFlags.Valid,
-        rights_base: types.Rights.Valid,
-        rights_inheriting: types.Rights.Valid,
+        rights: types.Rights.Valid,
         fd_flags: types.FdFlags.Valid,
-    ) Error!File,
+    ) Error!OpenedPath,
 
     path_readlink: *const fn (ctx: Ctx, path: []const u8, buf: []u8) Error!types.Size,
 
@@ -311,7 +318,7 @@ pub const VTable = struct {
 
     path_unlink_file: *const fn (ctx: Ctx, path: []const u8) Error!void,
 
-    sock_accept: *const fn (ctx: Ctx, flags: types.FdFlags.Valid) Error!File,
+    sock_accept: *const fn (ctx: Ctx, flags: types.FdFlags.Valid) Error!File.Impl,
 
     sock_recv: *const fn (
         ctx: Ctx,
@@ -429,7 +436,6 @@ pub fn fd_fdstat_set_rights(
     rights_inheriting: types.Rights.Valid,
 ) Error!void {
     // No corresponding rights flag for this function.
-    std.debug.assert(file.rights.base.contains(file.rights.inheriting));
     if (!file.rights.base.contains(rights_base) or
         !file.rights.inheriting.contains(rights_inheriting))
     {
@@ -695,23 +701,48 @@ pub fn path_filestat_set_times(
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#path_open
 pub fn path_open(
     dir: *File,
+    scratch: *ArenaAllocator,
     dir_flags: types.LookupFlags.Valid,
-    path: []const u8,
+    path: Path,
     open_flags: types.OpenFlags.Valid,
+    /// The initial rights of the newly created file descriptor.
+    ///
+    /// The implementation is allowed to return a file descriptor with fewer rights than specified,
+    /// if and only if those rights do not apply to the type of file being opened.
+    ///
+    /// The base rights are rights that will apply to operations using the file descriptor itself,
+    /// while the inheriting rights are rights that apply to file descriptors derived from it.
     rights_base: types.Rights.Valid,
     rights_inheriting: types.Rights.Valid,
     fd_flags: types.FdFlags.Valid,
 ) Error!File {
+    const derived_rights = dir.rights.inheriting;
+    if (!derived_rights.contains(rights_base) or
+        !derived_rights.contains(rights_inheriting))
+    {
+        return Error.NotCapable;
+    }
+
     const pathOpen = try dir.api(.path_open, .path_open);
-    return pathOpen(
+    const opened: OpenedPath = try pathOpen(
         dir.impl.ctx,
+        scratch,
         dir_flags,
         path,
         open_flags,
         rights_base,
-        rights_inheriting,
         fd_flags,
     );
+
+    std.debug.assert(derived_rights.contains(opened.rights));
+
+    return File{
+        .impl = opened.file,
+        .rights = Rights{
+            .base = rights_base.intersection(opened.rights),
+            .inheriting = rights_inheriting,
+        },
+    };
 }
 
 /// Read the contents of a symbolic link.
@@ -785,7 +816,9 @@ pub fn sock_accept(
     /// The desired values of the file descriptor flags.
     flags: types.FdFlags.Valid,
 ) Error!File {
-    return (try socket.api(.sock_accept, .sock_accept))(socket.impl.ctx, flags);
+    const sock = try (try socket.api(.sock_accept, .sock_accept))(socket.impl.ctx, flags);
+    _ = sock;
+    @panic("TODO: Apply rights to `sock`");
 }
 
 /// Receive a message from a socket.
@@ -838,5 +871,7 @@ pub fn sock_shutdown(
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const Api = @import("api.zig").Api;
 const types = @import("types.zig");
+const Path = @import("Path.zig");

@@ -13,13 +13,26 @@ const HostDir = struct {
         read_state: ReadState,
     };
 
-    fn guestPath(ctx: *const HostDir) Path {
-        return .{ .ptr = ctx.info.guest_path_ptr, .len = ctx.info.guest_path_len };
+    fn guestPath(ctx: *const HostDir) ?Path {
+        return if (ctx.info.guest_path_len > 0)
+            Path{ .ptr = ctx.info.guest_path_ptr, .len = ctx.info.guest_path_len }
+        else
+            null;
     }
+};
+
+const initial_rights = types.Rights.Valid{
+    .path_link_source = true,
+    .path_open = true,
+    .fd_readdir = true,
+    .path_readlink = true,
+    .path_filestat_get = true,
 };
 
 /// Ownership of the file descriptor is transferred to the `File`.
 pub fn initPreopened(preopen: *PreopenDir, allocator: Allocator) Allocator.Error!File {
+    std.debug.assert(preopen.guest_path.len > 0);
+
     defer preopen.* = undefined;
 
     const perm = preopen.permissions;
@@ -40,22 +53,18 @@ pub fn initPreopened(preopen: *PreopenDir, allocator: Allocator) Allocator.Error
         },
     };
 
+    var rights = initial_rights;
+    rights.path_create_directory = perm.write;
+    rights.path_create_file = perm.write;
+    rights.path_link_target = perm.write;
+    rights.path_rename_source = perm.write;
+    rights.path_rename_target = perm.write;
+    rights.path_symlink = perm.write;
+    rights.path_remove_directory = perm.write;
+    rights.path_unlink_file = perm.write;
+
     return File{
-        .rights = File.Rights.init(types.Rights.Valid{
-            .path_create_directory = perm.write,
-            .path_create_file = perm.write,
-            .path_link_source = true,
-            .path_link_target = perm.write,
-            .path_open = true,
-            .fd_readdir = true,
-            .path_readlink = true,
-            .path_rename_source = perm.write,
-            .path_rename_target = perm.write,
-            .path_filestat_get = true,
-            .path_symlink = perm.write,
-            .path_remove_directory = perm.write,
-            .path_unlink_file = perm.write,
-        }),
+        .rights = File.Rights.init(rights),
         .impl = File.Impl{
             .ctx = Ctx.init(HostDir{ .dir = preopen.dir, .info = info }),
             .vtable = &vtable,
@@ -70,19 +79,26 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
 
 pub fn fd_prestat_get(ctx: Ctx) Error!types.PreStat {
     const self = ctx.get(HostDir);
-    return .init(
-        types.PreStat.Type.dir,
-        types.PreStat.Dir{ .pr_name_len = self.guestPath().len },
-    );
+    return if (self.guestPath()) |guest_path|
+        types.PreStat.init(
+            types.PreStat.Type.dir,
+            types.PreStat.Dir{ .pr_name_len = guest_path.len },
+        )
+    else
+        Error.NotCapable;
 }
 
 pub fn fd_prestat_dir_name(ctx: Ctx, path: []u8) Error!void {
     const self = ctx.get(HostDir);
-    if (self.info.guest_path_len < path.len) {
-        return Error.InvalidArgument;
-    }
+    if (self.guestPath()) |guest_path| {
+        if (self.info.guest_path_len < guest_path.len) {
+            return Error.InvalidArgument;
+        }
 
-    @memcpy(path[0..self.info.guest_path_len], self.guestPath().bytes());
+        @memcpy(path[0..self.info.guest_path_len], guest_path.bytes());
+    } else {
+        return Error.NotCapable;
+    }
 }
 
 const EntryBuf = struct {
@@ -309,21 +325,160 @@ fn path_filestat_set_times(
 
 fn path_open(
     ctx: Ctx,
+    scratch: *ArenaAllocator,
     dir_flags: types.LookupFlags.Valid,
-    path: []const u8,
+    path: Path,
     open_flags: types.OpenFlags.Valid,
-    rights_base: types.Rights.Valid,
-    rights_inheriting: types.Rights.Valid,
+    rights: types.Rights.Valid,
     fd_flags: types.FdFlags.Valid,
-) Error!File {
-    _ = ctx;
-    _ = dir_flags;
-    _ = path;
-    _ = open_flags;
-    _ = rights_base;
-    _ = rights_inheriting;
-    _ = fd_flags;
-    return Error.Unimplemented;
+) Error!File.OpenedPath {
+    // Linux allows returning `ENOMEM`, so this can return `error.OutOfMemory`.
+
+    const max_component_len = 64;
+
+    if (path.len == 0) {
+        return Error.InvalidArgument; // is this right?
+    }
+
+    std.log.debug("path_open attempting to access {f}", .{path});
+
+    const self = ctx.get(HostDir);
+    // Could also do special syscall on Linux, this is what wasmtime tries to use:
+    // https://man7.org/linux/man-pages/man2/openat2.2.html
+
+    const initial_components: []const Path.Component = components: {
+        var component_iter = std.mem.splitSequence(u8, path.bytes(), "\\/");
+        var component_buf = try std.ArrayList(Path.Component).initCapacity(scratch.allocator(), 1);
+        while (component_iter.next()) |comp_slice| {
+            if (std.mem.eql(u8, "..", comp_slice)) {
+                if (component_buf.pop() == null) {
+                    return Error.AccessDenied; // tried to escape sandbox
+                }
+            } else if (std.mem.eql(u8, ".", comp_slice) or comp_slice.len == 0) {
+                continue;
+            }
+
+            const comp = Path.Component{
+                .start = @intCast(comp_slice.ptr - path.ptr),
+                .len = @intCast(comp_slice.len),
+            };
+
+            if (component_buf.items.len >= max_component_len) {
+                return Error.PathTooLong; // too many components
+            }
+
+            try component_buf.append(scratch.allocator(), comp);
+        }
+
+        if (scratch.allocator().resize(component_buf.allocatedSlice(), component_buf.items.len)) {
+            component_buf.capacity = component_buf.items.len;
+        }
+
+        break :components component_buf.items;
+    };
+
+    if (initial_components.len == 0) {
+        @branchHint(.unlikely);
+        // Can't use `dup` here
+        std.log.err("TODO: path_open to same directory {f}", .{path});
+        return Error.Unimplemented;
+    }
+
+    // Can't compare realpath of dir and target, that's a TOCTOU
+
+    // Strategy here is to open each subdirectory, expanding symlinks, until the parent of the
+    // target is reached.
+    const final_name = try scratch.allocator().dupeZ(
+        u8,
+        initial_components[initial_components.len - 1].bytes(path),
+    );
+
+    var final_dir = self.dir;
+    defer if (initial_components.len > 1) {
+        final_dir.close();
+    };
+
+    for (0.., initial_components[1..]) |i, comp| {
+        var old_dir = final_dir;
+        const comp_bytes = comp.bytes(path);
+
+        // TODO: Use O_PATH on Linux
+        // TODO(zig): no_follow weird on windows https://github.com/ziglang/zig/issues/18335
+        final_dir = old_dir.openDir(
+            comp_bytes,
+            .{ .iterate = false, .no_follow = true },
+        ) catch |e| return switch (e) {
+            error.SymLinkLoop => if (!dir_flags.symlink_follow)
+                error.SymLinkLoop
+            else {
+                // readLink + std.path.isAbsolute
+                // Need separate array list (stackFallback(1, scratch.allocator())) to store expanded components
+                std.log.err("TODO: Expand symlinks in path_open for {f}", .{path});
+                return error.Unimplemented;
+            },
+            error.InvalidUtf8, error.InvalidWtf8 => unreachable,
+            error.NetworkNotFound => error.DirNotFound,
+            else => |err| err,
+        };
+
+        if (i > 1) {
+            old_dir.close();
+        }
+    }
+
+    // Open final handle
+    // TODO(zig): openAny https://github.com/ziglang/zig/issues/16738
+    if (builtin.os.tag == .windows) {
+        std.log.err("path_open final component {f} on windows", .{path});
+        return error.Unimplemented;
+    } else if (std.posix.O != void) {
+        var o_flags = fd_flags.toFlagsPosix() catch return error.InvalidArgument;
+        open_flags.setPosixFlags(&o_flags);
+
+        if (@hasField(std.posix.O, "CLOEXEC")) o_flags.CLOEXEC = true;
+        if (@hasField(std.posix.O, "LARGEFILE")) o_flags.LARGEFILE = true;
+        if (@hasField(std.posix.O, "NOCTTY")) o_flags.NOCTTY = true;
+
+        if (!open_flags.directory) {
+            // TODO: Darn, need to figure out if directory or file! (fstatat?)
+            o_flags.ACCMODE = if (rights.canWrite()) .RDWR else .RDONLY;
+        }
+
+        errdefer |e| std.log.err("OS error {t} opening {f}", .{ e, path });
+
+        const new_fd = std.posix.openatZ(
+            final_dir.fd,
+            final_name,
+            o_flags,
+            0,
+        ) catch |e| return switch (e) {
+            error.InvalidWtf8, error.NetworkNotFound => unreachable, // Windows-only
+            error.FileLocksNotSupported => unreachable,
+            else => |err| err,
+        };
+
+        errdefer std.posix.close(new_fd);
+
+        if (open_flags.directory) {
+            std.log.err("TODO: opened directory {f}", .{path});
+            return error.Unimplemented;
+        } else {
+            const as_file = std.fs.File{ .handle = new_fd };
+            const kind = (try as_file.stat()).kind;
+            return switch (kind) {
+                .directory => {
+                    std.log.err("TODO: {f} is an opened directory", .{path});
+                    return error.Unimplemented;
+                },
+                else => File.OpenedPath{
+                    .file = host_file.wrapFile(as_file, .close),
+                    .rights = rights.intersection(host_file.possible_rights),
+                },
+            };
+        }
+    } else {
+        @compileError("path_open impl on " ++ @tagName(builtin.os));
+    }
 }
 
 fn path_remove_directory(ctx: Ctx, path: []const u8) Error!void {
@@ -423,7 +578,7 @@ fn fd_write(_: Ctx, _: []const File.Ciovec, _: u32) Error!u32 {
     @trap();
 }
 
-fn sock_accept(_: Ctx, _: types.FdFlags.Valid) Error!File {
+fn sock_accept(_: Ctx, _: types.FdFlags.Valid) Error!File.Impl {
     @trap();
 }
 
