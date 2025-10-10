@@ -420,7 +420,7 @@ pub fn fd_fdstat_get(file: *File) Error!types.FdStat {
     return .{
         .file = try file.impl.vtable.fd_fdstat_get(file.impl.ctx),
         .rights_base = types.Rights{ .valid = file.rights.base },
-        .rights_inheriting = types.Rights{ .valid = file.rights.base },
+        .rights_inheriting = types.Rights{ .valid = file.rights.inheriting },
     };
 }
 
@@ -761,10 +761,15 @@ pub fn path_open(
 
     std.debug.assert(derived_rights.contains(opened.rights));
 
+    std.log.debug(
+        "opened {f} with base rights {f} restricted to {f} inherited {f}",
+        .{ path, rights_base, opened.rights, derived_rights },
+    );
+
     return File{
         .impl = opened.file,
         .rights = Rights{
-            .base = rights_base.intersection(opened.rights),
+            .base = rights_base.intersection(opened.rights).intersection(derived_rights),
             .inheriting = rights_inheriting,
         },
     };

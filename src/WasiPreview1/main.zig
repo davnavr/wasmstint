@@ -404,7 +404,7 @@ fn logger(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    var buffer: [256]u8 align(16) = undefined;
+    var buffer: [1024]u8 align(16) = undefined;
     var log_file_writer: std.fs.File.Writer = undefined;
     var writer: *std.Io.Writer = if (log_file) |f| writer: {
         log_file_writer = f.writerStreaming(&buffer);
