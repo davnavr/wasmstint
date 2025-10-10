@@ -64,6 +64,7 @@ csprng: Csprng,
 fd_table: Fd.Table,
 args: Arguments,
 environ: Environ,
+device_hash_seed: types.Device.HashSeed,
 inode_hash_seed: types.INode.HashSeed,
 
 const WasiPreview1 = @This();
@@ -129,6 +130,7 @@ pub fn init(
         .args = options.args,
         .environ = options.environ,
         .inode_hash_seed = @enumFromInt(rng.next()),
+        .device_hash_seed = @enumFromInt(rng.next()),
     };
 }
 
@@ -970,14 +972,24 @@ fn path_filestat_get(
     const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
     defer wasi.fd_table.unlockTable();
 
-    const path = pointer.ConstSlice(u8).init(mem, path_ptr, path_len) catch |e|
+    const path_slice = pointer.ConstSlice(u8).init(mem, path_ptr, path_len) catch |e|
         return .mapError(e);
+    const path = Path.init(path_slice.bytes()) catch |e| return .mapError(e);
+
+    var scratch = wasi.acquireScratch();
+    defer wasi.releaseScratch(scratch);
 
     const flags = flags_param.validate() orelse return Errno.inval;
 
     ret_ptr.write(
         mem,
-        file.path_filestat_get(flags, path.bytes()) catch |e| return .mapError(e),
+        file.path_filestat_get(
+            &scratch,
+            wasi.device_hash_seed,
+            wasi.inode_hash_seed,
+            flags,
+            path,
+        ) catch |e| return .mapError(e),
     ) catch |e| return .mapError(e);
 
     return .success;

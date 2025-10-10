@@ -287,8 +287,11 @@ pub const VTable = struct {
 
     path_filestat_get: *const fn (
         ctx: Ctx,
+        scratch: *ArenaAllocator,
+        device_hash_seed: types.Device.HashSeed,
+        inode_hash_seed: types.INode.HashSeed,
         flags: types.LookupFlags.Valid,
-        path: []const u8,
+        path: Path,
     ) Error!types.FileStat,
 
     path_filestat_set_times: *const fn (
@@ -658,12 +661,16 @@ pub fn path_create_directory(file: *File, path: []const u8) Error!void {
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#path_filestat_get
 pub fn path_filestat_get(
     file: *File,
+    scratch: *ArenaAllocator,
+    device_hash_seed: types.Device.HashSeed,
+    inode_hash_seed: types.INode.HashSeed,
     /// Flags determining the method of how the path is resolved.
     flags: types.LookupFlags.Valid,
     /// The path of the file or directory to inspect.
-    path: []const u8,
+    path: Path,
 ) Error!types.FileStat {
-    return (try file.api(.path_filestat_get, .path_filestat_get))(file.impl.ctx, flags, path);
+    const get = try file.api(.path_filestat_get, .path_filestat_get);
+    return get(file.impl.ctx, scratch, device_hash_seed, inode_hash_seed, flags, path);
 }
 
 /// Adjust the timestamps of a file or directory.

@@ -7,23 +7,23 @@ const HostFile = struct {
     close: Close,
 };
 
-pub const possible_rights = types.Rights.Valid{
-    .fd_datasync = true,
-    .fd_read = true,
-    .fd_seek = true,
-    .fd_fdstat_set_flags = true,
-    .fd_sync = true,
-    .fd_tell = true,
-    .fd_write = true,
-    .fd_advise = true,
-    .fd_allocate = true,
-    .fd_readdir = true,
-    .fd_filestat_get = true,
-    .fd_filestat_set_size = true,
-    .fd_filestat_set_times = true,
-    .sock_shutdown = true,
-    .sock_accept = true,
-};
+pub const possible_rights = types.Rights.Valid.init(&.{
+    .fd_datasync,
+    .fd_read,
+    .fd_seek,
+    .fd_fdstat_set_flags,
+    .fd_sync,
+    .fd_tell,
+    .fd_write,
+    .fd_advise,
+    .fd_allocate,
+    .fd_readdir,
+    .fd_filestat_get,
+    .fd_filestat_set_size,
+    .fd_filestat_set_times,
+    .sock_shutdown,
+    .sock_accept,
+});
 
 /// Callers must ensure that `fd` is an open file handle.
 ///
@@ -292,7 +292,14 @@ fn path_create_directory(_: Ctx, _: []const u8) Error!void {
     @trap();
 }
 
-fn path_filestat_get(_: Ctx, _: types.LookupFlags.Valid, _: []const u8) Error!types.FileStat {
+fn path_filestat_get(
+    _: Ctx,
+    _: *ArenaAllocator,
+    _: types.Device.HashSeed,
+    _: types.INode.HashSeed,
+    _: types.LookupFlags.Valid,
+    _: Path,
+) Error!types.FileStat {
     @trap();
 }
 

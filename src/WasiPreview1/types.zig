@@ -210,6 +210,23 @@ pub const Rights = packed struct(u64) {
         /// The right to invoke `sock_accept`.
         sock_accept: bool = false,
 
+        pub const Flag = std.meta.FieldEnum(Valid);
+
+        pub fn init(set: []const Flag) Valid {
+            var flags: u30 = 0;
+            for (set) |f| {
+                flags |= (@as(u30, 1) << @intFromEnum(f));
+            }
+
+            return @bitCast(flags);
+        }
+
+        comptime {
+            for (std.enums.values(Flag)) |f| {
+                std.debug.assert(@field(Valid.init(&.{f}), @tagName(f)));
+            }
+        }
+
         pub const format = flagsFormatter(Valid);
 
         pub fn contains(super: Valid, sub: Valid) bool {
@@ -219,6 +236,15 @@ pub const Rights = packed struct(u64) {
 
         pub fn intersection(a: Valid, b: Valid) Valid {
             return @bitCast(@as(u30, @bitCast(a)) & @as(u30, @bitCast(b)));
+        }
+
+        pub fn unionWithConditional(a: Valid, enabled: bool, b: Valid) Valid {
+            const enabled_mask: u30 = @bitCast(
+                @as(i30, @bitCast(@as(u30, @intFromBool(enabled)) << 29)) >> 29,
+            );
+            return @bitCast(
+                @as(u30, @bitCast(a)) | (@as(u30, @bitCast(b)) & enabled_mask),
+            );
         }
 
         pub fn canWrite(rights: Valid) bool {
@@ -242,6 +268,13 @@ pub const Rights = packed struct(u64) {
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#device
 pub const Device = packed struct(u64) {
     n: u64,
+
+    pub const HashSeed = enum(u64) { _ };
+
+    /// `dev` numbers exposed to WASI guests are hashed.
+    pub fn init(seed: HashSeed, n: u64) Device {
+        return Device{ .n = std.hash.Wyhash.hash(@intFromEnum(seed), std.mem.asBytes(&n)) };
+    }
 };
 
 /// File attributes.
@@ -329,7 +362,7 @@ pub const INode = packed struct(u64) {
 
     /// `inode` numbers exposed to WASI guests are hashed
     pub fn init(seed: HashSeed, n: u64) INode {
-        return .{ .n = std.hash.Wyhash.hash(@intFromEnum(seed), std.mem.asBytes(&n)) };
+        return INode{ .n = std.hash.Wyhash.hash(@intFromEnum(seed), std.mem.asBytes(&n)) };
     }
 };
 
@@ -368,7 +401,7 @@ pub const FileType = enum(u8) {
             else
                 unreachable,
             .whiteout => if (!is_windows) .unknown else unreachable, // BSD thing
-            .door, .event_port => if (builtin.os.tag == .solaris) .unknown else unreachable,
+            .door, .event_port => if (builtin.os.tag.isSolarish()) .unknown else unreachable,
             .unknown => .unknown,
         };
     }

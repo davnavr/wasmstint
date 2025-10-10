@@ -20,13 +20,24 @@ const HostDir = struct {
     }
 };
 
-const initial_rights = types.Rights.Valid{
-    .path_link_source = true,
-    .path_open = true,
-    .fd_readdir = true,
-    .path_readlink = true,
-    .path_filestat_get = true,
-};
+const initial_rights = types.Rights.Valid.init(&.{
+    .path_link_source,
+    .path_open,
+    .fd_readdir,
+    .path_readlink,
+    .path_filestat_get,
+});
+
+const write_rights = types.Rights.Valid.init(&.{
+    .path_create_directory,
+    .path_create_file,
+    .path_link_target,
+    .path_rename_source,
+    .path_rename_target,
+    .path_symlink,
+    .path_remove_directory,
+    .path_unlink_file,
+});
 
 /// Ownership of the file descriptor is transferred to the `File`.
 pub fn initPreopened(preopen: *PreopenDir, allocator: Allocator) Allocator.Error!File {
@@ -51,18 +62,10 @@ pub fn initPreopened(preopen: *PreopenDir, allocator: Allocator) Allocator.Error
         },
     };
 
-    var rights = initial_rights;
-    rights.path_create_directory = perm.write;
-    rights.path_create_file = perm.write;
-    rights.path_link_target = perm.write;
-    rights.path_rename_source = perm.write;
-    rights.path_rename_target = perm.write;
-    rights.path_symlink = perm.write;
-    rights.path_remove_directory = perm.write;
-    rights.path_unlink_file = perm.write;
-
     return File{
-        .rights = File.Rights.init(rights),
+        .rights = File.Rights.init(
+            initial_rights.unionWithConditional(perm.write, write_rights),
+        ),
         .impl = File.Impl{
             .ctx = Ctx.init(HostDir{ .dir = preopen.dir, .info = info }),
             .vtable = &vtable,
@@ -420,6 +423,8 @@ fn accessSubPathPortable(
         }
     }
 
+    // TODO: Shoot! `final_name` could be a symlink!
+
     return @call(.auto, accessor, .{ scratch, path, final_dir, final_name } ++ args);
 }
 
@@ -488,15 +493,70 @@ fn accessSubPath(
     return accessSubPathPortable(dir, scratch, flags, path, args, accessor.portable);
 }
 
+const path_filestat_get_impl = struct {
+    const Result = types.FileStat;
+
+    fn portable(
+        scratch: *ArenaAllocator,
+        path: Path,
+        final_dir: std.fs.Dir,
+        final_name: Path.Component,
+        device_hash_seed: types.Device.HashSeed,
+        inode_hash_seed: types.INode.HashSeed,
+    ) Error!types.FileStat {
+        // TODO: Possible duplicate code with `host_file.fd_fdstat_get`
+        if (builtin.os.tag == .windows) {
+            // TODO: On Windows, need to use NtQueryInformationFile: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryinformationfile
+            std.log.err("path_filestat_get of {f} on windows", .{path});
+            return Error.Unimplemented;
+        } else if (@hasDecl(std.posix.system, "Stat") and std.posix.Stat != void) {
+            // TODO: Use statx on Linux
+            const final_name_z = try scratch.allocator().dupeZ(u8, final_name.bytes(path));
+            const o_flags = if (@hasDecl(std.posix.AT, "SYMLINK_NOFOLLOW"))
+                std.posix.AT.SYMLINK_NOFOLLOW
+            else
+                0;
+            const stat = try std.posix.fstatatZ(final_dir.fd, final_name_z, o_flags);
+            const zig_stat = std.fs.File.Stat.fromPosix(stat);
+
+            return types.FileStat{
+                .dev = types.Device.init(device_hash_seed, stat.dev),
+                .ino = types.INode.init(inode_hash_seed, stat.ino),
+                .type = types.FileType.fromZigKind(zig_stat.kind) catch |e| switch (e) {
+                    // TODO: need `getsockopt()` to determine exact type of socket
+                    error.UnknownSocketType => .unknown,
+                },
+                .nlink = stat.nlink,
+                .size = types.FileSize{ .bytes = zig_stat.size },
+                .atim = types.Timestamp{ .ns = @truncate(@as(u128, @bitCast(zig_stat.atime))) },
+                .mtim = types.Timestamp{ .ns = @truncate(@as(u128, @bitCast(zig_stat.mtime))) },
+                .ctim = types.Timestamp{ .ns = @truncate(@as(u128, @bitCast(zig_stat.ctime))) },
+            };
+        } else {
+            @compileError("path_filestat_get impl for " ++ @tagName(builtin.os.tag));
+        }
+    }
+};
+
 fn path_filestat_get(
     ctx: Ctx,
+    scratch: *ArenaAllocator,
+    device_hash_seed: types.Device.HashSeed,
+    inode_hash_seed: types.INode.HashSeed,
     flags: types.LookupFlags.Valid,
-    path: []const u8,
+    path: Path,
 ) Error!types.FileStat {
-    _ = ctx;
-    _ = flags;
-    _ = path;
-    return Error.Unimplemented;
+    std.log.debug("path_filestat_get attempting to access {f}", .{path});
+
+    const self = ctx.get(HostDir);
+    return accessSubPath(
+        self.dir,
+        scratch,
+        flags,
+        path,
+        .{ device_hash_seed, inode_hash_seed },
+        path_filestat_get_impl,
+    );
 }
 
 fn path_filestat_set_times(
@@ -533,10 +593,11 @@ const path_open_impl = struct {
         if (builtin.os.tag == .windows) {
             std.log.err("path_open final component {f} on windows", .{path});
             return error.Unimplemented;
-        } else if (std.posix.O != void) {
+        } else if (@hasDecl(std.posix.system, "O") and std.posix.O != void) {
             const final_name_z = try scratch.allocator().dupeZ(u8, final_name.bytes(path));
 
             var o_flags = fd_flags.toFlagsPosix() catch return error.InvalidArgument;
+            o_flags.NOFOLLOW = true;
             open_flags.setPosixFlags(&o_flags);
 
             if (@hasField(std.posix.O, "CLOEXEC")) o_flags.CLOEXEC = true;
@@ -581,7 +642,7 @@ const path_open_impl = struct {
                 };
             }
         } else {
-            @compileError("path_open impl on " ++ @tagName(builtin.os));
+            @compileError("path_open impl for " ++ @tagName(builtin.os.tag));
         }
     }
 };
