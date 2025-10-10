@@ -25,6 +25,18 @@ pub const possible_rights = types.Rights.Valid.init(&.{
     .sock_accept,
 });
 
+pub const write_rights = types.Rights.Valid.init(&.{
+    .fd_write,
+    .fd_allocate,
+    .fd_readdir,
+    .fd_filestat_set_size,
+    .fd_filestat_set_times,
+});
+
+comptime {
+    std.debug.assert(possible_rights.contains(write_rights));
+}
+
 /// Callers must ensure that `fd` is an open file handle.
 ///
 /// Ownership of `fd` is transferred to the `File`.
@@ -37,7 +49,7 @@ pub fn wrapFile(fd: std.fs.File, close: Close) File.Impl {
 
 /// Creates wrappers for the standard streams, and makes guest calls to `fd_close` a no-op.
 pub fn wrapStandardStreams() File.StandardStreams {
-    const write_rights = File.Rights.init(types.Rights.Valid{ .fd_write = true });
+    const out_rights = File.Rights.init(types.Rights.Valid{ .fd_write = true });
     // Leave standard streams open in case an interpreter error/panic occurs
     return .{
         .stdin = File{
@@ -45,11 +57,11 @@ pub fn wrapStandardStreams() File.StandardStreams {
             .impl = wrapFile(std.fs.File.stdin(), .leave_open),
         },
         .stdout = File{
-            .rights = write_rights,
+            .rights = out_rights,
             .impl = wrapFile(std.fs.File.stdout(), .leave_open),
         },
         .stderr = File{
-            .rights = write_rights,
+            .rights = out_rights,
             .impl = wrapFile(std.fs.File.stderr(), .leave_open),
         },
     };

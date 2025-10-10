@@ -24,6 +24,7 @@ const possible_rights = types.Rights.Valid.init(&.{
     .path_link_source,
     .path_open,
     .fd_readdir,
+    .fd_filestat_get,
     .path_readlink,
     .path_filestat_get,
     .path_create_directory,
@@ -42,6 +43,7 @@ const initial_rights = types.Rights.Valid.init(&.{
     .fd_readdir,
     .path_readlink,
     .path_filestat_get,
+    .fd_filestat_get,
 });
 
 const write_rights = types.Rights.Valid.init(&.{
@@ -55,9 +57,12 @@ const write_rights = types.Rights.Valid.init(&.{
     .path_unlink_file,
 });
 
+const initial_inheriting_rights = possible_rights.unionWith(host_file.possible_rights);
+
 comptime {
     std.debug.assert(possible_rights.contains(initial_rights));
     std.debug.assert(possible_rights.contains(write_rights));
+    std.debug.assert(initial_inheriting_rights.contains(.init(&.{.fd_filestat_get})));
 }
 
 /// Ownership of the file descriptor is transferred to the `File`.
@@ -84,9 +89,13 @@ pub fn initPreopened(preopen: *PreopenDir, allocator: Allocator) Allocator.Error
     };
 
     return File{
-        .rights = File.Rights.init(
-            initial_rights.unionWithConditional(perm.write, write_rights),
-        ),
+        .rights = File.Rights{
+            .base = initial_rights.unionWithConditional(perm.write, write_rights),
+            // TODO: Could allow caller to restrict rights, maybe add params on `PreopenDir`?
+            .inheriting = initial_inheriting_rights
+                .withoutConditional(perm.write, write_rights)
+                .withoutConditional(perm.write, host_file.write_rights),
+        },
         .impl = File.Impl{
             .ctx = Ctx.init(HostDir{ .dir = preopen.dir, .info = info }),
             .vtable = &vtable,
@@ -125,9 +134,13 @@ fn init(
     };
 }
 
-fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
-    _ = ctx;
-    return .{ .type = .directory, .flags = std.mem.zeroes(types.FdFlags) };
+fn fd_filestat_get(ctx: Ctx) Error!types.FileStat {
+    const self = ctx.get(HostDir);
+    std.log.err("fd_filestat_get for directories is not implemented", .{});
+    _ = self;
+    return Error.Unimplemented;
+    // const stat = try self.dir.stat();
+    // return types.FileStat{ .type = .directory, .flags = std.mem.zeroes(types.FdFlags) };
 }
 
 pub fn fd_prestat_get(ctx: Ctx) Error!types.PreStat {
@@ -340,6 +353,14 @@ fn fd_close(ctx: Ctx, allocator: Allocator) Error!void {
     // self.guestPath is not deallocated
     defer allocator.destroy(self.info);
     try host_file.closeHandle(self.dir.fd);
+}
+
+fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
+    _ = ctx;
+    return types.FdStat.File{
+        .type = .directory,
+        .flags = std.mem.zeroes(types.FdFlags),
+    };
 }
 
 fn path_create_directory(ctx: Ctx, path: []const u8) Error!void {
@@ -692,12 +713,17 @@ const path_open_impl = struct {
                 const kind = (try as_file.stat()).kind;
                 switch (kind) {
                     .directory => break :open_dir,
-                    else => return File.OpenedPath{
-                        .file = host_file.wrapFile(as_file, .close),
-                        .rights = rights.intersection(host_file.possible_rights),
+                    else => {
+                        log.debug("successfully opened file {f}", .{path});
+                        return File.OpenedPath{
+                            .file = host_file.wrapFile(as_file, .close),
+                            .rights = rights.intersection(host_file.possible_rights),
+                        };
                     },
                 }
             }
+
+            log.debug("successfully opened directory {f}", .{path});
 
             const as_dir = std.fs.Dir{ .fd = new_fd };
             return init(as_dir, allocator, rights);
@@ -758,7 +784,7 @@ pub const vtable = File.VTable{
     .fd_datasync = fd_datasync,
     .fd_fdstat_get = fd_fdstat_get,
     .fd_fdstat_set_flags = fd_fdstat_set_flags,
-    .fd_filestat_get = File.unimplemented.fd_filestat_get,
+    .fd_filestat_get = fd_filestat_get,
     .fd_filestat_set_size = fd_filestat_set_size,
     .fd_filestat_set_times = File.unimplemented.fd_filestat_set_times,
     .fd_pread = fd_pread,

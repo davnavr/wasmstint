@@ -345,10 +345,12 @@ fn api(
     comptime right: Api,
     comptime func: std.meta.FieldEnum(VTable),
 ) error{AccessDenied}!@FieldType(VTable, @tagName(func)) {
-    return if (@field(file.rights.base, @tagName(right)))
-        @field(file.impl.vtable, @tagName(func))
-    else
-        error.AccessDenied;
+    if (@field(file.rights.base, @tagName(right))) {
+        return @field(file.impl.vtable, @tagName(func));
+    } else {
+        std.log.err("{t} requires right {t} to be called", .{ func, right });
+        return error.AccessDenied;
+    }
 }
 
 /// Provide file advisory information on a file descriptor.

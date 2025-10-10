@@ -468,9 +468,10 @@ fn fd_datasync(wasi: *WasiPreview1, _: *MemInst, raw_fd: i32) Errno {
 }
 
 fn fd_fdstat_get(wasi: *WasiPreview1, mem: *MemInst, raw_fd: i32, raw_ret: i32) Errno {
+    const fd_u = @as(u32, @bitCast(raw_fd));
     const ret_ptr = pointer.Pointer(types.FdStat){ .addr = @as(u32, @bitCast(raw_ret)) };
 
-    log.debug("fd_fdstat_get({d}, {f})", .{ @as(u32, @bitCast(raw_fd)), ret_ptr });
+    log.debug("fd_fdstat_get({d}, {f})", .{ fd_u, ret_ptr });
 
     const fd = Fd.initRaw(raw_fd) catch |e| return .mapError(e);
     const file = wasi.fd_table.get(fd) catch |e| return .mapError(e);
@@ -478,6 +479,11 @@ fn fd_fdstat_get(wasi: *WasiPreview1, mem: *MemInst, raw_fd: i32, raw_ret: i32) 
 
     const stat = file.fd_fdstat_get() catch |e| return .mapError(e);
     ret_ptr.write(mem, stat) catch |e| return .mapError(e);
+
+    log.debug(
+        "fd_fdstat_get({d}) -> {t}, {f}, base={f}, inheriting={f}",
+        .{ fd_u, stat.file.type, stat.file.flags, stat.rights_base, stat.rights_inheriting },
+    );
 
     return Errno.success;
 }
@@ -1129,6 +1135,7 @@ fn typedPathOpen(
         fs_flags,
     );
 
+    log.debug("path_open -> {f} with rights {f}", .{ new_fd.fd, new_fd.file.rights.base });
     return new_fd.fd;
 }
 

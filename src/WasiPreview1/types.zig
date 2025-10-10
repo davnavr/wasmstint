@@ -77,12 +77,14 @@ fn flagsFormatter(comptime T: type) fn (T, *std.Io.Writer) std.Io.Writer.Error!v
             if (@as(@typeInfo(T).@"struct".backing_integer.?, @bitCast(flags)) == 0) {
                 try writer.writeByte('0');
             } else {
-                inline for (0.., @typeInfo(T).@"struct".fields) |i, f| {
+                var first = true;
+                inline for (@typeInfo(T).@"struct".fields) |f| {
                     if (@field(flags, f.name)) {
-                        if (i > 0) {
+                        if (!first) {
                             try writer.writeAll("|");
                         }
 
+                        first = false;
                         try writer.writeAll(f.name);
                     }
                 }
@@ -225,6 +227,8 @@ pub const Rights = packed struct(u64) {
             for (std.enums.values(Flag)) |f| {
                 std.debug.assert(@field(Valid.init(&.{f}), @tagName(f)));
             }
+
+            std.debug.assert(@bitOffsetOf(Valid, "fd_filestat_get") == 21);
         }
 
         pub const format = flagsFormatter(Valid);
@@ -238,13 +242,23 @@ pub const Rights = packed struct(u64) {
             return @bitCast(@as(u30, @bitCast(a)) & @as(u30, @bitCast(b)));
         }
 
+        pub fn unionWith(a: Valid, b: Valid) Valid {
+            return @bitCast(@as(u30, @bitCast(a)) | @as(u30, @bitCast(b)));
+        }
+
+        fn mask(enabled: bool) u30 {
+            return @bitCast(@as(i30, @bitCast(@as(u30, @intFromBool(enabled)) << 29)) >> 29);
+        }
+
         pub fn unionWithConditional(a: Valid, enabled: bool, b: Valid) Valid {
-            const enabled_mask: u30 = @bitCast(
-                @as(i30, @bitCast(@as(u30, @intFromBool(enabled)) << 29)) >> 29,
-            );
             return @bitCast(
-                @as(u30, @bitCast(a)) | (@as(u30, @bitCast(b)) & enabled_mask),
+                @as(u30, @bitCast(a)) | (@as(u30, @bitCast(b)) & mask(enabled)),
             );
+        }
+
+        pub fn withoutConditional(a: Valid, remove: bool, b: Valid) Valid {
+            const keep = ~(mask(remove) & @as(u30, @bitCast(b)));
+            return @bitCast(@as(u30, @bitCast(a)) & keep);
         }
 
         pub fn canWrite(rights: Valid) bool {
@@ -463,6 +477,8 @@ pub const FdFlags = packed struct(u16) {
 
     valid: Valid,
     padding: u11 = 0,
+
+    pub const format = flagsFormatterWithInvalid(FdFlags);
 
     pub const Param = packed struct(u32) {
         valid: Valid,
