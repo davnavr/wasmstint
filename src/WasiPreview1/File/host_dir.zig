@@ -134,10 +134,16 @@ fn init(
     };
 }
 
-fn fd_filestat_get(ctx: Ctx) Error!types.FileStat {
+fn fd_filestat_get(
+    ctx: Ctx,
+    device_hash_seed: types.Device.HashSeed,
+    inode_hash_seed: types.INode.HashSeed,
+) Error!types.FileStat {
     const self = ctx.get(HostDir);
     std.log.err("fd_filestat_get for directories is not implemented", .{});
     _ = self;
+    _ = device_hash_seed;
+    _ = inode_hash_seed;
     return Error.Unimplemented;
     // const stat = try self.dir.stat();
     // return types.FileStat{ .type = .directory, .flags = std.mem.zeroes(types.FdFlags) };
@@ -595,25 +601,11 @@ const path_filestat_get_impl = struct {
             // TODO: Use statx on Linux
             const final_name_z = try scratch.allocator().dupeZ(u8, final_name.bytes(path));
             const o_flags = if (@hasDecl(std.posix.AT, "SYMLINK_NOFOLLOW"))
-                std.posix.AT.SYMLINK_NOFOLLOW
+                std.posix.AT.SYMLINK_NOFOLLOW // Why is this set? accessSubPath should catch it
             else
                 0;
             const stat = try std.posix.fstatatZ(final_dir.fd, final_name_z, o_flags);
-            const zig_stat = std.fs.File.Stat.fromPosix(stat);
-
-            return types.FileStat{
-                .dev = types.Device.init(device_hash_seed, stat.dev),
-                .ino = types.INode.init(inode_hash_seed, stat.ino),
-                .type = types.FileType.fromZigKind(zig_stat.kind) catch |e| switch (e) {
-                    // TODO: need `getsockopt()` to determine exact type of socket
-                    error.UnknownSocketType => .unknown,
-                },
-                .nlink = stat.nlink,
-                .size = types.FileSize{ .bytes = zig_stat.size },
-                .atim = types.Timestamp{ .ns = @truncate(@as(u128, @bitCast(zig_stat.atime))) },
-                .mtim = types.Timestamp{ .ns = @truncate(@as(u128, @bitCast(zig_stat.mtime))) },
-                .ctim = types.Timestamp{ .ns = @truncate(@as(u128, @bitCast(zig_stat.ctime))) },
-            };
+            return types.FileStat.fromPosixStat(&stat, device_hash_seed, inode_hash_seed);
         } else {
             @compileError("path_filestat_get impl for " ++ @tagName(builtin.os.tag));
         }

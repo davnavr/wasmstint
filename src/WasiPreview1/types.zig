@@ -314,6 +314,27 @@ pub const FileStat = extern struct {
     /// Last file status change timestamp.
     ctim: Timestamp,
 
+    pub fn fromPosixStat(
+        stat: *const std.posix.Stat,
+        device_hash_seed: Device.HashSeed,
+        inode_hash_seed: INode.HashSeed,
+    ) FileStat {
+        const zig_stat = std.fs.File.Stat.fromPosix(stat.*);
+        return FileStat{
+            .dev = Device.init(device_hash_seed, stat.dev),
+            .ino = INode.init(inode_hash_seed, stat.ino),
+            .type = FileType.fromZigKind(zig_stat.kind) catch |e| switch (e) {
+                // TODO: need `getsockopt()` to determine exact type of socket
+                error.UnknownSocketType => .unknown,
+            },
+            .nlink = stat.nlink,
+            .size = FileSize{ .bytes = zig_stat.size },
+            .atim = Timestamp{ .ns = @truncate(@as(u128, @bitCast(zig_stat.atime))) },
+            .mtim = Timestamp{ .ns = @truncate(@as(u128, @bitCast(zig_stat.mtime))) },
+            .ctim = Timestamp{ .ns = @truncate(@as(u128, @bitCast(zig_stat.ctime))) },
+        };
+    }
+
     comptime {
         std.debug.assert(@sizeOf(FileStat) == 64);
         std.debug.assert(@offsetOf(FileStat, "ctim") == 56);

@@ -64,6 +64,7 @@ csprng: Csprng,
 fd_table: Fd.Table,
 args: Arguments,
 environ: Environ,
+// TODO: Ensure these use integer hash functions/perfect hashes
 device_hash_seed: types.Device.HashSeed,
 inode_hash_seed: types.INode.HashSeed,
 
@@ -548,7 +549,10 @@ fn fd_filestat_get(
 
     ret_ptr.write(
         mem,
-        file.fd_filestat_get() catch |e| return .mapError(e),
+        file.fd_filestat_get(
+            wasi.device_hash_seed,
+            wasi.inode_hash_seed,
+        ) catch |e| return .mapError(e),
     ) catch |e| return .mapError(e);
 
     return Errno.success;

@@ -156,7 +156,11 @@ pub const unimplemented = struct {
         return Error.Unimplemented;
     }
 
-    pub fn fd_filestat_get(_: Ctx) Error!types.FileStat {
+    pub fn fd_filestat_get(
+        _: Ctx,
+        _: types.Device.HashSeed,
+        _: types.INode.HashSeed,
+    ) Error!types.FileStat {
         return Error.Unimplemented;
     }
 
@@ -230,7 +234,11 @@ pub const VTable = struct {
 
     // fd_fdstat_set_rights is managed by `File`, not by individual implementations.
 
-    fd_filestat_get: *const fn (ctx: Ctx) Error!types.FileStat,
+    fd_filestat_get: *const fn (
+        ctx: Ctx,
+        device_hash_seed: types.Device.HashSeed,
+        inode_hash_seed: types.INode.HashSeed,
+    ) Error!types.FileStat,
 
     fd_filestat_set_size: *const fn (ctx: Ctx, size: types.FileSize) Error!void,
 
@@ -457,8 +465,13 @@ pub fn fd_fdstat_set_rights(
 /// This is similar to `fstat` in POSIX.
 ///
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#fd_filestat_get
-pub fn fd_filestat_get(file: *File) Error!types.FileStat {
-    return (try file.api(.fd_filestat_get, .fd_filestat_get))(file.impl.ctx);
+pub fn fd_filestat_get(
+    file: *File,
+    device_hash_seed: types.Device.HashSeed,
+    inode_hash_seed: types.INode.HashSeed,
+) Error!types.FileStat {
+    const get = try file.api(.fd_filestat_get, .fd_filestat_get);
+    return get(file.impl.ctx, device_hash_seed, inode_hash_seed);
 }
 
 /// Adjust the size of an open file.

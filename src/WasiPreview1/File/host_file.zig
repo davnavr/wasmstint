@@ -124,6 +124,26 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
     };
 }
 
+fn fd_filestat_get(
+    ctx: Ctx,
+    device_hash_seed: types.Device.HashSeed,
+    inode_hash_seed: types.INode.HashSeed,
+) Error!types.FileStat {
+    const self = ctx.get(HostFile);
+    if (builtin.os.tag == .windows) {
+        // dev field on windows could be `_BY_HANDLE_FILE_INFORMATION.dwVolumeSerialNumber`
+        // NT API equivalent is `FileObjectIdInformation/FILE_OBJECTID_INFORMATION`
+        log.err("fd_filestat_get on windows", .{});
+        return Error.Unimplemented;
+    } else if (@hasDecl(std.posix.system, "Stat") and std.posix.Stat != void) {
+        // TODO: Use `statx` on Linux
+        const stat = try std.posix.fstat(self.file.handle);
+        return types.FileStat.fromPosixStat(&stat, device_hash_seed, inode_hash_seed);
+    } else {
+        @compileError("fd_filestat_get on " ++ @tagName(builtin.os.tag));
+    }
+}
+
 fn fd_pwrite(
     ctx: Ctx,
     iovs: []const File.Ciovec,
@@ -308,7 +328,7 @@ const vtable = File.VTable{
     .fd_datasync = File.unimplemented.fd_datasync,
     .fd_fdstat_get = fd_fdstat_get,
     .fd_fdstat_set_flags = File.unimplemented.fd_fdstat_set_flags,
-    .fd_filestat_get = File.unimplemented.fd_filestat_get,
+    .fd_filestat_get = fd_filestat_get,
     .fd_filestat_set_size = File.unimplemented.fd_filestat_set_size,
     .fd_filestat_set_times = File.unimplemented.fd_filestat_set_times,
     .fd_pread = File.unimplemented.fd_pread,
