@@ -305,6 +305,7 @@ pub const VTable = struct {
 
     path_open: *const fn (
         ctx: Ctx,
+        allocator: Allocator,
         scratch: *ArenaAllocator,
         dir_flags: types.LookupFlags.Valid,
         path: Path,
@@ -708,6 +709,7 @@ pub fn path_filestat_set_times(
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#path_open
 pub fn path_open(
     dir: *File,
+    allocator: Allocator,
     scratch: *ArenaAllocator,
     dir_flags: types.LookupFlags.Valid,
     path: Path,
@@ -733,6 +735,7 @@ pub fn path_open(
     const pathOpen = try dir.api(.path_open, .path_open);
     const opened: OpenedPath = try pathOpen(
         dir.impl.ctx,
+        allocator,
         scratch,
         dir_flags,
         path,

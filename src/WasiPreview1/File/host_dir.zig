@@ -20,6 +20,22 @@ const HostDir = struct {
     }
 };
 
+const possible_rights = types.Rights.Valid.init(&.{
+    .path_link_source,
+    .path_open,
+    .fd_readdir,
+    .path_readlink,
+    .path_filestat_get,
+    .path_create_directory,
+    .path_create_file,
+    .path_link_target,
+    .path_rename_source,
+    .path_rename_target,
+    .path_symlink,
+    .path_remove_directory,
+    .path_unlink_file,
+});
+
 const initial_rights = types.Rights.Valid.init(&.{
     .path_link_source,
     .path_open,
@@ -38,6 +54,11 @@ const write_rights = types.Rights.Valid.init(&.{
     .path_remove_directory,
     .path_unlink_file,
 });
+
+comptime {
+    std.debug.assert(possible_rights.contains(initial_rights));
+    std.debug.assert(possible_rights.contains(write_rights));
+}
 
 /// Ownership of the file descriptor is transferred to the `File`.
 pub fn initPreopened(preopen: *PreopenDir, allocator: Allocator) Allocator.Error!File {
@@ -74,6 +95,35 @@ pub fn initPreopened(preopen: *PreopenDir, allocator: Allocator) Allocator.Error
 }
 
 const log = std.log.scoped(.host_dir);
+
+fn init(
+    dir: std.fs.Dir,
+    allocator: Allocator,
+    rights: types.Rights.Valid,
+) Allocator.Error!File.OpenedPath {
+    // No guest path, don't have to worry about UAF
+    const info = try allocator.create(HostDir.Info);
+    errdefer comptime unreachable;
+
+    info.* = HostDir.Info{
+        .guest_path_len = 0,
+        .guest_path_ptr = @as([]const u8, "").ptr,
+        .read_next_cookie = .start,
+        .read_state = ReadState{
+            .iter = dir.iterate(),
+            .name_buf = undefined,
+            .cached = .current_dir,
+        },
+    };
+
+    return File.OpenedPath{
+        .rights = rights.intersection(possible_rights),
+        .file = File.Impl{
+            .ctx = Ctx.init(HostDir{ .dir = dir, .info = info }),
+            .vtable = &vtable,
+        },
+    };
+}
 
 fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
     _ = ctx;
@@ -596,6 +646,7 @@ const path_open_impl = struct {
         path: Path,
         final_dir: std.fs.Dir,
         final_name: Path.Component,
+        allocator: Allocator,
         open_flags: types.OpenFlags.Valid,
         rights: types.Rights.Valid,
         fd_flags: types.FdFlags.Valid,
@@ -636,23 +687,20 @@ const path_open_impl = struct {
 
             errdefer std.posix.close(new_fd);
 
-            if (open_flags.directory) {
-                log.err("TODO: opened directory {f}", .{path});
-                return error.Unimplemented;
-            } else {
+            if (!open_flags.directory) open_dir: {
                 const as_file = std.fs.File{ .handle = new_fd };
                 const kind = (try as_file.stat()).kind;
-                return switch (kind) {
-                    .directory => {
-                        log.err("TODO: {f} is an opened directory", .{path});
-                        return error.Unimplemented;
-                    },
-                    else => File.OpenedPath{
+                switch (kind) {
+                    .directory => break :open_dir,
+                    else => return File.OpenedPath{
                         .file = host_file.wrapFile(as_file, .close),
                         .rights = rights.intersection(host_file.possible_rights),
                     },
-                };
+                }
             }
+
+            const as_dir = std.fs.Dir{ .fd = new_fd };
+            return init(as_dir, allocator, rights);
         } else {
             @compileError("path_open impl for " ++ @tagName(builtin.os.tag));
         }
@@ -661,6 +709,7 @@ const path_open_impl = struct {
 
 fn path_open(
     ctx: Ctx,
+    allocator: Allocator,
     scratch: *ArenaAllocator,
     dir_flags: types.LookupFlags.Valid,
     path: Path,
@@ -678,7 +727,7 @@ fn path_open(
         scratch,
         dir_flags,
         path,
-        .{ open_flags, rights, fd_flags },
+        .{ allocator, open_flags, rights, fd_flags },
         path_open_impl,
     );
 }

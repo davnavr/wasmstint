@@ -1119,6 +1119,7 @@ fn typedPathOpen(
     defer wasi.releaseScratch(scratch);
 
     new_fd.file.* = try dir.path_open(
+        wasi.allocator,
         &scratch,
         dir_flags,
         path,

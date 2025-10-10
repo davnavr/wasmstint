@@ -316,6 +316,7 @@ fn path_filestat_set_times(
 
 fn path_open(
     _: Ctx,
+    _: std.mem.Allocator,
     _: *ArenaAllocator,
     _: types.LookupFlags.Valid,
     _: Path,
