@@ -324,8 +324,7 @@ pub fn fd_readdir(
             error.UnknownSocketType => .unknown,
         };
 
-        // Zig doesn't expose POSIX inode/Windows IndexNumber in `Dir.Iterator`, but WASI doesn't
-        // seem to do anything with inodes anyway.
+        // Zig doesn't expose POSIX inode/Windows IndexNumber in `Dir.Iterator`.
 
         // TODO: Copy `std.fs.Dir.Iterator` impls to obtain inode information that it skips
         // TODO: This returns different results than fd_fdstat_get impl, maybe do a `stat()` here (needed to find socket type anyway)?
@@ -375,6 +374,38 @@ fn path_create_directory(ctx: Ctx, path: []const u8) Error!void {
     return Error.Unimplemented;
 }
 
+const OsOpenFlags = if (builtin.os.tag == .windows)
+    void // TODO: Arguments for `NtCreateFile`
+else if (@hasDecl(std.posix.system, "O") and std.posix.O != void)
+    std.posix.O
+else
+    @compileError("specify open flags type " ++ @tagName(builtin.os.tag));
+
+const SetOpenFlagsError = error{ InvalidArgument, Unimplemented };
+
+fn SetOpenFlags(comptime Args: type) type {
+    const args_fields = @typeInfo(Args).@"struct".fields;
+    return @Type(.{
+        .@"fn" = std.builtin.Type.Fn{
+            .calling_convention = .auto,
+            .is_generic = false,
+            .is_var_args = false,
+            .return_type = SetOpenFlagsError!OsOpenFlags,
+            .params = params: {
+                var params: [args_fields.len]std.builtin.Type.Fn.Param = undefined;
+                for (args_fields, &params) |src, *dst| {
+                    dst.* = std.builtin.Type.Fn.Param{
+                        .is_generic = false,
+                        .is_noalias = false,
+                        .type = src.type,
+                    };
+                }
+                break :params &params;
+            },
+        },
+    });
+}
+
 const todo_openat2_on_linux_is_not_yet_supported = true; // TODO
 
 /// https://man7.org/linux/man-pages/man2/openat2.2.html
@@ -384,8 +415,9 @@ fn accessSubPathLinux(
     flags: types.LookupFlags.Valid,
     path: Path,
     args: anytype,
-    comptime accessor: anytype,
-) (error{NoSysOpenat2} || Error)!@typeInfo(accessor).@"fn".return_type.? {
+    comptime setOpenFlags: SetOpenFlags(@TypeOf(args)),
+    comptime doInPath: anytype,
+) (error{NoSysOpenat2} || Error)!@typeInfo(doInPath).@"fn".return_type.? {
     if (todo_openat2_on_linux_is_not_yet_supported) {
         return error.NoSysOpenat2;
     }
@@ -400,14 +432,14 @@ fn accessSubPathLinux(
     ); // FallbackImplementation if E_NOSYS or E2BIG
 
     _ = flags;
-    _ = args;
+    _ = setOpenFlags;
     _ = rc;
 }
 
 // FreeBSD also supports `O_RESOLVE_BENEATH` in openat
 //fn accessSubPathFreeBsd()
 
-fn AccessSubPathPortableReturn(comptime Accessor: type) type {
+fn AccessSubPathReturnType(comptime Accessor: type) type {
     return @typeInfo(@typeInfo(Accessor).@"fn".return_type.?).error_union.payload;
 }
 
@@ -416,9 +448,11 @@ fn accessSubPathPortable(
     scratch: *ArenaAllocator,
     flags: types.LookupFlags.Valid,
     path: Path,
-    args: anytype,
-    comptime accessor: anytype,
-) Error!AccessSubPathPortableReturn(@TypeOf(accessor)) {
+    set_open_flags_args: anytype,
+    comptime setOpenFlags: SetOpenFlags(@TypeOf(set_open_flags_args)),
+    do_in_path_args: anytype,
+    comptime doInPath: anytype,
+) Error!AccessSubPathReturnType(@TypeOf(doInPath)) {
     const max_component_len = 64;
 
     if (path.len == 0) {
@@ -474,7 +508,6 @@ fn accessSubPathPortable(
     const final_name = initial_components[initial_components.len - 1];
 
     var final_dir = dir;
-
     for (0.., initial_components[0 .. initial_components.len - 1]) |i, comp| {
         var old_dir = final_dir;
         defer if (i > 0 and i < initial_components.len - 1) {
@@ -511,12 +544,53 @@ fn accessSubPathPortable(
         final_dir.close();
     };
 
-    // TODO: Shoot! `final_name` could be a symlink! Better API might require passing FD to accessor
+    // Open final handle
+    const initial_o_flags = try @call(.auto, setOpenFlags, set_open_flags_args);
 
-    return @call(.auto, accessor, .{ scratch, path, final_dir, final_name } ++ args);
+    const do_in_path_args_without_fd = .{ scratch, path } ++ do_in_path_args;
+
+    // TODO(zig): openAny https://github.com/ziglang/zig/issues/16738
+    if (builtin.os.tag == .windows) {
+        log.err("accessSubPathPortable on windows {f}", .{path});
+        return Error.Unimplemented;
+    } else {
+        std.debug.assert(!initial_o_flags.NOFOLLOW);
+        const o_flags_no_follow = flags: {
+            var o_flags = initial_o_flags;
+            o_flags.NOFOLLOW = true;
+            break :flags o_flags;
+        };
+
+        const final_name_z = try scratch.allocator().dupeZ(u8, final_name.bytes(path));
+
+        errdefer |e| log.err("OS error {t} opening {f}", .{ e, path });
+
+        const new_fd = std.posix.openatZ(
+            final_dir.fd,
+            final_name_z,
+            o_flags_no_follow,
+            0,
+        ) catch |e| return switch (e) {
+            error.InvalidWtf8, error.NetworkNotFound => unreachable, // Windows-only
+            error.FileLocksNotSupported => unreachable,
+            error.SymLinkLoop => {
+                log.err("TODO: final path component of {f} was a symlink", .{path});
+                return error.Unimplemented;
+            },
+            else => |err| err,
+        };
+
+        return @call(.auto, doInPath, .{new_fd} ++ do_in_path_args_without_fd);
+    }
 }
 
 /// Allows safely accessing a path below the directory.
+///
+/// - On Linux, this can be implemented with the `openat2` system call, which is what is used
+///   to implement [WASI support in `wasmtime`].
+/// - On FreeBSD, this could probably be done with `O_RESOLVE_BENEATH` and `openat`.
+///
+/// [WASI support in `wasmtime`]: https://docs.rs/cap-primitives/3.4.4/src/cap_primitives/rustix/linux/fs/open_impl.rs.html
 fn accessSubPath(
     dir: std.fs.Dir,
     /// Used for temporary allocations of file paths.
@@ -526,21 +600,16 @@ fn accessSubPath(
     ///
     /// Attempts to navigate outside the handle (e.g. with `../` or symlinks) are caught.
     path: Path,
-    /// Tuple containing additional arguments to pass.
-    args: anytype,
-    /// Namespace that provides functions that perform the operation on the path.
+    set_open_flags_args: anytype,
+    comptime setOpenFlags: SetOpenFlags(@TypeOf(set_open_flags_args)),
+    do_in_path_args: anytype,
+    /// Function that performs the operation on the path.
     ///
-    /// This is not a single function to (eventually) allow specialized behavior on some platforms.
-    /// - On Linux, this can be implemented with the `openat2` system call, which is what is used
-    ///   to implement [WASI support in `wasmtime`].
-    /// - On FreeBSD, this could probably be done with `O_RESOLVE_BENEATH` and `openat`.
+    /// The first argument is an open file descriptor/handle referring to the target of `path`.
     ///
-    /// For the portable implementation, a handle to a parent directory (potentially a subdirectory)
-    /// and the name of the target is provided.
-    ///
-    /// [WASI support in `wasmtime`]: https://docs.rs/cap-primitives/3.4.4/src/cap_primitives/rustix/linux/fs/open_impl.rs.html
-    comptime accessor: type,
-) Error!accessor.Result {
+    /// This function is responsible for closing the opened file descriptor/handle.
+    comptime doInPath: anytype,
+) Error!AccessSubPathReturnType(@TypeOf(doInPath)) {
     // TODO: On Linux, fallback to portable implementation on E_NOSYS (check compile time OS version)
     fallback: switch (builtin.os.tag) {
         .linux => {
@@ -554,8 +623,10 @@ fn accessSubPath(
                 scratch,
                 flags,
                 path,
-                args,
-                accessor.linux,
+                set_open_flags_args,
+                setOpenFlags,
+                do_in_path_args,
+                doInPath,
             ) catch |e| switch (e) {
                 error.NoSysOpenat2 => {
                     const linux_openat2_version = std.SemanticVersion{
@@ -578,39 +649,55 @@ fn accessSubPath(
         else => {},
     }
 
-    return accessSubPathPortable(dir, scratch, flags, path, args, accessor.portable);
+    return accessSubPathPortable(
+        dir,
+        scratch,
+        flags,
+        path,
+        set_open_flags_args,
+        setOpenFlags,
+        do_in_path_args,
+        doInPath,
+    );
 }
 
-const path_filestat_get_impl = struct {
-    const Result = types.FileStat;
+fn pathFileStatSetFlags() SetOpenFlagsError!OsOpenFlags {
+    if (builtin.os.tag == .windows) {
+        log.err("path_filestat_get flags on windows", .{});
+    } else {
+        var flags = std.posix.O{
+            .ACCMODE = .RDONLY,
+            .CLOEXEC = true,
+        };
 
-    fn portable(
-        scratch: *ArenaAllocator,
-        path: Path,
-        final_dir: std.fs.Dir,
-        final_name: Path.Component,
-        device_hash_seed: types.Device.HashSeed,
-        inode_hash_seed: types.INode.HashSeed,
-    ) Error!types.FileStat {
-        // TODO: Possible duplicate code with `host_file.fd_fdstat_get`
-        if (builtin.os.tag == .windows) {
-            // TODO: On Windows, need to use NtQueryInformationFile: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryinformationfile
-            log.err("path_filestat_get of {f} on windows", .{path});
-            return Error.Unimplemented;
-        } else if (@hasDecl(std.posix.system, "Stat") and std.posix.Stat != void) {
-            // TODO: Use statx on Linux
-            const final_name_z = try scratch.allocator().dupeZ(u8, final_name.bytes(path));
-            const o_flags = if (@hasDecl(std.posix.AT, "SYMLINK_NOFOLLOW"))
-                std.posix.AT.SYMLINK_NOFOLLOW // Why is this set? accessSubPath should catch it
-            else
-                0;
-            const stat = try std.posix.fstatatZ(final_dir.fd, final_name_z, o_flags);
-            return types.FileStat.fromPosixStat(&stat, device_hash_seed, inode_hash_seed);
-        } else {
-            @compileError("path_filestat_get impl for " ++ @tagName(builtin.os.tag));
+        if (@hasField(std.posix.O, "PATH")) {
+            flags.PATH = true;
         }
+
+        return flags;
     }
-};
+}
+
+fn pathFileStat(
+    new_fd: std.posix.fd_t,
+    scratch: *ArenaAllocator,
+    path: Path,
+    device_hash_seed: types.Device.HashSeed,
+    inode_hash_seed: types.INode.HashSeed,
+) Error!types.FileStat {
+    defer std.posix.close(new_fd);
+    _ = scratch;
+    // TODO: Possible duplicate code with `host_file.fd_fdstat_get`
+    if (builtin.os.tag == .windows) {
+        // TODO: On Windows, need to use NtQueryInformationFile: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryinformationfile
+        log.err("path_filestat_get of {f} on windows", .{path});
+        return Error.Unimplemented;
+    } else {
+        // TODO: Use statx "." NOFOLLOW on Linux
+        const stat = try std.posix.fstat(new_fd);
+        return types.FileStat.fromPosixStat(&stat, device_hash_seed, inode_hash_seed);
+    }
+}
 
 fn path_filestat_get(
     ctx: Ctx,
@@ -629,8 +716,10 @@ fn path_filestat_get(
         scratch,
         flags,
         path,
+        .{},
+        pathFileStatSetFlags,
         .{ device_hash_seed, inode_hash_seed },
-        path_filestat_get_impl,
+        pathFileStat,
     );
 }
 
@@ -651,79 +740,68 @@ fn path_filestat_set_times(
     return Error.Unimplemented;
 }
 
-const path_open_impl = struct {
-    const Result = File.OpenedPath;
+fn pathOpenSetFlags(
+    open_flags: types.OpenFlags.Valid,
+    rights: types.Rights.Valid,
+    fd_flags: types.FdFlags.Valid,
+) SetOpenFlagsError!OsOpenFlags {
+    if (builtin.os.tag == .windows) {
+        log.err("path_open flags on windows", .{});
+        return error.Unimplemented;
+    } else {
+        var o_flags = fd_flags.toFlagsPosix() catch return error.InvalidArgument;
+        open_flags.setPosixFlags(&o_flags);
 
-    fn portable(
-        scratch: *ArenaAllocator,
-        path: Path,
-        final_dir: std.fs.Dir,
-        final_name: Path.Component,
-        allocator: Allocator,
-        open_flags: types.OpenFlags.Valid,
-        rights: types.Rights.Valid,
-        fd_flags: types.FdFlags.Valid,
-    ) Error!Result {
-        // Open final handle
-        // TODO(zig): openAny https://github.com/ziglang/zig/issues/16738
-        if (builtin.os.tag == .windows) {
-            log.err("path_open final component {f} on windows", .{path});
-            return error.Unimplemented;
-        } else if (@hasDecl(std.posix.system, "O") and std.posix.O != void) {
-            const final_name_z = try scratch.allocator().dupeZ(u8, final_name.bytes(path));
+        if (@hasField(std.posix.O, "CLOEXEC")) o_flags.CLOEXEC = true;
+        if (@hasField(std.posix.O, "LARGEFILE")) o_flags.LARGEFILE = true;
+        if (@hasField(std.posix.O, "NOCTTY")) o_flags.NOCTTY = true;
 
-            var o_flags = fd_flags.toFlagsPosix() catch return error.InvalidArgument;
-            o_flags.NOFOLLOW = true;
-            open_flags.setPosixFlags(&o_flags);
-
-            if (@hasField(std.posix.O, "CLOEXEC")) o_flags.CLOEXEC = true;
-            if (@hasField(std.posix.O, "LARGEFILE")) o_flags.LARGEFILE = true;
-            if (@hasField(std.posix.O, "NOCTTY")) o_flags.NOCTTY = true;
-
-            if (!open_flags.directory) {
-                // TODO: Darn, need to figure out if directory or file! (fstatat?)
-                o_flags.ACCMODE = if (rights.canWrite()) .RDWR else .RDONLY;
-            }
-
-            errdefer |e| log.err("OS error {t} opening {f}", .{ e, path });
-
-            const new_fd = std.posix.openatZ(
-                final_dir.fd,
-                final_name_z,
-                o_flags,
-                0,
-            ) catch |e| return switch (e) {
-                error.InvalidWtf8, error.NetworkNotFound => unreachable, // Windows-only
-                error.FileLocksNotSupported => unreachable,
-                else => |err| err,
-            };
-
-            errdefer std.posix.close(new_fd);
-
-            if (!open_flags.directory) open_dir: {
-                const as_file = std.fs.File{ .handle = new_fd };
-                const kind = (try as_file.stat()).kind;
-                switch (kind) {
-                    .directory => break :open_dir,
-                    else => {
-                        log.debug("successfully opened file {f}", .{path});
-                        return File.OpenedPath{
-                            .file = host_file.wrapFile(as_file, .close),
-                            .rights = rights.intersection(host_file.possible_rights),
-                        };
-                    },
-                }
-            }
-
-            log.debug("successfully opened directory {f}", .{path});
-
-            const as_dir = std.fs.Dir{ .fd = new_fd };
-            return init(as_dir, allocator, rights);
-        } else {
-            @compileError("path_open impl for " ++ @tagName(builtin.os.tag));
+        if (!open_flags.directory) {
+            // TODO: Darn, need to figure out if directory or file! (fstatat?)
+            o_flags.ACCMODE = if (rights.canWrite()) .RDWR else .RDONLY;
         }
+
+        return o_flags;
     }
-};
+}
+
+fn pathOpen(
+    new_fd: std.posix.fd_t,
+    scratch: *ArenaAllocator,
+    path: Path,
+    allocator: Allocator,
+    open_flags: types.OpenFlags.Valid,
+    rights: types.Rights.Valid,
+) Error!File.OpenedPath {
+    errdefer std.posix.close(new_fd);
+    _ = scratch;
+    if (builtin.os.tag == .windows) {
+        log.err("path_open {f} on windows", .{path});
+        return error.Unimplemented;
+    } else if (@hasDecl(std.posix.system, "O") and std.posix.O != void) {
+        if (!open_flags.directory) open_dir: {
+            const as_file = std.fs.File{ .handle = new_fd };
+            const kind = (try as_file.stat()).kind;
+            switch (kind) {
+                .directory => break :open_dir,
+                else => {
+                    log.debug("successfully opened file {f}", .{path});
+                    return File.OpenedPath{
+                        .file = host_file.wrapFile(as_file, .close),
+                        .rights = rights.intersection(host_file.possible_rights),
+                    };
+                },
+            }
+        }
+
+        log.debug("successfully opened directory {f}", .{path});
+
+        const as_dir = std.fs.Dir{ .fd = new_fd };
+        return init(as_dir, allocator, rights);
+    } else {
+        @compileError("path_open impl for " ++ @tagName(builtin.os.tag));
+    }
+}
 
 fn path_open(
     ctx: Ctx,
@@ -745,8 +823,10 @@ fn path_open(
         scratch,
         dir_flags,
         path,
-        .{ allocator, open_flags, rights, fd_flags },
-        path_open_impl,
+        .{ open_flags, rights, fd_flags },
+        pathOpenSetFlags,
+        .{ allocator, open_flags, rights },
+        pathOpen,
     );
 }
 
