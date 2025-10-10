@@ -28,11 +28,20 @@ pub fn openAtZ(
         .iterate = true, // guest may choose to ask for entries at any time
     };
 
+    const opened_dir = switch (builtin.os.tag) {
+        .windows, .wasi => try dir.openDir(sub_path, open_options),
+        else => try dir.openDirZ(sub_path, open_options),
+    };
+
+    std.log.debug(
+        "preopen host {any} @ {f} at guest path {f} -> host {any}",
+        .{ dir.fd, std.unicode.fmtUtf8(sub_path), guest_path, opened_dir.fd },
+    );
+
+    errdefer comptime unreachable;
+
     return .{
-        .dir = switch (builtin.os.tag) {
-            .windows, .wasi => try dir.openDir(sub_path, open_options),
-            else => try dir.openDirZ(sub_path, open_options),
-        },
+        .dir = opened_dir,
         .permissions = permissions,
         .guest_path = guest_path,
     };

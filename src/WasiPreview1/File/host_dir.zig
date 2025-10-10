@@ -73,6 +73,8 @@ pub fn initPreopened(preopen: *PreopenDir, allocator: Allocator) Allocator.Error
     };
 }
 
+const log = std.log.scoped(.host_dir);
+
 fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
     _ = ctx;
     return .{ .type = .directory, .flags = std.mem.zeroes(types.FdFlags) };
@@ -347,7 +349,7 @@ fn accessSubPathPortable(
     }
 
     const initial_components: []const Path.Component = components: {
-        var component_iter = std.mem.splitSequence(u8, path.bytes(), "\\/");
+        var component_iter = std.mem.splitAny(u8, path.bytes(), "\\/");
         var component_buf = try std.ArrayList(Path.Component).initCapacity(scratch.allocator(), 1);
         while (component_iter.next()) |comp_slice| {
             if (std.mem.eql(u8, "..", comp_slice)) {
@@ -362,6 +364,8 @@ fn accessSubPathPortable(
                 .start = @intCast(comp_slice.ptr - path.ptr),
                 .len = @intCast(comp_slice.len),
             };
+
+            // log.debug("component {f}", .{comp.toPath(path)});
 
             if (component_buf.items.len >= max_component_len) {
                 return Error.PathTooLong; // too many components
@@ -380,9 +384,11 @@ fn accessSubPathPortable(
     if (initial_components.len == 0) {
         @branchHint(.unlikely);
         // Can't use `dup` here
-        std.log.err("TODO: path_open to same directory {f}", .{path});
+        log.err("TODO: path_open to same directory {f}", .{path});
         return Error.Unimplemented;
     }
+
+    log.debug("{d} components in {f}", .{ initial_components.len, path });
 
     // Can't compare realpath of dir and target, that's a TOCTOU
 
@@ -391,26 +397,28 @@ fn accessSubPathPortable(
     const final_name = initial_components[initial_components.len - 1];
 
     var final_dir = dir;
-    defer if (initial_components.len > 1) {
-        final_dir.close();
-    };
 
-    for (0.., initial_components[1..]) |i, comp| {
+    for (0.., initial_components[0 .. initial_components.len - 1]) |i, comp| {
         var old_dir = final_dir;
+        defer if (i > 0 and i < initial_components.len - 1) {
+            log.debug("closing intermediate directory {any}", .{old_dir.fd});
+            old_dir.close();
+        };
+
         const comp_bytes = comp.bytes(path);
 
         // TODO: Use O_PATH on Linux
         // TODO(zig): no_follow weird on windows https://github.com/ziglang/zig/issues/18335
         final_dir = old_dir.openDir(
             comp_bytes,
-            .{ .iterate = false, .no_follow = true },
+            .{ .access_sub_paths = true, .no_follow = true },
         ) catch |e| return switch (e) {
             error.SymLinkLoop => if (!flags.symlink_follow)
                 error.SymLinkLoop
             else {
                 // readLink + std.path.isAbsolute
                 // Need separate array list (stackFallback(1, scratch.allocator())) to store expanded components
-                std.log.err("TODO: Expand symlinks in path_open for {f}", .{path});
+                log.debug("TODO: Expand symlinks in path_open for {f}", .{path});
                 return error.Unimplemented;
             },
             error.InvalidUtf8, error.InvalidWtf8 => unreachable,
@@ -418,12 +426,15 @@ fn accessSubPathPortable(
             else => |err| err,
         };
 
-        if (i > 1) {
-            old_dir.close();
-        }
+        log.debug("opened intermediate directory {f} ({any})", .{ comp.toPath(path), final_dir.fd });
     }
 
-    // TODO: Shoot! `final_name` could be a symlink!
+    defer if (initial_components.len > 1) {
+        log.debug("closing final directory {any}", .{final_dir.fd});
+        final_dir.close();
+    };
+
+    // TODO: Shoot! `final_name` could be a symlink! Better API might require passing FD to accessor
 
     return @call(.auto, accessor, .{ scratch, path, final_dir, final_name } ++ args);
 }
@@ -507,7 +518,7 @@ const path_filestat_get_impl = struct {
         // TODO: Possible duplicate code with `host_file.fd_fdstat_get`
         if (builtin.os.tag == .windows) {
             // TODO: On Windows, need to use NtQueryInformationFile: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryinformationfile
-            std.log.err("path_filestat_get of {f} on windows", .{path});
+            log.err("path_filestat_get of {f} on windows", .{path});
             return Error.Unimplemented;
         } else if (@hasDecl(std.posix.system, "Stat") and std.posix.Stat != void) {
             // TODO: Use statx on Linux
@@ -546,7 +557,8 @@ fn path_filestat_get(
     flags: types.LookupFlags.Valid,
     path: Path,
 ) Error!types.FileStat {
-    std.log.debug("path_filestat_get attempting to access {f}", .{path});
+    log.debug("path_filestat_get attempting to access {f}", .{path});
+    errdefer |e| log.err("path_filestat_get for {f} failed with {t}", .{ path, e });
 
     const self = ctx.get(HostDir);
     return accessSubPath(
@@ -591,7 +603,7 @@ const path_open_impl = struct {
         // Open final handle
         // TODO(zig): openAny https://github.com/ziglang/zig/issues/16738
         if (builtin.os.tag == .windows) {
-            std.log.err("path_open final component {f} on windows", .{path});
+            log.err("path_open final component {f} on windows", .{path});
             return error.Unimplemented;
         } else if (@hasDecl(std.posix.system, "O") and std.posix.O != void) {
             const final_name_z = try scratch.allocator().dupeZ(u8, final_name.bytes(path));
@@ -609,7 +621,7 @@ const path_open_impl = struct {
                 o_flags.ACCMODE = if (rights.canWrite()) .RDWR else .RDONLY;
             }
 
-            errdefer |e| std.log.err("OS error {t} opening {f}", .{ e, path });
+            errdefer |e| log.err("OS error {t} opening {f}", .{ e, path });
 
             const new_fd = std.posix.openatZ(
                 final_dir.fd,
@@ -625,14 +637,14 @@ const path_open_impl = struct {
             errdefer std.posix.close(new_fd);
 
             if (open_flags.directory) {
-                std.log.err("TODO: opened directory {f}", .{path});
+                log.err("TODO: opened directory {f}", .{path});
                 return error.Unimplemented;
             } else {
                 const as_file = std.fs.File{ .handle = new_fd };
                 const kind = (try as_file.stat()).kind;
                 return switch (kind) {
                     .directory => {
-                        std.log.err("TODO: {f} is an opened directory", .{path});
+                        log.err("TODO: {f} is an opened directory", .{path});
                         return error.Unimplemented;
                     },
                     else => File.OpenedPath{
@@ -658,7 +670,7 @@ fn path_open(
 ) Error!File.OpenedPath {
     // Linux allows returning `ENOMEM`, so this can return `error.OutOfMemory`.
 
-    std.log.debug("path_open attempting to access {f}", .{path});
+    log.debug("path_open attempting to access {f}", .{path});
 
     const self = ctx.get(HostDir);
     return accessSubPath(
