@@ -5,7 +5,6 @@ const HostDir = struct {
     info: *Info,
 
     const Info = struct {
-        permissions: PreopenDir.Permissions,
         // Guest `Path` is split to reduce padding
         guest_path_len: Path.Len, // maybe u1 bit in Path.Len to indicate ownership/constness?
         guest_path_ptr: Path.Ptr,
@@ -42,7 +41,6 @@ pub fn initPreopened(preopen: *PreopenDir, allocator: Allocator) Allocator.Error
     errdefer comptime unreachable;
 
     info.* = HostDir.Info{
-        .permissions = perm,
         .guest_path_len = preopen.guest_path.len,
         .guest_path_ptr = preopen.guest_path.ptr,
         .read_next_cookie = .start,
@@ -295,56 +293,55 @@ fn path_create_directory(ctx: Ctx, path: []const u8) Error!void {
     return Error.Unimplemented;
 }
 
-fn path_filestat_get(
-    ctx: Ctx,
-    flags: types.LookupFlags.Valid,
-    path: []const u8,
-) Error!types.FileStat {
-    _ = ctx;
-    _ = flags;
-    _ = path;
-    return Error.Unimplemented;
-}
+const todo_openat2_on_linux_is_not_yet_supported = true; // TODO
 
-fn path_filestat_set_times(
-    ctx: Ctx,
-    lookup_flags: types.LookupFlags.Valid,
-    path: []const u8,
-    atim: types.Timestamp,
-    mtim: types.Timestamp,
-    fst_flags: types.FstFlags.Valid,
-) Error!void {
-    _ = ctx;
-    _ = lookup_flags;
-    _ = path;
-    _ = atim;
-    _ = mtim;
-    _ = fst_flags;
-    return Error.Unimplemented;
-}
-
-fn path_open(
-    ctx: Ctx,
+/// https://man7.org/linux/man-pages/man2/openat2.2.html
+fn accessSubPathLinux(
+    dir: std.fs.Dir,
     scratch: *ArenaAllocator,
-    dir_flags: types.LookupFlags.Valid,
+    flags: types.LookupFlags.Valid,
     path: Path,
-    open_flags: types.OpenFlags.Valid,
-    rights: types.Rights.Valid,
-    fd_flags: types.FdFlags.Valid,
-) Error!File.OpenedPath {
-    // Linux allows returning `ENOMEM`, so this can return `error.OutOfMemory`.
+    args: anytype,
+    comptime accessor: anytype,
+) (error{NoSysOpenat2} || Error)!@typeInfo(accessor).@"fn".return_type.? {
+    if (todo_openat2_on_linux_is_not_yet_supported) {
+        return error.NoSysOpenat2;
+    }
 
+    const path_z = try scratch.allocator().dupeZ(u8, path.bytes());
+    const rc = std.os.linux.syscall4(
+        std.os.linux.SYS.openat2,
+        dir.fd,
+        path_z,
+        undefined, // how struct,
+        undefined, // how size
+    ); // FallbackImplementation if E_NOSYS or E2BIG
+
+    _ = flags;
+    _ = args;
+    _ = rc;
+}
+
+// FreeBSD also supports `O_RESOLVE_BENEATH` in openat
+//fn accessSubPathFreeBsd()
+
+fn AccessSubPathPortableReturn(comptime Accessor: type) type {
+    return @typeInfo(@typeInfo(Accessor).@"fn".return_type.?).error_union.payload;
+}
+
+fn accessSubPathPortable(
+    dir: std.fs.Dir,
+    scratch: *ArenaAllocator,
+    flags: types.LookupFlags.Valid,
+    path: Path,
+    args: anytype,
+    comptime accessor: anytype,
+) Error!AccessSubPathPortableReturn(@TypeOf(accessor)) {
     const max_component_len = 64;
 
     if (path.len == 0) {
         return Error.InvalidArgument; // is this right?
     }
-
-    std.log.debug("path_open attempting to access {f}", .{path});
-
-    const self = ctx.get(HostDir);
-    // Could also do special syscall on Linux, this is what wasmtime tries to use:
-    // https://man7.org/linux/man-pages/man2/openat2.2.html
 
     const initial_components: []const Path.Component = components: {
         var component_iter = std.mem.splitSequence(u8, path.bytes(), "\\/");
@@ -388,12 +385,9 @@ fn path_open(
 
     // Strategy here is to open each subdirectory, expanding symlinks, until the parent of the
     // target is reached.
-    const final_name = try scratch.allocator().dupeZ(
-        u8,
-        initial_components[initial_components.len - 1].bytes(path),
-    );
+    const final_name = initial_components[initial_components.len - 1];
 
-    var final_dir = self.dir;
+    var final_dir = dir;
     defer if (initial_components.len > 1) {
         final_dir.close();
     };
@@ -408,7 +402,7 @@ fn path_open(
             comp_bytes,
             .{ .iterate = false, .no_follow = true },
         ) catch |e| return switch (e) {
-            error.SymLinkLoop => if (!dir_flags.symlink_follow)
+            error.SymLinkLoop => if (!flags.symlink_follow)
                 error.SymLinkLoop
             else {
                 // readLink + std.path.isAbsolute
@@ -426,59 +420,194 @@ fn path_open(
         }
     }
 
-    // Open final handle
-    // TODO(zig): openAny https://github.com/ziglang/zig/issues/16738
-    if (builtin.os.tag == .windows) {
-        std.log.err("path_open final component {f} on windows", .{path});
-        return error.Unimplemented;
-    } else if (std.posix.O != void) {
-        var o_flags = fd_flags.toFlagsPosix() catch return error.InvalidArgument;
-        open_flags.setPosixFlags(&o_flags);
+    return @call(.auto, accessor, .{ scratch, path, final_dir, final_name } ++ args);
+}
 
-        if (@hasField(std.posix.O, "CLOEXEC")) o_flags.CLOEXEC = true;
-        if (@hasField(std.posix.O, "LARGEFILE")) o_flags.LARGEFILE = true;
-        if (@hasField(std.posix.O, "NOCTTY")) o_flags.NOCTTY = true;
+/// Allows safely accessing a path below the directory.
+fn accessSubPath(
+    dir: std.fs.Dir,
+    /// Used for temporary allocations of file paths.
+    scratch: *ArenaAllocator,
+    flags: types.LookupFlags.Valid,
+    /// The path the guest wants to access.
+    ///
+    /// Attempts to navigate outside the handle (e.g. with `../` or symlinks) are caught.
+    path: Path,
+    /// Tuple containing additional arguments to pass.
+    args: anytype,
+    /// Namespace that provides functions that perform the operation on the path.
+    ///
+    /// This is not a single function to (eventually) allow specialized behavior on some platforms.
+    /// - On Linux, this can be implemented with the `openat2` system call, which is what is used
+    ///   to implement [WASI support in `wasmtime`].
+    /// - On FreeBSD, this could probably be done with `O_RESOLVE_BENEATH` and `openat`.
+    ///
+    /// For the portable implementation, a handle to a parent directory (potentially a subdirectory)
+    /// and the name of the target is provided.
+    ///
+    /// [WASI support in `wasmtime`]: https://docs.rs/cap-primitives/3.4.4/src/cap_primitives/rustix/linux/fs/open_impl.rs.html
+    comptime accessor: type,
+) Error!accessor.Result {
+    // TODO: On Linux, fallback to portable implementation on E_NOSYS (check compile time OS version)
+    fallback: switch (builtin.os.tag) {
+        .linux => {
+            if (todo_openat2_on_linux_is_not_yet_supported) break :fallback;
 
-        if (!open_flags.directory) {
-            // TODO: Darn, need to figure out if directory or file! (fstatat?)
-            o_flags.ACCMODE = if (rights.canWrite()) .RDWR else .RDONLY;
-        }
+            // I think Zig's supported linux architectures all at least have a number for `openat2`
+            if (!@hasField(std.os.linux.SYS, "openat2")) break :fallback;
 
-        errdefer |e| std.log.err("OS error {t} opening {f}", .{ e, path });
+            return accessSubPathLinux(
+                dir,
+                scratch,
+                flags,
+                path,
+                args,
+                accessor.linux,
+            ) catch |e| switch (e) {
+                error.NoSysOpenat2 => {
+                    const linux_openat2_version = std.SemanticVersion{
+                        .major = 5,
+                        .minor = 6,
+                        .patch = 0,
+                    };
 
-        const new_fd = std.posix.openatZ(
-            final_dir.fd,
-            final_name,
-            o_flags,
-            0,
-        ) catch |e| return switch (e) {
-            error.InvalidWtf8, error.NetworkNotFound => unreachable, // Windows-only
-            error.FileLocksNotSupported => unreachable,
-            else => |err| err,
-        };
-
-        errdefer std.posix.close(new_fd);
-
-        if (open_flags.directory) {
-            std.log.err("TODO: opened directory {f}", .{path});
-            return error.Unimplemented;
-        } else {
-            const as_file = std.fs.File{ .handle = new_fd };
-            const kind = (try as_file.stat()).kind;
-            return switch (kind) {
-                .directory => {
-                    std.log.err("TODO: {f} is an opened directory", .{path});
-                    return error.Unimplemented;
+                    if (comptime builtin.os.isAtLeast(.linux, linux_openat2_version)) {
+                        unreachable;
+                    } else {
+                        _ = scratch.reset();
+                        break :fallback;
+                    }
                 },
-                else => File.OpenedPath{
-                    .file = host_file.wrapFile(as_file, .close),
-                    .rights = rights.intersection(host_file.possible_rights),
-                },
+                else => |err| return err,
             };
-        }
-    } else {
-        @compileError("path_open impl on " ++ @tagName(builtin.os));
+        },
+        // .freebsd => {},
+        else => {},
     }
+
+    return accessSubPathPortable(dir, scratch, flags, path, args, accessor.portable);
+}
+
+fn path_filestat_get(
+    ctx: Ctx,
+    flags: types.LookupFlags.Valid,
+    path: []const u8,
+) Error!types.FileStat {
+    _ = ctx;
+    _ = flags;
+    _ = path;
+    return Error.Unimplemented;
+}
+
+fn path_filestat_set_times(
+    ctx: Ctx,
+    lookup_flags: types.LookupFlags.Valid,
+    path: []const u8,
+    atim: types.Timestamp,
+    mtim: types.Timestamp,
+    fst_flags: types.FstFlags.Valid,
+) Error!void {
+    _ = ctx;
+    _ = lookup_flags;
+    _ = path;
+    _ = atim;
+    _ = mtim;
+    _ = fst_flags;
+    return Error.Unimplemented;
+}
+
+const path_open_impl = struct {
+    const Result = File.OpenedPath;
+
+    fn portable(
+        scratch: *ArenaAllocator,
+        path: Path,
+        final_dir: std.fs.Dir,
+        final_name: Path.Component,
+        open_flags: types.OpenFlags.Valid,
+        rights: types.Rights.Valid,
+        fd_flags: types.FdFlags.Valid,
+    ) Error!Result {
+        // Open final handle
+        // TODO(zig): openAny https://github.com/ziglang/zig/issues/16738
+        if (builtin.os.tag == .windows) {
+            std.log.err("path_open final component {f} on windows", .{path});
+            return error.Unimplemented;
+        } else if (std.posix.O != void) {
+            const final_name_z = try scratch.allocator().dupeZ(u8, final_name.bytes(path));
+
+            var o_flags = fd_flags.toFlagsPosix() catch return error.InvalidArgument;
+            open_flags.setPosixFlags(&o_flags);
+
+            if (@hasField(std.posix.O, "CLOEXEC")) o_flags.CLOEXEC = true;
+            if (@hasField(std.posix.O, "LARGEFILE")) o_flags.LARGEFILE = true;
+            if (@hasField(std.posix.O, "NOCTTY")) o_flags.NOCTTY = true;
+
+            if (!open_flags.directory) {
+                // TODO: Darn, need to figure out if directory or file! (fstatat?)
+                o_flags.ACCMODE = if (rights.canWrite()) .RDWR else .RDONLY;
+            }
+
+            errdefer |e| std.log.err("OS error {t} opening {f}", .{ e, path });
+
+            const new_fd = std.posix.openatZ(
+                final_dir.fd,
+                final_name_z,
+                o_flags,
+                0,
+            ) catch |e| return switch (e) {
+                error.InvalidWtf8, error.NetworkNotFound => unreachable, // Windows-only
+                error.FileLocksNotSupported => unreachable,
+                else => |err| err,
+            };
+
+            errdefer std.posix.close(new_fd);
+
+            if (open_flags.directory) {
+                std.log.err("TODO: opened directory {f}", .{path});
+                return error.Unimplemented;
+            } else {
+                const as_file = std.fs.File{ .handle = new_fd };
+                const kind = (try as_file.stat()).kind;
+                return switch (kind) {
+                    .directory => {
+                        std.log.err("TODO: {f} is an opened directory", .{path});
+                        return error.Unimplemented;
+                    },
+                    else => File.OpenedPath{
+                        .file = host_file.wrapFile(as_file, .close),
+                        .rights = rights.intersection(host_file.possible_rights),
+                    },
+                };
+            }
+        } else {
+            @compileError("path_open impl on " ++ @tagName(builtin.os));
+        }
+    }
+};
+
+fn path_open(
+    ctx: Ctx,
+    scratch: *ArenaAllocator,
+    dir_flags: types.LookupFlags.Valid,
+    path: Path,
+    open_flags: types.OpenFlags.Valid,
+    rights: types.Rights.Valid,
+    fd_flags: types.FdFlags.Valid,
+) Error!File.OpenedPath {
+    // Linux allows returning `ENOMEM`, so this can return `error.OutOfMemory`.
+
+    std.log.debug("path_open attempting to access {f}", .{path});
+
+    const self = ctx.get(HostDir);
+    return accessSubPath(
+        self.dir,
+        scratch,
+        dir_flags,
+        path,
+        .{ open_flags, rights, fd_flags },
+        path_open_impl,
+    );
 }
 
 fn path_remove_directory(ctx: Ctx, path: []const u8) Error!void {
