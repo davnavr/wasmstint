@@ -82,6 +82,8 @@ pub fn closeHandle(handle: std.posix.fd_t) Error!void {
     }
 }
 
+const log = std.log.scoped(.host_file);
+
 fn fd_close(ctx: Ctx, allocator: std.mem.Allocator) Error!void {
     const self = ctx.get(HostFile);
     _ = allocator;
@@ -194,7 +196,7 @@ fn fd_pwrite(
         },
         .windows => {
             // NtWriteFile allows "seek-and-write", but not proper `pwritev` or even `pwrite`
-            std.log.err("TODO: fd_pwrite on Windows", .{});
+            log.err("TODO: fd_pwrite on Windows", .{});
             return error.Unimplemented;
         },
         .wasi => @compileError("WASM on WASM fd_pwrite"),
@@ -213,6 +215,39 @@ fn fd_pwrite(
 
             return @bitCast(result);
         },
+    }
+}
+
+fn fd_tell(ctx: Ctx) Error!types.FileSize {
+    const self = ctx.get(HostFile);
+    // Zig conflates multiple errors (e.g. `EINVAL`, `ESPIPE`, etc.) into `error.Unseekable`
+    //return self.file.getPos();
+    //return std.posix.lseek_CUR_get(self.file.handle);
+    //return std.os.windows.SetFilePointerEx_CURRENT_get(self.file.handle);
+    if (builtin.os.tag == .windows) {
+        //std.os.windows.kernel32.SetFilePointerEx()
+        log.err("fd_tell on windows", {});
+        return Error.Unimplemented;
+    } else if (@hasDecl(std.posix.system, "SEEK") and std.posix.SEEK != void) {
+        // Duplicated code from `std.posix.lseek_CUR_get`.
+        // Could also add check for 32-bit linux to use `llseek` instead
+        const lseek = if (builtin.os.tag == .linux and std.os.linux.wrapped.lfs64_abi)
+            std.c.lseek64
+        else
+            std.posix.system.lseek;
+
+        const pos = lseek(self.file.handle, 0, std.posix.SEEK.CUR);
+        return switch (std.posix.errno(pos)) {
+            .SUCCESS => types.FileSize{ .bytes = @bitCast(pos) },
+            .BADF => unreachable,
+            .INVAL => Error.InvalidArgument,
+            .OVERFLOW => Error.Overflow,
+            .SPIPE => Error.SeekPipe,
+            .NXIO => Error.NoDevice,
+            else => |err| std.posix.unexpectedErrno(err),
+        };
+    } else {
+        @compileError("fd_tell on " + @tagName(builtin.os.tag));
     }
 }
 
@@ -284,7 +319,7 @@ const vtable = File.VTable{
     .fd_readdir = File.not_dir.fd_readdir,
     .fd_seek = File.unimplemented.fd_seek,
     .fd_sync = File.unimplemented.fd_sync,
-    .fd_tell = File.unimplemented.fd_tell,
+    .fd_tell = fd_tell,
     .fd_write = fd_write,
     .path_create_directory = path_create_directory,
     .path_filestat_get = path_filestat_get,
