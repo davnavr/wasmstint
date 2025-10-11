@@ -49,11 +49,12 @@ pub fn wrapFile(fd: std.fs.File, close: Close) File.Impl {
 
 /// Creates wrappers for the standard streams, and makes guest calls to `fd_close` a no-op.
 pub fn wrapStandardStreams() File.StandardStreams {
-    const out_rights = File.Rights.init(types.Rights.Valid{ .fd_write = true });
+    const common_rights = .{.fd_filestat_get};
+    const out_rights = File.Rights.init(types.Rights.Valid.init(&(.{.fd_write} ++ common_rights)));
     // Leave standard streams open in case an interpreter error/panic occurs
     return .{
         .stdin = File{
-            .rights = File.Rights.init(types.Rights.Valid{ .fd_read = true }),
+            .rights = File.Rights.init(types.Rights.Valid.init(&(.{.fd_read} ++ common_rights))),
             .impl = wrapFile(std.fs.File.stdin(), .leave_open),
         },
         .stdout = File{
