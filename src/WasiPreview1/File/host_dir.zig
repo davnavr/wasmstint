@@ -165,9 +165,11 @@ pub fn fd_prestat_dir_name(ctx: Ctx, path: []u8) Error!void {
     if (self.guestPath()) |guest_path| {
         if (self.info.guest_path_len < guest_path.len) {
             return Error.InvalidArgument;
+        } else if (path.len < self.info.guest_path_len) {
+            return Error.InvalidArgument;
+        } else {
+            @memcpy(path[0..self.info.guest_path_len], guest_path.bytes());
         }
-
-        @memcpy(path[0..self.info.guest_path_len], guest_path.bytes());
     } else {
         return Error.NotCapable;
     }
