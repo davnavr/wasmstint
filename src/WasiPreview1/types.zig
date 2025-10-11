@@ -11,7 +11,19 @@ pub const FileSize = packed struct(u64) { bytes: u64 };
 /// Timestamp in nanoseconds.
 ///
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#timestamp
-pub const Timestamp = packed struct(u64) { ns: u64 };
+pub const Timestamp = packed struct(u64) {
+    ns: u64,
+
+    const win_time_unit_per_ns = 100;
+
+    pub fn fromWindowsSystemTimeRelative(time: std.os.windows.LARGE_INTEGER) Timestamp {
+        return Timestamp{ .ns = @as(u64, @bitCast(time)) *| win_time_unit_per_ns };
+    }
+
+    pub fn format(stat: *const Timestamp, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("{d}", .{stat.ns});
+    }
+};
 
 /// Identifiers for clocks.
 ///
@@ -335,6 +347,22 @@ pub const FileStat = extern struct {
         };
     }
 
+    pub fn format(stat: *const FileStat, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print(
+            "dev=0x{X}, ino=0x{X}, type={t}, nlink={d}, size={d}, atim={f}, mtim={f}, ctim={f}",
+            .{
+                stat.dev.n,
+                stat.ino.n,
+                stat.type,
+                stat.nlink,
+                stat.size.bytes,
+                stat.atim,
+                stat.mtim,
+                stat.ctim,
+            },
+        );
+    }
+
     comptime {
         std.debug.assert(@sizeOf(FileStat) == 64);
         std.debug.assert(@offsetOf(FileStat, "ctim") == 56);
@@ -445,11 +473,32 @@ pub const FileType = enum(u8) {
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#fdflags
 pub const FdFlags = packed struct(u16) {
     pub const Valid = packed struct(u5) {
+        /// Append mode: Data written to the file is always appended to the file's end.
         append: bool,
+        /// Write according to synchronized I/O data integrity completion. Only the data stored in
+        /// the file is synchronized.
+        ///
+        /// This feature is not available on all platforms and therefore `path_open` and other such
+        /// functions which accept `FdFlags` may return `Errno.notsup` in the case that this flag
+        /// is set.
         dsync: bool,
+        /// Non-blocking mode.
         nonblock: bool,
+        /// Synchronized read I/O operations.
+        ///
+        /// This feature is not available on all platforms and therefore `path_open` and other such
+        /// functions which accept `FdFlags` may return `Errno.notsup` in the case that this flag
+        /// is set.
         rsync: bool,
-        // FILE_FLAG_WRITE_THROUGH on Windows? https://github.com/golang/go/issues/35358
+        /// Write according to synchronized I/O file integrity completion. In addition to
+        /// synchronizing the data stored in the file, the implementation may also synchronously
+        /// update the file's metadata.
+        ///
+        /// This feature is not available on all platforms and therefore `path_open` and other such
+        /// functions which accept `FdFlags` may return `Errno.notsup` in the case that this flag
+        /// is set.
+        ///
+        /// TODO: FILE_FLAG_WRITE_THROUGH on Windows? https://github.com/golang/go/issues/35358
         sync: bool,
 
         pub const format = flagsFormatter(Valid);
@@ -493,6 +542,17 @@ pub const FdFlags = packed struct(u16) {
             }
 
             return p;
+        }
+
+        pub fn fromFlagsWindows(flags: std.os.windows.ACCESS_MASK) Valid {
+            return Valid{
+                .append = flags & std.os.windows.FILE_APPEND_DATA != 0,
+                // Refer to comment on `sync` for possible equivalents on Windows
+                .dsync = false,
+                .nonblock = false,
+                .rsync = false,
+                .sync = false,
+            };
         }
     };
 
@@ -592,6 +652,16 @@ pub const OpenFlags = packed struct(u16) {
         trunc: bool,
 
         pub const format = flagsFormatter(Valid);
+
+        pub fn check(f: Valid) error{InvalidArgument}!void {
+            if (f.creat and f.directory) {
+                return error.InvalidArgument;
+            }
+
+            if (f.excl and !f.creat) {
+                return error.InvalidArgument;
+            }
+        }
 
         pub fn setPosixFlags(f: Valid, o: *std.posix.O) void {
             o.CREAT = f.creat;

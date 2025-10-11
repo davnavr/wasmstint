@@ -376,14 +376,139 @@ fn path_create_directory(ctx: Ctx, path: []const u8) Error!void {
     return Error.Unimplemented;
 }
 
+const WindowsOpenFlags = struct {
+    access_mask: AccessMask,
+    comptime file_attributes: std.os.windows.ULONG = std.os.windows.FILE_ATTRIBUTE_NORMAL,
+    share_access: ShareAccess = share_access_default,
+    create_disposition: CreateDisposition,
+    create_options: CreateOptions,
+
+    const share_access_default = ShareAccess.init(
+        &.{ .FILE_SHARE_READ, .FILE_SHARE_WRITE, .FILE_SHARE_DELETE },
+    );
+
+    fn Mask(comptime ValidFlags: type) type {
+        return packed struct(u32) {
+            bits: std.os.windows.ULONG,
+
+            const Valid = ValidFlags;
+            const Self = @This();
+
+            const zero = Self{ .bits = 0 };
+
+            fn init(flags: []const Valid) Self {
+                var mask = Self.zero;
+                for (flags) |f| {
+                    switch (f) {
+                        inline else => |tag| mask.bits |= @field(std.os.windows, @tagName(tag)),
+                    }
+                }
+                return mask;
+            }
+
+            fn set(mask: Self, others: Self) Self {
+                return Self{ .bits = mask.bits | others.bits };
+            }
+
+            fn setFlag(mask: Self, flag: Valid) Self {
+                return mask.set(Self.init(&.{flag}));
+            }
+
+            fn setConditional(a: Self, condition: bool, b: Self) Self {
+                return if (condition) a.set(b) else a;
+            }
+
+            fn setFlagConditional(mask: Self, condition: bool, flag: Valid) Self {
+                return mask.setConditional(condition, Self.init(&.{flag}));
+            }
+
+            fn without(mask: Self, removed: Self) Self {
+                return Self{ .bits = mask.bits & (~removed.bits) };
+            }
+
+            fn contains(a: Self, b: Self) bool {
+                return a.bits | b.bits == a.bits;
+            }
+
+            fn containsFlag(mask: Self, flag: Valid) bool {
+                return mask.contains(Self.init(&.{flag}));
+            }
+        };
+    }
+
+    /// https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/access-mask
+    const AccessMask = Mask(enum {
+        DELETE,
+        FILE_READ_DATA,
+        FILE_READ_ATTRIBUTES,
+        FILE_WRITE_DATA,
+        FILE_WRITE_ATTRIBUTES,
+        FILE_APPEND_DATA,
+        FILE_GENERIC_READ,
+        FILE_GENERIC_WRITE,
+        FILE_LIST_DIRECTORY,
+        FILE_TRAVERSE,
+        STANDARD_RIGHTS_READ,
+        STANDARD_RIGHTS_WRITE,
+        SYNCHRONIZE,
+    });
+
+    const ShareAccess = Mask(enum {
+        FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
+        FILE_SHARE_DELETE,
+    });
+
+    const CreateDisposition = @Type(std.builtin.Type{
+        .@"enum" = std.builtin.Type.Enum{
+            .tag_type = std.os.windows.ULONG,
+            .decls = &.{},
+            .is_exhaustive = true,
+            .fields = fields: {
+                const options = [_][:0]const u8{
+                    "FILE_SUPERSEDE",
+                    "FILE_CREATE",
+                    "FILE_OPEN",
+                    "FILE_OPEN_IF",
+                    "FILE_OVERWRITE",
+                    "FILE_OVERWRITE_IF",
+                };
+
+                var fields: [options.len]std.builtin.Type.EnumField = undefined;
+                for (options, &fields) |name, *dst| {
+                    dst.* = std.builtin.Type.EnumField{
+                        .name = name,
+                        .value = @field(std.os.windows, name),
+                    };
+                }
+
+                break :fields &fields;
+            },
+        },
+    });
+
+    const CreateOptions = Mask(enum {
+        FILE_DIRECTORY_FILE,
+        FILE_NON_DIRECTORY_FILE,
+        FILE_WRITE_THROUGH,
+        FILE_SEQUENTIAL_ONLY,
+        FILE_RANDOM_ACCESS,
+        FILE_NO_INTERMEDIATE_BUFFERING,
+        FILE_SYNCHRONOUS_IO_NONALERT,
+        FILE_OPEN_REPARSE_POINT,
+        /// Required for opening directories.
+        FILE_OPEN_FOR_BACKUP_INTENT,
+    });
+};
+
 const OsOpenFlags = if (builtin.os.tag == .windows)
-    void // TODO: Arguments for `NtCreateFile`
+    WindowsOpenFlags
 else if (@hasDecl(std.posix.system, "O") and std.posix.O != void)
     std.posix.O
 else
     @compileError("specify open flags type " ++ @tagName(builtin.os.tag));
 
-const SetOpenFlagsError = error{ InvalidArgument, Unimplemented };
+const SetOpenFlagsError = error{ InvalidArgument, NotSupported, Unimplemented };
 
 fn SetOpenFlags(comptime Args: type) type {
     const args_fields = @typeInfo(Args).@"struct".fields;
@@ -445,6 +570,8 @@ fn AccessSubPathReturnType(comptime Accessor: type) type {
     return @typeInfo(@typeInfo(Accessor).@"fn".return_type.?).error_union.payload;
 }
 
+/// Depends on the host OS having a way to open a path relative to an opened directory handle/fd
+/// while also indicating if a symlink would have been opened.
 fn accessSubPathPortable(
     dir: std.fs.Dir,
     scratch: *ArenaAllocator,
@@ -494,10 +621,13 @@ fn accessSubPathPortable(
         break :components component_buf.items;
     };
 
-    const final_name = if (initial_components.len == 0)
-        "."
+    const final_name: ?[]const u8 = if (initial_components.len > 0)
+        initial_components[initial_components.len - 1].bytes(path)
     else
-        initial_components[initial_components.len - 1].bytes(path);
+        null;
+
+    // TODO(zig): https://github.com/ziglang/zig/issues/20369
+    // errdefer |e| log.err("OS error {t} opening {f}", .{ @as(anyerror, e), path });
 
     // log.debug("{d} components in {f}", .{ initial_components.len, path });
 
@@ -506,6 +636,7 @@ fn accessSubPathPortable(
     // Strategy here is to open each subdirectory, expanding symlinks, until the parent of the
     // target is reached.
 
+    var path_arena = ArenaAllocator.init(scratch.allocator());
     var final_dir = dir;
     if (initial_components.len > 1) {
         for (0.., initial_components[0 .. initial_components.len - 1]) |i, comp| {
@@ -516,19 +647,42 @@ fn accessSubPathPortable(
             };
 
             const comp_bytes = comp.bytes(path);
+            const comp_str = if (builtin.os.tag == .windows)
+                std.unicode.utf8ToUtf16LeAllocZ(
+                    path_arena.allocator(),
+                    comp_bytes,
+                ) catch |e| switch (e) {
+                    error.InvalidUtf8 => unreachable,
+                    error.OutOfMemory => |oom| return oom,
+                }
+            else
+                try path_arena.allocator().dupeZ(u8, comp_bytes);
 
-            // TODO: Use O_PATH on Linux
-            // TODO(zig): no_follow weird on windows https://github.com/ziglang/zig/issues/18335
-            final_dir = old_dir.openDir(
-                comp_bytes,
-                .{ .access_sub_paths = true, .no_follow = true },
+            // TODO: Use O_PATH on Linux, requires using platform-specific APIs
+
+            const zigOpenDir = if (builtin.os.tag == .windows)
+                std.fs.Dir.openDirW
+            else
+                std.fs.Dir.openDirZ;
+
+            final_dir = zigOpenDir(
+                old_dir,
+                comp_str,
+                std.fs.Dir.OpenOptions{
+                    .access_sub_paths = true,
+                    // TODO(zig): no_follow weird on windows https://github.com/ziglang/zig/issues/18335
+                    .no_follow = true,
+                },
             ) catch |e| return switch (e) {
-                error.SymLinkLoop => if (!flags.symlink_follow)
+                // error.NotDir might happen on windows because a symlink is obviously not a directory
+                error.SymLinkLoop => if (builtin.os.tag == .windows)
+                    unreachable
+                else if (!flags.symlink_follow)
                     error.SymLinkLoop
                 else {
                     // readLink + std.path.isAbsolute
                     // Need separate array list (stackFallback(1, scratch.allocator())) to store expanded components
-                    log.debug("TODO: Expand symlinks in path_open for {f}", .{path});
+                    log.debug("TODO: Expand symlinks in accessSubPathPortable for {f}", .{path});
                     return error.Unimplemented;
                 },
                 error.InvalidUtf8, error.InvalidWtf8 => unreachable,
@@ -540,6 +694,8 @@ fn accessSubPathPortable(
             //     "opened intermediate directory {f} ({any})",
             //     .{ comp.toPath(path), final_dir.fd },
             // );
+
+            _ = path_arena.reset(.retain_capacity);
         }
     }
 
@@ -549,25 +705,215 @@ fn accessSubPathPortable(
     };
 
     // Open final handle
-    const initial_o_flags = try @call(.auto, setOpenFlags, set_open_flags_args);
+    const initial_o_flags: OsOpenFlags = try @call(.auto, setOpenFlags, set_open_flags_args);
 
     const do_in_path_args_without_fd = .{ scratch, path } ++ do_in_path_args;
 
     // TODO(zig): openAny https://github.com/ziglang/zig/issues/16738
     if (builtin.os.tag == .windows) {
-        log.err("accessSubPathPortable on windows {f}", .{path});
-        return Error.Unimplemented;
+        const initial_flags: WindowsOpenFlags = initial_o_flags;
+        std.debug.assert(!initial_flags.create_options.containsFlag(.FILE_OPEN_REPARSE_POINT));
+
+        const win = struct {
+            extern "ntdll" fn NtDuplicateObject(
+                SourceProcessHandle: std.os.windows.HANDLE,
+                SourceHandle: std.os.windows.HANDLE,
+                TargetProcessHandle: ?std.os.windows.HANDLE,
+                TargetHandle: ?*std.os.windows.HANDLE,
+                DesiredAccess: std.os.windows.ACCESS_MASK,
+                HandleAttributes: std.os.windows.ULONG,
+                Options: std.os.windows.ULONG,
+            ) callconv(.winapi) std.os.windows.NTSTATUS;
+
+            const DUPLICATE_SAME_ATTRIBUTES = 0x0000_0004;
+        };
+
+        // `NtCreateFile` doesn't seem
+        const final_name_bytes = final_name orelse {
+            @branchHint(.unlikely);
+            const current_process = std.os.windows.GetCurrentProcess();
+            var new_fd: std.os.windows.HANDLE = undefined;
+            const result = win.NtDuplicateObject(
+                current_process,
+                final_dir.fd,
+                current_process,
+                &new_fd,
+                initial_flags.access_mask.bits,
+                undefined,
+                win.DUPLICATE_SAME_ATTRIBUTES,
+            );
+
+            return switch (result) {
+                .SUCCESS => @call(.auto, doInPath, .{new_fd} ++ do_in_path_args_without_fd),
+                // .NOT_ENOUGH_MEMORY => error.OutOfMemory,
+                else => std.os.windows.unexpectedStatus(result),
+            };
+        };
+
+        const final_name_w = std.unicode.utf8ToUtf16LeAllocZ(
+            path_arena.allocator(),
+            final_name_bytes,
+        ) catch |e| switch (e) {
+            error.InvalidUtf8 => unreachable,
+            error.OutOfMemory => |oom| return oom,
+        };
+
+        var final_name_unicode = std.os.windows.UNICODE_STRING{
+            // Lengths are in bytes, excluding null-terminator
+            .Length = @intCast(final_name_w.len * 2),
+            .MaximumLength = @intCast(final_name_w.len * 2),
+            .Buffer = final_name_w.ptr,
+        };
+
+        // Open flags could specify file truncation, but that would either mean no symlink detection
+        // or truncating the symlink itself. Unfortunately, this means unconditionally checking for
+        // symlinks.
+
+        // Attempting to read the symlink path first followed by doing the real file open means a
+        // TOCTOU. A symlink could be created in between `DeviceIoControl` and final
+        // `NtCreateFile` call.
+
+        const create_disposition_dont_truncate = switch (initial_flags.create_disposition) {
+            .FILE_SUPERSEDE => unreachable, // currently not used
+            .FILE_CREATE, .FILE_OPEN, .FILE_OPEN_IF => |flag| flag,
+            .FILE_OVERWRITE => .FILE_OPEN,
+            .FILE_OVERWRITE_IF => .FILE_OPEN_IF,
+        };
+
+        var maybe_symlink_attrs = std.os.windows.OBJECT_ATTRIBUTES{
+            .Length = @sizeOf(std.os.windows.OBJECT_ATTRIBUTES),
+            .RootDirectory = final_dir.fd,
+            .ObjectName = &final_name_unicode,
+            .Attributes = 0,
+            .SecurityDescriptor = null,
+            .SecurityQualityOfService = null,
+        };
+
+        // TODO: `NtDuplicateObject` is equivalent of `ReOpenFile`, which could be useful here
+        const new_fd: std.fs.File.Handle = while (true) opened: {
+            // Logic copied from Zig's `std.os.windows.ReadLink`, except that this does not allow
+            // abssolute paths.
+            var maybe_symlink_handle: std.fs.File.Handle = undefined;
+            var maybe_symlink_io: std.os.windows.IO_STATUS_BLOCK = undefined;
+            // TODO: Documentation for NtCreateFile only lists `OBJ_CASE_INSENSITIVE` for Attributes
+            // TODO: See if `OBJ_DONT_REPARSE` can be used
+            // https://www.tiraniddo.dev/2020/05/objdontreparse-is-mostly-useless.html
+            const maybe_symlink_status = std.os.windows.ntdll.NtCreateFile(
+                &maybe_symlink_handle,
+                // Needs to be replaced with `initial_flags.access_mask.bits`
+                // This is enough to figure out symlink information
+                WindowsOpenFlags.AccessMask.init(&.{ .FILE_READ_ATTRIBUTES, .SYNCHRONIZE }).bits,
+                &maybe_symlink_attrs,
+                &maybe_symlink_io,
+                null,
+                std.os.windows.FILE_ATTRIBUTE_NORMAL,
+                // Needs to be replaced with `initial_flags.share_access.bits`
+                WindowsOpenFlags.share_access_default.bits,
+                // Needs to be replaced with `initial_flags.create_disposition`
+                @intFromEnum(create_disposition_dont_truncate),
+                // Needs to be replaced with `initial_flags.create_options`
+                WindowsOpenFlags.CreateOptions.init(
+                    &.{ .FILE_SYNCHRONOUS_IO_NONALERT, .FILE_OPEN_REPARSE_POINT },
+                ).bits,
+                null,
+                0,
+            );
+
+            switch (maybe_symlink_status) {
+                .SUCCESS => {},
+                .OBJECT_NAME_INVALID => unreachable,
+                .OBJECT_NAME_NOT_FOUND,
+                .OBJECT_PATH_NOT_FOUND,
+                .NO_MEDIA_IN_DEVICE,
+                => switch (initial_flags.create_disposition) {
+                    .FILE_SUPERSEDE => unreachable, // not used
+                    .FILE_OPEN, .FILE_OVERWRITE => return error.FileNotFound,
+                    else => unreachable,
+                },
+                .INVALID_PARAMETER => unreachable,
+                .SHARING_VIOLATION, .ACCESS_DENIED => return error.AccessDenied,
+                .PIPE_BUSY => return error.DeviceBusy,
+                .PIPE_NOT_AVAILABLE => return error.NoDevice,
+                .OBJECT_PATH_SYNTAX_BAD => unreachable,
+                .OBJECT_NAME_COLLISION => switch (initial_flags.create_disposition) {
+                    .FILE_SUPERSEDE => unreachable, // not used
+                    .FILE_CREATE => return error.PathAlreadyExists,
+                    else => unreachable,
+                },
+                .FILE_IS_A_DIRECTORY => unreachable,
+                .NOT_A_DIRECTORY => unreachable,
+                .USER_MAPPED_FILE => return error.AccessDenied,
+                .INVALID_HANDLE => unreachable,
+                .DELETE_PENDING => {
+                    // See comment in `std.os.windows.OpenFile`
+                    std.Thread.sleep(std.time.ns_per_ms);
+                    continue;
+                },
+                else => return std.os.windows.unexpectedStatus(maybe_symlink_status),
+            }
+
+            const status = struct {
+                const FILE_SUPERSEDED = 0x0000_0000;
+                const FILE_OPENED = 0x0000_0001;
+                const FILE_CREATED = 0x0000_0002;
+                const FILE_OVERWRITTEN = 0x0000_0003;
+                const FILE_EXISTS = 0x0000_0004;
+                const FILE_DOES_NOT_EXIST = 0x0000_0005;
+            };
+
+            errdefer std.os.windows.CloseHandle(maybe_symlink_handle);
+
+            // `ReOpenFile` in `kernel32` could be used here, it doesn't support truncation flags used
+            // in `path_open`, but manually handling truncation happens anyway to avoid TOCTOU.
+            switch (maybe_symlink_io.Information) {
+                // assumed to be caught in error handling paths above
+                status.FILE_EXISTS, status.FILE_DOES_NOT_EXIST => unreachable,
+                status.FILE_SUPERSEDED => unreachable,
+                status.FILE_OPENED => {
+                    // Check for symlink
+                    log.err("TODO: windows accessSubPath check for symlink for path {f}", .{path});
+
+                    return Error.Unimplemented;
+                },
+                status.FILE_CREATED => {
+                    // Change permissions of created file
+                    if (true) {
+                        log.err("TODO: windows accessSubPath ReOpenFile {f}", .{path});
+
+                        return Error.Unimplemented;
+                    }
+
+                    break :opened maybe_symlink_handle;
+                },
+                status.FILE_OVERWRITTEN => unreachable,
+                else => |bad| {
+                    if (std.posix.unexpected_error_tracing) {
+                        std.debug.print(
+                            "Unexpected IoStatusBlock.Information=0x{x}\n",
+                            .{bad},
+                        );
+                        std.debug.dumpCurrentStackTrace(@returnAddress());
+                    }
+
+                    return error.Unexpected;
+                },
+            }
+
+            comptime unreachable;
+        };
+
+        return @call(.auto, doInPath, .{new_fd} ++ do_in_path_args_without_fd);
     } else {
         std.debug.assert(!initial_o_flags.NOFOLLOW);
-        const o_flags_no_follow = flags: {
+        const o_flags_no_follow: std.posix.O = flags: {
             var o_flags = initial_o_flags;
             o_flags.NOFOLLOW = true;
             break :flags o_flags;
         };
 
-        const final_name_z = try scratch.allocator().dupeZ(u8, final_name);
-
         errdefer |e| log.err("OS error {t} opening {f}", .{ e, path });
+
+        const final_name_z = if (final_name) |b| try path_arena.allocator().dupeZ(u8, b) else ".";
 
         const new_fd = std.posix.openatZ(
             final_dir.fd,
@@ -667,7 +1013,14 @@ fn accessSubPath(
 
 fn pathFileStatGetFlags() SetOpenFlagsError!OsOpenFlags {
     if (builtin.os.tag == .windows) {
-        log.err("path_filestat_get flags on windows", .{});
+        return WindowsOpenFlags{
+            .access_mask = WindowsOpenFlags.AccessMask.init(&.{
+                .STANDARD_RIGHTS_READ,
+                .FILE_READ_ATTRIBUTES,
+            }),
+            .create_disposition = .FILE_OPEN,
+            .create_options = WindowsOpenFlags.CreateOptions.zero,
+        };
     } else {
         var flags = std.posix.O{
             .ACCMODE = .RDONLY,
@@ -691,16 +1044,89 @@ fn pathFileStatGet(
 ) Error!types.FileStat {
     defer std.posix.close(new_fd);
     _ = scratch;
-    // TODO: Possible duplicate code with `host_file.fd_fdstat_get`
-    if (builtin.os.tag == .windows) {
-        // TODO: On Windows, need to use NtQueryInformationFile: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryinformationfile
-        log.err("path_filestat_get of {f} on windows", .{path});
-        return Error.Unimplemented;
-    } else {
+    // Some duplicate code with `host_file.fd_fdstat_get`
+    const stat: types.FileStat = if (builtin.os.tag == .windows) stat: {
+        // Kernel32 equivalent is `GetFileInformationByHandle`
+
+        // https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_stat_lx_information
+        // Want to use `FILE_STAT_LX_INFORMATION`, but it is pretty new
+        // - No `std.os.windows.FILE_STAT_LX_INFORMATION` in Zig standard library
+        // - Introduced as part of WSL
+        // - Available since Windows 10 update 1803
+        // TODO: Include check and fallback path for builtin version `.win10_rs4` (does invalid class mean INVALID_PARAMETER?)
+
+        const file_all_info = info: {
+            var io: std.os.windows.IO_STATUS_BLOCK = undefined;
+            var info: std.os.windows.FILE_ALL_INFORMATION = undefined;
+            const status = std.os.windows.ntdll.NtQueryInformationFile(
+                new_fd,
+                &io,
+                &info,
+                @sizeOf(@TypeOf(info)),
+                .FileAllInformation,
+            );
+            switch (status) {
+                .SUCCESS, .BUFFER_OVERFLOW => break :info info,
+                .INVALID_PARAMETER => unreachable,
+                .ACCESS_DENIED => return error.AccessDenied,
+                else => return std.os.windows.unexpectedStatus(status),
+            }
+        };
+
+        // Can't use `FILE_FS_OBJECTID_INFORMATION`, since 16-byte GUID can't fit in 64-bit dev #
+        const fs_volume_info = info: {
+            var io: std.os.windows.IO_STATUS_BLOCK = undefined;
+            var info: std.os.windows.FILE_FS_VOLUME_INFORMATION = undefined;
+            const status = std.os.windows.ntdll.NtQueryVolumeInformationFile(
+                new_fd,
+                &io,
+                &info,
+                @sizeOf(@TypeOf(info)),
+                .FileFsVolumeInformation,
+            );
+            switch (status) {
+                .SUCCESS, .BUFFER_OVERFLOW => break :info info,
+                .INVALID_PARAMETER => unreachable,
+                .ACCESS_DENIED => return error.AccessDenied,
+                else => return std.os.windows.unexpectedStatus(status),
+            }
+        };
+
+        break :stat types.FileStat{
+            .dev = types.Device.init(device_hash_seed, fs_volume_info.VolumeSerialNumber),
+            .ino = types.INode.init(
+                inode_hash_seed,
+                @bitCast(file_all_info.InternalInformation.IndexNumber),
+            ),
+            .type = if (file_all_info.StandardInformation.Directory != 0)
+                .directory
+            else
+                .regular_file,
+            .nlink = file_all_info.StandardInformation.NumberOfLinks,
+            .size = types.FileSize{
+                .bytes = @bitCast(file_all_info.StandardInformation.AllocationSize),
+            },
+            // WASI doesn't seem to specify the meaning of the timestamps here.
+            // The Windows times are relative to system time, in 100-ns intervals.
+            .atim = types.Timestamp.fromWindowsSystemTimeRelative(
+                file_all_info.BasicInformation.LastAccessTime,
+            ),
+            .mtim = types.Timestamp.fromWindowsSystemTimeRelative(
+                file_all_info.BasicInformation.LastWriteTime,
+            ),
+            .ctim = types.Timestamp.fromWindowsSystemTimeRelative(
+                file_all_info.BasicInformation.ChangeTime,
+            ),
+        };
+    } else stat: {
         // TODO: Use statx "." NOFOLLOW on Linux
         const stat = try std.posix.fstat(new_fd);
-        return types.FileStat.fromPosixStat(&stat, device_hash_seed, inode_hash_seed);
-    }
+        break :stat types.FileStat.fromPosixStat(&stat, device_hash_seed, inode_hash_seed);
+    };
+
+    log.debug("path_filestat_get {f} -> {f}", .{ path, stat });
+
+    return stat;
 }
 
 fn path_filestat_get(
@@ -744,16 +1170,50 @@ fn path_filestat_set_times(
     return Error.Unimplemented;
 }
 
-fn pathOpenSetFlags(
+fn pathOpenFlags(
     open_flags: types.OpenFlags.Valid,
     rights: types.Rights.Valid,
     fd_flags: types.FdFlags.Valid,
 ) SetOpenFlagsError!OsOpenFlags {
+    try open_flags.check();
     if (builtin.os.tag == .windows) {
-        log.err("path_open flags on windows", .{});
-        return error.Unimplemented;
+        if (fd_flags.nonblock or fd_flags.dsync or fd_flags.rsync or fd_flags.sync) {
+            log.err("TODO: unsupported fdflags {f} on windows", .{fd_flags});
+            return Error.NotSupported;
+        }
+
+        const init_flags = &.{ .STANDARD_RIGHTS_READ, .FILE_TRAVERSE };
+        const write_flags = WindowsOpenFlags.AccessMask.init(&.{
+            .STANDARD_RIGHTS_WRITE,
+            if (fd_flags.append) .FILE_APPEND_DATA else .FILE_WRITE_DATA,
+        });
+
+        return WindowsOpenFlags{
+            .access_mask = WindowsOpenFlags.AccessMask.init(init_flags)
+                .setConditional(rights.canWrite(), write_flags)
+                .setFlagConditional(rights.fd_read, .FILE_READ_DATA)
+                .setFlagConditional(rights.fd_sync, .SYNCHRONIZE)
+                .setFlagConditional(rights.fd_filestat_get, .FILE_READ_ATTRIBUTES)
+                .setFlagConditional(rights.fd_filestat_set_size or rights.fd_filestat_set_times, .FILE_WRITE_ATTRIBUTES)
+                .setFlagConditional(rights.fd_readdir, .FILE_LIST_DIRECTORY),
+            // TODO: Does this handle trunc correctly?
+            .create_disposition = if (open_flags.creat and open_flags.excl)
+                .FILE_CREATE
+            else if (open_flags.creat)
+                if (open_flags.trunc) .FILE_OVERWRITE_IF else .FILE_OPEN_IF
+            else if (open_flags.excl)
+                unreachable
+            else if (open_flags.trunc)
+                .FILE_OVERWRITE
+            else
+                .FILE_OPEN,
+            .create_options = WindowsOpenFlags.CreateOptions.init(&.{
+                .FILE_SYNCHRONOUS_IO_NONALERT,
+                .FILE_OPEN_FOR_BACKUP_INTENT,
+            }).setFlagConditional(open_flags.directory, .FILE_DIRECTORY_FILE),
+        };
     } else {
-        var o_flags = fd_flags.toFlagsPosix() catch return error.InvalidArgument;
+        var o_flags = fd_flags.toFlagsPosix() catch return error.NotSupported;
         open_flags.setPosixFlags(&o_flags);
 
         if (@hasField(std.posix.O, "CLOEXEC")) o_flags.CLOEXEC = true;
@@ -780,6 +1240,7 @@ fn pathOpen(
     errdefer std.posix.close(new_fd);
     _ = scratch;
     if (builtin.os.tag == .windows) {
+        // Calls `NtCreateFile`
         log.err("path_open {f} on windows", .{path});
         return error.Unimplemented;
     } else if (@hasDecl(std.posix.system, "O") and std.posix.O != void) {
@@ -828,7 +1289,7 @@ fn path_open(
         dir_flags,
         path,
         .{ open_flags, rights, fd_flags },
-        pathOpenSetFlags,
+        pathOpenFlags,
         .{ allocator, open_flags, rights },
         pathOpen,
     );

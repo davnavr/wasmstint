@@ -105,33 +105,64 @@ fn fd_close(ctx: Ctx, allocator: std.mem.Allocator) Error!void {
 
 fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
     const self = ctx.get(HostFile);
-    // TODO: On Windows, more efficient to use NtQueryInformationFile: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryinformationfile
-    // TODO: On Linux, more efficient to use statx, asking only for mode
-    const @"type" = types.FileType.fromZigKind(
-        (try self.file.stat()).kind,
-    ) catch |e| switch (e) {
-        error.UnknownSocketType => .unknown, // TODO: Requires getsockopt
-    };
+    if (builtin.os.tag == .windows) {
+        var status_block: std.os.windows.IO_STATUS_BLOCK = undefined;
+        var info: std.os.windows.FILE_ALL_INFORMATION = undefined;
 
-    // TODO: On Windows, check for FILE_APPEND_DATA (might be in FILE_ACCESS_INFORMATION via NtQueryInformationFile)
-    const access: std.posix.O = @bitCast(@as(
-        @typeInfo(std.posix.O).@"struct".backing_integer.?,
-        @intCast(
-            std.posix.fcntl(
-                self.file.handle,
-                std.posix.F.GETFL,
-                undefined,
-            ) catch |e| return switch (e) {
-                error.Locked => error.WouldBlock,
-                else => |err| err,
-            },
-        ),
-    ));
+        // Equivalent in `kernel32` is GetFileInformationByHandle
+        // Simplified version of implementation of `std.fs.File.stat`
+        const status = std.os.windows.ntdll.NtQueryInformationFile(
+            self.file.handle,
+            &status_block,
+            &info,
+            @sizeOf(@TypeOf(info)),
+            // Need both `FILE_ACCESS_INFORMATION` and `FILE_STANDARD_INFORMATION`
+            .FileAllInformation,
+        );
+        switch (status) {
+            .SUCCESS, .BUFFER_OVERFLOW => {},
+            .INVALID_PARAMETER => unreachable,
+            .ACCESS_DENIED => return Error.AccessDenied,
+            else => return std.os.windows.unexpectedStatus(status),
+        }
 
-    return .{
-        .type = @"type",
-        .flags = types.FdFlags{ .valid = types.FdFlags.Valid.fromFlagsPosix(access) },
-    };
+        // TODO: Windows might need symlink check in fd_fdstat_get
+        // Zig checks for `FILE_ATTRIBUTE_REPARSE_POINT` in `BasicInformation` to detect symlinks
+
+        const fd_flags = types.FdFlags.Valid.fromFlagsWindows(info.AccessInformation.AccessFlags);
+
+        return types.FdStat.File{
+            // Zig checks `BasicInformation.FileAttributes` instead.
+            .type = if (info.StandardInformation.Directory != 0) .directory else .regular_file,
+            .flags = types.FdFlags{ .valid = fd_flags },
+        };
+    } else {
+        // TODO: On Linux, more efficient to use statx, asking only for mode
+        const @"type" = types.FileType.fromZigKind(
+            (try self.file.stat()).kind,
+        ) catch |e| switch (e) {
+            error.UnknownSocketType => .unknown, // TODO: Requires getsockopt
+        };
+
+        const access: std.posix.O = @bitCast(@as(
+            @typeInfo(std.posix.O).@"struct".backing_integer.?,
+            @intCast(
+                std.posix.fcntl(
+                    self.file.handle,
+                    std.posix.F.GETFL,
+                    undefined,
+                ) catch |e| return switch (e) {
+                    error.Locked => error.WouldBlock,
+                    else => |err| err,
+                },
+            ),
+        ));
+
+        return .{
+            .type = @"type",
+            .flags = types.FdFlags{ .valid = types.FdFlags.Valid.fromFlagsPosix(access) },
+        };
+    }
 }
 
 fn fd_filestat_get(
