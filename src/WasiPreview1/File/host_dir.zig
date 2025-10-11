@@ -494,55 +494,57 @@ fn accessSubPathPortable(
         break :components component_buf.items;
     };
 
-    if (initial_components.len == 0) {
-        @branchHint(.unlikely);
-        // Can't use `dup` here
-        log.err("TODO: path_open to same directory {f}", .{path});
-        return Error.Unimplemented;
-    }
+    const final_name = if (initial_components.len == 0)
+        "."
+    else
+        initial_components[initial_components.len - 1].bytes(path);
 
-    log.debug("{d} components in {f}", .{ initial_components.len, path });
+    // log.debug("{d} components in {f}", .{ initial_components.len, path });
 
     // Can't compare realpath of dir and target, that's a TOCTOU
 
     // Strategy here is to open each subdirectory, expanding symlinks, until the parent of the
     // target is reached.
-    const final_name = initial_components[initial_components.len - 1];
 
     var final_dir = dir;
-    for (0.., initial_components[0 .. initial_components.len - 1]) |i, comp| {
-        var old_dir = final_dir;
-        defer if (i > 0 and i < initial_components.len - 1) {
-            log.debug("closing intermediate directory {any}", .{old_dir.fd});
-            old_dir.close();
-        };
+    if (initial_components.len > 1) {
+        for (0.., initial_components[0 .. initial_components.len - 1]) |i, comp| {
+            var old_dir = final_dir;
+            defer if (i > 0 and i < initial_components.len - 1) {
+                // log.debug("closing intermediate directory {any}", .{old_dir.fd});
+                old_dir.close();
+            };
 
-        const comp_bytes = comp.bytes(path);
+            const comp_bytes = comp.bytes(path);
 
-        // TODO: Use O_PATH on Linux
-        // TODO(zig): no_follow weird on windows https://github.com/ziglang/zig/issues/18335
-        final_dir = old_dir.openDir(
-            comp_bytes,
-            .{ .access_sub_paths = true, .no_follow = true },
-        ) catch |e| return switch (e) {
-            error.SymLinkLoop => if (!flags.symlink_follow)
-                error.SymLinkLoop
-            else {
-                // readLink + std.path.isAbsolute
-                // Need separate array list (stackFallback(1, scratch.allocator())) to store expanded components
-                log.debug("TODO: Expand symlinks in path_open for {f}", .{path});
-                return error.Unimplemented;
-            },
-            error.InvalidUtf8, error.InvalidWtf8 => unreachable,
-            error.NetworkNotFound => error.DirNotFound,
-            else => |err| err,
-        };
+            // TODO: Use O_PATH on Linux
+            // TODO(zig): no_follow weird on windows https://github.com/ziglang/zig/issues/18335
+            final_dir = old_dir.openDir(
+                comp_bytes,
+                .{ .access_sub_paths = true, .no_follow = true },
+            ) catch |e| return switch (e) {
+                error.SymLinkLoop => if (!flags.symlink_follow)
+                    error.SymLinkLoop
+                else {
+                    // readLink + std.path.isAbsolute
+                    // Need separate array list (stackFallback(1, scratch.allocator())) to store expanded components
+                    log.debug("TODO: Expand symlinks in path_open for {f}", .{path});
+                    return error.Unimplemented;
+                },
+                error.InvalidUtf8, error.InvalidWtf8 => unreachable,
+                error.NetworkNotFound => error.DirNotFound,
+                else => |err| err,
+            };
 
-        log.debug("opened intermediate directory {f} ({any})", .{ comp.toPath(path), final_dir.fd });
+            // log.debug(
+            //     "opened intermediate directory {f} ({any})",
+            //     .{ comp.toPath(path), final_dir.fd },
+            // );
+        }
     }
 
     defer if (initial_components.len > 1) {
-        log.debug("closing final directory {any}", .{final_dir.fd});
+        // log.debug("closing final directory {any}", .{final_dir.fd});
         final_dir.close();
     };
 
@@ -563,7 +565,7 @@ fn accessSubPathPortable(
             break :flags o_flags;
         };
 
-        const final_name_z = try scratch.allocator().dupeZ(u8, final_name.bytes(path));
+        const final_name_z = try scratch.allocator().dupeZ(u8, final_name);
 
         errdefer |e| log.err("OS error {t} opening {f}", .{ e, path });
 
@@ -663,7 +665,7 @@ fn accessSubPath(
     );
 }
 
-fn pathFileStatSetFlags() SetOpenFlagsError!OsOpenFlags {
+fn pathFileStatGetFlags() SetOpenFlagsError!OsOpenFlags {
     if (builtin.os.tag == .windows) {
         log.err("path_filestat_get flags on windows", .{});
     } else {
@@ -680,7 +682,7 @@ fn pathFileStatSetFlags() SetOpenFlagsError!OsOpenFlags {
     }
 }
 
-fn pathFileStat(
+fn pathFileStatGet(
     new_fd: std.posix.fd_t,
     scratch: *ArenaAllocator,
     path: Path,
@@ -719,9 +721,9 @@ fn path_filestat_get(
         flags,
         path,
         .{},
-        pathFileStatSetFlags,
+        pathFileStatGetFlags,
         .{ device_hash_seed, inode_hash_seed },
-        pathFileStat,
+        pathFileStatGet,
     );
 }
 
