@@ -49,12 +49,21 @@ pub fn wrapFile(fd: std.fs.File, close: Close) File.Impl {
 
 /// Creates wrappers for the standard streams, and makes guest calls to `fd_close` a no-op.
 pub fn wrapStandardStreams() File.StandardStreams {
-    const common_rights = .{ .fd_filestat_get, .fd_tell };
-    const out_rights = File.Rights.init(types.Rights.Valid.init(&(.{.fd_write} ++ common_rights)));
+    const common_rights = .{
+        .fd_filestat_get,
+        // .fd_tell, // should only be enabled if stream is a "file"
+    };
+
+    const out_rights = File.Rights.init(
+        types.Rights.Valid.init(&(.{.fd_write} ++ common_rights)),
+    );
+
     // Leave standard streams open in case an interpreter error/panic occurs
     return .{
         .stdin = File{
-            .rights = File.Rights.init(types.Rights.Valid.init(&(.{.fd_read} ++ common_rights))),
+            .rights = File.Rights.init(
+                types.Rights.Valid.init(&(.{.fd_read} ++ common_rights)),
+            ),
             .impl = wrapFile(std.fs.File.stdin(), .leave_open),
         },
         .stdout = File{
@@ -263,6 +272,7 @@ fn fd_pwrite(
 
 fn fd_read(ctx: Ctx, iovs: []const File.Iovec, total_len: u32) Error!u32 {
     const self = ctx.get(HostFile);
+    log.debug("attempting to read up to {} bytes", .{total_len});
     if (builtin.os.tag == .windows) {
         // try std.os.windows.ReadFile()
         log.err("fd_read on windows", .{});
