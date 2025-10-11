@@ -144,6 +144,59 @@ fn fd_filestat_get(
     }
 }
 
+fn overflowsSignedSize(total_len: u32) bool {
+    return total_len > std.math.maxInt(isize);
+}
+
+/// Returns a subslice of `iovs` to avoid OS syscalls returning `EINVAL` due to `total_len`
+/// overflowing `ssize_t`.
+fn iovsBytesLenBounded(iovs: anytype, total_len: u32) @TypeOf(iovs) {
+    if (!overflowsSignedSize(total_len)) {
+        return iovs;
+    } else {
+        @branchHint(.cold);
+        var final = iovs;
+        var len_sum = total_len;
+        while (overflowsSignedSize(len_sum)) {
+            const removed = final[final.len - 1];
+            len_sum -= @intCast(removed.len);
+            final.len -= 1;
+        }
+
+        return final;
+    }
+}
+
+// fn fd_pread(ctx: Ctx, iovs: []const File.Iovec, total_len: u32) Error!u32 {
+//     const self = ctx.get(HostFile);
+//     switch (builtin.os.tag) {
+//         // Does not have `preadv`, fallback to `pread`
+//         // Check copied from `std.posix.preadv`
+//         .windows, .macos, .ios, .watchos, .tvos, .visionos, .haiku, .serenity => {
+//             // `NtReadFile` allows "seek-and-read", but not proper `pwritev` or even `pwrite`
+//             log.err("TODO: fd_pwrite on " ++ @tagName(builtin.os.tag), .{});
+//             return error.Unimplemented;
+//         },
+//         else => {
+//             const ciovs = iovsBytesLenBounded(File.Ciovec.castSlice(iovs), total_len);
+//             // Duplicated code from `std.posix.preadv`
+//             // Zig conflates `ENXIO`, `ESPIPE`, and `EOVERFLOW`
+//             const preadv = if (builtin.os.tag == .linux and std.os.linux.wrapped.lfs64_abi)
+//                 std.c.preadv
+//             else
+//                 std.posix.system.preadv;
+//             while (true) {
+//                 const written = preadv(
+//                     self.file.handle,
+//                     ciovs.ptr,
+//                     @min(ciovs.len, std.posix.IOV_MAX),
+//                     @as(i64, @bitCast(offset.bytes)),
+//                 );
+//             }
+//         },
+//     }
+// }
+
 fn fd_pwrite(
     ctx: Ctx,
     iovs: []const File.Ciovec,
@@ -151,28 +204,19 @@ fn fd_pwrite(
     total_len: u32,
 ) Error!u32 {
     const self = ctx.get(HostFile);
-    const file = self.file;
     switch (builtin.os.tag) {
-        .linux,
-        .freebsd,
-        .netbsd,
-        .dragonfly,
-        .illumos,
-        => |ux| {
-            var ciovs = File.Ciovec.castSlice(iovs);
-            // Prevent EINVAL when total length overflows `ssize_t`
-            if (total_len > std.math.maxInt(isize)) {
-                @branchHint(.cold);
-                var len_sum = total_len;
-                while (len_sum > std.math.maxInt(isize)) {
-                    const removed = ciovs[ciovs.len - 1];
-                    len_sum -= removed.len;
-                    ciovs.len -= 1;
-                }
-            }
+        // Does not have `pwritev`, fallback to `pwrite`
+        // Check copied from `std.posix.pwritev`
+        .windows, .macos, .ios, .watchos, .tvos, .visionos, .haiku => {
+            // `NtWriteFile` allows "seek-and-write", but not proper `pwritev` or even `pwrite`
+            log.err("TODO: fd_pwrite on " ++ @tagName(builtin.os.tag), .{});
+            return error.Unimplemented;
+        },
+        else => {
+            const ciovs = iovsBytesLenBounded(File.Ciovec.castSlice(iovs), total_len);
 
             // Duplicated code from `std.posix.pwritev` (MIT License).
-            const pwritev = if (ux == .linux and std.os.linux.wrapped.lfs64_abi)
+            const pwritev = if (builtin.os.tag == .linux and std.os.linux.wrapped.lfs64_abi)
                 std.c.pwritev64
             else
                 std.posix.system.pwritev;
@@ -180,7 +224,7 @@ fn fd_pwrite(
             while (true) {
                 // Zig unfortunately conflates NXIO, SPIPE, and OVERFLOW into one error
                 const written = pwritev(
-                    file.handle,
+                    self.file.handle,
                     ciovs.ptr,
                     @min(ciovs.len, std.posix.IOV_MAX),
                     @as(i64, @bitCast(offset.bytes)),
@@ -188,7 +232,10 @@ fn fd_pwrite(
 
                 return switch (std.posix.errno(written)) {
                     .SUCCESS => @intCast(written),
-                    .INTR => continue,
+                    .INTR => {
+                        @branchHint(.unlikely);
+                        continue;
+                    },
                     .INVAL => error.InvalidArgument,
                     .FAULT => unreachable,
                     .SRCH => error.ProcessNotFound,
@@ -203,38 +250,55 @@ fn fd_pwrite(
                     .PERM => error.PermissionDenied,
                     .PIPE => error.BrokenPipe,
                     .NXIO => error.NoDevice,
-                    // .SPIPE => if (offset.bytes == 0)
-                    //     fd_write(ctx, iovs, total_len)
-                    // else
-                    //     error.SeekPipe,
                     .SPIPE => error.SeekPipe,
-                    .OVERFLOW => return error.Overflow,
-                    .BUSY => return error.DeviceBusy,
+                    .OVERFLOW => error.Overflow,
+                    .BUSY => error.DeviceBusy,
                     else => |errno| std.posix.unexpectedErrno(errno),
                 };
             }
         },
-        .windows => {
-            // NtWriteFile allows "seek-and-write", but not proper `pwritev` or even `pwrite`
-            log.err("TODO: fd_pwrite on Windows", .{});
-            return error.Unimplemented;
-        },
-        .wasi => @compileError("WASM on WASM fd_pwrite"),
-        else => if (iovs.len == 0) {
-            return 0;
-        } else {
-            // Fall back on `pwrite`, just like Zig's `std`.
-            const result = std.posix.pwrite(
-                file.handle,
-                iovs[0].bytes(),
-                offset.bytes,
-            ) catch |e| switch (e) {
-                error.NotOpenForWriting => error.BadFd,
-                else => |known| known,
-            };
+    }
+}
 
-            return @bitCast(result);
-        },
+fn fd_read(ctx: Ctx, iovs: []const File.Iovec, total_len: u32) Error!u32 {
+    const self = ctx.get(HostFile);
+    if (builtin.os.tag == .windows) {
+        // try std.os.windows.ReadFile()
+        log.err("fd_read on windows", .{});
+        return Error.Unimplemented;
+    } else {
+        const os_iovs = iovsBytesLenBounded(File.Iovec.castSlice(iovs), total_len);
+
+        // Copied from `std.posix.readv`
+        // Zig conflates `ENOBUFS` and `ENOMEM`
+        while (true) {
+            const amt = std.posix.system.readv(
+                self.file.handle,
+                os_iovs.ptr,
+                @min(os_iovs.len, std.posix.IOV_MAX),
+            );
+
+            return switch (std.posix.errno(amt)) {
+                .SUCCESS => @intCast(amt),
+                .INTR => {
+                    @branchHint(.unlikely);
+                    continue;
+                },
+                .INVAL => error.InvalidArgument,
+                .FAULT => unreachable,
+                .SRCH => error.ProcessNotFound,
+                .AGAIN => error.WouldBlock,
+                .BADF => error.BadFd,
+                .IO => error.InputOutput,
+                .ISDIR => error.IsDir,
+                .NOBUFS => error.NoBufferSpace,
+                .NOMEM => error.SystemResources,
+                .NOTCONN => error.SocketNotConnected,
+                .CONNRESET => error.ConnectionResetByPeer,
+                .TIMEDOUT => error.ConnectionTimedOut,
+                else => |err| std.posix.unexpectedErrno(err),
+            };
+        }
     }
 }
 
@@ -246,7 +310,7 @@ fn fd_tell(ctx: Ctx) Error!types.FileSize {
     //return std.os.windows.SetFilePointerEx_CURRENT_get(self.file.handle);
     if (builtin.os.tag == .windows) {
         //std.os.windows.kernel32.SetFilePointerEx()
-        log.err("fd_tell on windows", {});
+        log.err("fd_tell on windows", .{});
         return Error.Unimplemented;
     } else if (@hasDecl(std.posix.system, "SEEK") and std.posix.SEEK != void) {
         // Duplicated code from `std.posix.lseek_CUR_get`.
@@ -260,7 +324,7 @@ fn fd_tell(ctx: Ctx) Error!types.FileSize {
         return switch (std.posix.errno(pos)) {
             .SUCCESS => types.FileSize{ .bytes = @bitCast(pos) },
             .BADF => unreachable,
-            .INVAL => Error.InvalidArgument,
+            .INVAL => Error.InvalidArgument, // guest could try to go beyond end
             .OVERFLOW => Error.Overflow,
             .SPIPE => Error.SeekPipe,
             .NXIO => Error.NoDevice,
@@ -331,11 +395,11 @@ const vtable = File.VTable{
     .fd_filestat_get = fd_filestat_get,
     .fd_filestat_set_size = File.unimplemented.fd_filestat_set_size,
     .fd_filestat_set_times = File.unimplemented.fd_filestat_set_times,
-    .fd_pread = File.unimplemented.fd_pread,
+    .fd_pread = File.unimplemented.fd_pread, // fd_pread,
     .fd_prestat_get = File.not_dir.fd_prestat_get,
     .fd_prestat_dir_name = File.not_dir.fd_prestat_dir_name,
     .fd_pwrite = fd_pwrite,
-    .fd_read = File.unimplemented.fd_read,
+    .fd_read = fd_read,
     .fd_readdir = File.not_dir.fd_readdir,
     .fd_seek = File.unimplemented.fd_seek,
     .fd_sync = File.unimplemented.fd_sync,

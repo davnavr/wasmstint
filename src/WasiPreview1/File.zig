@@ -99,7 +99,7 @@ pub const Iovec = extern struct {
         return iov.inner.base[0..iov.inner.len];
     }
 
-    pub fn castSlice(iovecs: []const Iovec) []const std.posix.iovec_const {
+    pub fn castSlice(iovecs: []const Iovec) []const std.posix.iovec {
         const casted: []const std.posix.iovec = @ptrCast(iovecs);
         std.debug.assert(casted.len == iovecs.len);
         return casted;
