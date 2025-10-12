@@ -305,9 +305,51 @@ fn fd_read(ctx: Ctx, iovs: []const File.Iovec, total_len: u32) Error!u32 {
     const self = ctx.get(HostFile);
     log.debug("attempting to read up to {} bytes", .{total_len});
     if (builtin.os.tag == .windows) {
-        // try std.os.windows.ReadFile()
-        log.err("fd_read on windows", .{});
-        return Error.Unimplemented;
+        if (total_len == 0) {
+            @branchHint(.unlikely);
+            return 0;
+        } else if (iovs.len > 1) {
+            @branchHint(.unlikely); // More common to write a single iovec
+            // Could use `scratch` allocator to create a buffer
+            log.debug(
+                "consider buffering fd_read on windows: iovs.len={d}, total_len={d}",
+                .{ iovs.len, total_len },
+            );
+        }
+
+        const buffer = iovs[0].bytes();
+        std.debug.assert(buffer.len > 0);
+        std.debug.assert(buffer.len <= total_len);
+        // Copied from `std.os.windows.ReadFile`
+        while (true) {
+            // `ReadFile` sets this to `0` anyway.
+            var number_of_bytes_read: std.os.windows.DWORD = undefined;
+            // `kernel32.ReadFile` handles reading from consoles, not just normal files
+            const success = std.os.windows.kernel32.ReadFile(
+                self.file.handle,
+                buffer.ptr,
+                @as(u32, @intCast(buffer.len)),
+                &number_of_bytes_read,
+                null,
+            ) != 0;
+
+            return if (success)
+                number_of_bytes_read
+            else switch (std.os.windows.GetLastError()) {
+                .IO_PENDING => unreachable,
+                .OPERATION_ABORTED => {
+                    @branchHint(.unlikely);
+                    continue;
+                },
+                .BROKEN_PIPE => error.BrokenPipe,
+                .HANDLE_EOF => 0,
+                .NETNAME_DELETED => error.ConnectionResetByPeer,
+                .LOCK_VIOLATION => error.LockViolation,
+                .ACCESS_DENIED => error.AccessDenied,
+                .INVALID_HANDLE => error.BadFd,
+                else => |err| std.os.windows.unexpectedError(err),
+            };
+        }
     } else {
         const os_iovs = iovsBytesLenBounded(File.Iovec.castSlice(iovs), total_len);
 

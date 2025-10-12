@@ -276,11 +276,16 @@ fn initIoVectorList(
             var total_len: u32 = 0;
             for (0..iovs.items.len) |i| {
                 if (i > 0) {
-                    @branchHint(.cold);
+                    @branchHint(.unlikely);
                 }
 
                 const ciovec = try iovs.read(i).bytes(mem);
                 const ciovec_len = std.math.cast(u32, ciovec.len) orelse break;
+                if (ciovec_len == 0) {
+                    @branchHint(.unlikely);
+                    continue;
+                }
+
                 total_len = std.math.add(u32, total_len, ciovec_len) catch |e| switch (e) {
                     error.Overflow => return error.InvalidArgument,
                 };
