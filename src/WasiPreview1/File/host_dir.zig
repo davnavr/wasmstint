@@ -1143,7 +1143,7 @@ fn pathFileStatGet(
             );
             switch (status) {
                 .SUCCESS, .BUFFER_OVERFLOW => break :info info,
-                .INVALID_PARAMETER => unreachable,
+                .INFO_LENGTH_MISMATCH => unreachable,
                 .ACCESS_DENIED => return error.AccessDenied,
                 else => return std.os.windows.unexpectedStatus(status),
             }
@@ -1320,18 +1320,42 @@ fn pathOpen(
 ) Error!File.OpenedPath {
     errdefer std.posix.close(new_fd);
     _ = scratch;
+    const opened_msg = "successfully opened file {f}";
     if (builtin.os.tag == .windows) {
-        // Calls `NtCreateFile`
-        log.err("path_open {f} on windows", .{path});
-        return error.Unimplemented;
+        if (!open_flags.directory) {
+            var io: std.os.windows.IO_STATUS_BLOCK = undefined;
+            var info: std.os.windows.FILE_BASIC_INFORMATION = undefined;
+            const status = std.os.windows.ntdll.NtQueryInformationFile(
+                new_fd,
+                &io,
+                &info,
+                @sizeOf(@TypeOf(info)),
+                .FileBasicInformation,
+            );
+
+            switch (status) {
+                .SUCCESS, .BUFFER_OVERFLOW => {},
+                .INFO_LENGTH_MISMATCH => unreachable,
+                .ACCESS_DENIED => return error.AccessDenied,
+                else => return std.os.windows.unexpectedStatus(status),
+            }
+
+            if (info.FileAttributes & std.os.windows.FILE_ATTRIBUTE_DIRECTORY == 0) {
+                log.debug(opened_msg, .{path});
+                return File.OpenedPath{
+                    .file = host_file.wrapFile(std.fs.File{ .handle = new_fd }, .close),
+                    .rights = rights.intersection(host_file.possible_rights),
+                };
+            }
+        }
     } else if (@hasDecl(std.posix.system, "O") and std.posix.O != void) {
-        if (!open_flags.directory) open_dir: {
+        if (!open_flags.directory) {
             const as_file = std.fs.File{ .handle = new_fd };
             const kind = (try as_file.stat()).kind;
             switch (kind) {
-                .directory => break :open_dir,
+                .directory => {},
                 else => {
-                    log.debug("successfully opened file {f}", .{path});
+                    log.debug(opened_msg, .{path});
                     return File.OpenedPath{
                         .file = host_file.wrapFile(as_file, .close),
                         .rights = rights.intersection(host_file.possible_rights),
@@ -1339,14 +1363,13 @@ fn pathOpen(
                 },
             }
         }
-
-        log.debug("successfully opened directory {f}", .{path});
-
-        const as_dir = std.fs.Dir{ .fd = new_fd };
-        return init(as_dir, allocator, rights);
     } else {
         @compileError("path_open impl for " ++ @tagName(builtin.os.tag));
     }
+
+    log.debug("successfully opened directory {f}", .{path});
+    const as_dir = std.fs.Dir{ .fd = new_fd };
+    return init(as_dir, allocator, rights);
 }
 
 fn path_open(
