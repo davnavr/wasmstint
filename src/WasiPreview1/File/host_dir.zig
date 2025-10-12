@@ -1253,9 +1253,14 @@ fn pathOpenFlags(
 ) SetOpenFlagsError!OsOpenFlags {
     try open_flags.check();
     if (builtin.os.tag == .windows) {
-        if (fd_flags.nonblock or fd_flags.dsync or fd_flags.rsync or fd_flags.sync) {
-            log.err("TODO: unsupported fdflags {f} on windows", .{fd_flags});
-            return Error.NotSupported;
+        // No effect for regular files on linux.
+        // POSIX says behavior on regular files is unspecified.
+        // Windows doesn't really have an equivalent to `O_NONBLOCK` anyways.
+        _ = fd_flags.nonblock;
+
+        if (fd_flags.dsync or fd_flags.rsync or fd_flags.sync) {
+            log.err("unsupported fdflags {f} on windows", .{fd_flags});
+            return Error.NotSupported; // `Errno.notsup` for unsupported flags
         }
 
         const init_flags = &.{ .STANDARD_RIGHTS_READ, .FILE_TRAVERSE };
