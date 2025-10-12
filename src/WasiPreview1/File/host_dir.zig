@@ -726,9 +726,16 @@ fn accessSubPathPortable(
             ) callconv(.winapi) std.os.windows.NTSTATUS;
 
             const DUPLICATE_SAME_ATTRIBUTES = 0x0000_0004;
+
+            const OBJ_DONT_REPARSE = 0x0000_1000;
+
+            const STATUS_REPARSE_POINT_ENCOUNTERED: std.os.windows.NTSTATUS =
+                @enumFromInt(0xC000_050B);
         };
 
-        // `NtCreateFile` doesn't seem
+        errdefer log.err("failed to open final component in {f}", .{path});
+
+        // `NtCreateFile` doesn't seem to support "." or ".\\" as a path to the `final_dir`
         const final_name_bytes = final_name orelse {
             @branchHint(.unlikely);
             const current_process = std.os.windows.GetCurrentProcess();
@@ -765,141 +772,210 @@ fn accessSubPathPortable(
             .Buffer = final_name_w.ptr,
         };
 
-        // Open flags could specify file truncation, but that would either mean no symlink detection
-        // or truncating the symlink itself. Unfortunately, this means unconditionally checking for
-        // symlinks.
+        // Documentation for `NtCreateFile` only lists `OBJ_CASE_INSENSITIVE` for `Attributes`
+        //
+        // `OBJ_DONT_REPARSE` fails on paths like `C:\Users\You\file.txt`, but this only needs to
+        // process relative paths.
+        //
+        // For more information see:
+        // https://www.tiraniddo.dev/2020/05/objdontreparse-is-mostly-useless.html
+        const obj_dont_reparse_min_version = std.Target.Os.WindowsVersion.win10_rs1;
+        const has_obj_dont_reparse =
+            builtin.os.version_range.windows.isAtLeast(obj_dont_reparse_min_version);
 
-        // Attempting to read the symlink path first followed by doing the real file open means a
-        // TOCTOU. A symlink could be created in between `DeviceIoControl` and final
-        // `NtCreateFile` call.
-
-        const create_disposition_dont_truncate = switch (initial_flags.create_disposition) {
-            .FILE_SUPERSEDE => unreachable, // currently not used
-            .FILE_CREATE, .FILE_OPEN, .FILE_OPEN_IF => |flag| flag,
-            .FILE_OVERWRITE => .FILE_OPEN,
-            .FILE_OVERWRITE_IF => .FILE_OPEN_IF,
+        const create_file_status = struct {
+            const FILE_SUPERSEDED = 0x0000_0000;
+            const FILE_OPENED = 0x0000_0001;
+            const FILE_CREATED = 0x0000_0002;
+            const FILE_OVERWRITTEN = 0x0000_0003;
+            const FILE_EXISTS = 0x0000_0004;
+            const FILE_DOES_NOT_EXIST = 0x0000_0005;
         };
 
-        var maybe_symlink_attrs = std.os.windows.OBJECT_ATTRIBUTES{
-            .Length = @sizeOf(std.os.windows.OBJECT_ATTRIBUTES),
-            .RootDirectory = final_dir.fd,
-            .ObjectName = &final_name_unicode,
-            .Attributes = 0,
-            .SecurityDescriptor = null,
-            .SecurityQualityOfService = null,
-        };
-
-        // TODO: `NtDuplicateObject` is equivalent of `ReOpenFile`, which could be useful here
-        const new_fd: std.fs.File.Handle = while (true) opened: {
-            // Logic copied from Zig's `std.os.windows.ReadLink`, except that this does not allow
-            // abssolute paths.
-            var maybe_symlink_handle: std.fs.File.Handle = undefined;
-            var maybe_symlink_io: std.os.windows.IO_STATUS_BLOCK = undefined;
-            // TODO: Documentation for NtCreateFile only lists `OBJ_CASE_INSENSITIVE` for Attributes
-            // TODO: See if `OBJ_DONT_REPARSE` can be used
-            // https://www.tiraniddo.dev/2020/05/objdontreparse-is-mostly-useless.html
-            const maybe_symlink_status = std.os.windows.ntdll.NtCreateFile(
-                &maybe_symlink_handle,
-                // Needs to be replaced with `initial_flags.access_mask.bits`
-                // This is enough to figure out symlink information
-                WindowsOpenFlags.AccessMask.init(&.{ .FILE_READ_ATTRIBUTES, .SYNCHRONIZE }).bits,
-                &maybe_symlink_attrs,
-                &maybe_symlink_io,
-                null,
-                std.os.windows.FILE_ATTRIBUTE_NORMAL,
-                // Needs to be replaced with `initial_flags.share_access.bits`
-                WindowsOpenFlags.share_access_default.bits,
-                // Needs to be replaced with `initial_flags.create_disposition`
-                @intFromEnum(create_disposition_dont_truncate),
-                // Needs to be replaced with `initial_flags.create_options`
-                WindowsOpenFlags.CreateOptions.init(
-                    &.{ .FILE_SYNCHRONOUS_IO_NONALERT, .FILE_OPEN_REPARSE_POINT },
-                ).bits,
-                null,
-                0,
-            );
-
-            switch (maybe_symlink_status) {
-                .SUCCESS => {},
-                .OBJECT_NAME_INVALID => unreachable,
-                .OBJECT_NAME_NOT_FOUND,
-                .OBJECT_PATH_NOT_FOUND,
-                .NO_MEDIA_IN_DEVICE,
-                => switch (initial_flags.create_disposition) {
-                    .FILE_SUPERSEDE => unreachable, // not used
-                    .FILE_OPEN, .FILE_OVERWRITE => return error.FileNotFound,
-                    else => unreachable,
-                },
-                .INVALID_PARAMETER => unreachable,
-                .SHARING_VIOLATION, .ACCESS_DENIED => return error.AccessDenied,
-                .PIPE_BUSY => return error.DeviceBusy,
-                .PIPE_NOT_AVAILABLE => return error.NoDevice,
-                .OBJECT_PATH_SYNTAX_BAD => unreachable,
-                .OBJECT_NAME_COLLISION => switch (initial_flags.create_disposition) {
-                    .FILE_SUPERSEDE => unreachable, // not used
-                    .FILE_CREATE => return error.PathAlreadyExists,
-                    else => unreachable,
-                },
-                .FILE_IS_A_DIRECTORY => unreachable,
-                .NOT_A_DIRECTORY => unreachable,
-                .USER_MAPPED_FILE => return error.AccessDenied,
-                .INVALID_HANDLE => unreachable,
-                .DELETE_PENDING => {
-                    // See comment in `std.os.windows.OpenFile`
-                    std.Thread.sleep(std.time.ns_per_ms);
-                    continue;
-                },
-                else => return std.os.windows.unexpectedStatus(maybe_symlink_status),
-            }
-
-            const status = struct {
-                const FILE_SUPERSEDED = 0x0000_0000;
-                const FILE_OPENED = 0x0000_0001;
-                const FILE_CREATED = 0x0000_0002;
-                const FILE_OVERWRITTEN = 0x0000_0003;
-                const FILE_EXISTS = 0x0000_0004;
-                const FILE_DOES_NOT_EXIST = 0x0000_0005;
+        const new_fd: std.fs.File.Handle = if (has_obj_dont_reparse == true) opened: {
+            var attrs = std.os.windows.OBJECT_ATTRIBUTES{
+                .Length = @sizeOf(std.os.windows.OBJECT_ATTRIBUTES),
+                .RootDirectory = final_dir.fd,
+                .ObjectName = &final_name_unicode,
+                .Attributes = win.OBJ_DONT_REPARSE,
+                .SecurityDescriptor = null,
+                .SecurityQualityOfService = null,
             };
 
-            errdefer std.os.windows.CloseHandle(maybe_symlink_handle);
-
-            // `ReOpenFile` in `kernel32` could be used here, it doesn't support truncation flags used
-            // in `path_open`, but manually handling truncation happens anyway to avoid TOCTOU.
-            switch (maybe_symlink_io.Information) {
-                // assumed to be caught in error handling paths above
-                status.FILE_EXISTS, status.FILE_DOES_NOT_EXIST => unreachable,
-                status.FILE_SUPERSEDED => unreachable,
-                status.FILE_OPENED => {
-                    // Check for symlink
-                    log.err("TODO: windows accessSubPath check for symlink for path {f}", .{path});
-
-                    return Error.Unimplemented;
-                },
-                status.FILE_CREATED => {
-                    // Change permissions of created file
-                    if (true) {
-                        log.err("TODO: windows accessSubPath ReOpenFile {f}", .{path});
-
-                        return Error.Unimplemented;
-                    }
-
-                    break :opened maybe_symlink_handle;
-                },
-                status.FILE_OVERWRITTEN => unreachable,
-                else => |bad| {
-                    if (std.posix.unexpected_error_tracing) {
-                        std.debug.print(
-                            "Unexpected IoStatusBlock.Information=0x{x}\n",
-                            .{bad},
+            // Recreates some logic for `std.os.windows.OpenFile`
+            while (true) {
+                var opened_handle: std.fs.File.Handle = undefined;
+                var io: std.os.windows.IO_STATUS_BLOCK = undefined;
+                const status = std.os.windows.ntdll.NtCreateFile(
+                    &opened_handle,
+                    initial_flags.access_mask.bits,
+                    &attrs,
+                    &io,
+                    null,
+                    std.os.windows.FILE_ATTRIBUTE_NORMAL,
+                    initial_flags.share_access.bits,
+                    @intFromEnum(initial_flags.create_disposition),
+                    initial_flags.create_options.bits,
+                    null,
+                    0,
+                );
+                switch (status) {
+                    .SUCCESS => break :opened opened_handle,
+                    win.STATUS_REPARSE_POINT_ENCOUNTERED => {
+                        log.err(
+                            "TODO: windows accessSubPathPortable reparse point while opening {f}",
+                            .{path},
                         );
-                        std.debug.dumpCurrentStackTrace(@returnAddress());
-                    }
-
-                    return error.Unexpected;
-                },
+                        // Either use tail calls, or wrap the whole function in a big for loop (0..arbitrary_limit)
+                        // continue; // do this when reparse point components are parsed
+                        return Error.Unimplemented;
+                    },
+                    .OBJECT_NAME_INVALID => return error.BadPathName,
+                    .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
+                    .BAD_NETWORK_PATH, .BAD_NETWORK_NAME => return error.NetworkNotFound,
+                    else => return std.os.windows.unexpectedStatus(status),
+                }
+            }
+        } else opened: {
+            if (true) {
+                @compileError(std.fmt.comptimePrint(
+                    "target windows version was {[actual]t}, but accessSubPathPortable " ++
+                        "requires at least {[expected]t}.\nIf using zig build, pass " ++
+                        "-Dtarget={[cpu]t}-windows.{[expected]t}.\nIf you feel lucky, manually " ++
+                        "remove the version check.",
+                    .{
+                        .actual = builtin.os.version_range.windows.min,
+                        .expected = obj_dont_reparse_min_version,
+                        .cpu = builtin.cpu.arch,
+                    },
+                ));
             }
 
-            comptime unreachable;
+            // BEGIN UNFINISHED CODE //
+
+            // Initial open flags could specify file truncation, but that would either mean no
+            // symlink detection or truncating the symlink itself. Unfortunately, this means
+            // unconditionally checking for symlinks.
+
+            // Attempting to read the symlink path first followed by doing the real file open means
+            // a TOCTOU. A symlink could be created in between `DeviceIoControl` and final
+            // `NtCreateFile` call.
+            const create_disposition_dont_truncate = switch (initial_flags.create_disposition) {
+                .FILE_SUPERSEDE => unreachable, // currently not used
+                .FILE_CREATE, .FILE_OPEN, .FILE_OPEN_IF => |flag| flag,
+                .FILE_OVERWRITE => .FILE_OPEN,
+                .FILE_OVERWRITE_IF => .FILE_OPEN_IF,
+            };
+
+            var maybe_symlink_attrs = std.os.windows.OBJECT_ATTRIBUTES{
+                .Length = @sizeOf(std.os.windows.OBJECT_ATTRIBUTES),
+                .RootDirectory = final_dir.fd,
+                .ObjectName = &final_name_unicode,
+                .Attributes = 0,
+                .SecurityDescriptor = null,
+                .SecurityQualityOfService = null,
+            };
+
+            // `NtDuplicateObject` is equivalent of `ReOpenFile`, which could be useful here
+            while (true) {
+                // Logic copied from Zig's `std.os.windows.ReadLink`, except that this does not
+                // allow absolute paths.
+                var maybe_symlink_handle: std.fs.File.Handle = undefined;
+                var maybe_symlink_io: std.os.windows.IO_STATUS_BLOCK = undefined;
+                const maybe_symlink_status = std.os.windows.ntdll.NtCreateFile(
+                    &maybe_symlink_handle,
+                    // Needs to be replaced with `initial_flags.access_mask.bits`
+                    // This is enough to figure out symlink information
+                    WindowsOpenFlags.AccessMask.init(&.{ .FILE_READ_ATTRIBUTES, .SYNCHRONIZE }).bits,
+                    &maybe_symlink_attrs,
+                    &maybe_symlink_io,
+                    null,
+                    std.os.windows.FILE_ATTRIBUTE_NORMAL,
+                    // Needs to be replaced with `initial_flags.share_access.bits`
+                    WindowsOpenFlags.share_access_default.bits,
+                    // Needs to be replaced with `initial_flags.create_disposition`
+                    @intFromEnum(create_disposition_dont_truncate),
+                    // Needs to be replaced with `initial_flags.create_options`
+                    WindowsOpenFlags.CreateOptions.init(
+                        &.{ .FILE_SYNCHRONOUS_IO_NONALERT, .FILE_OPEN_REPARSE_POINT },
+                    ).bits,
+                    null,
+                    0,
+                );
+
+                switch (maybe_symlink_status) {
+                    .SUCCESS => {},
+                    .OBJECT_NAME_INVALID => unreachable,
+                    .OBJECT_NAME_NOT_FOUND,
+                    .OBJECT_PATH_NOT_FOUND,
+                    .NO_MEDIA_IN_DEVICE,
+                    => switch (initial_flags.create_disposition) {
+                        .FILE_SUPERSEDE => unreachable, // not used
+                        .FILE_OPEN, .FILE_OVERWRITE => return error.FileNotFound,
+                        else => unreachable,
+                    },
+                    .INVALID_PARAMETER => unreachable,
+                    .SHARING_VIOLATION, .ACCESS_DENIED => return error.AccessDenied,
+                    .PIPE_BUSY => return error.DeviceBusy,
+                    .PIPE_NOT_AVAILABLE => return error.NoDevice,
+                    .OBJECT_PATH_SYNTAX_BAD => unreachable,
+                    .OBJECT_NAME_COLLISION => switch (initial_flags.create_disposition) {
+                        .FILE_SUPERSEDE => unreachable, // not used
+                        .FILE_CREATE => return error.PathAlreadyExists,
+                        else => unreachable,
+                    },
+                    .FILE_IS_A_DIRECTORY => unreachable,
+                    .NOT_A_DIRECTORY => unreachable,
+                    .USER_MAPPED_FILE => return error.AccessDenied,
+                    .INVALID_HANDLE => unreachable,
+                    .DELETE_PENDING => {
+                        // See comment in `std.os.windows.OpenFile`
+                        std.Thread.sleep(std.time.ns_per_ms);
+                        continue;
+                    },
+                    else => return std.os.windows.unexpectedStatus(maybe_symlink_status),
+                }
+
+                errdefer std.os.windows.CloseHandle(maybe_symlink_handle);
+
+                // `ReOpenFile` in `kernel32` could be used here, it doesn't support truncation flags used
+                // in `path_open`, but manually handling truncation happens anyway to avoid TOCTOU.
+                switch (maybe_symlink_io.Information) {
+                    // assumed to be caught in error handling paths above
+                    create_file_status.FILE_EXISTS, create_file_status.FILE_DOES_NOT_EXIST => unreachable,
+                    create_file_status.FILE_SUPERSEDED => unreachable,
+                    create_file_status.FILE_OPENED => {
+                        // Check for symlink
+                        log.err("windows accessSubPath check for symlink for path {f}", .{path});
+                        return Error.Unimplemented; // Stub
+                    },
+                    create_file_status.FILE_CREATED => {
+                        // Change permissions of created file
+                        if (true) {
+                            log.err("windows accessSubPath ReOpenFile {f}", .{path});
+                            return Error.Unimplemented; // Stub
+                        }
+
+                        break :opened maybe_symlink_handle;
+                    },
+                    create_file_status.FILE_OVERWRITTEN => unreachable,
+                    else => |bad| {
+                        if (std.posix.unexpected_error_tracing) {
+                            std.debug.print(
+                                "Unexpected IoStatusBlock.Information=0x{x}\n",
+                                .{bad},
+                            );
+                            std.debug.dumpCurrentStackTrace(@returnAddress());
+                        }
+
+                        return error.Unexpected;
+                    },
+                }
+
+                comptime unreachable;
+            }
+
+            // END UNFINISHED CODE
         };
 
         return @call(.auto, doInPath, .{new_fd} ++ do_in_path_args_without_fd);
