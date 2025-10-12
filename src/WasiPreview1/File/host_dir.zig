@@ -830,6 +830,7 @@ fn accessSubPathPortable(
                         // continue; // do this when reparse point components are parsed
                         return Error.Unimplemented;
                     },
+                    .OBJECT_NAME_COLLISION => return error.PathAlreadyExists,
                     .OBJECT_NAME_INVALID => return error.BadPathName,
                     .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
                     .BAD_NETWORK_PATH, .BAD_NETWORK_NAME => return error.NetworkNotFound,
