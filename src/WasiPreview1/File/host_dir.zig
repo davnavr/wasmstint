@@ -745,13 +745,15 @@ fn accessSubPathPortable(
                 final_dir.fd,
                 current_process,
                 &new_fd,
-                initial_flags.access_mask.bits,
+                // TODO: Figure out access denied error or use ReOpenFile
+                undefined, // initial_flags.access_mask.bits
                 undefined,
-                win.DUPLICATE_SAME_ATTRIBUTES,
+                win.DUPLICATE_SAME_ATTRIBUTES | std.os.windows.DUPLICATE_SAME_ACCESS,
             );
 
             return switch (result) {
                 .SUCCESS => @call(.auto, doInPath, .{new_fd} ++ do_in_path_args_without_fd),
+                // .ACCESS_DENIED => error.AccessDenied,
                 // .NOT_ENOUGH_MEMORY => error.OutOfMemory,
                 else => std.os.windows.unexpectedStatus(result),
             };
