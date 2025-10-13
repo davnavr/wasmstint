@@ -109,49 +109,36 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
         var status_block: std.os.windows.IO_STATUS_BLOCK = undefined;
         var info: std.os.windows.FILE_ALL_INFORMATION = undefined;
 
-        const win = struct {
-            extern "kernel32" fn GetFileType(hFile: std.os.windows.HANDLE) std.os.windows.DWORD;
-        };
-
         // Equivalent in `kernel32` is `GetFileInformationByHandle`
         // Simplified version of implementation of `std.fs.File.stat`
-        const status = std.os.windows.ntdll.NtQueryInformationFile(
+        const status = host_os.windows.ntQueryInformationFile(
             self.file.handle,
             &status_block,
-            &info,
-            @sizeOf(@TypeOf(info)),
             // Need both `FILE_ACCESS_INFORMATION` and `FILE_STANDARD_INFORMATION`
             .FileAllInformation,
+            &info,
         );
         switch (status) {
             .SUCCESS, .BUFFER_OVERFLOW => {},
             .INVALID_PARAMETER => unreachable,
             .ACCESS_DENIED => return Error.AccessDenied,
             .INVALID_DEVICE_REQUEST => {
-                const FILE_TYPE = enum(std.os.windows.DWORD) {
-                    DISK = 0x0001,
-                    CHAR = 0x0002,
-                    PIPE = 0x0003,
-                    UNKNOWN = 0x0000,
-                    _,
-                };
-
                 // Not a file, check for a console handle (standard streams)
-                switch (@as(FILE_TYPE, @enumFromInt(win.GetFileType(self.file.handle)))) {
-                    .DISK => unreachable,
-                    .CHAR => return types.FdStat.File{
+                switch (host_os.windows.GetFileType(self.file.handle)) {
+                    .disk => unreachable,
+                    .char => return types.FdStat.File{
                         .type = types.FileType.character_device,
                         .flags = types.FdFlags{ .valid = .{} },
                     },
-                    .PIPE => {
+                    .pipe => {
                         // Unable to determine socket type (getsockopt with winsock?)
                         log.err("encountered windows pipe in fd_fdstat_get", .{});
                     },
-                    .UNKNOWN => switch (std.os.windows.GetLastError()) {
+                    .unknown => switch (std.os.windows.GetLastError()) {
                         .SUCCESS => {},
                         else => |bad| return std.os.windows.unexpectedError(bad),
                     },
-                    _ => |bad| {
+                    .remote, _ => |bad| {
                         log.err("unknown FILE_TYPE 0x{X} in fd_fdstat_get", .{@intFromEnum(bad)});
                     },
                 }
@@ -179,19 +166,7 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
             error.UnknownSocketType => .unknown, // TODO: Requires getsockopt
         };
 
-        const access: std.posix.O = @bitCast(@as(
-            @typeInfo(std.posix.O).@"struct".backing_integer.?,
-            @intCast(
-                std.posix.fcntl(
-                    self.file.handle,
-                    std.posix.F.GETFL,
-                    undefined,
-                ) catch |e| return switch (e) {
-                    error.Locked => error.WouldBlock,
-                    else => |err| err,
-                },
-            ),
-        ));
+        const access = try host_os.unix_like.fcntlGetFl(self.file.handle);
 
         return .{
             .type = @"type",
@@ -291,15 +266,10 @@ fn fd_pwrite(
         else => {
             const ciovs = iovsBytesLenBounded(File.Ciovec.castSlice(iovs), total_len);
 
-            // Duplicated code from `std.posix.pwritev` (MIT License).
-            const pwritev = if (builtin.os.tag == .linux and std.os.linux.wrapped.lfs64_abi)
-                std.c.pwritev64
-            else
-                std.posix.system.pwritev;
-
+            // Duplicated code from `std.posix.pwritev`.
             while (true) {
                 // Zig unfortunately conflates NXIO, SPIPE, and OVERFLOW into one error
-                const written = pwritev(
+                const written = host_os.unix_like.pwritev(
                     self.file.handle,
                     ciovs.ptr,
                     @min(ciovs.len, std.posix.IOV_MAX),
@@ -434,12 +404,11 @@ fn fd_tell(ctx: Ctx) Error!types.FileSize {
         // var offset: std.os.windows.LARGE_INTEGER = undefined;
         var io: std.os.windows.IO_STATUS_BLOCK = undefined;
         var info: std.os.windows.FILE_POSITION_INFORMATION = undefined;
-        const status = std.os.windows.ntdll.NtQueryInformationFile(
+        const status = host_os.windows.ntQueryInformationFile(
             self.file.handle,
             &io,
-            &info,
-            @sizeOf(@TypeOf(info)),
             .FilePositionInformation,
+            &info,
         );
         return switch (status) {
             .SUCCESS, .BUFFER_OVERFLOW => types.FileSize{
@@ -453,12 +422,7 @@ fn fd_tell(ctx: Ctx) Error!types.FileSize {
     } else if (@hasDecl(std.posix.system, "SEEK") and std.posix.SEEK != void) {
         // Duplicated code from `std.posix.lseek_CUR_get()`.
         // Could also add check for 32-bit linux to use `llseek` instead
-        const lseek = if (builtin.os.tag == .linux and std.os.linux.wrapped.lfs64_abi)
-            std.c.lseek64
-        else
-            std.posix.system.lseek;
-
-        const pos = lseek(self.file.handle, 0, std.posix.SEEK.CUR);
+        const pos = host_os.unix_like.lseek(self.file.handle, 0, std.posix.SEEK.CUR);
         return switch (std.posix.errno(pos)) {
             .SUCCESS => types.FileSize{ .bytes = @bitCast(pos) },
             .BADF => unreachable,
@@ -611,6 +575,7 @@ fn path_unlink_file(_: Ctx, _: []const u8) Error!void {
 const std = @import("std");
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
+const host_os = @import("../host_os.zig");
 const File = @import("../File.zig");
 const types = @import("../types.zig");
 const Path = @import("../Path.zig");

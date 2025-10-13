@@ -377,128 +377,15 @@ fn path_create_directory(ctx: Ctx, path: []const u8) Error!void {
 }
 
 const WindowsOpenFlags = struct {
-    access_mask: AccessMask,
+    access_mask: host_os.windows.AccessMask,
     comptime file_attributes: std.os.windows.ULONG = std.os.windows.FILE_ATTRIBUTE_NORMAL,
-    share_access: ShareAccess = share_access_default,
-    create_disposition: CreateDisposition,
-    create_options: CreateOptions,
+    share_access: host_os.windows.ShareAccess = share_access_default,
+    create_disposition: host_os.windows.CreateDisposition,
+    create_options: host_os.windows.CreateOptions,
 
-    const share_access_default = ShareAccess.init(
+    const share_access_default = host_os.windows.ShareAccess.init(
         &.{ .FILE_SHARE_READ, .FILE_SHARE_WRITE, .FILE_SHARE_DELETE },
     );
-
-    fn Mask(comptime ValidFlags: type) type {
-        return packed struct(u32) {
-            bits: std.os.windows.ULONG,
-
-            const Valid = ValidFlags;
-            const Self = @This();
-
-            const zero = Self{ .bits = 0 };
-
-            fn init(flags: []const Valid) Self {
-                var mask = Self.zero;
-                for (flags) |f| {
-                    switch (f) {
-                        inline else => |tag| mask.bits |= @field(std.os.windows, @tagName(tag)),
-                    }
-                }
-                return mask;
-            }
-
-            fn set(mask: Self, others: Self) Self {
-                return Self{ .bits = mask.bits | others.bits };
-            }
-
-            fn setFlag(mask: Self, flag: Valid) Self {
-                return mask.set(Self.init(&.{flag}));
-            }
-
-            fn setConditional(a: Self, condition: bool, b: Self) Self {
-                return if (condition) a.set(b) else a;
-            }
-
-            fn setFlagConditional(mask: Self, condition: bool, flag: Valid) Self {
-                return mask.setConditional(condition, Self.init(&.{flag}));
-            }
-
-            fn without(mask: Self, removed: Self) Self {
-                return Self{ .bits = mask.bits & (~removed.bits) };
-            }
-
-            fn contains(a: Self, b: Self) bool {
-                return a.bits | b.bits == a.bits;
-            }
-
-            fn containsFlag(mask: Self, flag: Valid) bool {
-                return mask.contains(Self.init(&.{flag}));
-            }
-        };
-    }
-
-    /// https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/access-mask
-    const AccessMask = Mask(enum {
-        DELETE,
-        FILE_READ_DATA,
-        FILE_READ_ATTRIBUTES,
-        FILE_WRITE_DATA,
-        FILE_WRITE_ATTRIBUTES,
-        FILE_APPEND_DATA,
-        FILE_GENERIC_READ,
-        FILE_GENERIC_WRITE,
-        FILE_LIST_DIRECTORY,
-        FILE_TRAVERSE,
-        STANDARD_RIGHTS_READ,
-        STANDARD_RIGHTS_WRITE,
-        SYNCHRONIZE,
-    });
-
-    const ShareAccess = Mask(enum {
-        FILE_SHARE_READ,
-        FILE_SHARE_WRITE,
-        FILE_SHARE_DELETE,
-    });
-
-    const CreateDisposition = @Type(std.builtin.Type{
-        .@"enum" = std.builtin.Type.Enum{
-            .tag_type = std.os.windows.ULONG,
-            .decls = &.{},
-            .is_exhaustive = true,
-            .fields = fields: {
-                const options = [_][:0]const u8{
-                    "FILE_SUPERSEDE",
-                    "FILE_CREATE",
-                    "FILE_OPEN",
-                    "FILE_OPEN_IF",
-                    "FILE_OVERWRITE",
-                    "FILE_OVERWRITE_IF",
-                };
-
-                var fields: [options.len]std.builtin.Type.EnumField = undefined;
-                for (options, &fields) |name, *dst| {
-                    dst.* = std.builtin.Type.EnumField{
-                        .name = name,
-                        .value = @field(std.os.windows, name),
-                    };
-                }
-
-                break :fields &fields;
-            },
-        },
-    });
-
-    const CreateOptions = Mask(enum {
-        FILE_DIRECTORY_FILE,
-        FILE_NON_DIRECTORY_FILE,
-        FILE_WRITE_THROUGH,
-        FILE_SEQUENTIAL_ONLY,
-        FILE_RANDOM_ACCESS,
-        FILE_NO_INTERMEDIATE_BUFFERING,
-        FILE_SYNCHRONOUS_IO_NONALERT,
-        FILE_OPEN_REPARSE_POINT,
-        /// Required for opening directories.
-        FILE_OPEN_FOR_BACKUP_INTENT,
-    });
 };
 
 const OsOpenFlags = if (builtin.os.tag == .windows)
@@ -714,25 +601,6 @@ fn accessSubPathPortable(
         const initial_flags: WindowsOpenFlags = initial_o_flags;
         std.debug.assert(!initial_flags.create_options.containsFlag(.FILE_OPEN_REPARSE_POINT));
 
-        const win = struct {
-            extern "ntdll" fn NtDuplicateObject(
-                SourceProcessHandle: std.os.windows.HANDLE,
-                SourceHandle: std.os.windows.HANDLE,
-                TargetProcessHandle: ?std.os.windows.HANDLE,
-                TargetHandle: ?*std.os.windows.HANDLE,
-                DesiredAccess: std.os.windows.ACCESS_MASK,
-                HandleAttributes: std.os.windows.ULONG,
-                Options: std.os.windows.ULONG,
-            ) callconv(.winapi) std.os.windows.NTSTATUS;
-
-            const DUPLICATE_SAME_ATTRIBUTES = 0x0000_0004;
-
-            const OBJ_DONT_REPARSE = 0x0000_1000;
-
-            const STATUS_REPARSE_POINT_ENCOUNTERED: std.os.windows.NTSTATUS =
-                @enumFromInt(0xC000_050B);
-        };
-
         errdefer log.err("failed to open final component in {f}", .{path});
 
         // `NtCreateFile` doesn't seem to support "." or ".\\" as a path to the `final_dir`
@@ -740,7 +608,7 @@ fn accessSubPathPortable(
             @branchHint(.unlikely);
             const current_process = std.os.windows.GetCurrentProcess();
             var new_fd: std.os.windows.HANDLE = undefined;
-            const result = win.NtDuplicateObject(
+            const result = host_os.windows.NtDuplicateObject(
                 current_process,
                 final_dir.fd,
                 current_process,
@@ -748,7 +616,7 @@ fn accessSubPathPortable(
                 // TODO: Figure out access denied error or use ReOpenFile
                 undefined, // initial_flags.access_mask.bits
                 undefined,
-                win.DUPLICATE_SAME_ATTRIBUTES | std.os.windows.DUPLICATE_SAME_ACCESS,
+                host_os.windows.DUPLICATE_SAME_ATTRIBUTES | std.os.windows.DUPLICATE_SAME_ACCESS,
             );
 
             return switch (result) {
@@ -767,12 +635,7 @@ fn accessSubPathPortable(
             error.OutOfMemory => |oom| return oom,
         };
 
-        var final_name_unicode = std.os.windows.UNICODE_STRING{
-            // Lengths are in bytes, excluding null-terminator
-            .Length = @intCast(final_name_w.len * 2),
-            .MaximumLength = @intCast(final_name_w.len * 2),
-            .Buffer = final_name_w.ptr,
-        };
+        var final_name_unicode = host_os.windows.initUnicodeString(final_name_w);
 
         // Documentation for `NtCreateFile` only lists `OBJ_CASE_INSENSITIVE` for `Attributes`
         //
@@ -785,21 +648,12 @@ fn accessSubPathPortable(
         const has_obj_dont_reparse =
             builtin.os.version_range.windows.isAtLeast(obj_dont_reparse_min_version);
 
-        const create_file_status = struct {
-            const FILE_SUPERSEDED = 0x0000_0000;
-            const FILE_OPENED = 0x0000_0001;
-            const FILE_CREATED = 0x0000_0002;
-            const FILE_OVERWRITTEN = 0x0000_0003;
-            const FILE_EXISTS = 0x0000_0004;
-            const FILE_DOES_NOT_EXIST = 0x0000_0005;
-        };
-
         const new_fd: std.fs.File.Handle = if (has_obj_dont_reparse == true) opened: {
             var attrs = std.os.windows.OBJECT_ATTRIBUTES{
                 .Length = @sizeOf(std.os.windows.OBJECT_ATTRIBUTES),
                 .RootDirectory = final_dir.fd,
                 .ObjectName = &final_name_unicode,
-                .Attributes = win.OBJ_DONT_REPARSE,
+                .Attributes = host_os.windows.OBJ_DONT_REPARSE,
                 .SecurityDescriptor = null,
                 .SecurityQualityOfService = null,
             };
@@ -808,22 +662,22 @@ fn accessSubPathPortable(
             while (true) {
                 var opened_handle: std.fs.File.Handle = undefined;
                 var io: std.os.windows.IO_STATUS_BLOCK = undefined;
-                const status = std.os.windows.ntdll.NtCreateFile(
+                const status = host_os.windows.NtCreateFile(
                     &opened_handle,
-                    initial_flags.access_mask.bits,
+                    initial_flags.access_mask,
                     &attrs,
                     &io,
                     null,
                     std.os.windows.FILE_ATTRIBUTE_NORMAL,
-                    initial_flags.share_access.bits,
-                    @intFromEnum(initial_flags.create_disposition),
-                    initial_flags.create_options.bits,
+                    initial_flags.share_access,
+                    initial_flags.create_disposition,
+                    initial_flags.create_options,
                     null,
                     0,
                 );
                 switch (status) {
                     .SUCCESS => break :opened opened_handle,
-                    win.STATUS_REPARSE_POINT_ENCOUNTERED => {
+                    host_os.windows.STATUS_REPARSE_POINT_ENCOUNTERED => {
                         log.err(
                             "TODO: windows accessSubPathPortable reparse point while opening {f}",
                             .{path},
@@ -940,6 +794,15 @@ fn accessSubPathPortable(
                 }
 
                 errdefer std.os.windows.CloseHandle(maybe_symlink_handle);
+
+                const create_file_status = struct {
+                    const FILE_SUPERSEDED = 0x0000_0000;
+                    const FILE_OPENED = 0x0000_0001;
+                    const FILE_CREATED = 0x0000_0002;
+                    const FILE_OVERWRITTEN = 0x0000_0003;
+                    const FILE_EXISTS = 0x0000_0004;
+                    const FILE_DOES_NOT_EXIST = 0x0000_0005;
+                };
 
                 // `ReOpenFile` in `kernel32` could be used here, it doesn't support truncation flags used
                 // in `path_open`, but manually handling truncation happens anyway to avoid TOCTOU.
@@ -1093,12 +956,12 @@ fn accessSubPath(
 fn pathFileStatGetFlags() SetOpenFlagsError!OsOpenFlags {
     if (builtin.os.tag == .windows) {
         return WindowsOpenFlags{
-            .access_mask = WindowsOpenFlags.AccessMask.init(&.{
+            .access_mask = host_os.windows.AccessMask.init(&.{
                 .STANDARD_RIGHTS_READ,
                 .FILE_READ_ATTRIBUTES,
             }),
             .create_disposition = .FILE_OPEN,
-            .create_options = WindowsOpenFlags.CreateOptions.zero,
+            .create_options = host_os.windows.CreateOptions.zero,
         };
     } else {
         var flags = std.posix.O{
@@ -1123,88 +986,8 @@ fn pathFileStatGet(
 ) Error!types.FileStat {
     defer std.posix.close(new_fd);
     _ = scratch;
-    // Some duplicate code with `host_file.fd_fdstat_get`
-    const stat: types.FileStat = if (builtin.os.tag == .windows) stat: {
-        // Kernel32 equivalent is `GetFileInformationByHandle`
-
-        // https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_stat_lx_information
-        // Want to use `FILE_STAT_LX_INFORMATION`, but it is pretty new
-        // - No `std.os.windows.FILE_STAT_LX_INFORMATION` in Zig standard library
-        // - Introduced as part of WSL
-        // - Available since Windows 10 update 1803
-        // TODO: Include check and fallback path for builtin version `.win10_rs4` (does invalid class mean INVALID_PARAMETER or INVALID_INFO_CLASS?)
-
-        const file_all_info = info: {
-            var io: std.os.windows.IO_STATUS_BLOCK = undefined;
-            var info: std.os.windows.FILE_ALL_INFORMATION = undefined;
-            const status = std.os.windows.ntdll.NtQueryInformationFile(
-                new_fd,
-                &io,
-                &info,
-                @sizeOf(@TypeOf(info)),
-                .FileAllInformation,
-            );
-            switch (status) {
-                .SUCCESS, .BUFFER_OVERFLOW => break :info info,
-                .INFO_LENGTH_MISMATCH => unreachable,
-                .ACCESS_DENIED => return error.AccessDenied,
-                else => return std.os.windows.unexpectedStatus(status),
-            }
-        };
-
-        // Can't use `FILE_FS_OBJECTID_INFORMATION`, since 16-byte GUID can't fit in 64-bit dev #
-        const fs_volume_info = info: {
-            var io: std.os.windows.IO_STATUS_BLOCK = undefined;
-            var info: std.os.windows.FILE_FS_VOLUME_INFORMATION = undefined;
-            const status = std.os.windows.ntdll.NtQueryVolumeInformationFile(
-                new_fd,
-                &io,
-                &info,
-                @sizeOf(@TypeOf(info)),
-                .FileFsVolumeInformation,
-            );
-            switch (status) {
-                .SUCCESS, .BUFFER_OVERFLOW => break :info info,
-                .INVALID_PARAMETER => unreachable,
-                .ACCESS_DENIED => return error.AccessDenied,
-                else => return std.os.windows.unexpectedStatus(status),
-            }
-        };
-
-        break :stat types.FileStat{
-            .dev = types.Device.init(device_hash_seed, fs_volume_info.VolumeSerialNumber),
-            .ino = types.INode.init(
-                inode_hash_seed,
-                @bitCast(file_all_info.InternalInformation.IndexNumber),
-            ),
-            .type = if (file_all_info.StandardInformation.Directory != 0)
-                .directory
-            else
-                .regular_file,
-            .nlink = file_all_info.StandardInformation.NumberOfLinks,
-            .size = types.FileSize{
-                .bytes = @bitCast(file_all_info.StandardInformation.AllocationSize),
-            },
-            // WASI doesn't seem to specify the meaning of the timestamps here.
-            // The Windows times are relative to system time, in 100-ns intervals.
-            .atim = types.Timestamp.fromWindowsSystemTimeRelative(
-                file_all_info.BasicInformation.LastAccessTime,
-            ),
-            .mtim = types.Timestamp.fromWindowsSystemTimeRelative(
-                file_all_info.BasicInformation.LastWriteTime,
-            ),
-            .ctim = types.Timestamp.fromWindowsSystemTimeRelative(
-                file_all_info.BasicInformation.ChangeTime,
-            ),
-        };
-    } else stat: {
-        // TODO: Use statx "." NOFOLLOW on Linux
-        const stat = try std.posix.fstat(new_fd);
-        break :stat types.FileStat.fromPosixStat(&stat, device_hash_seed, inode_hash_seed);
-    };
-
+    const stat: types.FileStat = try host_os.fileStat(new_fd, device_hash_seed, inode_hash_seed);
     log.debug("path_filestat_get {f} -> {f}", .{ path, stat });
-
     return stat;
 }
 
@@ -1267,13 +1050,13 @@ fn pathOpenFlags(
         }
 
         const init_flags = &.{ .STANDARD_RIGHTS_READ, .FILE_TRAVERSE };
-        const write_flags = WindowsOpenFlags.AccessMask.init(&.{
+        const write_flags = host_os.windows.AccessMask.init(&.{
             .STANDARD_RIGHTS_WRITE,
             if (fd_flags.append) .FILE_APPEND_DATA else .FILE_WRITE_DATA,
         });
 
         return WindowsOpenFlags{
-            .access_mask = WindowsOpenFlags.AccessMask.init(init_flags)
+            .access_mask = host_os.windows.AccessMask.init(init_flags)
                 .setConditional(rights.canWrite(), write_flags)
                 .setFlagConditional(rights.fd_read, .FILE_READ_DATA)
                 .setFlagConditional(rights.fd_sync, .SYNCHRONIZE)
@@ -1291,7 +1074,7 @@ fn pathOpenFlags(
                 .FILE_OVERWRITE
             else
                 .FILE_OPEN,
-            .create_options = WindowsOpenFlags.CreateOptions.init(&.{
+            .create_options = host_os.windows.CreateOptions.init(&.{
                 .FILE_SYNCHRONOUS_IO_NONALERT,
                 .FILE_OPEN_FOR_BACKUP_INTENT,
             }).setFlagConditional(open_flags.directory, .FILE_DIRECTORY_FILE),
@@ -1328,12 +1111,11 @@ fn pathOpen(
         if (!open_flags.directory) {
             var io: std.os.windows.IO_STATUS_BLOCK = undefined;
             var info: std.os.windows.FILE_BASIC_INFORMATION = undefined;
-            const status = std.os.windows.ntdll.NtQueryInformationFile(
+            const status = host_os.windows.ntQueryInformationFile(
                 new_fd,
                 &io,
-                &info,
-                @sizeOf(@TypeOf(info)),
                 .FileBasicInformation,
+                &info,
             );
 
             switch (status) {
@@ -1524,6 +1306,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
+const host_os = @import("../host_os.zig");
 const types = @import("../types.zig");
 const pointer = @import("wasmstint").pointer;
 const PreopenDir = @import("../PreopenDir.zig");
