@@ -181,18 +181,7 @@ fn fd_filestat_get(
     inode_hash_seed: types.INode.HashSeed,
 ) Error!types.FileStat {
     const self = ctx.get(HostFile);
-    if (builtin.os.tag == .windows) {
-        // dev field on windows could be `_BY_HANDLE_FILE_INFORMATION.dwVolumeSerialNumber`
-        // NT API equivalent is `FileObjectIdInformation/FILE_OBJECTID_INFORMATION`
-        log.err("fd_filestat_get on windows", .{});
-        return Error.Unimplemented;
-    } else if (@hasDecl(std.posix.system, "Stat") and std.posix.Stat != void) {
-        // TODO: Use `statx` on Linux
-        const stat = try std.posix.fstat(self.file.handle);
-        return types.FileStat.fromPosixStat(&stat, device_hash_seed, inode_hash_seed);
-    } else {
-        @compileError("fd_filestat_get on " ++ @tagName(builtin.os.tag));
-    }
+    return host_os.fileStat(self.file.handle, device_hash_seed, inode_hash_seed);
 }
 
 fn overflowsSignedSize(total_len: u32) bool {

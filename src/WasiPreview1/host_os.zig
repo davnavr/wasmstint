@@ -89,10 +89,11 @@ pub fn fileStat(
                 file_all_info.BasicInformation.ChangeTime,
             ),
         };
-    } else {
-        // TODO: Use statx "." NOFOLLOW on Linux
+    } else if (@hasDecl(std.posix.system, "Stat") and std.posix.Stat != void) {
         const stat = try std.posix.fstat(fd);
         return wasi_types.FileStat.fromPosixStat(&stat, device_hash_seed, inode_hash_seed);
+    } else {
+        @compileError("no fileStat implementation for " ++ @tagName(builtin.os.tag));
     }
 }
 

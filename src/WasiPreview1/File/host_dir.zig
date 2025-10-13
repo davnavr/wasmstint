@@ -986,6 +986,7 @@ fn pathFileStatGet(
 ) Error!types.FileStat {
     defer std.posix.close(new_fd);
     _ = scratch;
+    // TODO: Use statx "." NOFOLLOW on Linux
     const stat: types.FileStat = try host_os.fileStat(new_fd, device_hash_seed, inode_hash_seed);
     log.debug("path_filestat_get {f} -> {f}", .{ path, stat });
     return stat;
