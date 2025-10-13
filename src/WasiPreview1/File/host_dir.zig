@@ -1130,7 +1130,7 @@ fn pathFileStatGet(
         // - No `std.os.windows.FILE_STAT_LX_INFORMATION` in Zig standard library
         // - Introduced as part of WSL
         // - Available since Windows 10 update 1803
-        // TODO: Include check and fallback path for builtin version `.win10_rs4` (does invalid class mean INVALID_PARAMETER?)
+        // TODO: Include check and fallback path for builtin version `.win10_rs4` (does invalid class mean INVALID_PARAMETER or INVALID_INFO_CLASS?)
 
         const file_all_info = info: {
             var io: std.os.windows.IO_STATUS_BLOCK = undefined;

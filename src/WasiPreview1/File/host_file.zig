@@ -109,7 +109,11 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
         var status_block: std.os.windows.IO_STATUS_BLOCK = undefined;
         var info: std.os.windows.FILE_ALL_INFORMATION = undefined;
 
-        // Equivalent in `kernel32` is GetFileInformationByHandle
+        const win = struct {
+            extern "kernel32" fn GetFileType(hFile: std.os.windows.HANDLE) std.os.windows.DWORD;
+        };
+
+        // Equivalent in `kernel32` is `GetFileInformationByHandle`
         // Simplified version of implementation of `std.fs.File.stat`
         const status = std.os.windows.ntdll.NtQueryInformationFile(
             self.file.handle,
@@ -123,6 +127,37 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
             .SUCCESS, .BUFFER_OVERFLOW => {},
             .INVALID_PARAMETER => unreachable,
             .ACCESS_DENIED => return Error.AccessDenied,
+            .INVALID_DEVICE_REQUEST => {
+                const FILE_TYPE = enum(std.os.windows.DWORD) {
+                    DISK = 0x0001,
+                    CHAR = 0x0002,
+                    PIPE = 0x0003,
+                    UNKNOWN = 0x0000,
+                    _,
+                };
+
+                // Not a file, check for a console handle (standard streams)
+                switch (@as(FILE_TYPE, @enumFromInt(win.GetFileType(self.file.handle)))) {
+                    .DISK => unreachable,
+                    .CHAR => return types.FdStat.File{
+                        .type = types.FileType.character_device,
+                        .flags = types.FdFlags{ .valid = .{} },
+                    },
+                    .PIPE => {
+                        // Unable to determine socket type (getsockopt with winsock?)
+                        log.err("encountered windows pipe in fd_fdstat_get", .{});
+                    },
+                    .UNKNOWN => switch (std.os.windows.GetLastError()) {
+                        .SUCCESS => {},
+                        else => |bad| return std.os.windows.unexpectedError(bad),
+                    },
+                    _ => |bad| {
+                        log.err("unknown FILE_TYPE 0x{X} in fd_fdstat_get", .{@intFromEnum(bad)});
+                    },
+                }
+
+                return types.FdStat.File{ .type = .unknown, .flags = .{ .valid = .{} } };
+            },
             else => return std.os.windows.unexpectedStatus(status),
         }
 

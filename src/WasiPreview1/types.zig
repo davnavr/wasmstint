@@ -474,22 +474,22 @@ pub const FileType = enum(u8) {
 pub const FdFlags = packed struct(u16) {
     pub const Valid = packed struct(u5) {
         /// Append mode: Data written to the file is always appended to the file's end.
-        append: bool,
+        append: bool = false,
         /// Write according to synchronized I/O data integrity completion. Only the data stored in
         /// the file is synchronized.
         ///
         /// This feature is not available on all platforms and therefore `path_open` and other such
         /// functions which accept `FdFlags` may return `Errno.notsup` in the case that this flag
         /// is set.
-        dsync: bool,
+        dsync: bool = false,
         /// Non-blocking mode.
-        nonblock: bool,
+        nonblock: bool = false,
         /// Synchronized read I/O operations.
         ///
         /// This feature is not available on all platforms and therefore `path_open` and other such
         /// functions which accept `FdFlags` may return `Errno.notsup` in the case that this flag
         /// is set.
-        rsync: bool,
+        rsync: bool = false,
         /// Write according to synchronized I/O file integrity completion. In addition to
         /// synchronizing the data stored in the file, the implementation may also synchronously
         /// update the file's metadata.
@@ -499,7 +499,7 @@ pub const FdFlags = packed struct(u16) {
         /// is set.
         ///
         /// TODO: FILE_FLAG_WRITE_THROUGH on Windows? https://github.com/golang/go/issues/35358
-        sync: bool,
+        sync: bool = false,
 
         pub const format = flagsFormatter(Valid);
 
@@ -547,11 +547,7 @@ pub const FdFlags = packed struct(u16) {
         pub fn fromFlagsWindows(flags: std.os.windows.ACCESS_MASK) Valid {
             return Valid{
                 .append = flags & std.os.windows.FILE_APPEND_DATA != 0,
-                // Refer to comment on `sync` for possible equivalents on Windows
-                .dsync = false,
-                .nonblock = false,
-                .rsync = false,
-                .sync = false,
+                // Refer to comment on `sync` for possible equivalents of other flags on Windows
             };
         }
     };
