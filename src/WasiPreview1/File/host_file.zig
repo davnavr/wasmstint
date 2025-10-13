@@ -427,12 +427,31 @@ fn fd_tell(ctx: Ctx) Error!types.FileSize {
     //return self.file.getPos();
     //return std.posix.lseek_CUR_get(self.file.handle);
     //return std.os.windows.SetFilePointerEx_CURRENT_get(self.file.handle);
+
     if (builtin.os.tag == .windows) {
-        //std.os.windows.kernel32.SetFilePointerEx()
-        log.err("fd_tell on windows", .{});
-        return Error.Unimplemented;
+        // Similar code to `std.os.windows.kernel32.SetFilePointerEx_CURRENT_get()`
+
+        // var offset: std.os.windows.LARGE_INTEGER = undefined;
+        var io: std.os.windows.IO_STATUS_BLOCK = undefined;
+        var info: std.os.windows.FILE_POSITION_INFORMATION = undefined;
+        const status = std.os.windows.ntdll.NtQueryInformationFile(
+            self.file.handle,
+            &io,
+            &info,
+            @sizeOf(@TypeOf(info)),
+            .FilePositionInformation,
+        );
+        return switch (status) {
+            .SUCCESS, .BUFFER_OVERFLOW => types.FileSize{
+                .bytes = @as(u64, @bitCast(info.CurrentByteOffset)),
+            },
+            .INFO_LENGTH_MISMATCH => unreachable,
+            .ACCESS_DENIED => error.AccessDenied,
+            .INVALID_DEVICE_REQUEST => error.SeekPipe, // probably a console handle
+            else => std.os.windows.unexpectedStatus(status),
+        };
     } else if (@hasDecl(std.posix.system, "SEEK") and std.posix.SEEK != void) {
-        // Duplicated code from `std.posix.lseek_CUR_get`.
+        // Duplicated code from `std.posix.lseek_CUR_get()`.
         // Could also add check for 32-bit linux to use `llseek` instead
         const lseek = if (builtin.os.tag == .linux and std.os.linux.wrapped.lfs64_abi)
             std.c.lseek64

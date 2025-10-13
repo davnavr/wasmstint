@@ -360,7 +360,7 @@ const SpectestInterp = struct {
             module,
             exe.name,
             .{
-                .max_rss = .mib(117),
+                .max_rss = .mib(140),
                 // Prevent compile errors due to https://github.com/ziglang/zig/issues/24044
                 .use_llvm = proj_opts.use_llvm,
             },
@@ -503,7 +503,7 @@ const Wasip1Interp = struct {
             .exe,
             module,
             exe.name,
-            .{ .max_rss = .mib(146), .use_llvm = proj_opts.use_llvm },
+            .{ .max_rss = .mib(175), .use_llvm = proj_opts.use_llvm },
         );
 
         {
