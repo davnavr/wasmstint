@@ -219,44 +219,7 @@ pub fn main() u8 {
     defer stderr.deinit(page_allocator);
 
     const exit_code: u8 = exit: {
-        const ArgvFormatter = struct {
-            // Bash-style escape sequences, because those are more familiar
-            fn formatString(s: []const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-                try writer.writeByte('"');
-                for (s) |b| {
-                    switch (b) {
-                        0 => try writer.writeAll("\\0"),
-                        '\x07' => try writer.writeAll("\\b"),
-                        '\x0C' => try writer.writeAll("\\f"),
-                        '\n' => try writer.writeAll("\\n"),
-                        '\r' => try writer.writeAll("\\r"),
-                        '\t' => try writer.writeAll("\\t"),
-                        '\x0B' => try writer.writeAll("\\v"),
-                        '\"' => try writer.writeAll("\\\""),
-                        else => if (std.ascii.isPrint(b)) {
-                            try writer.writeByte(b);
-                        } else {
-                            try writer.print("\\x{X:0>2}", .{b});
-                        },
-                    }
-                }
-                try writer.writeByte('"');
-            }
-
-            pub fn format(
-                args: []const []const u8,
-                writer: *std.Io.Writer,
-            ) std.Io.Writer.Error!void {
-                for (0.., args) |i, a| {
-                    if (i > 0) {
-                        try writer.writeByte(' ');
-                    }
-
-                    try formatString(a, writer);
-                }
-            }
-        };
-        const fmt_argv = std.fmt.Alt([]const []const u8, ArgvFormatter.format){ .data = argv };
+        const fmt_argv = subprocess.fmtArgv(argv);
 
         interp.spawn() catch |e|
             return abnormalExitFmt(1, "{t}: failed to spawn command {f}", .{ e, fmt_argv });
@@ -283,22 +246,6 @@ pub fn main() u8 {
         const term = interp.wait() catch |e|
             return abnormalExitFmt(1, "{t}: failed to wait for process {f}", .{ e, fmt_argv });
 
-        const SignalFormatter = struct {
-            fn format(num: u32, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-                inline for (@typeInfo(std.posix.SIG).@"struct".decls) |decl| {
-                    const field = @field(std.posix.SIG, decl.name);
-                    if (@TypeOf(field) == comptime_int) {
-                        if (field == num) {
-                            try writer.writeAll(decl.name);
-                            return;
-                        }
-                    }
-                }
-
-                try writer.writeAll("unknown signal");
-            }
-        };
-
         switch (term) {
             .Exited => |code| break :exit code,
             .Unknown => |n| return if (builtin.os.tag == .windows)
@@ -319,7 +266,7 @@ pub fn main() u8 {
                 return abnormalExitFmt(
                     1,
                     "interpreter process exited with signal {d} ({f}): {f}",
-                    .{ num, std.fmt.Alt(u32, SignalFormatter.format){ .data = num }, fmt_argv },
+                    .{ num, subprocess.fmtSignalNumber(num), fmt_argv },
                 ),
             .Stopped => |num| if (builtin.os.tag == .windows)
                 unreachable
@@ -448,6 +395,7 @@ const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const page_allocator = std.heap.page_allocator;
 const cli_args = @import("cli_args");
+const subprocess = @import("subprocess");
 const FileContent = @import("FileContent");
 
 test {

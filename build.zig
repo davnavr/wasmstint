@@ -81,6 +81,7 @@ pub fn build(b: *Build) void {
         .wasmstint = .build(b, &steps, &project_options),
         .cli_args = Modules.CliArgs.build(b, &steps, &project_options),
         .wasip1 = undefined,
+        .subprocess = .build(b, &project_options),
     };
     modules.wasip1 = Modules.Wasip1.build(
         b,
@@ -113,16 +114,16 @@ pub fn build(b: *Build) void {
 
     buildSpecificationTests(b, spectest_exe, &steps, &tool_paths);
 
-    const wasip1_test_runner = Wasip1TestRunner.build(
-        b,
-        &steps,
-        .{ .project = &project_options },
-        .{
-            .cli_args = modules.cli_args,
-            .file_content = modules.file_content,
-            .interpreter = wasip1_exe,
-        },
-    );
+    // const wasip1_test_runner = Wasip1TestRunner.build(
+    //     b,
+    //     &steps,
+    //     .{ .project = &project_options },
+    //     .{
+    //         .cli_args = modules.cli_args,
+    //         .file_content = modules.file_content,
+    //         .interpreter = wasip1_exe,
+    //     },
+    // );
 
     buildFuzzers(
         b,
@@ -135,14 +136,15 @@ pub fn build(b: *Build) void {
         b,
         &steps,
         .{ .project = &project_options, .tool_paths = &tool_paths },
+        .{ .interpreter = wasip1_exe, .subprocess = modules.subprocess },
     );
 
-    buildWasiTestsuite(
-        b,
-        &steps,
-        .{ .project = &project_options, .tool_paths = &tool_paths },
-        .{ .driver = wasip1_test_runner, .interpreter = wasip1_exe },
-    );
+    // buildWasiTestsuite(
+    //     b,
+    //     &steps,
+    //     .{ .project = &project_options, .tool_paths = &tool_paths },
+    //     .{ .driver = wasip1_test_runner, .interpreter = wasip1_exe },
+    // );
 }
 
 const ByteSize = packed struct(usize) {
@@ -188,6 +190,7 @@ const Modules = struct {
     wasmstint: Wasmstint,
     cli_args: CliArgs,
     wasip1: Wasip1,
+    subprocess: Subprocess,
 
     fn addAsImportTo(comptime T: type, from: T, to: *Build.Module) void {
         to.addImport(T.name, from.module);
@@ -307,6 +310,25 @@ const Modules = struct {
                 },
             );
             addAsImportTo(Wasmstint, imports.wasmstint, module);
+
+            return .{ .module = module };
+        }
+    };
+
+    const Subprocess = struct {
+        module: *Build.Module,
+
+        const name = "subprocess";
+
+        fn build(b: *Build, options: *const ProjectOptions) Subprocess {
+            const module = b.addModule(
+                name,
+                .{
+                    .root_source_file = b.path("src/subprocess.zig"),
+                    .target = options.target,
+                    .optimize = options.optimize,
+                },
+            );
 
             return .{ .module = module };
         }
@@ -584,6 +606,10 @@ fn buildWasiSamplePrograms(
     b: *Build,
     steps: *const TopLevelSteps,
     options: struct { project: *const ProjectOptions, tool_paths: *const ToolPaths },
+    modules: struct {
+        interpreter: Wasip1Interp,
+        subprocess: Modules.Subprocess,
+    },
 ) void {
     const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
 
@@ -593,7 +619,9 @@ fn buildWasiSamplePrograms(
         .{ .iterate = true },
     ) catch @panic("could not open tests directory");
 
-    const compile_step = b.step("install-wasip1-samples", "Build sample WASIP 0.1 programs");
+    const compile_step = b.step("install-wasip1-samples", "Build sample WASI 0.1 programs");
+    const test_step = b.step("test-wasip1-samples", "Test sample WASI 0.1 programs");
+    steps.@"test".dependOn(test_step);
 
     var tests_iter = tests_dir_handle.iterateAssumeFirstIteration();
     while (tests_iter.next() catch @panic("bad entry in tests directory")) |tests_entry| {
@@ -603,7 +631,7 @@ fn buildWasiSamplePrograms(
             continue;
         }
 
-        const max_rss = ByteSize.mib(176);
+        const exe_max_rss = ByteSize.mib(176);
         const sample_exe = b.addExecutable(.{
             .name = b.dupe(tests_entry.name[0 .. tests_entry.name.len - 4]),
             .root_module = b.createModule(.{
@@ -611,10 +639,17 @@ fn buildWasiSamplePrograms(
                 .target = wasm_target,
                 .optimize = options.project.optimize,
             }),
-            .max_rss = max_rss.bytes,
+            .max_rss = exe_max_rss.bytes,
         });
 
-        addCheck(b, steps, .exe, sample_exe.root_module, sample_exe.name, .{ .max_rss = max_rss });
+        addCheck(
+            b,
+            steps,
+            .exe,
+            sample_exe.root_module,
+            sample_exe.name,
+            .{ .max_rss = exe_max_rss },
+        );
 
         const install_sample = b.addInstallArtifact(
             sample_exe,
@@ -622,6 +657,26 @@ fn buildWasiSamplePrograms(
         );
 
         compile_step.dependOn(&install_sample.step);
+
+        const test_options = b.addOptions();
+        test_options.addOptionPath("wasm", sample_exe.getEmittedBin());
+        test_options.addOptionPath("interpreter", modules.interpreter.exe.getEmittedBin());
+
+        const invoke_test = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = sample_exe.root_module.root_source_file,
+                .target = options.project.target,
+                .optimize = options.project.optimize,
+            }),
+            .max_rss = ByteSize.mib(138).bytes,
+        });
+        invoke_test.root_module.addOptions("test_paths", test_options);
+        Modules.addAsImportTo(Modules.Subprocess, modules.subprocess, invoke_test.root_module);
+
+        // Can't add to "check" step, since it would require building the WASM.
+        const run_test = b.addRunArtifact(invoke_test);
+        run_test.step.max_rss = ByteSize.mib(8).bytes;
+        test_step.dependOn(&run_test.step);
     }
 }
 

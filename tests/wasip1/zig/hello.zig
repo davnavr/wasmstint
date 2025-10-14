@@ -4,3 +4,17 @@ pub fn main() u8 {
 }
 
 const std = @import("std");
+
+test {
+    try subprocess.invokeWasiInterpreter(
+        test_paths.interpreter,
+        test_paths.wasm,
+        .{},
+        .{
+            .stdout = "Hello WASM!\n",
+        },
+    );
+}
+
+const subprocess = @import("subprocess");
+const test_paths = @import("test_paths");
