@@ -663,6 +663,7 @@ fn buildWasiSamplePrograms(
         test_options.addOptionPath("interpreter", modules.interpreter.exe.getEmittedBin());
 
         const invoke_test = b.addTest(.{
+            .name = sample_exe.name,
             .root_module = b.createModule(.{
                 .root_source_file = sample_exe.root_module.root_source_file,
                 .target = options.project.target,

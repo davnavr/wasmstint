@@ -12,3 +12,30 @@ pub fn main() !void {
 }
 
 const std = @import("std");
+
+test "no arguments" {
+    try subprocess.invokeWasiInterpreter(
+        test_paths.interpreter,
+        test_paths.wasm,
+        .{},
+        .{
+            .stderr = "How rude! You didn't tell me your name.\n",
+        },
+    );
+}
+
+test "one argument" {
+    try subprocess.invokeWasiInterpreter(
+        test_paths.interpreter,
+        test_paths.wasm,
+        .{
+            .args = &.{"The Tester"},
+        },
+        .{
+            .stderr = "Hello The Tester, I am greeting you!\n",
+        },
+    );
+}
+
+const subprocess = @import("subprocess");
+const test_paths = @import("test_paths");
