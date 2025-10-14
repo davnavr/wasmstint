@@ -11,7 +11,7 @@ test {
         test_paths.wasm,
         .{},
         .{
-            .stdout = "Hello WASM!\n",
+            .stderr = "Hello WASM!\n",
         },
     );
 }

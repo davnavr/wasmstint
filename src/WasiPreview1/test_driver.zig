@@ -282,12 +282,12 @@ pub fn main() u8 {
     var output_difference = false;
     if (std.mem.indexOfDiff(u8, stdout.items, spec.stdout)) |diff_index| {
         output_difference = true;
-        printDiff("stdout", spec.stdout, @alignCast(stdout.items), diff_index);
+        subprocess.printDiff("stdout", spec.stdout, @alignCast(stdout.items), diff_index);
     }
 
     if (std.mem.indexOfDiff(u8, stderr.items, spec.stderr)) |diff_index| {
         output_difference = true;
-        printDiff("stderr", spec.stderr, @alignCast(stderr.items), diff_index);
+        subprocess.printDiff("stderr", spec.stderr, @alignCast(stderr.items), diff_index);
     }
 
     if (exit_code != spec.exit_code) {
@@ -304,90 +304,6 @@ pub fn main() u8 {
 
     std.process.cleanExit();
     return 0;
-}
-
-fn isAsciiString(s: []const u8) bool {
-    for (s) |b| {
-        if (!std.ascii.isAscii(b)) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-fn printDiff(
-    name: []const u8,
-    expected: []const u8,
-    actual: []align(std.heap.page_size_min) const u8,
-    diff_index: usize,
-) void {
-    @branchHint(.unlikely);
-    var stderr_buf: [512]u8 align(16) = undefined;
-    const stderr = std.debug.lockStderrWriter(&stderr_buf);
-    defer stderr.flush() catch {};
-    const color = std.Io.tty.detectConfig(std.fs.File.stderr());
-
-    color.setColor(stderr, .bright_red) catch {};
-    stderr.writeAll("error: ") catch {};
-    color.setColor(stderr, .reset) catch {};
-    stderr.writeAll(name) catch {};
-    stderr.writeAll(" stream differs:\n") catch {};
-
-    if (isAsciiString(expected) and isAsciiString(actual)) {
-        const first_line_start = if (std.mem.lastIndexOfScalar(
-            u8,
-            expected[0..diff_index],
-            '\n',
-        )) |i| i + 1 else 0;
-
-        var remaining_expected = expected[first_line_start..];
-        var remaining_actual = actual[first_line_start..];
-        while (remaining_expected.len > 0 or remaining_actual.len > 0) {
-            if (remaining_expected.len > 0) {
-                printDiffLine(stderr, color, .bright_green, '+', &remaining_expected);
-            }
-
-            if (remaining_actual.len > 0) {
-                printDiffLine(stderr, color, .bright_red, '-', &remaining_actual);
-            }
-        }
-
-        color.setColor(stderr, .reset) catch {};
-    } else {
-        @branchHint(.unlikely);
-        @panic("TODO: print hex diff");
-    }
-}
-
-fn printDiffLine(
-    stderr: *std.Io.Writer,
-    config: std.Io.tty.Config,
-    color: std.Io.tty.Color,
-    prefix_char: u8,
-    remaining: *[]const u8,
-) void {
-    const newline_index = std.mem.indexOfScalar(u8, remaining.*, '\n');
-    const line = remaining.*[0..(newline_index orelse remaining.len)];
-    defer remaining.* = remaining.*[(if (newline_index) |i| i + 1 else remaining.len)..];
-    config.setColor(stderr, color) catch {};
-    stderr.writeAll(&.{ prefix_char, ' ' }) catch {};
-
-    for (line) |b| {
-        switch (@as(u7, @intCast(b))) {
-            '\n' => unreachable,
-            inline 0...std.ascii.control_code.ht,
-            std.ascii.control_code.vt...std.ascii.control_code.us,
-            => |ctrl| {
-                const codepoint = @as(u24, 0x2400) + ctrl;
-                stderr.writeAll(&std.unicode.utf8EncodeComptime(codepoint)) catch {};
-            },
-            '\x7F' => stderr.writeAll("\u{2421}") catch {},
-            else => stderr.writeByte(b) catch {},
-        }
-    }
-
-    stderr.writeByte('\n') catch {};
 }
 
 const std = @import("std");
