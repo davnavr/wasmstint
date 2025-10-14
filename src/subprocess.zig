@@ -354,6 +354,17 @@ fn setColorInfallible(writer: *Writer, config: HasColor, color: Color) error{Une
     };
 }
 
+const cp_437_non_ascii: [128]u14 = .{
+    0xC7,   0xFC,   0xE9,   0xE2,   0xE4,   0xE0,   0xE5,   0xE7,   0xEA,   0xEB,   0xE8,   0xEF,   0xEE,   0xEC,   0xC4,   0xC5,
+    0xC9,   0xE6,   0xC6,   0xF4,   0xF8,   0xF2,   0xFB,   0xF9,   0xFF,   0xD6,   0xDC,   0xA2,   0xA3,   0xA5,   0x20A7, 0x192,
+    0xE1,   0xED,   0xF3,   0xFA,   0xF1,   0xD1,   0xAA,   0xBA,   0xBF,   0x2310, 0xAC,   0xBD,   0xBC,   0xA1,   0xAB,   0xBB,
+    0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x2561, 0x2562, 0x2556, 0x2555, 0x2563, 0x2551, 0x2557, 0x255D, 0x255C, 0x255B, 0x2510,
+    0x2514, 0x2534, 0x252C, 0x251C, 0x2500, 0x253C, 0x255E, 0x255F, 0x255A, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256C, 0x2567,
+    0x2568, 0x2564, 0x2565, 0x2559, 0x2558, 0x2552, 0x2553, 0x256B, 0x256A, 0x2518, 0x250C, 0x2588, 0x2584, 0x258C, 0x2590, 0x2580,
+    0x3B1,  0xDF,   0x393,  0x3C0,  0x3A3,  0x3C3,  0xB5,   0x3C4,  0x3A6,  0x398,  0x3A9,  0x3B4,  0x221E, 0x3C6,  0x3B5,  0x2229,
+    0x2261, 0xB1,   0x2265, 0x2264, 0x2320, 0x2321, 0xF7,   0x2248, 0xB0,   0x2119, 0xB7,   0x221A, 0x207F, 0xB2,   0x25A0, 0x237D,
+};
+
 fn printDiffHexDumpLine(
     stderr: *Writer,
     config: HasColor,
@@ -374,17 +385,21 @@ fn printDiffHexDumpLine(
 
         hex.print(" {X:0>2}", .{line_byte}) catch unreachable;
 
+        var utf8_buf: [4]u8 align(4) = undefined;
         text.writeAll(switch (line_byte) {
-            inline 0...std.ascii.control_code.us => |ctrl| ctrl: {
-                const codepoint = @as(u24, 0x2400) + ctrl;
-                break :ctrl &std.unicode.utf8EncodeComptime(codepoint);
+            0...std.ascii.control_code.us => ctrl: {
+                const codepoint = @as(u21, 0x2400) + line_byte; // Use unicode control pictures
+                const len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch unreachable;
+                break :ctrl utf8_buf[0..len];
             },
-            ' ' => "\u{2423}",
-            '\x7F' => "\u{2421}",
-            else => if (line_byte <= '~')
-                &[1]u8{line_byte}
-            else
-                unreachable,
+            std.ascii.control_code.del => "\u{2421}",
+            ' '...'~' => &[1]u8{line_byte},
+            else => non_ascii: {
+                // Use Code Page 437, this isn't used for ASCII control since it looks nicer
+                const codepoint = cp_437_non_ascii[line_byte - 0x80];
+                const len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch unreachable;
+                break :non_ascii utf8_buf[0..len];
+            },
         }) catch unreachable;
 
         if (line_byte != other_byte) {
@@ -394,13 +409,12 @@ fn printDiffHexDumpLine(
     }
 
     const remainder_count = hex_dump_line_width - line.len;
-    hex.splatByteAll(' ', 3 * remainder_count) catch unreachable;
-    text.splatByteAll(' ', remainder_count) catch unreachable;
-
     try stderr.writeAll(hex.buffered());
+    try stderr.splatByteAll(' ', 3 * remainder_count);
     try stderr.writeAll(" |");
     try stderr.writeAll(text.buffered());
-    try stderr.writeAll(" |");
+    try stderr.splatBytesAll("\u{25E6}", remainder_count);
+    try stderr.writeAll("|");
 }
 
 const std = @import("std");
