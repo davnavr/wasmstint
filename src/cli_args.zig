@@ -339,6 +339,57 @@ pub const Flag = struct {
         );
     }
 
+    pub fn enumeration(
+        comptime E: type,
+        comptime info: Info,
+        comptime arg_name: [:0]const u8,
+    ) Flag {
+        const arg_help = ArgHelp{ .name = arg_name };
+        const valid_values = desc: {
+            var buf: []const u8 = "";
+            for (@typeInfo(E).@"enum".fields, 0..) |f, i| {
+                buf = buf ++ (if (i > 0) "," else "") ++ " " ++ f.name;
+            }
+            break :desc buf;
+        };
+
+        const Parser = struct {
+            fn parse(
+                args: *ArgIterator,
+                arena: *ArenaAllocator,
+                diagnostics: ?*Diagnostics,
+                state: ?E,
+            ) ParseError!?E {
+                if (state != null) {
+                    return info.reportDuplicate(diagnostics);
+                }
+
+                const str = args.next() orelse return info.reportMissing(diagnostics, arg_help);
+
+                return std.meta.stringToEnum(E, str) orelse Diagnostics.reportFmt(
+                    diagnostics,
+                    arena,
+                    "{s} is invalid, valid values are: " ++ valid_values,
+                    .{str},
+                );
+            }
+        };
+
+        return Flag.init(
+            Info{
+                .long = info.long,
+                .short = info.short,
+                .description = info.description ++ "[valid values:" ++ valid_values ++ "]",
+            },
+            arg_help,
+            ?E,
+            null,
+            ?E,
+            Parser.parse,
+            idFinish(?E),
+        );
+    }
+
     pub fn string(comptime info: Info, comptime arg_name: [:0]const u8) Flag {
         const arg_help = ArgHelp{ .name = arg_name };
         const Parser = struct {

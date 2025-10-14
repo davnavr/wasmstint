@@ -57,6 +57,12 @@ const Arguments = cli_args.CliArgs(.{
             "PATH",
         ),
 
+        cli_args.Flag.enumeration(
+            std.log.Level,
+            .{ .long = "log-level", .description = "Which log messages to include." },
+            "LEVEL",
+        ),
+
         env_flag,
 
         dir_flag,
@@ -396,6 +402,7 @@ fn parseArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) ParsedArgume
 }
 
 var log_file: ?std.fs.File = null;
+var log_level: ?std.log.Level = std_options.log_level;
 var log_counter: u64 = 0;
 
 fn logger(
@@ -404,6 +411,10 @@ fn logger(
     comptime format: []const u8,
     args: anytype,
 ) void {
+    if (log_level == null or @intFromEnum(level) > @intFromEnum(log_level.?)) {
+        return;
+    }
+
     var buffer: [1024]u8 align(16) = undefined;
     var log_file_writer: std.fs.File.Writer = undefined;
     var writer: *std.Io.Writer = if (log_file) |f| writer: {
@@ -428,6 +439,7 @@ fn logger(
 
 pub const std_options = std.Options{
     .logFn = logger,
+    .log_level = if (builtin.mode == .Debug) .debug else .warn,
 };
 
 pub fn main() void {
@@ -471,6 +483,7 @@ fn realMain() Error!i32 {
 
     const cwd = std.fs.cwd();
 
+    log_level = arguments.@"log-level";
     if (arguments.@"log-file") |path| {
         // https://github.com/ziglang/zig/issues/14375
         const flags = std.fs.File.CreateFlags{ .truncate = false };
