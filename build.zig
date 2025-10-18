@@ -669,7 +669,7 @@ fn buildWasiSamplePrograms(
                 .target = options.project.target,
                 .optimize = options.project.optimize,
             }),
-            .max_rss = ByteSize.mib(138).bytes,
+            .max_rss = ByteSize.mib(278).bytes,
         });
         invoke_test.root_module.addOptions("test_paths", test_options);
         Modules.addAsImportTo(Modules.Subprocess, modules.subprocess, invoke_test.root_module);

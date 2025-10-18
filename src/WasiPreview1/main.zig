@@ -520,7 +520,7 @@ fn realMain() Error!i32 {
         break :args forwarded.arguments();
     };
 
-    const wasm_binary = @import("FileContent").readFileZ(cwd, arguments.module) catch |e| switch (e) {
+    const wasm_binary = FileContent.readFileZ(cwd, arguments.module) catch |e| switch (e) {
         error.OutOfMemory => oom("module bytes"),
         else => |io_err| return fail.format(
             error.GenericError,
@@ -528,6 +528,7 @@ fn realMain() Error!i32 {
             .{ fmt_wasm_path, io_err },
         ),
     };
+    defer if (builtin.mode == .Debug) wasm_binary.deinit();
 
     const csprng = WasiPreview1.Csprng.os;
     const rt_rng_num: u128 = arguments.@"rt-rng-seed" orelse seed: {
@@ -542,7 +543,7 @@ fn realMain() Error!i32 {
     _ = scratch.reset(.retain_capacity);
     var parse_diagnostics = std.Io.Writer.Allocating.init(arena.allocator());
     const parsed_module = module: {
-        var wasm: []const u8 = wasm_binary.contents;
+        var wasm: []const u8 = wasm_binary.contents();
         break :module wasmstint.Module.parse(
             arena.allocator(),
             &wasm,
@@ -888,6 +889,7 @@ fn mainLoop(
 const std = @import("std");
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
+const FileContent = @import("FileContent");
 const wasmstint = @import("wasmstint");
 const cli_args = @import("cli_args");
 const WasiPreview1 = @import("WasiPreview1");

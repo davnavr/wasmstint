@@ -208,7 +208,7 @@ fn processModuleCommand(
     var parse_diagnostics = std.Io.Writer.Allocating.initCapacity(alloca.allocator(), 128) catch
         @panic("oom");
     const parsed_module = module: {
-        var wasm: []const u8 = module_binary.contents;
+        var wasm: []const u8 = module_binary.contents();
         break :module wasmstint.Module.parse(
             state.module_arena.allocator(),
             &wasm,
@@ -1112,7 +1112,7 @@ fn processAssertInvalid(
     };
 
     var scratch = std.heap.ArenaAllocator.init(arena.allocator());
-    var wasm: []const u8 = module_binary.contents;
+    var wasm: []const u8 = module_binary.contents();
     var parse_diagnostics = std.Io.Writer.Allocating.initCapacity(arena.allocator(), 128) catch
         @panic("oom");
     validation_failed: {
@@ -1191,7 +1191,7 @@ fn processAssertMalformed(
     };
 
     var scratch = std.heap.ArenaAllocator.init(arena.allocator());
-    var wasm: []const u8 = module_binary.contents;
+    var wasm: []const u8 = module_binary.contents();
     var parse_diagnostics = std.Io.Writer.Allocating.initCapacity(arena.allocator(), 128) catch
         @panic("oom");
     parse_failed: {
@@ -1274,7 +1274,7 @@ fn processAssertUninstantiable(
     };
 
     var scratch = std.heap.ArenaAllocator.init(arena.allocator());
-    var wasm: []const u8 = module_binary.contents;
+    var wasm: []const u8 = module_binary.contents();
     var parse_diagnostics = std.Io.Writer.Allocating.initCapacity(arena.allocator(), 128) catch
         @panic("oom");
     const module = wasmstint.Module.parse(
@@ -1371,7 +1371,7 @@ fn processAssertUnlinkable(
     };
 
     var scratch = std.heap.ArenaAllocator.init(arena.allocator());
-    var wasm: []const u8 = module_binary.contents;
+    var wasm: []const u8 = module_binary.contents();
     var parse_diagnostics = std.Io.Writer.Allocating.initCapacity(arena.allocator(), 128) catch
         @panic("oom");
     var module = wasmstint.Module.parse(

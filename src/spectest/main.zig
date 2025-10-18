@@ -88,6 +88,7 @@ pub fn main() u8 {
             return 1;
         },
     };
+    defer if (builtin.mode == .Debug) json_file.deinit();
 
     var json_dir = std.fs.cwd().openDir(
         std.fs.path.dirname(arguments.run).?,
@@ -117,7 +118,7 @@ pub fn main() u8 {
     var json_script: Parser = undefined;
     json_script.init(
         &arena,
-        std.unicode.Utf8View.init(json_file.contents) catch {
+        std.unicode.Utf8View.init(json_file.contents()) catch {
             stderr.writeErrorPreamble();
             stderr.print("Input file {f} is not valid UTF-8", .{fmt_json_path});
             return 1;
