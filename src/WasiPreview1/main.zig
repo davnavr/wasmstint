@@ -893,6 +893,7 @@ const FileContent = @import("FileContent");
 const wasmstint = @import("wasmstint");
 const cli_args = @import("cli_args");
 const WasiPreview1 = @import("WasiPreview1");
+const coz = @import("coz");
 
 test {
     _ = main;

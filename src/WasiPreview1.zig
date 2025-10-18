@@ -1649,6 +1649,9 @@ pub fn dispatch(
     memory: *MemInst,
     fuel: *Interpreter.Fuel,
 ) DispatchResult {
+    var coz_begin = coz.begin("wasmstint.WasiPreview1.dispatch");
+    defer coz_begin.end();
+
     const callee = state.currentHostFunction().?;
 
     // TODO: Parameter to indicate if it safe to assume a WASI function is being called?
@@ -1729,6 +1732,7 @@ const Interpreter = wasmstint.Interpreter;
 const MemInst = wasmstint.runtime.MemInst;
 const Module = wasmstint.Module;
 const pointer = wasmstint.pointer;
+const coz = @import("coz");
 
 test {
     _ = WasiPreview1;

@@ -516,6 +516,9 @@ pub const Command = struct {
 };
 
 pub fn next(parser: *Parser, arena: *ArenaAllocator, scratch: *ArenaAllocator) Error!?Command {
+    var coz_begin = coz.begin("wasmstint.spectest.Parser.next");
+    defer coz_begin.end();
+
     switch (parser.state) {
         .more => {},
         .finished => return null,
@@ -567,3 +570,4 @@ const Oom = std.mem.Allocator.Error;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const json = std.json;
 const Name = @import("wasmstint").Module.Name;
+const coz = @import("coz");

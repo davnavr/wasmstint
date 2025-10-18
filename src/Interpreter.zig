@@ -707,6 +707,7 @@ const Stack = struct {
         comptime params: ParameterAllocation,
         callee: runtime.FuncAddr,
     ) Allocator.Error!ReserveStackFrame {
+        defer coz.progressNamed("wasmstint.Interpreter.reserveStackFrame");
         const frame_size = (stackFrameSize(callee, params) catch unreachable).allocated_size;
         const new_len = std.math.add(u32, stack.len, frame_size) catch
             return error.OutOfMemory;
@@ -1396,6 +1397,9 @@ pub const State = union(enum) {
             arguments: []const TaggedValue,
             fuel: *Fuel,
         ) (error{ ValueTypeOrCountMismatch, ValidationNeeded, OutOfMemory })!State {
+            var coz_begin = coz.begin("wasmstint.Interpreter.AwaitingHost.beginCall");
+            defer coz_begin.end();
+
             const interp: *Interpreter = self.interpreter.get();
 
             const saved_stack_len = interp.stack.len;
@@ -1462,6 +1466,9 @@ pub const State = union(enum) {
             module: *runtime.ModuleAlloc,
             fuel: *Fuel,
         ) Stack.PushStackFrameError!State {
+            var coz_begin = coz.begin("wasmstint.Interpreter.AwaitingHost.instantiateModule");
+            defer coz_begin.end();
+
             std.debug.assert(!module.instantiated);
             const interp: *Interpreter = self.interpreter.get();
 
@@ -1487,6 +1494,9 @@ pub const State = union(enum) {
             interp.version.increment();
 
             {
+                var coz_setup = coz.begin("wasmstint.Interpreter.moduleInstantiationSetup");
+                defer coz_setup.end();
+
                 var instantiation_error: ModuleInstantiationSetupError = undefined;
                 moduleInstantiationSetup(module, &instantiation_error) catch return State{
                     .trapped = Trapped.init(
@@ -1539,6 +1549,9 @@ pub const State = union(enum) {
             results: []const TaggedValue,
             fuel: *Fuel,
         ) error{ValueTypeOrCountMismatch}!State {
+            var coz_begin = coz.begin("wasmstint.Interpreter.AwaitingHost.returnFromHost");
+            defer coz_begin.end();
+
             const interp: *Interpreter = self.interpreter.get();
             const popped_addr: *align(@sizeOf(Value)) StackFrame = interp.currentFrame().?;
             const popped = popped_addr.*;
@@ -1762,6 +1775,11 @@ pub const State = union(enum) {
             alloca: Allocator,
             fuel: *Fuel,
         ) error{OutOfMemory}!State {
+            var coz_begin = coz.begin(
+                "wasmstint.Interpreter.CallStackExhaustion.resumeExecution",
+            );
+            defer coz_begin.end();
+
             const interp: *Interpreter = self.interpreter.get();
             self.restorable_sp.restore(interp);
 
@@ -1789,6 +1807,9 @@ pub const State = union(enum) {
 
         /// Resumes execution of WASM bytecode after being `interrupted`.
         pub fn resumeExecution(self: Interrupted, fuel: *Fuel) State {
+            var coz_begin = coz.begin("wasmstint.Interpreter.Interrupted.resumeExecution");
+            defer coz_begin.end();
+
             const interp: *Interpreter = self.interpreter.get();
             interp.version.increment();
             return interp.enterMainLoop(fuel);
@@ -2488,6 +2509,7 @@ const Instr = struct {
     }
 
     inline fn readIdxRaw(i: *Instr) u32 {
+        defer coz.progressNamed("wasmstint.Interpreter.Instr.readIdxRaw");
         const first_byte = i.readByte();
         if (first_byte & 0x80 == 0) {
             return first_byte;
@@ -2600,6 +2622,7 @@ const Instr = struct {
             }
         }
 
+        defer coz.progressNamed("wasmstint.Interpreter.Instr.readNextOpcodeHandler");
         if (fuel.remaining == 0) {
             @branchHint(.unlikely);
             return opcode_handlers.outOfFuelHandler;
@@ -2629,6 +2652,7 @@ const Instr = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
+        defer coz.progressNamed("wasmstint.Interpreter.Instr.dispatchNextOpcode");
         if (builtin.mode == .Debug) {
             const current_frame: *align(@sizeOf(Value)) const StackFrame = interp.currentFrame().?;
             const max_val_stack = current_frame.function.expanded().wasm.code().inner.max_values;
@@ -2907,6 +2931,9 @@ inline fn invokeWithinWasm(
     call_ip: Ip,
     callee: runtime.FuncAddr,
 ) StateTransition {
+    var coz_begin = coz.begin("wasmstint.Interpreter.invokeWithinWasm");
+    defer coz_begin.end();
+
     const signature = callee.signature();
 
     // Overlap trick to avoid copying arguments.
@@ -3089,6 +3116,9 @@ fn linearMemoryAccessor(
             state: *State,
             module: runtime.ModuleInst,
         ) StateTransition {
+            var coz_begin = coz.begin("wasmstint.Interpreter.accessLinearMemory");
+            defer coz_begin.end();
+
             var i = Instr.init(ip, eip);
             var vals = ValStack.init(sp, interp);
             const side_table = SideTable.init(stp);
@@ -3767,6 +3797,7 @@ fn floatOpcodeHandlers(comptime F: type) type {
                 // TODO: Consistent rounding behavior for `floor`
                 // On `x86_64-linux`, uses `vroundss $0x11`
                 // On `x86_64-windows`, uses `vroundss $0x9`
+                // Correct rounding on windows on higher versions (e.g. x86-64-v2)
                 return @floor(z);
             }
 
@@ -4239,6 +4270,7 @@ const opcode_handlers = struct {
         state: *State,
         module: runtime.ModuleInst,
     ) StateTransition {
+        defer coz.progessNamed("wasmstint.Interpreter.end");
         const end_ptr: Eip = @ptrCast(ip - 1);
         _ = end_ptr.*;
         return if (@intFromPtr(end_ptr) == @intFromPtr(eip))
@@ -5611,6 +5643,7 @@ const Allocator = std.mem.Allocator;
 const Module = @import("Module.zig");
 const runtime = @import("runtime.zig");
 const opcodes = @import("opcodes.zig");
+const coz = @import("coz");
 
 test {
     _ = Instr;

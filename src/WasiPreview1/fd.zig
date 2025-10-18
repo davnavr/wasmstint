@@ -83,6 +83,8 @@ const FdTable = struct {
                 .n = table.rng.random().intRangeAtMost(u31, 4, std.math.maxInt(u31)),
             };
 
+            coz.progressNamed("wasmstint.WasiPreview1.FdTable.create");
+
             const entry = table.entries.getOrPutAssumeCapacity(chosen);
             if (entry.found_existing) {
                 // More likely to hit underlying OS open FD limit before branch hint is wrong
@@ -102,6 +104,7 @@ const FdTable = struct {
 
     /// Don't forget to call `unlockTable()` when this function returns **successfully**!
     pub fn get(table: *FdTable, fd: Fd) Fd.Error!*File {
+        defer coz.progressNamed("wasmstint.WasiPreview1.FdTable.get");
         const file = table.entries.getPtr(fd) orelse return error.BadFd;
         table.entries.lockPointers();
         return file;
@@ -183,3 +186,4 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const File = @import("File.zig");
 const PreopenDir = @import("PreopenDir.zig");
+const coz = @import("coz");

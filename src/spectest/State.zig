@@ -87,6 +87,9 @@ pub fn processCommand(
     output: Output,
     scratch: *ArenaAllocator,
 ) Error!void {
+    var coz_begin = coz.begin("wasmstint.spectest.State.processCommand");
+    defer coz_begin.end();
+
     switch (command.type) {
         .module => try state.processModuleCommand(command, output, scratch),
         .action => |*act| {
@@ -1456,3 +1459,4 @@ const Interpreter = wasmstint.Interpreter;
 const Name = wasmstint.Module.Name;
 const Parser = @import("Parser.zig");
 const Imports = @import("Imports.zig");
+const coz = @import("coz");

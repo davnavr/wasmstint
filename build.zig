@@ -8,9 +8,26 @@ const ProjectOptions = struct {
     optimize_interpreter: std.builtin.OptimizeMode,
     // TODO(zig): https://github.com/ziglang/zig/issues/24044
     comptime use_llvm: bool = true,
+    /// Should never be `false`, that would imply `libc` is *prohibited*.
+    link_libc: ?bool,
+    /// Implies `link_libc`.
+    enable_coz: bool,
 
     fn init(b: *Build) ProjectOptions {
         const optimize = b.standardOptimizeOption(.{});
+
+        const enable_coz = b.option(
+            bool,
+            "coz",
+            "Enable coz profiling counters. Implies -Dlink-libc",
+        ) orelse false;
+
+        const link_libc = b.option(
+            bool,
+            "link-libc",
+            "Require linking to the C standard library",
+        ) orelse false;
+
         return .{
             .target = b.standardTargetOptions(.{}),
             .optimize = optimize,
@@ -19,6 +36,8 @@ const ProjectOptions = struct {
                 "optimize-interpreter",
                 "Override optimization level for interpreter",
             ) orelse optimize,
+            .link_libc = if (enable_coz or link_libc) true else null,
+            .enable_coz = enable_coz,
         };
     }
 };
@@ -77,16 +96,18 @@ pub fn build(b: *Build) void {
     steps.@"test".dependOn(steps.@"test-unit");
 
     var modules = Modules{
+        .coz = .build(b, &project_options),
         .file_content = .build(b, &project_options),
-        .wasmstint = .build(b, &steps, &project_options),
+        .wasmstint = undefined,
         .cli_args = Modules.CliArgs.build(b, &steps, &project_options),
         .wasip1 = undefined,
         .subprocess = .build(b, &project_options),
     };
+    modules.wasmstint = .build(b, &steps, &project_options, .{ .coz = modules.coz });
     modules.wasip1 = Modules.Wasip1.build(
         b,
         &project_options,
-        .{ .wasmstint = modules.wasmstint },
+        .{ .wasmstint = modules.wasmstint, .coz = modules.coz },
     );
 
     const spectest_exe = SpectestInterp.build(
@@ -97,6 +118,7 @@ pub fn build(b: *Build) void {
             .wasmstint = modules.wasmstint,
             .file_content = modules.file_content,
             .cli_args = modules.cli_args,
+            .coz = modules.coz,
         },
     );
 
@@ -109,6 +131,7 @@ pub fn build(b: *Build) void {
             .file_content = modules.file_content,
             .cli_args = modules.cli_args,
             .wasip1 = modules.wasip1,
+            .coz = modules.coz,
         },
     );
 
@@ -191,6 +214,7 @@ const Modules = struct {
     cli_args: CliArgs,
     wasip1: Wasip1,
     subprocess: Subprocess,
+    coz: Coz,
 
     fn addAsImportTo(comptime T: type, from: T, to: *Build.Module) void {
         to.addImport(T.name, from.module);
@@ -221,6 +245,7 @@ const Modules = struct {
             b: *Build,
             steps: *const TopLevelSteps,
             options: *const ProjectOptions,
+            imports: struct { coz: Coz },
         ) Wasmstint {
             const module = b.addModule(
                 name,
@@ -228,8 +253,10 @@ const Modules = struct {
                     .root_source_file = b.path("src/root.zig"),
                     .target = options.target,
                     .optimize = options.optimize_interpreter,
+                    .link_libc = options.link_libc,
                 },
             );
+            addAsImportTo(Coz, imports.coz, module);
 
             // TODO(zig): https://github.com/ziglang/zig/issues/23423
             const use_llvm = true;
@@ -299,7 +326,7 @@ const Modules = struct {
         fn build(
             b: *Build,
             options: *const ProjectOptions,
-            imports: struct { wasmstint: Wasmstint },
+            imports: struct { wasmstint: Wasmstint, coz: Coz },
         ) Wasip1 {
             const module = b.addModule(
                 name,
@@ -307,9 +334,11 @@ const Modules = struct {
                     .root_source_file = b.path("src/WasiPreview1.zig"),
                     .target = options.target,
                     .optimize = options.optimize,
+                    .link_libc = options.link_libc,
                 },
             );
             addAsImportTo(Wasmstint, imports.wasmstint, module);
+            addAsImportTo(Coz, imports.coz, module);
 
             return .{ .module = module };
         }
@@ -321,14 +350,32 @@ const Modules = struct {
         const name = "subprocess";
 
         fn build(b: *Build, options: *const ProjectOptions) Subprocess {
-            const module = b.addModule(
-                name,
-                .{
-                    .root_source_file = b.path("src/subprocess.zig"),
-                    .target = options.target,
-                    .optimize = options.optimize,
-                },
-            );
+            const module = b.createModule(.{
+                .root_source_file = b.path("src/subprocess.zig"),
+                .target = options.target,
+                .optimize = options.optimize,
+            });
+
+            return .{ .module = module };
+        }
+    };
+
+    const Coz = struct {
+        module: *Build.Module,
+
+        const name = "coz";
+
+        fn build(b: *Build, options: *const ProjectOptions) Coz {
+            const module = b.createModule(.{
+                .root_source_file = b.path("src/coz.zig"),
+                .target = options.target,
+                .optimize = options.optimize,
+                .link_libc = options.link_libc,
+            });
+
+            const coz_options = b.addOptions();
+            coz_options.addOption(bool, "enabled", options.enable_coz);
+            module.addOptions("options", coz_options);
 
             return .{ .module = module };
         }
@@ -346,6 +393,7 @@ const SpectestInterp = struct {
             file_content: Modules.FileContent,
             wasmstint: Modules.Wasmstint,
             cli_args: Modules.CliArgs,
+            coz: Modules.Coz,
         },
     ) SpectestInterp {
         const module = b.createModule(.{
@@ -356,6 +404,7 @@ const SpectestInterp = struct {
         Modules.addAsImportTo(Modules.FileContent, imports.file_content, module);
         Modules.addAsImportTo(Modules.Wasmstint, imports.wasmstint, module);
         Modules.addAsImportTo(Modules.CliArgs, imports.cli_args, module);
+        Modules.addAsImportTo(Modules.Coz, imports.coz, module);
 
         const exe = b.addExecutable(.{
             .name = "wasmstint-spectest",
@@ -500,6 +549,7 @@ const Wasip1Interp = struct {
             wasmstint: Modules.Wasmstint,
             cli_args: Modules.CliArgs,
             wasip1: Modules.Wasip1,
+            coz: Modules.Coz,
         },
     ) Wasip1Interp {
         const module = b.createModule(.{
@@ -511,6 +561,7 @@ const Wasip1Interp = struct {
         Modules.addAsImportTo(Modules.Wasmstint, imports.wasmstint, module);
         Modules.addAsImportTo(Modules.CliArgs, imports.cli_args, module);
         Modules.addAsImportTo(Modules.Wasip1, imports.wasip1, module);
+        Modules.addAsImportTo(Modules.Coz, imports.coz, module);
 
         const exe = b.addExecutable(.{
             .name = "wasmstint-wasip1",

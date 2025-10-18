@@ -498,6 +498,7 @@ fn accessSubPathPortable(
                 return Error.PathTooLong; // too many components
             }
 
+            coz.progressNamed("wasmstint.WasiPreview1.host_dir.accessSubPath-component");
             try component_buf.append(scratch.allocator(), comp);
         }
 
@@ -527,6 +528,9 @@ fn accessSubPathPortable(
     var final_dir = dir;
     if (initial_components.len > 1) {
         for (0.., initial_components[0 .. initial_components.len - 1]) |i, comp| {
+            var coz_open_comp_dir = coz.begin("wasmstint.WasiPreview1.host_dir.accessSubPath-openDir");
+            defer coz_open_comp_dir.end();
+
             var old_dir = final_dir;
             defer if (i > 0 and i < initial_components.len - 1) {
                 // log.debug("closing intermediate directory {any}", .{old_dir.fd});
@@ -872,6 +876,7 @@ fn accessSubPathPortable(
             else => |err| err,
         };
 
+        coz.progressNamed("wasmstint.WasiPreview1.accessSubPath-openat");
         return @call(.auto, doInPath, .{new_fd} ++ do_in_path_args_without_fd);
     }
 }
@@ -902,6 +907,9 @@ fn accessSubPath(
     /// This function is responsible for closing the opened file descriptor/handle.
     comptime doInPath: anytype,
 ) Error!AccessSubPathReturnType(@TypeOf(doInPath)) {
+    var coz_begin = coz.begin("wasmstint.WasiPreview1.host_dir.accessSubPath");
+    defer coz_begin.end();
+
     // TODO: On Linux, fallback to portable implementation on E_NOSYS (check compile time OS version)
     fallback: switch (builtin.os.tag) {
         .linux => {
@@ -1316,3 +1324,4 @@ const File = @import("../File.zig");
 const Error = File.Error;
 const Ctx = File.Ctx;
 const host_file = @import("host_file.zig");
+const coz = @import("coz");

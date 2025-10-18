@@ -18,6 +18,9 @@ pub fn begin(
     gpa: Allocator,
     import_failure: ?*ImportProvider.FailedRequest,
 ) BeginError!ModuleAllocating {
+    var coz_begin = coz.begin("wasmstint.runtime.ModuleAllocating.begin");
+    defer coz_begin.end();
+
     var arena = std.heap.FixedBufferAllocator.init(
         try gpa.alignedAlloc(
             u8,
@@ -286,3 +289,4 @@ const value = @import("value.zig");
 const MemInst = @import("memory.zig").MemInst;
 const TableInst = @import("table.zig").TableInst;
 const TableStride = @import("table.zig").TableStride;
+const coz = @import("coz");

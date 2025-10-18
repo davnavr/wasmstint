@@ -1163,6 +1163,9 @@ pub fn parse(
     alloca: *ArenaAllocator,
     options: ParseOptions,
 ) ParseError!Module {
+    var coz_transaction = coz.begin("wasmstint.Module.parse");
+    defer coz_transaction.end();
+
     _ = alloca.reset(.retain_capacity);
     const diag = options.diagnostics;
     const original_wasm = wasm.*;
@@ -2362,6 +2365,7 @@ const reservation_allocator = @import("reservation_allocator.zig");
 const Reader = @import("Module/Reader.zig");
 const opcodes = @import("opcodes.zig");
 const validator = @import("Module/validator.zig");
+const coz = @import("coz");
 
 test {
     _ = Reader;

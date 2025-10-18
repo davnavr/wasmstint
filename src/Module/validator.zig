@@ -129,6 +129,9 @@ pub const Code = extern struct {
             };
         }
 
+        var coz_transaction = coz.begin("wasmstint.validator");
+        defer coz_transaction.end();
+
         const code_addr = @intFromPtr(code);
         const code_sec_ptr = module.inner.raw.code;
         std.debug.assert(@intFromPtr(code_sec_ptr) <= code_addr);
@@ -896,6 +899,9 @@ const SideTableBuilder = struct {
         target_side_table_idx: u32,
         end_offset: u32,
     ) Module.LimitError!void {
+        var coz_begin = coz.begin("wasmstint.validator.resolveFixupEntry");
+        defer coz_begin.end();
+
         const entry: *Entry = table.entries.at(fixup_entry.entry_idx);
         const origin = entry.delta_ip.fixup_origin;
 
@@ -957,6 +963,9 @@ const SideTableBuilder = struct {
 
         var remaining = popped.fixups;
         while (remaining.header.len > 0) {
+            var coz_fixup = coz.begin("wasmstint.validator.popAndResolveFixups");
+            defer coz_fixup.end();
+
             for (remaining.entries()) |*fixup_entry| {
                 try table.resolveFixupEntry(
                     fixup_entry,
@@ -1065,6 +1074,9 @@ pub fn rawValidate(
 
     var val_stack: ValStack = undefined;
     const locals: struct { types: []const ValType, count: u16 } = locals: {
+        var coz_all_locals = coz.begin("wasmstint.validator.locals");
+        defer coz_all_locals.end();
+
         const local_group_count = try reader.readUleb128(u32, diag, "locals count");
 
         const LocalGroup = struct { type: ValType, count: u32 };
@@ -1140,6 +1152,9 @@ pub fn rawValidate(
 
     var instr_offset: u32 = 0;
     while (ctrl_stack.len > 0) {
+        var coz_instr = coz.begin("wasmstint.validator.instruction");
+        defer coz_instr.end();
+
         _ = per_instr_arena.reset(.retain_capacity);
 
         // Offset from the first byte of the first instruction to the first
@@ -1292,6 +1307,9 @@ pub fn rawValidate(
                 }
             },
             .end => {
+                var coz_opcode_end = coz.begin("wasmstint.validator.opcode.end");
+                defer coz_opcode_end.end();
+
                 // std.debug.print("PROCESSING END\n", .{});
                 const frame = try popCtrlFrame(&ctrl_stack, &val_stack, module, diag);
 
@@ -2202,3 +2220,4 @@ const Reader = @import("Reader.zig");
 const Diagnostics = Reader.Diagnostics;
 const ValType = Module.ValType;
 const opcodes = @import("../opcodes.zig");
+const coz = @import("coz");
