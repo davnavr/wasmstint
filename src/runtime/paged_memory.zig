@@ -2,6 +2,60 @@
 
 const MapError = ModuleAllocating.LimitsError || Oom;
 
+const win = struct {
+    const AllocateVirtualMemoryError = error{SystemResources} || Oom || std.posix.UnexpectedError;
+
+    /// Returns the base of the base address of the allocated region of pages.
+    fn allocateVirtualMemory(
+        base_address: ?[*]align(page_size_min) u8,
+        region_size: *windows.SIZE_T,
+        allocation_type: windows.ULONG,
+        protect: windows.ULONG,
+    ) AllocateVirtualMemoryError![*]align(page_size_min) u8 {
+        var ret_base_address: ?*anyopaque = @ptrCast(base_address);
+        const status = windows.ntdll.NtAllocateVirtualMemory(
+            windows.GetCurrentProcess(),
+            @ptrCast(&ret_base_address),
+            0,
+            region_size,
+            allocation_type,
+            protect,
+        );
+
+        switch (status) {
+            .SUCCESS => return @ptrCast(@alignCast(ret_base_address.?)),
+            .ALREADY_COMMITTED => unreachable,
+            .COMMITMENT_LIMIT, .NO_MEMORY => return Oom.OutOfMemory,
+            .INSUFFICIENT_RESOURCES => return error.SystemResources,
+            .CONFLICTING_ADDRESSES => unreachable,
+            .INVALID_HANDLE => unreachable,
+            .INVALID_PAGE_PROTECTION => unreachable,
+            .OBJECT_TYPE_MISMATCH => unreachable,
+            .PROCESS_IS_TERMINATING => unreachable, // Going to die anyways.
+            else => return windows.unexpectedStatus(status),
+        }
+    }
+
+    fn freeVirtualMemory(
+        base_address: [*]align(page_size_min) u8,
+        region_size: *windows.SIZE_T,
+        free_type: windows.ULONG,
+    ) void {
+        var freed_address: ?*anyopaque = @ptrCast(base_address);
+        const status = windows.ntdll.NtFreeVirtualMemory(
+            windows.GetCurrentProcess(),
+            @ptrCast(&freed_address),
+            region_size,
+            free_type,
+        );
+
+        switch (status) {
+            .SUCCESS => {},
+            else => windows.unexpectedStatus(status) catch unreachable,
+        }
+    }
+};
+
 /// Allocates OS memory pages for use as a `MemInst`.
 ///
 /// Asserts that `initial_size <= initial_capacity`.
@@ -62,24 +116,34 @@ pub fn map(
     const single_syscall = capacity == reserve;
     const allocation: []align(page_size_min) u8 = if (builtin.os.tag == .windows) win: {
         const single_commit = if (single_syscall) windows.MEM_COMMIT else @as(windows.DWORD, 0);
-        const base_addr = windows.VirtualAlloc(
+        var alloc_size: windows.SIZE_T = reserve;
+        const base_addr: [*]align(page_size_min) u8 = win.allocateVirtualMemory(
             null,
-            reserve,
+            &alloc_size,
             windows.MEM_RESERVE | single_commit,
             windows.PAGE_READWRITE,
         ) catch return Oom.OutOfMemory;
-        errdefer windows.VirtualFree(base_addr, 0, windows.MEM_RELEASE);
+        std.debug.assert(alloc_size == reserve);
+
+        errdefer {
+            var freed_size: windows.SIZE_T = reserve;
+            win.freeVirtualMemory(base_addr, &freed_size, windows.MEM_RELEASE);
+            std.debug.assert(reserve == freed_size);
+        }
 
         if (!single_syscall and capacity > 0) {
-            _ = windows.VirtualAlloc(
+            var commit_size: windows.SIZE_T = capacity;
+            const commit_ret = win.allocateVirtualMemory(
                 base_addr,
-                capacity,
+                &commit_size,
                 windows.MEM_COMMIT,
                 windows.PAGE_READWRITE,
             ) catch return Oom.OutOfMemory;
+            std.debug.assert(commit_size == capacity);
+            std.debug.assert(@intFromPtr(base_addr) == @intFromPtr(commit_ret));
         }
 
-        break :win @as([*]align(page_size_min) u8, @ptrCast(@alignCast(base_addr)))[0..reserve];
+        break :win base_addr[0..reserve];
     } else posix: {
         // see `PageAllocator.map`
         const hint = @atomicLoad(
@@ -163,9 +227,11 @@ fn checkMemInst(mem: *const MemInst) void {
 pub fn free(mem: *MemInst) void {
     checkMemInst(mem);
     if (builtin.os.tag == .windows) {
-        windows.VirtualFree(@ptrCast(mem.base), 0, windows.MEM_RELEASE);
+        const freed_size: windows.SIZE_T = 0;
+        win.freeVirtualMemory(mem.base, &freed_size, windows.MEM_RELEASE);
+        std.debug.assert(freed_size == mem.limit);
     } else {
-        posix.munmap(@alignCast(mem.bytes()));
+        posix.munmap(@alignCast(mem.base[0..mem.limit]));
     }
 
     mem.* = undefined;
