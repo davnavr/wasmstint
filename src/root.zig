@@ -9,7 +9,6 @@ pub const Interpreter = @import("Interpreter.zig");
 pub const pointer = @import("pointer.zig");
 
 pub const LimitedAllocator = @import("LimitedAllocator.zig");
-pub const PageBufferAllocator = @import("PageBufferAllocator.zig");
 
 const std = @import("std");
 
@@ -45,7 +44,6 @@ comptime {
 
 test {
     _ = @import("reservation_allocator.zig");
-    _ = PageBufferAllocator;
     _ = Module;
     _ = Interpreter;
     _ = pointer;
