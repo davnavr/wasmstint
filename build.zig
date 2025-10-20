@@ -97,17 +97,23 @@ pub fn build(b: *Build) void {
 
     var modules = Modules{
         .coz = .build(b, &project_options),
+        .allocators = .build(b, &steps, &project_options),
         .file_content = .build(b, &project_options),
         .wasmstint = undefined,
         .cli_args = Modules.CliArgs.build(b, &steps, &project_options),
         .wasip1 = undefined,
         .subprocess = .build(b, &project_options),
     };
-    modules.wasmstint = .build(b, &steps, &project_options, .{ .coz = modules.coz });
+    modules.wasmstint = .build(
+        b,
+        &steps,
+        &project_options,
+        .{ .coz = modules.coz, .allocators = modules.allocators },
+    );
     modules.wasip1 = Modules.Wasip1.build(
         b,
         &project_options,
-        .{ .wasmstint = modules.wasmstint, .coz = modules.coz },
+        .{ .wasmstint = modules.wasmstint, .coz = modules.coz, .allocators = modules.allocators },
     );
 
     const spectest_exe = SpectestInterp.build(
@@ -119,6 +125,7 @@ pub fn build(b: *Build) void {
             .file_content = modules.file_content,
             .cli_args = modules.cli_args,
             .coz = modules.coz,
+            .allocators = modules.allocators,
         },
     );
 
@@ -132,6 +139,7 @@ pub fn build(b: *Build) void {
             .cli_args = modules.cli_args,
             .wasip1 = modules.wasip1,
             .coz = modules.coz,
+            .allocators = modules.allocators,
         },
     );
 
@@ -209,6 +217,7 @@ fn addCheck(
 }
 
 const Modules = struct {
+    allocators: Allocators,
     file_content: FileContent,
     wasmstint: Wasmstint,
     cli_args: CliArgs,
@@ -219,6 +228,37 @@ const Modules = struct {
     fn addAsImportTo(comptime T: type, from: T, to: *Build.Module) void {
         to.addImport(T.name, from.module);
     }
+
+    const Allocators = struct {
+        module: *Build.Module,
+
+        const name = "allocators";
+
+        fn build(
+            b: *Build,
+            steps: *const TopLevelSteps,
+            options: *const ProjectOptions,
+        ) Allocators {
+            const module = b.createModule(.{
+                .root_source_file = b.path("src/allocators.zig"),
+                .target = options.target,
+                .optimize = options.optimize,
+            });
+
+            const tests = b.addTest(.{
+                .name = name,
+                .root_module = module,
+                .max_rss = ByteSize.mib(120).bytes,
+            });
+
+            const tests_run = &b.addRunArtifact(tests).step;
+            tests_run.max_rss = ByteSize.mib(4).bytes;
+            steps.@"test-unit".dependOn(tests_run);
+
+            addCheck(b, steps, .@"test", module, name, .{ .max_rss = .mib(40) });
+            return .{ .module = module };
+        }
+    };
 
     const FileContent = struct {
         module: *Build.Module,
@@ -245,7 +285,7 @@ const Modules = struct {
             b: *Build,
             steps: *const TopLevelSteps,
             options: *const ProjectOptions,
-            imports: struct { coz: Coz },
+            imports: struct { coz: Coz, allocators: Allocators },
         ) Wasmstint {
             const module = b.addModule(
                 name,
@@ -257,6 +297,7 @@ const Modules = struct {
                 },
             );
             addAsImportTo(Coz, imports.coz, module);
+            addAsImportTo(Allocators, imports.allocators, module);
 
             // TODO(zig): https://github.com/ziglang/zig/issues/23423
             const use_llvm = true;
@@ -326,7 +367,7 @@ const Modules = struct {
         fn build(
             b: *Build,
             options: *const ProjectOptions,
-            imports: struct { wasmstint: Wasmstint, coz: Coz },
+            imports: struct { wasmstint: Wasmstint, coz: Coz, allocators: Allocators },
         ) Wasip1 {
             const module = b.addModule(
                 name,
@@ -339,6 +380,7 @@ const Modules = struct {
             );
             addAsImportTo(Wasmstint, imports.wasmstint, module);
             addAsImportTo(Coz, imports.coz, module);
+            addAsImportTo(Allocators, imports.allocators, module);
 
             return .{ .module = module };
         }
@@ -394,6 +436,7 @@ const SpectestInterp = struct {
             wasmstint: Modules.Wasmstint,
             cli_args: Modules.CliArgs,
             coz: Modules.Coz,
+            allocators: Modules.Allocators,
         },
     ) SpectestInterp {
         const module = b.createModule(.{
@@ -405,6 +448,7 @@ const SpectestInterp = struct {
         Modules.addAsImportTo(Modules.Wasmstint, imports.wasmstint, module);
         Modules.addAsImportTo(Modules.CliArgs, imports.cli_args, module);
         Modules.addAsImportTo(Modules.Coz, imports.coz, module);
+        Modules.addAsImportTo(Modules.Allocators, imports.allocators, module);
 
         const exe = b.addExecutable(.{
             .name = "wasmstint-spectest",
@@ -431,7 +475,7 @@ const SpectestInterp = struct {
             module,
             exe.name,
             .{
-                .max_rss = .mib(140),
+                .max_rss = .mib(160),
                 // Prevent compile errors due to https://github.com/ziglang/zig/issues/24044
                 .use_llvm = proj_opts.use_llvm,
             },
@@ -550,6 +594,7 @@ const Wasip1Interp = struct {
             cli_args: Modules.CliArgs,
             wasip1: Modules.Wasip1,
             coz: Modules.Coz,
+            allocators: Modules.Allocators,
         },
     ) Wasip1Interp {
         const module = b.createModule(.{
@@ -562,6 +607,7 @@ const Wasip1Interp = struct {
         Modules.addAsImportTo(Modules.CliArgs, imports.cli_args, module);
         Modules.addAsImportTo(Modules.Wasip1, imports.wasip1, module);
         Modules.addAsImportTo(Modules.Coz, imports.coz, module);
+        Modules.addAsImportTo(Modules.Allocators, imports.allocators, module);
 
         const exe = b.addExecutable(.{
             .name = "wasmstint-wasip1",

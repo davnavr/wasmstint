@@ -8,10 +8,6 @@ pub const Interpreter = @import("Interpreter.zig");
 
 pub const pointer = @import("pointer.zig");
 
-pub const LimitedAllocator = @import("LimitedAllocator.zig");
-
-const std = @import("std");
-
 pub fn waitForDebugger() void {
     const os = @import("builtin").target.os;
     if (os.tag == .windows) {
@@ -42,8 +38,9 @@ comptime {
     std.debug.assert(std.mem.byte_size_in_bits == 8);
 }
 
+const std = @import("std");
+
 test {
-    _ = @import("reservation_allocator.zig");
     _ = Module;
     _ = Interpreter;
     _ = pointer;

@@ -1218,7 +1218,7 @@ pub fn parse(
 
     var module_arena = ArenaAllocator.init(gpa);
     var module = allocator: {
-        var allocator = reservation_allocator.ReservationAllocator.zero;
+        var allocator = allocators.ReservationAllocator(.@"16").zero;
         try allocator.reserve(FuncType, counts.type);
         try allocator.reserve(ValType, sections.readers.type.bytes.len -| counts.type);
         try allocator.reserve(ImportName, counts.import);
@@ -1435,7 +1435,7 @@ pub fn parse(
 }
 
 fn parseTypeSec(
-    arena: *reservation_allocator.ArenaFallbackAllocator,
+    arena: *ArenaFallbackAllocator,
     count: u32,
     readers: *const Sections.Readers,
     diag: ParseDiagnostics,
@@ -1520,7 +1520,7 @@ const ImportSec = struct {
 };
 
 fn parseImportSec(
-    arena: *reservation_allocator.ArenaFallbackAllocator,
+    arena: *ArenaFallbackAllocator,
     type_sec: []const FuncType,
     counts: *const Sections.Counts,
     readers: *const Sections.Readers,
@@ -1632,7 +1632,7 @@ fn parseImportSec(
         },
         .types = types: {
             var final_types: ImportSec.Types = undefined;
-            var types_size = reservation_allocator.ReservationAllocator.zero;
+            var types_size = allocators.ReservationAllocator(.@"16").zero;
             inline for (@typeInfo(ImportSec.Types).@"struct".fields) |f| {
                 try types_size.reserve(
                     @typeInfo(@FieldType(ImportSec.Types, f.name)).pointer.child,
@@ -1644,7 +1644,7 @@ fn parseImportSec(
                 );
             }
 
-            var types_alloc = reservation_allocator.ArenaFallbackAllocator{
+            var types_alloc = ArenaFallbackAllocator{
                 .buffer = try types_size.bufferAllocator(arena.allocator()),
                 .arena = arena.arena,
             };
@@ -1760,7 +1760,7 @@ fn parseMemSec(
 }
 
 fn parseGlobalSec(
-    arena: *reservation_allocator.ArenaFallbackAllocator,
+    arena: *ArenaFallbackAllocator,
     import_sec: *const ImportSec,
     count: u32,
     readers: *const Sections.Readers,
@@ -1807,7 +1807,7 @@ const ExportSec = struct {
 
 fn parseExportSec(
     import_types: *const ImportSec.Types,
-    arena: *reservation_allocator.ArenaFallbackAllocator,
+    arena: *ArenaFallbackAllocator,
     count: u32,
     readers: *const Sections.Readers,
     rng_seed: u64,
@@ -1924,7 +1924,7 @@ const ElemSec = struct {
 };
 
 fn parseElemSec(
-    arena: *reservation_allocator.ArenaFallbackAllocator,
+    arena: *ArenaFallbackAllocator,
     readers: *const Sections.Readers,
     count: u32,
     import_sec: *const ImportSec,
@@ -2165,7 +2165,7 @@ const CodeSec = struct {
 };
 
 pub fn parseCodeSec(
-    arena: *reservation_allocator.ArenaFallbackAllocator,
+    arena: *ArenaFallbackAllocator,
     readers: *const Sections.Readers,
     count: u32,
     diag: ParseDiagnostics,
@@ -2204,7 +2204,7 @@ const DataSec = struct {
 };
 
 fn parseDataSec(
-    arena: *reservation_allocator.ArenaFallbackAllocator,
+    arena: *ArenaFallbackAllocator,
     readers: *const Sections.Readers,
     count: u32,
     import_sec: *const ImportSec,
@@ -2361,7 +2361,8 @@ const Type = std.builtin.Type;
 const Writer = std.Io.Writer;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
-const reservation_allocator = @import("reservation_allocator.zig");
+const allocators = @import("allocators");
+const ArenaFallbackAllocator = allocators.ArenaFallbackAllocator;
 const Reader = @import("Module/Reader.zig");
 const opcodes = @import("opcodes.zig");
 const validator = @import("Module/validator.zig");

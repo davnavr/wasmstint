@@ -1,14 +1,27 @@
+//! Wraps an existing `Allocator` implementation to limit the amount of memory it can allocate.
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
 
+/// Pointer to the remaining amount of memory that can be allocated, in bytes.
 remaining: *usize,
+/// The current amount of memory that has been allocated, in bytes.
 allocated: usize,
 inner: Allocator,
 
 const LimitedAllocator = @This();
 
-pub fn init(remaining: *usize, inner: Allocator) LimitedAllocator {
+pub fn init(
+    /// The maximum amount of memory that can be allocated.
+    ///
+    /// Decreasing this value while the allocator is in use has the effect of reducing the amount
+    /// of memory that is allowed to be allocated.
+    ///
+    /// It is not recommended to increment this value.
+    remaining: *usize,
+    inner: Allocator,
+) LimitedAllocator {
     return .{
         .remaining = remaining,
         .allocated = 0,
@@ -28,11 +41,6 @@ pub fn allocator(self: *LimitedAllocator) Allocator {
         .ptr = self,
         .vtable = &vtable,
     };
-}
-
-pub fn resetCount(self: *LimitedAllocator) void {
-    self.remaining.* += self.allocated;
-    self.allocated = 0;
 }
 
 inline fn checkAllocLimit(self: *LimitedAllocator, additional: usize) Allocator.Error!usize {
@@ -98,6 +106,18 @@ fn remap(ctx: *anyopaque, memory: []u8, alignment: Alignment, new_len: usize, re
 fn free(ctx: *anyopaque, memory: []u8, alignment: Alignment, ret_addr: usize) void {
     const self: *LimitedAllocator = @ptrCast(@alignCast(ctx));
     self.inner.rawFree(memory, alignment, ret_addr);
-    self.remaining.* += memory.len;
-    self.allocated -= memory.len;
+    self.remaining.* +|= memory.len;
+    self.allocated -|= memory.len;
+}
+
+test {
+    var remaining: usize = 8;
+    var limited = LimitedAllocator.init(&remaining, std.testing.allocator);
+    const interface = limited.allocator();
+
+    const a = try interface.create(i64);
+    defer interface.destroy(a);
+    a.* = 42;
+
+    try std.testing.expectError(error.OutOfMemory, interface.create(u8));
 }

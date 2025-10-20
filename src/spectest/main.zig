@@ -130,7 +130,7 @@ pub fn main() u8 {
     const fmt_wast_path = std.unicode.fmtUtf8(json_script.source_filename);
 
     var interpreter_allocated_amount = @as(usize, arguments.@"max-stack-size") *| 16;
-    var interpreter_allocator = wasmstint.LimitedAllocator.init(
+    var interpreter_allocator = allocators.LimitedAllocator.init(
         &interpreter_allocated_amount,
         std.heap.page_allocator,
     );
@@ -214,6 +214,7 @@ fn handleJsonError(
 const std = @import("std");
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
+const allocators = @import("allocators");
 const wasmstint = @import("wasmstint");
 const cli_args = @import("cli_args");
 const FileContent = @import("FileContent");

@@ -279,7 +279,6 @@ pub fn deinit(request: *ModuleAllocating) ModuleDeallocation {
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const reservation_allocator = @import("../reservation_allocator.zig");
 const Module = @import("../Module.zig");
 const ImportProvider = @import("ImportProvider.zig");
 const ModuleInst = @import("module_inst.zig").ModuleInst;

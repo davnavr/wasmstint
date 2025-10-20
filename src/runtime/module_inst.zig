@@ -11,7 +11,7 @@ pub const ModuleInst = packed struct(usize) {
     /// Makes calculating the layout of a `ModuleInst` a single cost when a `Module` is parsed,
     /// rather than recalculating it every time a module is instantiated.
     pub const Shape = struct {
-        size: reservation_allocator.ReservationAllocator,
+        size: allocators.ReservationAllocator(.@"16"),
         // /// Stores the offsets of the values of defined globals.
         // ///
         // /// These offsets are relative to the address of the value of the first defined global.
@@ -29,7 +29,7 @@ pub const ModuleInst = packed struct(usize) {
         ) std.mem.Allocator.Error!void {
             const info = &module.inner.raw;
 
-            var size = reservation_allocator.ReservationAllocator{ .bytes = @sizeOf(Header) };
+            var size = allocators.ReservationAllocator(.@"16"){ .bytes = @sizeOf(Header) };
             try size.reserve(FuncAddr, info.func_import_count);
             try size.reserve(*TableInst, info.table_count);
             try size.reserve(TableInst, info.table_count - info.table_import_count);
@@ -288,7 +288,7 @@ pub const ModuleInst = packed struct(usize) {
 };
 
 const std = @import("std");
-const reservation_allocator = @import("../reservation_allocator.zig");
+const allocators = @import("allocators");
 const Module = @import("../Module.zig");
 const MemInst = @import("memory.zig").MemInst;
 const TableInst = @import("table.zig").TableInst;
