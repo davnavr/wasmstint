@@ -410,7 +410,7 @@ const SpectestInterp = struct {
             .name = "wasmstint-spectest",
             .root_module = module,
             .use_llvm = proj_opts.use_llvm,
-            .max_rss = ByteSize.mib(402).bytes,
+            .max_rss = ByteSize.mib(447).bytes,
         });
 
         b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{}).step);

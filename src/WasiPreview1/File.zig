@@ -759,7 +759,12 @@ pub fn path_open(
         fd_flags,
     );
 
-    std.debug.assert(derived_rights.contains(opened.rights));
+    if (!derived_rights.contains(opened.rights)) {
+        std.debug.panic(
+            "opened rights {f} > inheriting rights {f}",
+            .{ opened.rights, derived_rights },
+        );
+    }
 
     std.log.debug(
         "opened {f} with base rights {f} restricted to {f} inherited {f}",

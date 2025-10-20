@@ -420,34 +420,110 @@ fn SetOpenFlags(comptime Args: type) type {
     });
 }
 
-const todo_openat2_on_linux_is_not_yet_supported = true; // TODO
-
-/// https://man7.org/linux/man-pages/man2/openat2.2.html
+/// Uses the Linux [`openat2`] syscall to safely access a path within `dir`.
+///
+/// [`openat2`]: https://man7.org/linux/man-pages/man2/openat2.2.html
 fn accessSubPathLinux(
     dir: std.fs.Dir,
     scratch: *ArenaAllocator,
     flags: types.LookupFlags.Valid,
     path: Path,
-    args: anytype,
-    comptime setOpenFlags: SetOpenFlags(@TypeOf(args)),
+    set_open_flags_args: anytype,
+    comptime setOpenFlags: SetOpenFlags(@TypeOf(set_open_flags_args)),
+    do_in_path_args: anytype,
     comptime doInPath: anytype,
-) (error{NoSysOpenat2} || Error)!@typeInfo(doInPath).@"fn".return_type.? {
-    if (todo_openat2_on_linux_is_not_yet_supported) {
-        return error.NoSysOpenat2;
+) (error{NoOpenAt2} || Error)!AccessSubPathReturnType(@TypeOf(doInPath)) {
+    const supported = struct {
+        var flag = std.atomic.Value(bool).init(true);
+    };
+
+    if (!supported.flag.load(.unordered)) {
+        return error.NoOpenAt2;
     }
 
-    const path_z = try scratch.allocator().dupeZ(u8, path.bytes());
-    const rc = std.os.linux.syscall4(
-        std.os.linux.SYS.openat2,
-        dir.fd,
-        path_z,
-        undefined, // how struct,
-        undefined, // how size
-    ); // FallbackImplementation if E_NOSYS or E2BIG
+    const OpenHow = extern struct {
+        // 3 fields are what are supported in initial design for `openat2`
+        flags: u64 = 0,
+        mode: u64 = 0,
+        resolve: Resolve = Resolve{},
 
-    _ = flags;
-    _ = setOpenFlags;
-    _ = rc;
+        const Resolve = packed struct(u64) {
+            NO_XDEV: bool = false,
+            NO_MAGICLINKS: bool = false,
+            NO_SYMLINKS: bool = false,
+            BENEATH: bool = false,
+            IN_ROOT: bool = false,
+            CACHED: bool = false,
+            _6: u58 = 0,
+        };
+    };
+
+    const o_flags: std.os.linux.O = flags: {
+        var initial: std.os.linux.O = try @call(.auto, setOpenFlags, set_open_flags_args);
+        std.debug.assert(!initial.NOFOLLOW);
+        initial.NOFOLLOW = !flags.symlink_follow;
+        break :flags initial;
+    };
+
+    const how = OpenHow{
+        .flags = @as(u32, @bitCast(o_flags)),
+        .resolve = OpenHow.Resolve{
+            .BENEATH = true,
+            // .IN_ROOT = true, //  causes `EINVAL`, `wasmtime` doesn't use it anyway
+            .NO_MAGICLINKS = true,
+        },
+    };
+
+    // errdefer |e| log.err("OS error {t} opening {f}", .{ e, path });
+
+    const path_z = try scratch.allocator().dupeZ(u8, path.bytes());
+    const new_fd: std.os.linux.fd_t = while (true) {
+        const rc = std.os.linux.syscall4(
+            std.os.linux.SYS.openat2,
+            @bitCast(@as(isize, dir.fd)),
+            @intFromPtr(path_z.ptr),
+            @intFromPtr(&how),
+            @sizeOf(OpenHow),
+        );
+
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => break @intCast(rc),
+            .INTR => continue,
+            .NOSYS => {
+                supported.flag.store(false, .monotonic);
+                return error.NoOpenAt2;
+            },
+            .ACCES => return error.AccessDenied,
+            .@"2BIG" => unreachable, // provided `how` fields are always supported
+            .BADF => unreachable,
+            .BUSY => return error.DeviceBusy,
+            .DQUOT => return error.DiskQuota,
+            .EXIST => return error.PathAlreadyExists,
+            .FAULT => unreachable,
+            .FBIG, .OVERFLOW => return error.FileTooBig,
+            .INVAL => return error.InvalidArgument, // filesystem doesn't like file name
+            .ISDIR => return error.IsDir,
+            .LOOP => return error.SymLinkLoop,
+            .MFILE => return error.ProcessFdQuotaExceeded,
+            .NAMETOOLONG => return error.NameTooLong,
+            .NFILE => return error.SystemFdQuotaExceeded,
+            .NODEV, .NXIO => return error.NoDevice,
+            .NOENT => return error.FileNotFound,
+            .SRCH => return error.ProcessNotFound,
+            .NOMEM => return error.OutOfMemory,
+            .NOSPC => return error.NoSpaceLeft,
+            .NOTDIR => return error.NotDir,
+            .PERM => return error.PermissionDenied,
+            .OPNOTSUPP => unreachable, // O_TMPFILE is never passed
+            .ROFS => return error.ReadOnlyFileSystem,
+            .TXTBSY => return error.FileBusy,
+            .AGAIN => return error.WouldBlock,
+            .XDEV => return error.AccessDenied, // escape from `dir`
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    };
+
+    return @call(.auto, doInPath, .{new_fd} ++ .{ scratch, path } ++ do_in_path_args);
 }
 
 // FreeBSD also supports `O_RESOLVE_BENEATH` in openat
@@ -910,13 +986,17 @@ fn accessSubPath(
     var coz_begin = coz.begin("wasmstint.WasiPreview1.host_dir.accessSubPath");
     defer coz_begin.end();
 
-    // TODO: On Linux, fallback to portable implementation on E_NOSYS (check compile time OS version)
     fallback: switch (builtin.os.tag) {
         .linux => {
-            if (todo_openat2_on_linux_is_not_yet_supported) break :fallback;
+            // Currently always succeeds
+            if (!@hasField(std.os.linux.SYS, "openat2")) {
+                break :fallback;
+            }
 
-            // I think Zig's supported linux architectures all at least have a number for `openat2`
-            if (!@hasField(std.os.linux.SYS, "openat2")) break :fallback;
+            const supports_openat2 = comptime builtin.os.isAtLeast(
+                .linux,
+                std.SemanticVersion{ .major = 5, .minor = 6, .patch = 0 },
+            );
 
             return accessSubPathLinux(
                 dir,
@@ -928,21 +1008,19 @@ fn accessSubPath(
                 do_in_path_args,
                 doInPath,
             ) catch |e| switch (e) {
-                error.NoSysOpenat2 => {
-                    const linux_openat2_version = std.SemanticVersion{
-                        .major = 5,
-                        .minor = 6,
-                        .patch = 0,
-                    };
+                error.NoOpenAt2 => {
+                    @branchHint(
+                        if (supports_openat2 == true)
+                            .cold
+                        else if (supports_openat2 == false)
+                            .likely
+                        else
+                            .none,
+                    );
 
-                    if (comptime builtin.os.isAtLeast(.linux, linux_openat2_version)) {
-                        unreachable;
-                    } else {
-                        _ = scratch.reset();
-                        break :fallback;
-                    }
+                    break :fallback;
                 },
-                else => |err| return err,
+                else => |err| err,
             };
         },
         // .freebsd => {},
@@ -1095,6 +1173,7 @@ fn pathOpenFlags(
         if (@hasField(std.posix.O, "CLOEXEC")) o_flags.CLOEXEC = true;
         if (@hasField(std.posix.O, "LARGEFILE")) o_flags.LARGEFILE = true;
         if (@hasField(std.posix.O, "NOCTTY")) o_flags.NOCTTY = true;
+        if (@hasField(std.posix.O, "LARGEFILE")) o_flags.LARGEFILE = true;
 
         if (!open_flags.directory) {
             // TODO: Darn, need to figure out if directory or file! (fstatat?)
