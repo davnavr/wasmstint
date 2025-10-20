@@ -36,6 +36,14 @@ const Arguments = cli_args.CliArgs(.{
 
         cli_args.Flag.integerSizeSuffix(
             .{
+                .long = "rt-memory-limit",
+                .description = "Upper bound on memory usage for runtime structures, in bytes",
+            },
+            u32,
+        ).withDefault(16 * 1024 * 1024),
+
+        cli_args.Flag.integerSizeSuffix(
+            .{
                 .long = "max-stack-size",
                 .description = "Limits the size of the WASM value/call stack",
             },
@@ -469,13 +477,21 @@ fn printExitCode(arguments: *const Arguments.Parsed, code: i32) void {
 }
 
 fn realMain() Error!i32 {
-    var arena = ArenaAllocator.init(std.heap.page_allocator);
+    var memory_limit: usize = std.math.maxInt(usize);
+    var limited_page_allocator = allocators.LimitedAllocator.init(
+        &memory_limit,
+        std.heap.page_allocator,
+    );
+
+    var arena = ArenaAllocator.init(limited_page_allocator.allocator());
     defer arena.deinit();
-    var scratch = ArenaAllocator.init(std.heap.page_allocator);
+    var scratch = ArenaAllocator.init(limited_page_allocator.allocator());
     defer scratch.deinit();
 
     const all_arguments = parseArguments(&scratch, &arena);
     const arguments = all_arguments.flags;
+
+    memory_limit = @min(memory_limit, arguments.@"rt-memory-limit");
 
     if (std.mem.eql(u8, arguments.invoke, memory_export)) {
         return fail.print(error.BadCliFlag, "cannot use " ++ memory_export ++ " as an entrypoint");
@@ -617,7 +633,7 @@ fn realMain() Error!i32 {
     }
 
     var wasi = WasiPreview1.init(
-        std.heap.page_allocator, // std.heap.smp_allocator,
+        limited_page_allocator.allocator(), // std.heap.smp_allocator,
         .{
             .args = forwarded_arguments,
             .environ = all_arguments.environ,
@@ -890,6 +906,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const FileContent = @import("FileContent");
+const allocators = @import("allocators");
 const wasmstint = @import("wasmstint");
 const cli_args = @import("cli_args");
 const WasiPreview1 = @import("WasiPreview1");
