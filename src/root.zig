@@ -3,7 +3,6 @@
 //! [WebAssembly]: https://webassembly.org/
 
 pub const Module = @import("Module.zig");
-pub const float = @import("float.zig");
 pub const runtime = @import("runtime.zig");
 pub const Interpreter = @import("Interpreter.zig");
 
