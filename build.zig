@@ -248,11 +248,11 @@ const Modules = struct {
             const tests = b.addTest(.{
                 .name = name,
                 .root_module = module,
-                .max_rss = ByteSize.mib(120).bytes,
+                .max_rss = ByteSize.mib(190).bytes,
             });
 
             const tests_run = &b.addRunArtifact(tests).step;
-            tests_run.max_rss = ByteSize.mib(4).bytes;
+            tests_run.max_rss = ByteSize.mib(6).bytes;
             steps.@"test-unit".dependOn(tests_run);
 
             addCheck(b, steps, .@"test", module, name, .{ .max_rss = .mib(40) });
@@ -354,7 +354,7 @@ const Modules = struct {
             tests_run.max_rss = ByteSize.mib(8).bytes;
             steps.@"test-unit".dependOn(tests_run);
 
-            addCheck(b, steps, .@"test", module, name, .{ .max_rss = .mib(99) });
+            addCheck(b, steps, .@"test", module, name, .{ .max_rss = .mib(109) });
             return .{ .module = module };
         }
     };

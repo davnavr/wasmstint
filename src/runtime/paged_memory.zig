@@ -2,60 +2,6 @@
 
 const MapError = ModuleAllocating.LimitsError || Oom;
 
-const win = struct {
-    const AllocateVirtualMemoryError = error{SystemResources} || Oom || std.posix.UnexpectedError;
-
-    /// Returns the base of the base address of the allocated region of pages.
-    fn allocateVirtualMemory(
-        base_address: ?[*]align(page_size_min) u8,
-        region_size: *windows.SIZE_T,
-        allocation_type: windows.ULONG,
-        protect: windows.ULONG,
-    ) AllocateVirtualMemoryError![*]align(page_size_min) u8 {
-        var ret_base_address: ?*anyopaque = @ptrCast(base_address);
-        const status = windows.ntdll.NtAllocateVirtualMemory(
-            windows.GetCurrentProcess(),
-            @ptrCast(&ret_base_address),
-            0,
-            region_size,
-            allocation_type,
-            protect,
-        );
-
-        switch (status) {
-            .SUCCESS => return @ptrCast(@alignCast(ret_base_address.?)),
-            .ALREADY_COMMITTED => unreachable,
-            .COMMITMENT_LIMIT, .NO_MEMORY => return Oom.OutOfMemory,
-            .INSUFFICIENT_RESOURCES => return error.SystemResources,
-            .CONFLICTING_ADDRESSES => unreachable,
-            .INVALID_HANDLE => unreachable,
-            .INVALID_PAGE_PROTECTION => unreachable,
-            .OBJECT_TYPE_MISMATCH => unreachable,
-            .PROCESS_IS_TERMINATING => unreachable, // Going to die anyways.
-            else => return windows.unexpectedStatus(status),
-        }
-    }
-
-    fn freeVirtualMemory(
-        base_address: [*]align(page_size_min) u8,
-        region_size: *windows.SIZE_T,
-        free_type: windows.ULONG,
-    ) void {
-        var freed_address: ?*anyopaque = @ptrCast(base_address);
-        const status = windows.ntdll.NtFreeVirtualMemory(
-            windows.GetCurrentProcess(),
-            @ptrCast(&freed_address),
-            region_size,
-            free_type,
-        );
-
-        switch (status) {
-            .SUCCESS => {},
-            else => windows.unexpectedStatus(status) catch unreachable,
-        }
-    }
-};
-
 /// Allocates OS memory pages for use as a `MemInst`.
 ///
 /// Asserts that `initial_size <= initial_capacity`.
@@ -115,29 +61,28 @@ pub fn map(
 
     const single_syscall = capacity == reserve;
     const allocation: []align(page_size_min) u8 = if (builtin.os.tag == .windows) win: {
-        const single_commit = if (single_syscall) windows.MEM_COMMIT else @as(windows.DWORD, 0);
         var alloc_size: windows.SIZE_T = reserve;
-        const base_addr: [*]align(page_size_min) u8 = win.allocateVirtualMemory(
+        const base_addr: [*]align(page_size_min) u8 = virtual_memory.nt.allocate(
             null,
             &alloc_size,
-            windows.MEM_RESERVE | single_commit,
-            windows.PAGE_READWRITE,
+            .{ .RESERVE = true, .COMMIT = single_syscall },
+            .READWRITE,
         ) catch return Oom.OutOfMemory;
         std.debug.assert(alloc_size == reserve);
 
         errdefer {
             var freed_size: windows.SIZE_T = reserve;
-            win.freeVirtualMemory(base_addr, &freed_size, windows.MEM_RELEASE);
+            virtual_memory.nt.free(base_addr, &freed_size, .RELEASE) catch {};
             std.debug.assert(reserve == freed_size);
         }
 
         if (!single_syscall and capacity > 0) {
             var commit_size: windows.SIZE_T = capacity;
-            const commit_ret = win.allocateVirtualMemory(
+            const commit_ret = virtual_memory.nt.allocate(
                 base_addr,
                 &commit_size,
-                windows.MEM_COMMIT,
-                windows.PAGE_READWRITE,
+                .{ .COMMIT = true },
+                .READWRITE,
             ) catch return Oom.OutOfMemory;
             std.debug.assert(commit_size == capacity);
             std.debug.assert(@intFromPtr(base_addr) == @intFromPtr(commit_ret));
@@ -145,47 +90,19 @@ pub fn map(
 
         break :win base_addr[0..reserve];
     } else posix: {
-        // see `PageAllocator.map`
-        const hint = @atomicLoad(
-            @TypeOf(std.heap.next_mmap_addr_hint),
-            &std.heap.next_mmap_addr_hint,
-            .unordered,
-        );
-
-        const pages = posix.mmap(
-            hint,
+        const pages = virtual_memory.mman.map_anonymous(
             reserve,
-            if (single_syscall)
-                (posix.system.PROT.WRITE | posix.system.PROT.READ)
-            else
-                posix.system.PROT.NONE,
-            .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
-            -1,
-            0,
-        ) catch |e| switch (e) {
-            error.OutOfMemory => |oom| return oom,
-            else => unreachable,
-        };
+            .{ .WRITE = single_syscall, .READ = single_syscall },
+            .{},
+        ) catch return Oom.OutOfMemory;
         errdefer posix.munmap(pages);
 
         // This recreates windows commit behavior
         // TODO: Linux has mremap so only other Unix targets are required to do this
         if (!single_syscall) {
-            posix.mprotect(pages[0..capacity], posix.system.PROT.WRITE) catch |e| switch (e) {
-                error.OutOfMemory => |oom| return oom,
-                error.AccessDenied, error.Unexpected => unreachable,
-            };
+            virtual_memory.mman.protect(pages[0..capacity], .{ .WRITE = true }) catch
+                return Oom.OutOfMemory;
         }
-
-        // see `PageAllocator.map`
-        _ = @cmpxchgWeak(
-            @TypeOf(std.heap.next_mmap_addr_hint),
-            &std.heap.next_mmap_addr_hint,
-            hint,
-            @alignCast(@constCast(pages.ptr[pages.len..pages.len].ptr)),
-            .monotonic,
-            .monotonic,
-        );
 
         break :posix pages;
     };
@@ -228,7 +145,7 @@ pub fn free(mem: *MemInst) void {
     checkMemInst(mem);
     if (builtin.os.tag == .windows) {
         const freed_size: windows.SIZE_T = 0;
-        win.freeVirtualMemory(mem.base, &freed_size, windows.MEM_RELEASE);
+        virtual_memory.nt.free(mem.base, &freed_size, .RELEASE) catch {};
         std.debug.assert(freed_size == mem.limit);
     } else {
         posix.munmap(@alignCast(mem.base[0..mem.limit]));
@@ -268,18 +185,16 @@ pub fn grow(
     );
 
     if (builtin.os.tag == .windows) {
-        const base = windows.VirtualAlloc(
-            @ptrCast(new_pages),
-            new_pages.len,
-            windows.MEM_COMMIT,
-            windows.PAGE_READWRITE,
+        var region_size: windows.SIZE_T = new_pages.len;
+        const base = virtual_memory.nt.allocate(
+            new_pages.ptr,
+            &region_size,
+            .{ .COMMIT = true },
+            .READWRITE,
         ) catch return;
         std.debug.assert(@intFromPtr(base) == @intFromPtr(new_pages.ptr));
     } else {
-        posix.mprotect(new_pages, posix.PROT.READ | posix.PROT.WRITE) catch |e| switch (e) {
-            error.OutOfMemory => return,
-            error.AccessDenied, error.Unexpected => unreachable,
-        };
+        virtual_memory.mman.protect(new_pages, .{ .READ = true, .WRITE = true }) catch return;
     }
 
     request.memory.capacity = request.new_size;
@@ -297,6 +212,7 @@ const windows = std.os.windows;
 const pageSize = std.heap.pageSize;
 const page_size_min = std.heap.page_size_min;
 const Oom = std.mem.Allocator.Error;
+const virtual_memory = @import("allocators").virtual_memory;
 const MemType = @import("../Module.zig").MemType;
 const ModuleAllocating = @import("ModuleAllocating.zig");
 const MemInst = @import("memory.zig").MemInst;
