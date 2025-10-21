@@ -49,10 +49,10 @@ const Arguments = cli_args.CliArgs(.{
 
 pub fn main() u8 {
     var scratch = ArenaAllocator.init(std.heap.page_allocator);
-    defer scratch.deinit();
+    defer if (builtin.mode == .Debug) scratch.deinit();
 
     var arena = ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
+    defer if (builtin.mode == .Debug) arena.deinit();
 
     const arguments = args: {
         var parser: Arguments = undefined;
@@ -129,11 +129,11 @@ pub fn main() u8 {
     _ = scratch.reset(.retain_capacity);
     const fmt_wast_path = std.unicode.fmtUtf8(json_script.source_filename);
 
-    var interpreter_allocated_amount = @as(usize, arguments.@"max-stack-size") *| 16;
-    var interpreter_allocator = allocators.LimitedAllocator.init(
-        &interpreter_allocated_amount,
-        std.heap.page_allocator,
-    );
+    var interpreter_allocator = allocators.PageAllocation.init(
+        .{},
+        @as(usize, arguments.@"max-stack-size") *| 16,
+    ) catch @panic("oom");
+    defer if (builtin.mode == .Debug) interpreter_allocator.deinit();
 
     var imports: Imports = undefined;
     imports.init(rng.random(), &arena);

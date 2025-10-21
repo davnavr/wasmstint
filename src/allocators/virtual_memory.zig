@@ -52,8 +52,9 @@ pub const nt = struct {
     ///
     /// [memory protection constants]: https://learn.microsoft.com/en-us/windows/win32/Memory/memory-protection-constants
     pub const Protection = enum(windows.ULONG) {
-        READONLY = 0x02,
-        READWRITE = 0x04,
+        NOACCESS = windows.PAGE_NOACCESS,
+        READONLY = windows.PAGE_READONLY,
+        READWRITE = windows.PAGE_READWRITE,
         _,
     };
 
@@ -84,7 +85,6 @@ pub const nt = struct {
             .CONFLICTING_ADDRESSES => return error.ConflictingAddresses,
             .INVALID_HANDLE => unreachable,
             .INVALID_PAGE_PROTECTION => unreachable,
-            .INVALID_PARAMETER_1 => unreachable, // process id
             .INVALID_PARAMETER_2 => unreachable, // base address ptr
             .INVALID_PARAMETER_3 => unreachable, // zero bits
             .INVALID_PARAMETER_4 => unreachable, // region size ptr
@@ -117,8 +117,48 @@ pub const nt = struct {
 
         switch (status) {
             .SUCCESS => {},
+            .INVALID_HANDLE => unreachable,
+            .INVALID_PARAMETER_2 => unreachable, // base ptr
+            .INVALID_PARAMETER_3 => unreachable, // region size ptr
+            .INVALID_PARAMETER_4 => unreachable, // free type
             else => return windows.unexpectedStatus(status),
         }
+    }
+
+    pub const ProtectError = posix.UnexpectedError || Oom || error{
+        ConflictingAddresses,
+    };
+
+    pub fn protect(
+        pages: []align(page_size_min) u8,
+        new_protection: Protection,
+    ) ProtectError!Protection {
+        var base_address: ?*anyopaque = @ptrCast(pages.ptr);
+        var region_size: windows.SIZE_T = pages.len;
+        var old_protect: windows.DWORD = undefined;
+        const status = windows.ntdll.NtProtectVirtualMemory(
+            windows.GetCurrentProcess(),
+            @ptrCast(&base_address),
+            &region_size,
+            new_protection,
+            &old_protect,
+        );
+
+        return switch (status) {
+            .SUCCESS => @bitCast(old_protect),
+            .NO_MEMORY => return Oom.OutOfMemory,
+            .INSUFFICIENT_RESOURCES => return error.SystemResources,
+            .INVALID_HANDLE => unreachable,
+            .INVALID_PAGE_PROTECTION => unreachable,
+            .INVALID_PARAMETER_2 => unreachable, // base address ptr
+            .INVALID_PARAMETER_3 => unreachable, // region size ptr
+            .INVALID_PARAMETER_4 => unreachable, // new protection
+            .INVALID_PARAMETER_5 => unreachable, // old protection ptr
+            .PROCESS_IS_TERMINATING => return Oom.OutOfMemory, // Going to die anyways.
+            .CONFLICTING_ADDRESSES => return error.ConflictingAddresses,
+            .NOT_COMMITTED => unreachable,
+            else => return windows.unexpectedStatus(status),
+        };
     }
 };
 

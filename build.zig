@@ -248,7 +248,7 @@ const Modules = struct {
             const tests = b.addTest(.{
                 .name = name,
                 .root_module = module,
-                .max_rss = ByteSize.mib(190).bytes,
+                .max_rss = ByteSize.mib(200).bytes,
             });
 
             const tests_run = &b.addRunArtifact(tests).step;

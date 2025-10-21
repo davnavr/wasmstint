@@ -684,12 +684,17 @@ fn realMain() Error!i32 {
 
     var module_allocated = module_allocating.finish() catch unreachable;
 
+    var interp_allocator = allocators.PageAllocation.init(
+        .{},
+        arguments.@"max-stack-size" *| 16,
+    ) catch oom("interpreter stack reserve");
+    defer if (builtin.mode == .Debug) interp_allocator.deinit();
+
     var interp: wasmstint.Interpreter = undefined;
-    defer interp.deinit(std.heap.page_allocator);
+    defer interp.deinit(interp_allocator.allocator());
     {
-        // TODO: allocator for interpreter that uses windows VirtualAlloc reserve
         const start = interp.init(
-            std.heap.page_allocator,
+            interp_allocator.allocator(),
             .{ .stack_reserve = arguments.@"max-stack-size" },
         ) catch oom("interpreter stack");
 
