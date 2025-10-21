@@ -121,7 +121,7 @@ pub fn init(
         var region_size: windows.SIZE_T = 0;
         virtual_memory.nt.free(allocated_pages.ptr, &region_size, .RELEASE) catch {};
     } else {
-        posix.munmap(allocated_pages);
+        virtual_memory.mman.unmap(allocated_pages) catch {};
     };
 
     const preallocate_offset = if (options.guard_pages) page_size else 0;
@@ -345,7 +345,7 @@ pub fn deinit(ctx: *PageAllocation) void {
         var region_size: windows.SIZE_T = 0;
         virtual_memory.nt.free(pages.ptr, &region_size, .RELEASE) catch {};
     } else {
-        posix.munmap(pages);
+        virtual_memory.mman.unmap(pages) catch {};
     }
 }
 

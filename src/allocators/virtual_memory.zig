@@ -278,6 +278,18 @@ pub const mman = struct {
             error.AccessDenied => unreachable, // `mprotect` on mapped file
         };
     }
+
+    pub const UnmapError = posix.UnexpectedError || Oom;
+
+    pub fn unmap(pages: []align(page_size_min) u8) UnmapError!void {
+        // Zig wrapper `std.posix.munmap` doesn't allow freeing in the middle of existing mapping.
+        switch (posix.errno(posix.system.munmap(pages.ptr, pages.len))) {
+            .SUCCESS => {},
+            .INVAL => unreachable,
+            .NOMEM => return error.OutOfMemory,
+            else => |bad| return posix.unexpectedErrno(bad),
+        }
+    }
 };
 
 const std = @import("std");

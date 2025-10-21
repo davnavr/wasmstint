@@ -95,7 +95,7 @@ pub fn map(
             .{ .WRITE = single_syscall, .READ = single_syscall },
             .{},
         ) catch return Oom.OutOfMemory;
-        errdefer posix.munmap(pages);
+        errdefer virtual_memory.mman.unmap(pages) catch {};
 
         // This recreates windows commit behavior
         // TODO: Linux has mremap so only other Unix targets are required to do this
@@ -148,7 +148,7 @@ pub fn free(mem: *MemInst) void {
         virtual_memory.nt.free(mem.base, &freed_size, .RELEASE) catch {};
         std.debug.assert(freed_size == mem.limit);
     } else {
-        posix.munmap(@alignCast(mem.base[0..mem.limit]));
+        virtual_memory.mman.unmap(@alignCast(mem.base[0..mem.limit])) catch {};
     }
 
     mem.* = undefined;
