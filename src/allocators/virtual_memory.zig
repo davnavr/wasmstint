@@ -45,6 +45,8 @@ pub const nt = struct {
                     );
                 }
             }
+
+            std.debug.assert(@as(u32, @bitCast(AllocationType{})) == 0);
         }
     };
 
@@ -127,6 +129,7 @@ pub const nt = struct {
 
     pub const ProtectError = posix.UnexpectedError || Oom || error{
         ConflictingAddresses,
+        SystemResources,
     };
 
     pub fn protect(
@@ -140,12 +143,12 @@ pub const nt = struct {
             windows.GetCurrentProcess(),
             @ptrCast(&base_address),
             &region_size,
-            new_protection,
+            @intFromEnum(new_protection),
             &old_protect,
         );
 
         return switch (status) {
-            .SUCCESS => @bitCast(old_protect),
+            .SUCCESS => @enumFromInt(old_protect),
             .NO_MEMORY => return Oom.OutOfMemory,
             .INSUFFICIENT_RESOURCES => return error.SystemResources,
             .INVALID_HANDLE => unreachable,

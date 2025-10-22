@@ -80,7 +80,11 @@ pub fn main() u8 {
     const fmt_json_path = std.unicode.fmtUtf8(arguments.run);
 
     const cwd = std.fs.cwd();
-    const json_file = FileContent.readFileZ(cwd, arguments.run) catch |e| switch (e) {
+    var json_file = file_content.readFilePortable(
+        cwd,
+        arguments.run,
+        if (builtin.os.tag == .windows) scratch.allocator() else arena.allocator(),
+    ) catch |e| switch (e) {
         error.OutOfMemory => @panic("oom"),
         else => |io_err| {
             stderr.writeErrorPreamble();
@@ -88,6 +92,7 @@ pub fn main() u8 {
             return 1;
         },
     };
+    _ = scratch.reset(.retain_capacity);
     defer if (builtin.mode == .Debug) json_file.deinit();
 
     var json_dir = std.fs.cwd().openDir(
@@ -217,7 +222,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const allocators = @import("allocators");
 const wasmstint = @import("wasmstint");
 const cli_args = @import("cli_args");
-const FileContent = @import("FileContent");
+const file_content = @import("file_content");
 const Parser = @import("Parser.zig");
 const State = @import("State.zig");
 const Imports = @import("Imports.zig");

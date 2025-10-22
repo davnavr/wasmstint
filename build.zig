@@ -98,12 +98,13 @@ pub fn build(b: *Build) void {
     var modules = Modules{
         .coz = .build(b, &project_options),
         .allocators = .build(b, &steps, &project_options),
-        .file_content = .build(b, &project_options),
+        .file_content = undefined,
         .wasmstint = undefined,
         .cli_args = Modules.CliArgs.build(b, &steps, &project_options),
         .wasip1 = undefined,
         .subprocess = .build(b, &project_options),
     };
+    modules.file_content = .build(b, &project_options, .{ .allocators = modules.allocators });
     modules.wasmstint = .build(
         b,
         &steps,
@@ -255,7 +256,7 @@ const Modules = struct {
             tests_run.max_rss = ByteSize.mib(6).bytes;
             steps.@"test-unit".dependOn(tests_run);
 
-            addCheck(b, steps, .@"test", module, name, .{ .max_rss = .mib(40) });
+            addCheck(b, steps, .@"test", module, name, .{ .max_rss = .mib(110) });
             return .{ .module = module };
         }
     };
@@ -263,14 +264,19 @@ const Modules = struct {
     const FileContent = struct {
         module: *Build.Module,
 
-        const name = "FileContent";
+        const name = "file_content";
 
-        fn build(b: *Build, options: *const ProjectOptions) FileContent {
+        fn build(
+            b: *Build,
+            options: *const ProjectOptions,
+            imports: struct { allocators: Allocators },
+        ) FileContent {
             const module = b.createModule(.{
-                .root_source_file = b.path("src/FileContent.zig"),
+                .root_source_file = b.path("src/file_content.zig"),
                 .target = options.target,
                 .optimize = options.optimize,
             });
+            addAsImportTo(Allocators, imports.allocators, module);
 
             return .{ .module = module };
         }

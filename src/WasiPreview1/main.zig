@@ -536,7 +536,12 @@ fn realMain() Error!i32 {
         break :args forwarded.arguments();
     };
 
-    const wasm_binary = FileContent.readFileZ(cwd, arguments.module) catch |e| switch (e) {
+    _ = scratch.reset(.retain_capacity);
+    var wasm_binary = file_content.readFilePortable(
+        cwd,
+        arguments.module,
+        if (builtin.os.tag == .windows) scratch.allocator() else arena.allocator(),
+    ) catch |e| switch (e) {
         error.OutOfMemory => oom("module bytes"),
         else => |io_err| return fail.format(
             error.GenericError,
@@ -910,7 +915,7 @@ fn mainLoop(
 const std = @import("std");
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
-const FileContent = @import("FileContent");
+const file_content = @import("file_content");
 const allocators = @import("allocators");
 const wasmstint = @import("wasmstint");
 const cli_args = @import("cli_args");

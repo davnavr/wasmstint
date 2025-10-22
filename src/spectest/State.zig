@@ -142,11 +142,13 @@ pub fn processCommand(
 fn openModuleContents(
     state: *State,
     filename: [:0]const u8,
+    contents_allocator: std.mem.Allocator,
     output: Output,
-) Error!FileContent {
-    return FileContent.readFileZ(
+) Error!file_content.FileContent {
+    return file_content.readFilePortable(
         state.script_dir,
         filename,
+        contents_allocator,
     ) catch |e| switch (e) {
         error.OutOfMemory => @panic("oom"),
         else => |io_err| failFmt(
@@ -204,7 +206,11 @@ fn processModuleCommand(
         break :has_name entry;
     } else null;
 
-    const module_binary = try state.openModuleContents(module.filename, output);
+    const module_binary = try state.openModuleContents(
+        module.filename,
+        state.module_arena.allocator(),
+        output,
+    );
     const fmt_filename = std.unicode.fmtUtf8(module.filename);
     // errdefer module_binary.deinit();
 
@@ -1094,10 +1100,11 @@ fn processAssertExhaustion(
 fn openAssertionModuleContents(
     state: *State,
     command: *const Parser.Command.AssertWithModule,
+    arena: *ArenaAllocator,
     output: Output,
-) Error!?FileContent {
+) Error!?file_content.FileContent {
     return switch (command.module_type) {
-        .binary => try state.openModuleContents(command.filename, output),
+        .binary => try state.openModuleContents(command.filename, arena.allocator(), output),
         .text => null,
     };
 }
@@ -1109,7 +1116,7 @@ fn processAssertInvalid(
     arena: *ArenaAllocator,
 ) Error!void {
     const fmt_filename = std.unicode.fmtUtf8(command.filename);
-    const module_binary = (try state.openAssertionModuleContents(command, output)) orelse {
+    const module_binary = (try state.openAssertionModuleContents(command, arena, output)) orelse {
         output.print("skipping text module \"{f}\"\n", .{fmt_filename});
         return;
     };
@@ -1188,7 +1195,7 @@ fn processAssertMalformed(
     arena: *ArenaAllocator,
 ) Error!void {
     const fmt_filename = std.unicode.fmtUtf8(command.filename);
-    const module_binary = (try state.openAssertionModuleContents(command, output)) orelse {
+    const module_binary = (try state.openAssertionModuleContents(command, arena, output)) orelse {
         output.print("skipping text module \"{f}\"\n", .{fmt_filename});
         return;
     };
@@ -1271,7 +1278,7 @@ fn processAssertUninstantiable(
     arena: *ArenaAllocator,
 ) Error!void {
     const fmt_filename = std.unicode.fmtUtf8(command.filename);
-    const module_binary = (try state.openAssertionModuleContents(command, output)) orelse {
+    const module_binary = (try state.openAssertionModuleContents(command, arena, output)) orelse {
         output.print("skipping text module \"{f}\"\n", .{fmt_filename});
         return;
     };
@@ -1368,7 +1375,7 @@ fn processAssertUnlinkable(
     arena: *ArenaAllocator,
 ) Error!void {
     const fmt_filename = std.unicode.fmtUtf8(command.filename);
-    const module_binary = (try state.openAssertionModuleContents(command, output)) orelse {
+    const module_binary = (try state.openAssertionModuleContents(command, arena, output)) orelse {
         output.print("skipping text module \"{f}\"\n", .{fmt_filename});
         return;
     };
@@ -1452,7 +1459,7 @@ fn processAssertUnlinkable(
 const std = @import("std");
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
-const FileContent = @import("FileContent");
+const file_content = @import("file_content");
 const wasmstint = @import("wasmstint");
 const ModuleInst = wasmstint.runtime.ModuleInst;
 const Interpreter = wasmstint.Interpreter;
