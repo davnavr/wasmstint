@@ -1664,6 +1664,7 @@ pub fn dispatch(
 
     const api = Api.fromHostFunc(callee.func);
     std.debug.assert(@intFromPtr(api.hostFunc()) == @intFromPtr(callee.func));
+    std.log.debug("call {t}", .{api});
     switch (api) {
         .proc_exit => {
             // rval - The exit code returned by the process.

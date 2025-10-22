@@ -447,7 +447,7 @@ fn logger(
 
 pub const std_options = std.Options{
     .logFn = logger,
-    .log_level = if (builtin.mode == .Debug) .debug else .warn,
+    .log_level = .debug,
 };
 
 pub fn main() void {

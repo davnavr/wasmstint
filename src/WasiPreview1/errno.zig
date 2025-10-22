@@ -164,12 +164,13 @@ pub const Errno = enum(u16) {
 
     pub fn format(num: Errno, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (num) {
-            .success => try writer.writeAll(@tagName(num)),
-            else => try writer.print("{t}: {s}", .{ num, num.message() orelse "unknown" }),
+            inline .success => |known| try writer.writeAll(comptime @tagName(known)),
+            else => try writer.print("{t}: {s}", .{ num, num.message().? }),
+            _ => try writer.print("0x{X:0>4}: unknown", .{@intFromEnum(num)}),
         }
     }
 
-    const unexpected: Errno = @enumFromInt(404);
+    const unexpected: Errno = @enumFromInt(0xFFFF);
 
     pub fn mapError(err: Error) Errno {
         return switch (err) {
