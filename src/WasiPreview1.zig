@@ -255,24 +255,30 @@ const environ_sizes_get = environ_api.sizes_get;
 
 const InitIovsError = pointer.OobError || error{InvalidArgument};
 
-// TODO: std.heap.stackFallback + only do portion of ciovecs; if OOM happens, do not return Errno.nomem to guest!
-// ^ stack buffer to allow minimum of 1 (C)Iovec
-fn initIoVectorList(
-    comptime List: type,
-    comptime GuestVec: type,
-    comptime HostVec: type,
-) fn (*MemInst, pointer.ConstPointer(GuestVec), len: u32, *ArenaAllocator) InitIovsError!List {
+fn IoVecList(comptime GuestVec: type, comptime HostVec: type) type {
     return struct {
+        list: []const HostVec,
+        total_len: u32,
+
+        // Always allow at least one vector to be read/written.
+        const ListAllocator = std.heap.StackFallbackAllocator(@sizeOf(HostVec));
+
+        const List = @This();
+
+        fn listAllocator(scratch: *ArenaAllocator) ListAllocator {
+            return std.heap.stackFallback(@sizeOf(HostVec), scratch.allocator());
+        }
+
         fn init(
             mem: *MemInst,
             ptr: pointer.ConstPointer(GuestVec),
             len: u32,
-            // Should be *std.heap.StackBufferAllocator
-            scratch: *ArenaAllocator,
+            list_allocator: *ListAllocator,
         ) InitIovsError!List {
             const iovs = try pointer.ConstSlice(GuestVec).init(mem, ptr, len);
             var list = std.ArrayListUnmanaged(HostVec).empty;
-            list.ensureTotalCapacityPrecise(scratch.allocator(), iovs.items.len) catch {};
+            const allocator = list_allocator.get();
+            list.ensureTotalCapacityPrecise(allocator, iovs.items.len) catch {};
             var total_len: u32 = 0;
             for (0..iovs.items.len) |i| {
                 if (i > 0) {
@@ -289,27 +295,21 @@ fn initIoVectorList(
                 total_len = std.math.add(u32, total_len, ciovec_len) catch |e| switch (e) {
                     error.Overflow => return error.InvalidArgument,
                 };
-                list.appendAssumeCapacity(HostVec.init(ciovec)); // Should be list.append, breaking on OOM
+                list.appendBounded(HostVec.init(ciovec)) catch if (i == 0) {
+                    unreachable;
+                } else {
+                    break;
+                };
             }
 
-            return .{ .list = list.items, .total_len = total_len };
+            std.debug.assert(list.items.len >= @min(1, len));
+            return List{ .list = list.items, .total_len = total_len };
         }
-    }.init;
+    };
 }
 
-const Iovs = struct {
-    list: []const File.Iovec,
-    total_len: u32,
-
-    const init = initIoVectorList(Iovs, Iovec, File.Iovec);
-};
-
-const Ciovs = struct {
-    list: []const File.Ciovec,
-    total_len: u32,
-
-    const init = initIoVectorList(Ciovs, Ciovec, File.Ciovec);
-};
+const Iovs = IoVecList(Iovec, File.Iovec);
+const Ciovs = IoVecList(Ciovec, File.Ciovec);
 
 /// Return the resolution of a clock.
 ///
@@ -641,7 +641,8 @@ fn fd_pread(
     var scratch = wasi.acquireScratch();
     defer wasi.releaseScratch(scratch);
 
-    const iovs = Iovs.init(mem, iovs_ptr, iovs_len, &scratch) catch |e| return .mapError(e);
+    var iovs_allocator = Iovs.listAllocator(&scratch);
+    const iovs = Iovs.init(mem, iovs_ptr, iovs_len, &iovs_allocator) catch |e| return .mapError(e);
 
     ret_ptr.write(
         mem,
@@ -728,7 +729,8 @@ fn fd_pwrite(
     var scratch = wasi.acquireScratch();
     defer wasi.releaseScratch(scratch);
 
-    const ciovs = Ciovs.init(mem, iovs_ptr, iovs_len, &scratch) catch |e| return .mapError(e);
+    var iovs_allocator = Iovs.listAllocator(&scratch);
+    const ciovs = Ciovs.init(mem, iovs_ptr, iovs_len, &iovs_allocator) catch |e| return .mapError(e);
 
     ret_ptr.write(
         mem,
@@ -762,7 +764,8 @@ fn fd_read(
     var scratch = wasi.acquireScratch();
     defer wasi.releaseScratch(scratch);
 
-    const iovs = Iovs.init(mem, iovs_ptr, iovs_len, &scratch) catch |e| return .mapError(e);
+    var iovs_allocator = Iovs.listAllocator(&scratch);
+    const iovs = Iovs.init(mem, iovs_ptr, iovs_len, &iovs_allocator) catch |e| return .mapError(e);
 
     ret_ptr.write(
         mem,
@@ -927,7 +930,8 @@ fn fd_write(
     var scratch = wasi.acquireScratch();
     defer wasi.releaseScratch(scratch);
 
-    const ciovs = Ciovs.init(mem, iovs_ptr, iovs_len, &scratch) catch |e| return .mapError(e);
+    var ciovs_allocator = Iovs.listAllocator(&scratch);
+    const ciovs = Ciovs.init(mem, iovs_ptr, iovs_len, &ciovs_allocator) catch |e| return .mapError(e);
 
     ret_ptr.write(
         mem,
@@ -1561,7 +1565,8 @@ fn sock_recv(
     var scratch = wasi.acquireScratch();
     defer wasi.releaseScratch(scratch);
 
-    const iovs = Iovs.init(mem, iovs_ptr, iovs_len, &scratch) catch |e| return .mapError(e);
+    var iovs_allocator = Iovs.listAllocator(&scratch);
+    const iovs = Iovs.init(mem, iovs_ptr, iovs_len, &iovs_allocator) catch |e| return .mapError(e);
 
     const result = socket.sock_recv(iovs.list, iovs.total_len, ri_flags) catch |e|
         return .mapError(e);
@@ -1603,7 +1608,8 @@ fn sock_send(
     var scratch = wasi.acquireScratch();
     defer wasi.releaseScratch(scratch);
 
-    const ciovs = Ciovs.init(mem, iovs_ptr, iovs_len, &scratch) catch |e| return .mapError(e);
+    var ciovs_allocator = Iovs.listAllocator(&scratch);
+    const ciovs = Ciovs.init(mem, iovs_ptr, iovs_len, &ciovs_allocator) catch |e| return .mapError(e);
 
     ret_ptr.write(
         mem,
