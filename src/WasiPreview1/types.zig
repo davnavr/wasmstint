@@ -286,6 +286,29 @@ pub const Rights = packed struct(u64) {
     pub const validate = validateFlags(Rights);
 };
 
+fn hashINodeOrDeviceNumber(seed: u64, n: u64) u64 {
+    // A perfect hash function is needed since programs could depend on `INode` and `Device`
+    // to uniquely identify a file on a filesystem.
+
+    // Integer hash functions are reversible, so by definition, they are perfect hash functions.
+    // These aren't really "seedable", so this simply adds the `seed` before hashing.
+    return std.hash.int(seed +% n);
+}
+
+/// File serial number that is unique within its file system.
+///
+/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#inode
+pub const INode = packed struct(u64) {
+    n: u64,
+
+    pub const HashSeed = enum(u64) { _ };
+
+    /// `inode` numbers exposed to WASI guests are hashed
+    pub fn init(seed: HashSeed, n: u64) INode {
+        return INode{ .n = hashINodeOrDeviceNumber(@intFromEnum(seed), n) };
+    }
+};
+
 /// Identifier for a device containing a file system.
 ///
 /// Can be used in combination with `INode` to uniquely identify a file or directory in the
@@ -299,7 +322,7 @@ pub const Device = packed struct(u64) {
 
     /// `dev` numbers exposed to WASI guests are hashed.
     pub fn init(seed: HashSeed, n: u64) Device {
-        return Device{ .n = std.hash.Wyhash.hash(@intFromEnum(seed), std.mem.asBytes(&n)) };
+        return Device{ .n = hashINodeOrDeviceNumber(@intFromEnum(seed), n) };
     }
 };
 
@@ -412,20 +435,6 @@ pub const DirCookie = packed struct(u64) {
         } else {
             try writer.print("{d}", .{cookie.n});
         }
-    }
-};
-
-/// File serial number that is unique within its file system.
-///
-/// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#inode
-pub const INode = packed struct(u64) {
-    n: u64,
-
-    pub const HashSeed = enum(u64) { _ };
-
-    /// `inode` numbers exposed to WASI guests are hashed
-    pub fn init(seed: HashSeed, n: u64) INode {
-        return INode{ .n = std.hash.Wyhash.hash(@intFromEnum(seed), std.mem.asBytes(&n)) };
     }
 };
 

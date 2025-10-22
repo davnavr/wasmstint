@@ -64,7 +64,6 @@ csprng: Csprng,
 fd_table: Fd.Table,
 args: Arguments,
 environ: Environ,
-// TODO: Ensure these use integer hash functions/perfect hashes
 device_hash_seed: types.Device.HashSeed,
 inode_hash_seed: types.INode.HashSeed,
 
