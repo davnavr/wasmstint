@@ -167,11 +167,70 @@ pub fn initUnicodeString(str: []u16) std.os.windows.UNICODE_STRING {
     };
 }
 
+/// https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_stat_lx_information
+pub const FILE_STAT_LX_INFORMATION = extern struct {
+    FileId: std.os.windows.FILE_INTERNAL_INFORMATION,
+    CreationTime: std.os.windows.LARGE_INTEGER,
+    LastAccessTime: std.os.windows.LARGE_INTEGER,
+    LastWriteTime: std.os.windows.LARGE_INTEGER,
+    ChangeTime: std.os.windows.LARGE_INTEGER,
+    AllocationSize: std.os.windows.LARGE_INTEGER,
+    EndOfFile: std.os.windows.LARGE_INTEGER,
+    FileAttributes: std.os.windows.ULONG,
+    ReparseTag: std.os.windows.ULONG,
+    NumberOfLinks: std.os.windows.ULONG,
+    EffectiveAccess: std.os.windows.ACCESS_MASK,
+    LxFlags: std.os.windows.ULONG,
+    LxUid: std.os.windows.ULONG,
+    LxGid: std.os.windows.ULONG,
+    LxMode: Mode,
+    LxDeviceIdMajor: std.os.windows.ULONG,
+    LxDeviceIdMinor: std.os.windows.ULONG,
+
+    pub const Mode = packed struct(std.os.windows.ULONG) {
+        _0: u6 = 0,
+        exec: bool = false,
+        write: bool = false,
+        read: bool = false,
+        _9: u3 = 0,
+        fmt: Fmt,
+        _16: u16 = 0,
+
+        test {
+            try std.testing.expectEqual(
+                0x4000 | 0x0100,
+                @as(u32, @bitCast(Mode{ .read = true, .fmt = .dir })),
+            );
+            try std.testing.expectEqual(
+                0x8000 | 0x0100 | 0x0080,
+                @as(u32, @bitCast(Mode{ .read = true, .write = true, .fmt = .reg })),
+            );
+        }
+    };
+
+    pub const Fmt = enum(u4) {
+        /// Directory.
+        dir = 0x4,
+        /// Character special.
+        chr = 0x2,
+        /// Pipe.
+        fifo = 0x1,
+        /// Regular.
+        reg = 0x8,
+        _,
+    };
+
+    test {
+        _ = Mode;
+    }
+};
+
 pub fn FileInformationType(comptime class: std.os.windows.FILE_INFORMATION_CLASS) type {
     return switch (class) {
         .FileBasicInformation => std.os.windows.FILE_BASIC_INFORMATION,
         .FilePositionInformation => std.os.windows.FILE_POSITION_INFORMATION,
         .FileAllInformation => std.os.windows.FILE_ALL_INFORMATION,
+        .FileStatLxInformation => FILE_STAT_LX_INFORMATION,
         else => @compileError("specify FILE_INFORMATION_ struct for " ++ @tagName(class)),
     };
 }
@@ -384,11 +443,127 @@ pub fn isMsysOrCygwinPty(handle: Handle) NamedPipePty {
     return NamedPipePty.fromName(name[1..]);
 }
 
+/// Implements `fd_filestat_get()` for `HANDLE`s not referring to a file or directory on disk.
+///
+/// Asserts that `GetFileType(handle)` does not return `FileType.disk`.
+pub fn fileStatNonDisk(
+    handle: Handle,
+    device_hash_seed: wasi_types.Device.HashSeed,
+    inode_hash_seed: wasi_types.INode.HashSeed,
+) WasiError!wasi_types.FileStat {
+    // `VolumeSerialNumber` of real files are 32-bit, leaving high 32-bits
+    // for our use.
+    const fake_device = struct {
+        pub const real_console = 0xC0C0_4EA1_0000_0000;
+        pub const msys_console: u64 = 0xC0C0_3575_2000_0000;
+        pub const cygwin_console: u64 = 0xC0C0_C793_3140_0000;
+    };
+
+    // Since non-file handles have no `IndexNumber`, and handles are meaningless
+    // when a process dies anyway, this makes up an `inode` based on the handle
+    // value. Unfortunately, Windows doesn't provide a way to get a unique ID
+    // for different handles that refer to the same "thing".
+    const ino_from_handle = wasi_types.INode.init(inode_hash_seed, @intFromPtr(handle));
+
+    const file_type = GetFileType(handle);
+    switch (file_type) {
+        .disk => unreachable,
+        .char => return wasi_types.FileStat{
+            .dev = wasi_types.Device.init(
+                device_hash_seed,
+                fake_device.real_console,
+            ),
+            .ino = ino_from_handle,
+            .type = wasi_types.FileType.character_device,
+            .nlink = 1, // can't make hardlinks
+            // standard stream sizes seem to always be zero on Linux
+            .size = wasi_types.FileSize{ .bytes = 0 },
+
+            // On Linux, atim and mtim seem to be the current time/last time a
+            // print (idk about reads) occurred, while ctim was when the stream was
+            // created.
+            //
+            // Windows doesn't track times for console handles, because they aren't
+            // files. Possible workarounds:
+            // - For `ctim`, could cheat and use the time WASI state was
+            //   initialized as the creation time
+            // - Could make a new `File` implementation (`console_file.zig`, would
+            //   also use `Read/WriteConsole`) that updates times on every
+            //   read/write, but that is annoying
+            // - Could cheat and supply current time every time `fd_filestat_get` is
+            //   called
+            //
+            // Since there are other ways for a guest to detect a Windows host
+            // anyways, this just gives up and puts zeroes.
+            .atim = wasi_types.Timestamp.zero,
+            .mtim = wasi_types.Timestamp.zero,
+            .ctim = wasi_types.Timestamp.zero,
+        },
+        .pipe => pipe: {
+            const pipe_pty = isMsysOrCygwinPty(handle);
+            if (pipe_pty.tag == .not_a_pty) {
+                break :pipe;
+            }
+
+            const INodeBits = packed struct(u64) {
+                type: NamedPipePty.Type,
+                number: u7,
+                low_installation_bits: u54,
+            };
+
+            return wasi_types.FileStat{
+                .dev = wasi_types.Device.init(
+                    device_hash_seed,
+                    switch (pipe_pty.tag) {
+                        .not_a_pty => unreachable,
+                        .msys => fake_device.msys_console,
+                        .cygwin => fake_device.cygwin_console,
+                    } | std.math.shr(u64, pipe_pty.id.installation_key, 54),
+                ),
+                .ino = wasi_types.INode.init(
+                    inode_hash_seed,
+                    @as(
+                        u64,
+                        @bitCast(INodeBits{
+                            .type = pipe_pty.id.type,
+                            .number = pipe_pty.id.number,
+                            .low_installation_bits = @truncate(pipe_pty.id.installation_key),
+                        }),
+                    ),
+                ),
+                .type = wasi_types.FileType.character_device,
+                // Windows allows fetching the # of pipe instances
+                .nlink = 1,
+                // Windows allows peeking size of data in pipe
+                .size = wasi_types.FileSize{ .bytes = 0 },
+                // See `.char` handler for why these are zero
+                .atim = wasi_types.Timestamp.zero,
+                .mtim = wasi_types.Timestamp.zero,
+                .ctim = wasi_types.Timestamp.zero,
+            };
+        },
+        .unknown => switch (std.os.windows.GetLastError()) {
+            .SUCCESS => {},
+            else => |bad| return std.os.windows.unexpectedError(bad),
+        },
+        .remote, _ => {},
+    }
+
+    std.log.err(
+        "fd_filestat_get on unknown windows file type {s} {X}",
+        .{ std.enums.tagName(FileType, file_type) orelse "invalid", file_type },
+    );
+    return error.AccessDenied;
+}
+
 const std = @import("std");
 const Handle = std.os.windows.HANDLE;
 const NtStatus = std.os.windows.NTSTATUS;
 const wideLiteral = std.unicode.wtf8ToWtf16LeStringLiteral;
+const WasiError = @import("../errno.zig").Error;
+const wasi_types = @import("../types.zig");
 
 test {
     _ = NamedPipePty;
+    _ = FILE_STAT_LX_INFORMATION;
 }
