@@ -191,6 +191,8 @@ pub fn ntQueryInformationFile(
     );
 }
 
+/// Includes console handle detection logic that is not provided by the equivalent `ntdll` API.
+///
 /// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfiletype
 pub extern "kernel32" fn GetFileType(hFile: Handle) FileType;
 

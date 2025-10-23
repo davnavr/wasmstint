@@ -14,6 +14,8 @@ pub const FileSize = packed struct(u64) { bytes: u64 };
 pub const Timestamp = packed struct(u64) {
     ns: u64,
 
+    pub const zero = Timestamp{ .ns = 0 };
+
     const win_time_unit_per_ns = 100;
 
     pub fn fromWindowsSystemTimeRelative(time: std.os.windows.LARGE_INTEGER) Timestamp {

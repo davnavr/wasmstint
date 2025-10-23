@@ -40,6 +40,77 @@ pub fn fileStat(
                 .SUCCESS, .BUFFER_OVERFLOW => break :info info,
                 .INFO_LENGTH_MISMATCH => unreachable,
                 .ACCESS_DENIED => return error.AccessDenied,
+                .INVALID_DEVICE_REQUEST => {
+                    // `VolumeSerialNumber` of real files are 32-bit, leaving high 32-bits
+                    // for our use.
+                    const fake_device = struct {
+                        pub const real_console = 0xC0C0_4EA1_0000_0000;
+                        pub const msys_console = 0xC0C0_3575_0000_0000;
+                        pub const cygwin_console = 0xC0C0_C731_0000_0000;
+
+                        comptime {
+                            for (@typeInfo(@This()).@"struct".decls) |d| {
+                                const value: u64 = @field(@This(), d.name);
+                                if (value & 0xFFFF_FFFF != 0) {
+                                    @compileError(d.name ++ " must only have high 32-bits set");
+                                }
+                            }
+                        }
+                    };
+
+                    // Since non-file handles have no `IndexNumber`, and handles are meaningless
+                    // when a process dies anyway, this makes up an `inode` based on the handle
+                    // value. Unfortunately, Windows doesn't provide a way to get a unique ID
+                    // for different handles that refer to the same "thing".
+                    const inode = wasi_types.INode.init(inode_hash_seed, @intFromPtr(fd));
+
+                    switch (windows.GetFileType(fd)) {
+                        .disk => unreachable,
+                        .char => return wasi_types.FileStat{
+                            .dev = wasi_types.Device.init(
+                                device_hash_seed,
+                                fake_device.real_console,
+                            ),
+                            .ino = inode,
+                            .type = wasi_types.FileType.character_device,
+                            .nlink = 1, // can't make hardlinks
+                            .size = wasi_types.FileSize{ .bytes = 0 },
+
+                            // On Linux, atim and mtim seem to be the current time/last time a
+                            // print (idk about reads) occurred, while ctim was when the stream was
+                            // created.
+                            //
+                            // Windows doesn't track times for console handles, because they aren't
+                            // files. Possible workarounds:
+                            // - For `ctim`, could cheat and use the time WASI state was
+                            //   initialized as the creation time
+                            // - Could make a new `File` implementation (`console_file.zig`, would
+                            //   also use `Read/WriteConsole`) that updates times on every
+                            //   read/write, but that is annoying
+                            // - Could cheat and supply current time every time `fd_filestat_get` is
+                            //   called
+                            //
+                            // Since there are other ways for a guest to detect a Windows host
+                            // anyways, this just gives up and puts zeroes.
+                            .atim = wasi_types.Timestamp.zero,
+                            .mtim = wasi_types.Timestamp.zero,
+                            .ctim = wasi_types.Timestamp.zero,
+                        },
+                        .pipe => {
+                            // TODO: `std.fs.File.isCygwinPty`
+                            // Zig wrapper does useless work, it checks if file is console
+                            std.log.err("TODO: windows named pipe in fd_filestat_get", .{});
+                        },
+                        .unknown => switch (std.os.windows.GetLastError()) {
+                            .SUCCESS => {},
+                            else => |bad| return std.os.windows.unexpectedError(bad),
+                        },
+                        .remote, _ => {},
+                    }
+
+                    std.log.err("TODO: fd_filestat_get on unknown windows file type", .{});
+                    return error.AccessDenied;
+                },
                 else => return std.os.windows.unexpectedStatus(status),
             }
         };

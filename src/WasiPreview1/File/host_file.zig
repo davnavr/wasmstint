@@ -123,15 +123,19 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
             .INVALID_PARAMETER => unreachable,
             .ACCESS_DENIED => return Error.AccessDenied,
             .INVALID_DEVICE_REQUEST => {
+                const char_device = types.FdStat.File{
+                    .type = types.FileType.character_device,
+                    .flags = types.FdFlags{ .valid = .{} },
+                };
+
                 // Not a file, check for a console handle (standard streams)
                 switch (host_os.windows.GetFileType(self.file.handle)) {
                     .disk => unreachable,
-                    .char => return types.FdStat.File{
-                        .type = types.FileType.character_device,
-                        .flags = types.FdFlags{ .valid = .{} },
-                    },
+                    .char => return char_device,
                     .pipe => {
                         // Unable to determine socket type (getsockopt with winsock?)
+                        // TODO: `std.fs.File.isCygwinPty` => `return char_device`
+                        // Zig wrapper does useless work, it checks if file is console
                         log.err("encountered windows pipe in fd_fdstat_get", .{});
                     },
                     .unknown => switch (std.os.windows.GetLastError()) {
