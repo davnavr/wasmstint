@@ -113,6 +113,7 @@ pub fn build(b: *Build) void {
     );
     modules.wasip1 = Modules.Wasip1.build(
         b,
+        &steps,
         &project_options,
         .{ .wasmstint = modules.wasmstint, .coz = modules.coz, .allocators = modules.allocators },
     );
@@ -372,6 +373,7 @@ const Modules = struct {
 
         fn build(
             b: *Build,
+            steps: *const TopLevelSteps,
             options: *const ProjectOptions,
             imports: struct { wasmstint: Wasmstint, coz: Coz, allocators: Allocators },
         ) Wasip1 {
@@ -388,6 +390,17 @@ const Modules = struct {
             addAsImportTo(Coz, imports.coz, module);
             addAsImportTo(Allocators, imports.allocators, module);
 
+            const tests = b.addTest(.{
+                .name = name,
+                .root_module = module,
+                .max_rss = ByteSize.mib(194).bytes,
+            });
+
+            const tests_run = &b.addRunArtifact(tests).step;
+            tests_run.max_rss = ByteSize.mib(6).bytes;
+            steps.@"test-unit".dependOn(tests_run);
+
+            addCheck(b, steps, .@"test", module, name, .{ .max_rss = .mib(106) });
             return .{ .module = module };
         }
     };

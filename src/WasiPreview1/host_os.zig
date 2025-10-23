@@ -45,35 +45,29 @@ pub fn fileStat(
                     // for our use.
                     const fake_device = struct {
                         pub const real_console = 0xC0C0_4EA1_0000_0000;
-                        pub const msys_console = 0xC0C0_3575_0000_0000;
-                        pub const cygwin_console = 0xC0C0_C731_0000_0000;
-
-                        comptime {
-                            for (@typeInfo(@This()).@"struct".decls) |d| {
-                                const value: u64 = @field(@This(), d.name);
-                                if (value & 0xFFFF_FFFF != 0) {
-                                    @compileError(d.name ++ " must only have high 32-bits set");
-                                }
-                            }
-                        }
+                        pub const msys_console: u64 = 0xC0C0_3575_2000_0000;
+                        pub const cygwin_console: u64 = 0xC0C0_C793_3140_0000;
                     };
 
                     // Since non-file handles have no `IndexNumber`, and handles are meaningless
                     // when a process dies anyway, this makes up an `inode` based on the handle
                     // value. Unfortunately, Windows doesn't provide a way to get a unique ID
                     // for different handles that refer to the same "thing".
-                    const inode = wasi_types.INode.init(inode_hash_seed, @intFromPtr(fd));
+                    const ino_from_handle =
+                        wasi_types.INode.init(inode_hash_seed, @intFromPtr(fd));
 
-                    switch (windows.GetFileType(fd)) {
+                    const file_type = windows.GetFileType(fd);
+                    switch (file_type) {
                         .disk => unreachable,
                         .char => return wasi_types.FileStat{
                             .dev = wasi_types.Device.init(
                                 device_hash_seed,
                                 fake_device.real_console,
                             ),
-                            .ino = inode,
+                            .ino = ino_from_handle,
                             .type = wasi_types.FileType.character_device,
                             .nlink = 1, // can't make hardlinks
+                            // standard stream sizes seem to always be zero on Linux
                             .size = wasi_types.FileSize{ .bytes = 0 },
 
                             // On Linux, atim and mtim seem to be the current time/last time a
@@ -96,10 +90,50 @@ pub fn fileStat(
                             .mtim = wasi_types.Timestamp.zero,
                             .ctim = wasi_types.Timestamp.zero,
                         },
-                        .pipe => {
-                            // TODO: `std.fs.File.isCygwinPty`
-                            // Zig wrapper does useless work, it checks if file is console
-                            std.log.err("TODO: windows named pipe in fd_filestat_get", .{});
+                        .pipe => pipe: {
+                            const pipe_pty = windows.isMsysOrCygwinPty(fd);
+                            if (pipe_pty.tag == .not_a_pty) {
+                                break :pipe;
+                            }
+
+                            const INodeBits = packed struct(u64) {
+                                type: windows.NamedPipePty.Type,
+                                number: u7,
+                                low_installation_bits: u54,
+                            };
+
+                            return wasi_types.FileStat{
+                                .dev = wasi_types.Device.init(
+                                    device_hash_seed,
+                                    switch (pipe_pty.tag) {
+                                        .not_a_pty => unreachable,
+                                        .msys => fake_device.msys_console,
+                                        .cygwin => fake_device.cygwin_console,
+                                    } | std.math.shr(u64, pipe_pty.id.installation_key, 54),
+                                ),
+                                .ino = wasi_types.INode.init(
+                                    inode_hash_seed,
+                                    @as(
+                                        u64,
+                                        @bitCast(INodeBits{
+                                            .type = pipe_pty.id.type,
+                                            .number = pipe_pty.id.number,
+                                            .low_installation_bits = @truncate(
+                                                pipe_pty.id.installation_key,
+                                            ),
+                                        }),
+                                    ),
+                                ),
+                                .type = wasi_types.FileType.character_device,
+                                // Windows allows fetching the # of pipe instances
+                                .nlink = 1,
+                                // Windows allows peeking size of data in pipe
+                                .size = wasi_types.FileSize{ .bytes = 0 },
+                                // See `.char` handler for why these are zero
+                                .atim = wasi_types.Timestamp.zero,
+                                .mtim = wasi_types.Timestamp.zero,
+                                .ctim = wasi_types.Timestamp.zero,
+                            };
                         },
                         .unknown => switch (std.os.windows.GetLastError()) {
                             .SUCCESS => {},
@@ -108,7 +142,7 @@ pub fn fileStat(
                         .remote, _ => {},
                     }
 
-                    std.log.err("TODO: fd_filestat_get on unknown windows file type", .{});
+                    std.log.err("fd_filestat_get on unknown windows file type {X}", .{file_type});
                     return error.AccessDenied;
                 },
                 else => return std.os.windows.unexpectedStatus(status),
@@ -171,3 +205,9 @@ pub fn fileStat(
 const std = @import("std");
 const builtin = @import("builtin");
 const wasi_types = @import("types.zig");
+
+test {
+    if (builtin.os.tag == .windows) {
+        _ = windows;
+    }
+}

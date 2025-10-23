@@ -1741,4 +1741,5 @@ const coz = @import("coz");
 
 test {
     _ = WasiPreview1;
+    _ = @import("WasiPreview1/host_os.zig");
 }

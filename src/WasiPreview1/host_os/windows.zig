@@ -205,6 +205,190 @@ pub const FileType = enum(std.os.windows.DWORD) {
     _,
 };
 
+/// An MSYS2 or Cygwin named pipe used as a Unix-style pty (pseudoterminal).
+pub const NamedPipePty = packed struct(u76) {
+    tag: Tag,
+    id: Id,
+
+    pub const Tag = enum(u2) { msys, cygwin, not_a_pty };
+
+    pub const not_a_pty = NamedPipePty{
+        .tag = .not_a_pty,
+        .id = @bitCast(@as(u74, std.math.maxInt(u74))),
+    };
+
+    pub const Id = packed struct(u74) {
+        installation_key: u64,
+        /// Cygwin seems to allow at most 128 ptys.
+        number: u7,
+        type: Type,
+    };
+
+    pub const Type = enum(u3) {
+        echoloop,
+        @"from-master",
+        @"from-master-nat",
+        @"to-master",
+        @"to-master-nat",
+        unknown,
+
+        fn get(s: []const u16) ?Type {
+            if (s.len == 0) {
+                return null;
+            }
+
+            inline for (comptime std.enums.values(Type)) |kind| {
+                switch (kind) {
+                    .unknown => {},
+                    inline else => |known| {
+                        if (std.mem.eql(u16, wideLiteral(@tagName(known)), s)) {
+                            return kind;
+                        }
+                    },
+                }
+            }
+
+            return Type.unknown;
+        }
+    };
+
+    fn wideCharToHexDigit(c: u16) error{InvalidCharacter}!u4 {
+        return @intCast(switch (c) {
+            '0'...'9' => c - '0',
+            'a'...'f' => c - 'a' + 10,
+            else => return error.InvalidCharacter,
+        });
+    }
+
+    test wideCharToHexDigit {
+        try std.testing.expectEqual(0, wideCharToHexDigit('0'));
+        try std.testing.expectEqual(9, wideCharToHexDigit('9'));
+        try std.testing.expectEqual(0xA, wideCharToHexDigit('a'));
+        try std.testing.expectEqual(0xF, wideCharToHexDigit('f'));
+    }
+
+    fn fromName(name: []const u16) NamedPipePty {
+        const kind_end = std.mem.indexOfScalar(u16, name, '-') orelse return .not_a_pty;
+        const kind_str = name[0..kind_end];
+        const after_kind = name[kind_end + 1 ..];
+
+        const kind: Tag = if (std.mem.eql(u16, wideLiteral("msys"), kind_str))
+            .msys
+        else if (std.mem.eql(u16, wideLiteral("cygwin"), kind_str))
+            .cygwin
+        else
+            return .not_a_pty;
+
+        if (after_kind.len <= 16 or after_kind[16] != '-') {
+            return .not_a_pty;
+        }
+
+        var installation_key: u64 = 0;
+        const installation_key_digits = after_kind[0..16];
+        for (0..8) |i| {
+            const hi_digit = installation_key_digits[i * 2];
+            const lo_digit = installation_key_digits[(i * 2) + 1];
+            const hi_nibble = @shlExact(
+                @as(u8, wideCharToHexDigit(hi_digit) catch return .not_a_pty),
+                4,
+            );
+            const lo_nibble = wideCharToHexDigit(lo_digit) catch return .not_a_pty;
+            const byte: u8 = hi_nibble | @as(u8, lo_nibble);
+            installation_key = @shlExact(installation_key, 8) | @as(u64, byte);
+        }
+
+        const after_installation_key = after_kind[17..];
+        if (!std.mem.startsWith(u16, after_installation_key, wideLiteral("pty"))) {
+            return .not_a_pty;
+        }
+        const after_pty = after_installation_key["pty".len..];
+
+        const pty_number_end = std.mem.indexOfScalar(u16, after_pty, '-') orelse return .not_a_pty;
+        const pty_number_digits = after_pty[0..pty_number_end];
+
+        const id = NamedPipePty.Id{
+            .installation_key = installation_key,
+            .number = number: {
+                var pty_number: u7 = 0;
+                for (pty_number_digits) |d| {
+                    const n: u7 = switch (d) {
+                        '0'...'9' => @intCast(d - '0'),
+                        else => return .not_a_pty,
+                    };
+
+                    pty_number = std.math.mul(u7, pty_number, 10) catch return .not_a_pty;
+                    pty_number = std.math.add(u7, pty_number, n) catch return .not_a_pty;
+                }
+
+                break :number pty_number;
+            },
+            .type = NamedPipePty.Type.get(after_pty[pty_number_end + 1 ..]) orelse
+                return .not_a_pty,
+        };
+
+        return NamedPipePty{ .tag = kind, .id = id };
+    }
+
+    test fromName {
+        try std.testing.expectEqual(
+            NamedPipePty{
+                .tag = .msys,
+                .id = Id{
+                    .installation_key = 0x1888_AE32_E00D_56AA,
+                    .number = 0,
+                    .type = Type.@"from-master",
+                },
+            },
+            NamedPipePty.fromName(wideLiteral("msys-1888ae32e00d56aa-pty0-from-master")),
+        );
+    }
+};
+
+/// Similar to `std.fs.File.isCygwinPty`, except it assumes that `handle` is already a named pipe,
+/// and also returns the "installation key", the `pty` number, and the type of pty.
+pub fn isMsysOrCygwinPty(handle: Handle) NamedPipePty {
+    const min_len_bytes = "\\msys-0123456789ABCDEF-ptyN-echoloop".len * 2;
+    const max_len_bytes = "\\cygwin-0123456789ABCDEF-ptyNNN-from-master-nat".len * 2;
+
+    const FileNameInfo = extern struct {
+        byte_len: std.os.windows.DWORD,
+        name: [@divExact(max_len_bytes, 2)]std.os.windows.WCHAR,
+    };
+
+    var name_info: FileNameInfo = undefined;
+    {
+        var io_status_block: std.os.windows.IO_STATUS_BLOCK = undefined;
+        const query_status = std.os.windows.ntdll.NtQueryInformationFile(
+            handle,
+            &io_status_block,
+            @ptrCast(&name_info),
+            @sizeOf(FileNameInfo),
+            .FileNameInformation,
+        );
+
+        switch (query_status) {
+            .SUCCESS => {},
+            .INVALID_PARAMETER => unreachable,
+            // .BUFFER_OVERFLOW,
+            else => return .not_a_pty,
+        }
+    }
+
+    std.debug.assert(name_info.byte_len % 2 == 0);
+    if (name_info.byte_len < min_len_bytes or max_len_bytes < name_info.byte_len) {
+        return .not_a_pty;
+    }
+
+    const name: []const u16 = name_info.name[0..@divExact(name_info.byte_len, 2)];
+    std.debug.assert(name[0] == '\\');
+    return NamedPipePty.fromName(name[1..]);
+}
+
 const std = @import("std");
 const Handle = std.os.windows.HANDLE;
 const NtStatus = std.os.windows.NTSTATUS;
+const wideLiteral = std.unicode.wtf8ToWtf16LeStringLiteral;
+
+test {
+    _ = NamedPipePty;
+}
