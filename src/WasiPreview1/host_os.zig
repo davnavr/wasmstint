@@ -19,6 +19,24 @@ pub fn fileStat(
     if (builtin.os.tag == .windows) {
         // Kernel32 equivalent is `GetFileInformationByHandleEx`
 
+        const all_info = info: {
+            var io: std.os.windows.IO_STATUS_BLOCK = undefined;
+            var info: std.os.windows.FILE_ALL_INFORMATION = undefined;
+            const status = windows.ntQueryInformationFile(fd, &io, .FileAllInformation, &info);
+            switch (status) {
+                .SUCCESS, .BUFFER_OVERFLOW => break :info info,
+                .INFO_LENGTH_MISMATCH => unreachable,
+                .ACCESS_DENIED => return error.AccessDenied,
+                .INVALID_INFO_CLASS => unreachable,
+                .NOT_SUPPORTED => unreachable,
+                inline .INVALID_DEVICE_REQUEST => |bad| {
+                    std.log.debug("could not obtain volume information: " ++ @tagName(bad), .{});
+                    return windows.fileStatNonDisk(fd, device_hash_seed, inode_hash_seed);
+                },
+                else => return std.os.windows.unexpectedStatus(status),
+            }
+        };
+
         // Can't use `FILE_FS_OBJECTID_INFORMATION`, since 16-byte GUID can't fit in 64-bit dev #
         const fs_volume_info = info: {
             var io: std.os.windows.IO_STATUS_BLOCK = undefined;
@@ -42,86 +60,8 @@ pub fn fileStat(
             }
         };
 
-        const dev = wasi_types.Device.init(device_hash_seed, fs_volume_info.VolumeSerialNumber);
-
-        // Introduced to support Windows Subsystem for Linux (likely version 1) with
-        // Windows 10 update 1803.
-        const stat_lx_support = struct {
-            var flag = std.atomic.Value(bool).init(true);
-            const min_version = std.Target.Os.WindowsVersion.win10_rs4;
-            const is_min_version = builtin.os.isAtLeast(.windows, min_version) == true;
-            const likely_has: std.builtin.BranchHint = if (is_min_version) .likely else .none;
-        };
-
-        if (stat_lx_support.flag.load(.unordered)) {
-            @branchHint(stat_lx_support.likely_has);
-            var io: std.os.windows.IO_STATUS_BLOCK = undefined;
-            var stat_lx_info: windows.FILE_STAT_LX_INFORMATION = undefined;
-            const status = windows.ntQueryInformationFile(
-                fd,
-                &io,
-                .FileStatLxInformation,
-                &stat_lx_info,
-            );
-            switch (status) {
-                .SUCCESS, .BUFFER_OVERFLOW => {
-                    @branchHint(stat_lx_support.likely_has);
-                    return wasi_types.FileStat{
-                        .dev = dev,
-                        .ino = wasi_types.INode.init(
-                            inode_hash_seed,
-                            @bitCast(stat_lx_info.FileId.IndexNumber),
-                        ),
-                        // Possible that this handles other files types when in WSL. If this
-                        // code is in a WSL file system, that the call to query `STAT_LX` is
-                        // likely to be supported anyway.
-                        .type = switch (stat_lx_info.LxMode.fmt) {
-                            .dir => wasi_types.FileType.directory,
-                            .chr => .character_device,
-                            .reg => .regular_file,
-                            .fifo, _ => .unknown,
-                        },
-                        .nlink = stat_lx_info.NumberOfLinks,
-                        .size = wasi_types.FileSize{ .bytes = @bitCast(stat_lx_info.EndOfFile) },
-                        // See code querying `FILE_ALL_INFORMATION` below for why these times are
-                        // used.
-                        .atim = wasi_types.Timestamp.fromWindowsSystemTimeRelative(
-                            stat_lx_info.LastAccessTime,
-                        ),
-                        .mtim = wasi_types.Timestamp.fromWindowsSystemTimeRelative(
-                            stat_lx_info.LastWriteTime,
-                        ),
-                        .ctim = wasi_types.Timestamp.fromWindowsSystemTimeRelative(
-                            stat_lx_info.ChangeTime,
-                        ),
-                    };
-                },
-                .INVALID_INFO_CLASS, .NOT_SUPPORTED => {
-                    std.log.debug("fallback to querying FILE_ALL_INFORMATION: {t}", .{status});
-                    stat_lx_support.flag.store(false, .monotonic);
-                },
-                .INVALID_PARAMETER => unreachable,
-                .ACCESS_DENIED => return error.AccessDenied,
-                .INVALID_DEVICE_REQUEST => unreachable,
-                else => return std.os.windows.unexpectedStatus(status),
-            }
-        }
-
-        const all_info = info: {
-            var io: std.os.windows.IO_STATUS_BLOCK = undefined;
-            var info: std.os.windows.FILE_ALL_INFORMATION = undefined;
-            const status = windows.ntQueryInformationFile(fd, &io, .FileAllInformation, &info);
-            switch (status) {
-                .SUCCESS, .BUFFER_OVERFLOW => break :info info,
-                .INFO_LENGTH_MISMATCH => unreachable,
-                .ACCESS_DENIED => return error.AccessDenied,
-                .INVALID_DEVICE_REQUEST => unreachable,
-                else => return std.os.windows.unexpectedStatus(status),
-            }
-        };
-
         return wasi_types.FileStat{
-            .dev = dev,
+            .dev = wasi_types.Device.init(device_hash_seed, fs_volume_info.VolumeSerialNumber),
             .ino = wasi_types.INode.init(
                 inode_hash_seed,
                 @bitCast(all_info.InternalInformation.IndexNumber),
