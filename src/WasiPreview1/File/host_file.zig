@@ -162,21 +162,55 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
             .type = if (info.StandardInformation.Directory != 0) .directory else .regular_file,
             .flags = types.FdFlags{ .valid = fd_flags },
         };
-    } else {
-        // TODO: On Linux, more efficient to use statx, asking only for mode
-        const @"type" = types.FileType.fromZigKind(
-            (try self.file.stat()).kind,
-        ) catch |e| switch (e) {
-            error.UnknownSocketType => .unknown, // TODO: Requires getsockopt
-        };
+    } else return .{
+        .flags = types.FdFlags{
+            .valid = types.FdFlags.Valid.fromFlagsPosix(
+                try host_os.unix_like.fcntlGetFl(self.file.handle),
+            ),
+        },
+        .type = type: {
+            if (builtin.os.tag == .linux) fallback: {
+                var statx: std.os.linux.Statx = undefined;
+                host_os.linux.statx(
+                    self.file.handle,
+                    "",
+                    .{ .EMPTY_PATH = true, .SYMLINK_NOFOLLOW = true },
+                    .{ .TYPE = true },
+                    &statx,
+                ) catch |e| switch (e) {
+                    error.StatxNotSupported => {
+                        log.debug("statx is not supported, falling back to stat", .{});
+                        break :fallback;
+                    },
+                    error.MissingRequestedFields => {
+                        @branchHint(.cold);
+                        log.debug("statx did not provide type: 0x{X}", .{statx.mask});
+                        break :type .unknown; // exotic file type
+                    },
+                    else => |err| return err,
+                };
 
-        const access = try host_os.unix_like.fcntlGetFl(self.file.handle);
+                const S = std.os.linux.S;
 
-        return .{
-            .type = @"type",
-            .flags = types.FdFlags{ .valid = types.FdFlags.Valid.fromFlagsPosix(access) },
-        };
-    }
+                break :type switch (statx.mode & S.IFMT) {
+                    S.IFDIR => .directory,
+                    S.IFCHR => .character_device,
+                    S.IFBLK => .block_device,
+                    S.IFREG => .regular_file,
+                    S.IFIFO => .unknown,
+                    S.IFLNK => .symbolic_link,
+                    S.IFSOCK => .unknown, // TODO: Requires getsockopt
+                    else => .unknown,
+                };
+            }
+
+            break :type types.FileType.fromZigKind(
+                (try self.file.stat()).kind,
+            ) catch |e| switch (e) {
+                error.UnknownSocketType => .unknown, // TODO: Requires getsockopt
+            };
+        },
+    };
 }
 
 fn fd_filestat_get(

@@ -3,6 +3,7 @@
 // Platform specific modules.
 pub const windows = @import("host_os/windows.zig");
 pub const unix_like = @import("host_os/unix_like.zig");
+pub const linux = @import("host_os/linux.zig");
 
 pub const Fd = std.posix.fd_t;
 
@@ -101,5 +102,9 @@ const wasi_types = @import("types.zig");
 test {
     if (builtin.os.tag == .windows) {
         _ = windows;
+    }
+
+    if (builtin.os.tag == .linux) {
+        _ = linux;
     }
 }

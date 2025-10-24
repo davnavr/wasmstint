@@ -486,14 +486,7 @@ fn accessSubPathLinux(
             @sizeOf(OpenHow),
         );
 
-        // Can't use `std.posix.errno`, since it checks `errno` when `libc` is linked.
-        const result_signed: isize = @bitCast(result);
-        const errno: std.os.linux.E = if (-4096 < result_signed and result_signed < 0)
-            @enumFromInt(-result_signed)
-        else
-            .SUCCESS;
-
-        switch (errno) {
+        switch (host_os.linux.errno(result)) {
             .SUCCESS => break @intCast(result),
             .INTR => continue,
             .NOSYS => {
@@ -542,6 +535,9 @@ fn AccessSubPathReturnType(comptime Accessor: type) type {
 
 /// Depends on the host OS having a way to open a path relative to an opened directory handle/fd
 /// while also indicating if a symlink would have been opened.
+///
+/// This is an implementation of the path resolution algorithm described
+/// [here](https://github.com/WebAssembly/wasi-filesystem/blob/main/path-resolution.md).
 fn accessSubPathPortable(
     dir: std.fs.Dir,
     scratch: *ArenaAllocator,
@@ -1079,7 +1075,6 @@ fn pathFileStatGet(
 ) Error!types.FileStat {
     defer std.posix.close(new_fd);
     _ = scratch;
-    // TODO: Use statx "." NOFOLLOW on Linux
     const stat: types.FileStat = try host_os.fileStat(new_fd, device_hash_seed, inode_hash_seed);
     log.debug("path_filestat_get {f} -> {f}", .{ path, stat });
     return stat;

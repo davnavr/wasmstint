@@ -854,7 +854,7 @@ fn mainLoop(
     table_allocator: std.mem.Allocator,
     wasi: *WasiPreview1,
     memory: ?*wasmstint.runtime.MemInst,
-) !?i32 {
+) Error!?i32 {
     var local_fuel = max_fuel;
     const fuel = switch (fuel_checking) {
         .unlimited => &local_fuel,
