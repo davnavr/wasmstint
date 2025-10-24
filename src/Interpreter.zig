@@ -22,6 +22,7 @@ const Value = extern union {
     f64: f64,
     externref: ExternRef,
     funcref: FuncRef,
+    i64x2: @Vector(2, i64),
 
     const Tag = enum {
         i32,
@@ -5133,7 +5134,7 @@ const opcode_handlers = struct {
         var vals = ValStack.init(sp, interp);
 
         const top: *align(@sizeOf(Value)) Value = &vals.topArray(interp, 1)[0];
-        const is_null = std.mem.allEqual(u8, std.mem.asBytes(top), 0);
+        const is_null = @reduce(.Or, top.i64x2) == 0;
         // std.debug.dumpHex(std.mem.asBytes(top));
         // std.debug.print(
         //     "> ref.is_null (ref.extern {?}) -> {}\n",
