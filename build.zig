@@ -254,7 +254,7 @@ const Modules = struct {
             });
 
             const tests_run = &b.addRunArtifact(tests).step;
-            tests_run.max_rss = ByteSize.mib(6).bytes;
+            tests_run.max_rss = ByteSize.mib(16).bytes;
             steps.@"test-unit".dependOn(tests_run);
 
             addCheck(b, steps, .@"test", module, name, .{ .max_rss = .mib(110) });
@@ -316,7 +316,7 @@ const Modules = struct {
             });
 
             const tests_run = &b.addRunArtifact(tests).step;
-            tests_run.max_rss = ByteSize.mib(8).bytes;
+            tests_run.max_rss = ByteSize.mib(19).bytes;
             steps.@"test-unit".dependOn(tests_run);
             addCheck(
                 b,
@@ -358,7 +358,7 @@ const Modules = struct {
             });
 
             const tests_run = &b.addRunArtifact(tests).step;
-            tests_run.max_rss = ByteSize.mib(8).bytes;
+            tests_run.max_rss = ByteSize.mib(16).bytes;
             steps.@"test-unit".dependOn(tests_run);
 
             addCheck(b, steps, .@"test", module, name, .{ .max_rss = .mib(109) });
@@ -393,11 +393,11 @@ const Modules = struct {
             const tests = b.addTest(.{
                 .name = name,
                 .root_module = module,
-                .max_rss = ByteSize.mib(194).bytes,
+                .max_rss = ByteSize.mib(219).bytes,
             });
 
             const tests_run = &b.addRunArtifact(tests).step;
-            tests_run.max_rss = ByteSize.mib(6).bytes;
+            tests_run.max_rss = ByteSize.mib(16).bytes;
             steps.@"test-unit".dependOn(tests_run);
 
             addCheck(b, steps, .@"test", module, name, .{ .max_rss = .mib(106) });
@@ -792,7 +792,7 @@ fn buildWasiSamplePrograms(
 
         // Can't add to "check" step, since it would require building the WASM.
         const run_test = b.addRunArtifact(invoke_test);
-        run_test.step.max_rss = ByteSize.mib(8).bytes;
+        run_test.step.max_rss = ByteSize.mib(16).bytes;
         test_step.dependOn(&run_test.step);
     }
 }

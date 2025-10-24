@@ -478,7 +478,7 @@ fn accessSubPathLinux(
 
     const path_z = try scratch.allocator().dupeZ(u8, path.bytes());
     const new_fd: std.os.linux.fd_t = while (true) {
-        const rc = std.os.linux.syscall4(
+        const result = std.os.linux.syscall4(
             std.os.linux.SYS.openat2,
             @bitCast(@as(isize, dir.fd)),
             @intFromPtr(path_z.ptr),
@@ -486,8 +486,15 @@ fn accessSubPathLinux(
             @sizeOf(OpenHow),
         );
 
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => break @intCast(rc),
+        // Can't use `std.posix.errno`, since it checks `errno` when `libc` is linked.
+        const result_signed: isize = @bitCast(result);
+        const errno: std.os.linux.E = if (-4096 < result_signed and result_signed < 0)
+            @enumFromInt(-result_signed)
+        else
+            .SUCCESS;
+
+        switch (errno) {
+            .SUCCESS => break @intCast(result),
             .INTR => continue,
             .NOSYS => {
                 supported.flag.store(false, .monotonic);
