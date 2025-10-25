@@ -188,6 +188,14 @@ pub const FuncAddr = extern struct {
         }
     };
 
+    pub fn hash(func: FuncAddr, hasher: anytype) void {
+        std.hash.autoHash(hasher, func.module_or_host);
+        switch (func.expanded()) {
+            .wasm => |wasm| std.hash.autoHash(hasher, wasm.idx),
+            .host => |host| std.hash.autoHash(hasher, host.data),
+        }
+    }
+
     pub fn format(func: FuncAddr, writer: *Writer) Writer.Error!void {
         try func.expanded().format(writer);
     }

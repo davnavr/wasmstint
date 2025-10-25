@@ -99,6 +99,13 @@ pub const ModuleInst = packed struct(usize) {
                 });
         }
 
+        pub fn startFuncAddr(inst: *const Header) FuncAddr.Nullable {
+            return if (inst.module.inner.raw.start.get()) |start_idx|
+                @bitCast(inst.funcAddr(start_idx))
+            else
+                FuncAddr.Nullable.null;
+        }
+
         pub inline fn tableInsts(inst: *const Header) []const *TableInst {
             return inst.tables[0..inst.module.inner.raw.table_count];
         }

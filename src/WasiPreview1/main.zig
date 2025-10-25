@@ -704,7 +704,7 @@ fn realMain() Error!i32 {
         ) catch oom("interpreter stack");
 
         var instantiate_fuel = max_fuel;
-        const instantiate_state = start.instantiateModule(
+        const instantiate_state = start.awaiting_host.instantiateModule(
             arena.allocator(),
             &module_allocated,
             &instantiate_fuel,
@@ -820,7 +820,7 @@ fn realMain() Error!i32 {
                 &starting_fuel,
             ) catch |e| switch (e) {
                 error.OutOfMemory => oom("entrypoint function call"),
-                error.ValueTypeOrCountMismatch => return fail.format(
+                error.SignatureMismatch => return fail.format(
                     error.GenericError,
                     "expected entrypoint function {f} to have no arguments",
                     .{fmt_entrypoint},
@@ -880,13 +880,13 @@ fn mainLoop(
             } else {
                 // WASM spec says start (not to be confused with `_start`) has no results
                 // All WASI entrypoints also have no results.
-                std.debug.assert(host.result_types.len == 0);
+                std.debug.assert(host.resultTypes().len == 0);
                 return null;
             },
             .awaiting_validation => unreachable,
             .call_stack_exhaustion => oom("call stack exhausted"), // TODO: print stack trace
             .interrupted => |*interrupt| {
-                switch (interrupt.cause) {
+                switch (interrupt.cause().*) {
                     .out_of_fuel => switch (fuel_checking) {
                         .limited => {
                             // TODO: print stack trace
@@ -903,11 +903,9 @@ fn mainLoop(
 
                 break :next interrupt.resumeExecution(fuel);
             },
-            .trapped => |*trapped| return fail.format(
-                error.GenericError,
-                "trap {t}",
-                .{trapped.trap.code},
-            ),
+            .trapped => |*trapped| {
+                return fail.format(error.GenericError, "trap {t}", .{trapped.trap().code});
+            },
         };
     }
 }

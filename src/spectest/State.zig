@@ -360,10 +360,11 @@ fn processRegisterCommand(
 }
 
 fn failCallStackExhausted(state: *const State, output: Output) Error {
+    const stack = &state.interpreter.stack;
     return failFmt(
         output,
         "call stack exhausted after {} frames\n{f}",
-        .{ state.interpreter.call_depth, state.interpreter.walkCallStack() },
+        .{ stack.call_depth, stack.walkCallStack() },
     );
 }
 
@@ -375,10 +376,10 @@ fn failInterpreterTrap(
 }
 
 fn failInterpreterInterrupted(
-    cause: Interpreter.InterruptionCause,
+    cause: *const Interpreter.InterruptionCause,
     output: Output,
 ) Error {
-    const message = switch (cause) {
+    const message = switch (cause.*) {
         .out_of_fuel => "interpreter ran out of fuel",
         .memory_grow, .table_grow => unreachable,
     };
@@ -573,12 +574,12 @@ fn expectResultValues(
     const result_state = switch (state.runToCompletion(interp, fuel, output, &state.module_arena)) {
         .awaiting_validation => unreachable,
         .call_stack_exhaustion => return state.failCallStackExhausted(output),
-        .trapped => |trap| return failInterpreterTrap(&trap.trap, output),
-        .interrupted => |interrupt| return failInterpreterInterrupted(interrupt.cause, output),
+        .trapped => |trap| return failInterpreterTrap(trap.trap(), output),
+        .interrupted => |interrupt| return failInterpreterInterrupted(interrupt.cause(), output),
         .awaiting_host => |awaiting| awaiting,
     };
 
-    std.debug.assert(state.interpreter.call_depth == 0);
+    std.debug.assert(state.interpreter.stack.call_depth == 0);
 
     const actual_results: []const Interpreter.TaggedValue =
         result_state.allocResults(scratch.allocator()) catch @panic("oom");
@@ -654,7 +655,7 @@ fn runToCompletion(
                 fuel,
             ) catch return interp,
             .interrupted => |*interrupt| {
-                switch (interrupt.cause) {
+                switch (interrupt.cause().*) {
                     .out_of_fuel => return interp,
                     .memory_grow => |*grow| {
                         wasmstint.runtime.paged_memory.grow(grow);
@@ -766,7 +767,7 @@ fn processActionCommand(
                 fuel,
             ) catch |e| switch (e) {
                 error.OutOfMemory => @panic("oom"),
-                error.ValueTypeOrCountMismatch => {
+                error.SignatureMismatch => {
                     const signature = callee.signature();
                     return if (signature.param_count != invoke.args.len) failFmt(
                         output,
@@ -951,9 +952,9 @@ fn expectTrap(
     const result_state = state.runToCompletion(interp, fuel, output, store_arena);
     const trap: *const Interpreter.Trap = switch (result_state) {
         .awaiting_validation => unreachable,
-        .trapped => |trapped| &trapped.trap,
+        .trapped => |trapped| trapped.trap(),
         .call_stack_exhaustion => return state.failCallStackExhausted(output),
-        .interrupted => |interrupt| return failInterpreterInterrupted(interrupt.cause, output),
+        .interrupted => |interrupt| return failInterpreterInterrupted(interrupt.cause(), output),
         .awaiting_host => |awaiting| return failInterpreterResults(
             awaiting,
             expected,
@@ -1073,9 +1074,12 @@ fn processAssertExhaustion(
     switch (state.runToCompletion(finished_action.invoke, &fuel, output, &state.module_arena)) {
         .awaiting_validation => unreachable,
         .call_stack_exhaustion => {},
-        .trapped => |trap| return failInterpreterTrap(&trap.trap, output),
-        .interrupted => |interrupt| if (interrupt.cause != .out_of_fuel) {
-            return failInterpreterInterrupted(interrupt.cause, output);
+        .trapped => |trap| return failInterpreterTrap(trap.trap(), output),
+        .interrupted => |interrupt| {
+            const cause = interrupt.cause();
+            if (cause.* != .out_of_fuel) {
+                return failInterpreterInterrupted(cause, output);
+            }
         },
         .awaiting_host => |awaiting| return failInterpreterResults(
             awaiting,
