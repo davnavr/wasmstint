@@ -104,7 +104,7 @@ pub const Values = struct {
                             @intFromPtr(base + code.inner.max_values),
                     );
                 },
-                .host => unreachable,
+                .host => {},
             }
         } else {
             stack.assertPtrInBounds(top.ptr);
@@ -235,7 +235,10 @@ pub fn walkCallStack(stack: *const Stack) Walker {
 pub const PushedFrame = struct {
     offset: Frame.Offset,
     frame: *Frame,
-    top: Top,
+
+    pub fn top(pushed: PushedFrame) Top {
+        return Top{ .ptr = pushed.frame.valueStackBase() };
+    }
 };
 
 pub const PushFrameError = error{ValidationNeeded} || Allocator.Error;
@@ -243,6 +246,9 @@ pub const PushFrameError = error{ValidationNeeded} || Allocator.Error;
 /// Pushes a new stack frame, assuming that there is enough space remaining in the stack.
 pub fn pushFrameWithinCapacity(
     stack: *Stack,
+    /// Refers to the top of the stack before the new frame is pushed.
+    ///
+    /// If `params == .preallocated`, then below `top` is are the arguments to pass.
     top: Top,
     instantiate_flag: *bool,
     comptime params: ParameterAllocation,
@@ -255,6 +261,9 @@ pub fn pushFrameWithinCapacity(
     };
 
     const prev_frame_ptr: ?*Frame = stack.frameAt(stack.current_frame);
+    if (prev_frame_ptr) |prev_frame| {
+        std.debug.assert(@intFromPtr(prev_frame.valueStackBase()) <= @intFromPtr(top.ptr));
+    }
 
     const frame_info = try FrameSize.calculate(callee, params);
     std.debug.assert(frame_info.allocated_size > frame_info.allocated_local_count);
@@ -269,15 +278,18 @@ pub fn pushFrameWithinCapacity(
     //     .{ callee, frame_info.allocated_size },
     // );
 
+    const signature = callee.signature();
+
+    const prev_frame_top = Top{
+        .ptr = top.ptr - switch (params) {
+            .allocate => 0,
+            .preallocated => signature.param_count,
+        },
+    };
     const prev_frame_checksum = if (builtin.mode != .Debug) {
         // no checksum
     } else if (prev_frame_ptr) |prev|
-        prev.calculateChecksum(stack, Top{
-            .ptr = top.ptr - switch (params) {
-                .allocate => 0,
-                .preallocated => callee.signature().param_count,
-            },
-        })
+        prev.calculateChecksum(stack, prev_frame_top)
     else
         0;
 
@@ -297,7 +309,7 @@ pub fn pushFrameWithinCapacity(
     new_frame.* = Frame{
         .checksum = prev_frame_checksum,
         .function = callee,
-        .signature = callee.signature(),
+        .signature = signature,
         .instantiate_flag = instantiate_flag,
         .local_count = .{ .total = frame_info.total_local_count },
         .prev_frame = stack.current_frame,
@@ -310,8 +322,8 @@ pub fn pushFrameWithinCapacity(
 
     const new_values =
         new_frame_slice[(frame_info.allocated_local_count + Frame.size_in_values)..];
-
     stack.assertSliceInBounds(new_values);
+    std.debug.assert(@intFromPtr(new_values.ptr) == @intFromPtr(new_frame.valueStackBase()));
 
     switch (callee.expanded()) {
         .host => {},
@@ -330,25 +342,18 @@ pub fn pushFrameWithinCapacity(
                 .stp = code.inner.side_table_ptr,
             };
 
-            const new_locals: []align(@sizeOf(Value)) Value = new_frame.localValues(stack);
-            std.debug.assert(@intFromPtr(new_locals.ptr) == @intFromPtr(new_frame_slice.ptr));
+            const new_locals: []align(@sizeOf(Value)) Value =
+                new_frame.localValues(stack)[signature.param_count..];
 
             // Zero the local variables that aren't parameters
-            @memset(
-                new_locals[callee.signature().param_count..],
-                std.mem.zeroes(Value),
-            );
+            @memset(new_locals, std.mem.zeroes(Value));
         },
     }
 
     stack.call_depth = new_call_depth;
     stack.current_frame = new_frame_offset;
 
-    return PushedFrame{
-        .offset = new_frame_offset,
-        .frame = new_frame,
-        .top = Top{ .ptr = new_values.ptr },
-    };
+    return PushedFrame{ .offset = new_frame_offset, .frame = new_frame };
 }
 
 /// Allocates space to ensure a future call to `CallStack.pushWithinCapacity` succeeds.
@@ -373,19 +378,21 @@ pub fn reserveFrame(
         return error.OutOfMemory;
 
     const old_cap: u32 = @intCast(stack.allocated.len);
-    const new_cap: u32 = @max(new_len, old_cap +| @max(1, old_cap / 2));
+    const new_cap: u32 = @max(old_cap, new_len);
+    const new_cap_exp: u32 = @max(new_cap, old_cap +| @max(1, old_cap / 2)); // 1.5x growth factor
+    std.debug.assert(new_cap <= new_cap_exp);
 
     const old_allocation = stack.allocated;
-    if (alloca.resize(old_allocation, new_cap)) {
-        stack.allocated = old_allocation[0..new_cap];
-    } else if (alloca.resize(old_allocation, new_len)) {
+    if (alloca.resize(old_allocation, new_cap_exp)) {
+        stack.allocated = old_allocation.ptr[0..new_cap_exp];
+    } else if (alloca.resize(old_allocation, new_cap)) {
         // Try to get as much memory as possible from the allocator
-        stack.allocated = old_allocation[0..new_len];
+        stack.allocated = old_allocation.ptr[0..new_cap];
     } else {
         // This branch means the allocator might not support `resize`
         const alignment = comptime std.mem.Alignment.fromByteUnits(@sizeOf(Value));
-        const new_allocation = alloca.alignedAlloc(Value, alignment, new_cap) catch
-            try alloca.alignedAlloc(Value, alignment, new_len);
+        const new_allocation = alloca.alignedAlloc(Value, alignment, new_cap_exp) catch
+            try alloca.alignedAlloc(Value, alignment, new_cap);
 
         errdefer comptime unreachable;
 
@@ -474,6 +481,7 @@ pub fn popFrame(
         .from_stack_top => {
             // Overlap is possible if # of results > # locals + size of `Frame`
             const results_src = value_stack[value_stack.len - results.len ..];
+            // std.log.debug("ret wrote to {*}", .{results.ptr});
             @memmove(results, results_src);
         },
         .manually => {
@@ -485,13 +493,13 @@ pub fn popFrame(
 
     stack.current_frame = prev_frame;
     stack.call_depth -= 1; // can't underflow, assumed call stack is not empty
-    const new_top = Top{ .ptr = results.ptr + results.len };
 
     if (stack.currentFrame()) |current| {
         const current_func = current.function.expanded();
         switch (current_func) {
             .wasm => if (builtin.mode == .Debug) {
-                const actual_checksum = current.calculateChecksum(stack, new_top);
+                const prev_top = Top{ .ptr = results.ptr };
+                const actual_checksum = current.calculateChecksum(stack, prev_top);
                 if (expected_checksum != actual_checksum) {
                     std.debug.panic(
                         "frame checksum mismatch for {f}:\nexpected: {X}\nactual: {X}",
@@ -505,7 +513,7 @@ pub fn popFrame(
 
     return PoppedFrame{
         .results = results,
-        .top = new_top,
+        .top = Top{ .ptr = results.ptr + results.len },
         .signature = signature,
         .info = if (builtin.mode == .Debug) .{
             .callee = popped_func,
@@ -684,9 +692,9 @@ pub const Frame = extern struct {
         top: Top,
     ) u128 {
         const locals = frame.localValues(stack);
-        const values_base = @intFromPtr(frame.valueStackBase());
-        std.debug.assert(values_base <= @intFromPtr(top.ptr));
-        const values = frame.valueStackBase()[0..(values_base - @intFromPtr(top.ptr))];
+        const values_base = frame.valueStackBase();
+        std.debug.assert(@intFromPtr(values_base) <= @intFromPtr(top.ptr));
+        const values = frame.valueStackBase()[0..(top.ptr - values_base)];
         stack.assertSliceInBounds(values);
 
         const frame_function = frame.function.expanded();
@@ -723,7 +731,7 @@ pub const Frame = extern struct {
         std.hash.autoHash(&hasher, frame.instantiate_flag);
         std.hash.autoHash(&hasher, @as(u32, frame.local_count.total));
         std.hash.autoHash(&hasher, frame.prev_frame);
-        std.hash.autoHash(&hasher, frame.wasm.eip); // IP and STP change
+        std.hash.autoHash(&hasher, frame.wasm); // TODO: See if IP and STP can be hashed
         hasher.update(std.mem.sliceAsBytes(values));
         const final = hasher.final();
         // std.debug.print("HASH RESULT = {X}\n", .{final});
@@ -816,10 +824,12 @@ pub const Walker = struct {
             return false;
         } else {
             const current_frame = walker.currentFrame().?; // call_depth mismatch
+            const prev_frame = current_frame.prev_frame;
             std.debug.assert( // previous frame must have lesser address
-                @intFromEnum(current_frame.prev_frame) <= @intFromEnum(walker.stack.current_frame),
+                prev_frame == .none or
+                    @intFromEnum(prev_frame) < @intFromEnum(walker.stack.current_frame),
             );
-            walker.stack.current_frame = current_frame.prev_frame;
+            walker.stack.current_frame = prev_frame;
             walker.stack.call_depth -= 1;
             return true;
         }
@@ -846,8 +856,9 @@ pub const Walker = struct {
     pub fn formatIp(ip: Module.Code.Ip, writer: *Writer) Writer.Error!void {
         try writer.print("0x{X:0>2}", .{ip[0]});
         if (std.enums.fromInt(@import("../opcodes.zig").ByteOpcode, ip[0])) |opcode| {
-            try writer.print(" ({t})", .{opcode});
+            try writer.print("({t})", .{opcode});
         }
+        try writer.print("@{X}", .{@intFromPtr(ip)});
     }
 
     pub fn format(initial_walker: Walker, writer: *Writer) Writer.Error!void {
@@ -855,11 +866,21 @@ pub const Walker = struct {
         const n = walker.stack.call_depth;
         while (walker.currentFrame()) |frame| {
             defer _ = walker.next();
-            try writer.print("#{[index]} @ {[addr]X} {[callee]f}\n", .{
+            try writer.print("#{[index]} {[addr]f} {[callee]f}", .{
                 .index = n - walker.stack.call_depth,
+                .addr = formatLowAddress(frame),
                 .callee = frame.function,
-                .addr = @intFromPtr(frame),
             });
+
+            switch (frame.function.expanded()) {
+                .wasm => try writer.print(
+                    " ip={[ip]f}",
+                    .{ .ip = std.fmt.Alt(Module.Code.Ip, formatIp){ .data = frame.wasm.ip } },
+                ),
+                .host => {},
+            }
+
+            try writer.writeByte('\n');
         }
     }
 };

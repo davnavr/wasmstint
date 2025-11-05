@@ -545,7 +545,7 @@ fn buildSpecificationTests(
         }
 
         var wast2json = b.addSystemCommand(&.{tool_paths.getOrDefault(.wast2json)});
-        wast2json.step.max_rss = ByteSize.mib(14).bytes;
+        wast2json.step.max_rss = ByteSize.mib(16).bytes;
         translate_step.dependOn(&wast2json.step);
         wast2json.setCwd(translate_output_dir);
         wast2json.addFileArg(tests_dir.path(b, tests_entry.name));

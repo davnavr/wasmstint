@@ -137,12 +137,11 @@ pub const TaggedValue = union(enum) {
 
         pub fn format(self: Formatter, writer: *Writer) Writer.Error!void {
             const value = self.value;
-            try writer.writeByte('(');
             switch (value.*) {
-                inline .i32, .i64 => |i| {
+                inline .i32, .i64 => |i, tag| {
                     const Unsigned = std.meta.Int(.unsigned, @typeInfo(@TypeOf(i)).int.bits);
 
-                    try writer.writeAll(@tagName(value.*));
+                    try writer.writeAll("(" ++ @tagName(tag));
                     try writer.print(".const 0x{X}", .{i});
                     if (self.options.int.signed or self.options.int.unsigned) {
                         try writer.writeAll(" (; ");
@@ -159,11 +158,11 @@ pub const TaggedValue = union(enum) {
                             try writer.print("unsigned={d}", .{@as(Unsigned, @bitCast(i))});
                         }
 
-                        try writer.writeAll(" ;)");
+                        try writer.writeAll(" ;))");
                     }
                 },
-                inline .f32, .f64 => |z| {
-                    try writer.writeAll(@tagName(value.*));
+                inline .f32, .f64 => |z, tag| {
+                    try writer.writeAll("(" ++ @tagName(tag));
                     try writer.print(".const {}", .{z});
                     if (self.options.float.hex) {
                         try writer.print(
@@ -176,11 +175,10 @@ pub const TaggedValue = union(enum) {
                             },
                         );
                     }
+                    try writer.writeByte(')');
                 },
                 inline .funcref, .externref => |*ref| try ref.format(writer),
             }
-
-            try writer.writeByte(')');
         }
     };
 

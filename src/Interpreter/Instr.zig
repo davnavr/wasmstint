@@ -197,17 +197,31 @@ pub inline fn dispatchNextOpcode(
         const current_frame: *const Stack.Frame = interp.stack.currentFrame().?;
         const wasm_func = current_frame.function.expanded().wasm;
         std.debug.assert(@intFromPtr(module.inner) == @intFromPtr(wasm_func.module.inner));
-        const max_val_stack = wasm_func.code().inner.max_values;
-        const val_stack_limit = current_frame.valueStackBase() + max_val_stack;
-        // std.debug.print("SP = {*} < MAX = {*}\n", .{ vals.stack.ptr, val_stack_limit });
-        if (@intFromPtr(sp.ptr) > @intFromPtr(val_stack_limit)) {
+
+        const vals_base: [*]align(@sizeOf(Value)) const Value = current_frame.valueStackBase();
+        if (@intFromPtr(vals_base) > @intFromPtr(sp.ptr)) {
             std.debug.panic(
-                "value stack {*} cannot exceed {*}, function has maximum of {} but sp is {}",
+                "value stack {*} underflowed stack {*} by {d} values",
+                .{ sp.ptr, vals_base, vals_base - sp.ptr },
+            );
+        }
+
+        const max_val_stack = wasm_func.code().inner.max_values;
+        const val_stack_limit = @intFromPtr(vals_base + max_val_stack);
+        // std.log.debug(
+        //     "ip={f}, sp={*}, base={*}",
+        //     .{ std.fmt.Alt(Ptr, Stack.Walker.formatIp){ .data = reader.next }, sp.ptr, vals_base },
+        // );
+        if (@intFromPtr(sp.ptr) > val_stack_limit) {
+            std.debug.panic(
+                "value stack 0x{X} cannot exceed 0x{X}, function has maximum of {d} < {d}\nip={*}\n{f}",
                 .{
-                    sp.ptr,
+                    @intFromPtr(sp.ptr),
                     val_stack_limit,
                     max_val_stack,
-                    sp.ptr - current_frame.valueStackBase(),
+                    sp.ptr - vals_base,
+                    reader.next,
+                    interp.stack.walkCallStack(),
                 },
             );
         }

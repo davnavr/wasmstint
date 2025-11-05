@@ -244,12 +244,7 @@ fn alloc(ctx: *anyopaque, len: usize, alignment: Alignment, ret_addr: usize) ?[*
         return null;
     }
 
-    const rounded_len: Len = tryAlignForward(len, page_size) catch return null;
-    // If shrinking, don't need to ask OS for more pages
-    if (rounded_len <= self.info.maximum) {
-        self.grow(rounded_len) catch return null;
-    }
-
+    self.grow(len) catch return null;
     self.current.len = len;
     return self.current.ptr;
 }
@@ -278,16 +273,19 @@ fn resize(
     }
 
     std.debug.assert(@intFromPtr(memory.ptr) == @intFromPtr(self.current.ptr));
-    std.debug.assert(memory.len == self.current.len);
-
-    if (new_len <= memory.len) {
-        self.current.len = new_len;
-        return true;
-    } else {
-        self.grow(new_len) catch return false;
-        self.current.len = new_len;
-        return true;
+    if (builtin.mode == .Debug and memory.len != self.current.len) {
+        std.debug.panic(
+            "expected {*} to have length {d}, is {d}",
+            .{ memory.ptr, self.current.len, memory.len },
+        );
     }
+
+    if (memory.len < new_len) {
+        self.grow(new_len) catch return false;
+    }
+
+    self.current.len = new_len;
+    return true;
 }
 
 fn remap(
@@ -322,7 +320,7 @@ fn free(
     std.debug.assert(@intFromPtr(memory.ptr) == @intFromPtr(self.current.ptr));
     std.debug.assert(memory.len == self.current.len);
 
-    self.current.len = 0;
+    self.current = &.{};
 }
 
 pub fn deinit(ctx: *PageAllocation) void {

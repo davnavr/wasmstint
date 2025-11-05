@@ -228,6 +228,7 @@ fn returnFromWasm(
         const frame = interp.stack.frameAt(interp.stack.current_frame).?;
         switch (frame.function.expanded()) {
             .wasm => |wasm| {
+                // std.log.debug("returning to WASM {f} with top {*}", .{ frame.function, popped.top.ptr });
                 const new_locals = Locals{ .ptr = frame.localValues(&interp.stack).ptr };
                 return Instr.init(frame.wasm.ip, frame.wasm.eip).dispatchNextOpcode(
                     popped.top,
@@ -275,8 +276,9 @@ inline fn invokeWithinWasm(
     const signature = callee.signature();
 
     // Overlap trick to avoid copying arguments.
-    const args: []align(@sizeOf(Value)) Value =
-        (saved_sp.saved_top.ptr - signature.param_count)[0..signature.param_count];
+    const args: []align(@sizeOf(Value)) Value = @constCast(
+        saved_sp.poppedValues()[0..signature.param_count],
+    );
     const current_frame = interp.stack.frameAt(interp.stack.current_frame).?;
 
     _ = updateWasmFrameState(current_frame, old_instr, old_stp);
@@ -286,9 +288,9 @@ inline fn invokeWithinWasm(
     //     .{ current_frame.function, callee, interp.call_depth, args },
     // );
 
-    const new_sp = Stack.Top{ .ptr = args.ptr + args.len };
+    const args_top = Stack.Top{ .ptr = args.ptr + args.len };
     const new_frame = interp.stack.pushFrameWithinCapacity(
-        new_sp,
+        args_top,
         &interp.dummy_instantiate_flag,
         .preallocated,
         callee,
@@ -316,9 +318,8 @@ inline fn invokeWithinWasm(
     // );
 
     std.debug.assert(@intFromPtr(current_frame) != @intFromPtr(new_frame.frame));
+    std.debug.assert(interp.stack.current_frame == new_frame.offset);
     std.debug.assert(@intFromPtr(old_instr.end) == @intFromPtr(current_frame.wasm.eip));
-    current_frame.wasm.ip = old_instr.next;
-    current_frame.wasm.stp = old_stp;
 
     const new_locals: []align(@sizeOf(Value)) Value = new_frame.frame.localValues(&interp.stack);
     std.debug.assert(@intFromPtr(new_locals.ptr) == @intFromPtr(args.ptr));
@@ -327,11 +328,11 @@ inline fn invokeWithinWasm(
     switch (callee.expanded()) {
         .wasm => |wasm| {
             // std.debug.print(
-            //     "AFTER CALL sp={*}\n",
-            //     .{new_vals.stack.ptr},
+            //     "AFTER CALL args={*}, sp={*}\n",
+            //     .{ args.ptr, new_frame.top().ptr },
             // );
             return Instr.init(new_frame.frame.wasm.ip, new_frame.frame.wasm.eip).dispatchNextOpcode(
-                new_sp,
+                new_frame.top(),
                 fuel,
                 new_frame.frame.wasm.stp,
                 Locals{ .ptr = new_locals.ptr },
@@ -345,7 +346,12 @@ inline fn invokeWithinWasm(
             //     "old_vals = {*}, new_vals = {*}, args = {*}\n",
             //     .{ old_vals.stack.ptr, new_vals.stack.ptr, args.ptr },
             // );
-            return Transition.awaitingHost(new_sp, interp, &host.func.signature, .calling_host);
+            return Transition.awaitingHost(
+                new_frame.top(),
+                interp,
+                &host.func.signature,
+                .calling_host,
+            );
         },
     }
 }
@@ -1755,9 +1761,9 @@ const opcode_handlers = struct {
             pop_count,
         );
 
-        const elem_index: u32 = @bitCast(
-            saved_sp.poppedValues()[expected_signature.param_count].i32,
-        );
+        const elem_index_val: *align(@sizeOf(Value)) const Value =
+            &saved_sp.poppedValues()[expected_signature.param_count];
+        const elem_index: u32 = @bitCast(elem_index_val.i32);
 
         const table_addr = current_module.tableAddr(table_idx);
         std.debug.assert(table_addr.elem_type == .funcref);
@@ -1765,7 +1771,7 @@ const opcode_handlers = struct {
 
         // std.debug.print(
         //     " > call_indirect (i32.const {} (; @ {X} ;)) ;; table.size = {}, call depth = {}\n",
-        //     .{ elem_index, @intFromPtr(vals.stack.ptr), table.len, interp.call_depth },
+        //     .{ elem_index, @intFromPtr(elem_index_val), table.len, interp.stack.call_depth },
         // );
 
         if (table.len <= elem_index) {
@@ -2037,7 +2043,8 @@ const opcode_handlers = struct {
         const operand: *align(@sizeOf(Value)) Value = &vals.topArray(1)[0];
         const idx: u32 = @bitCast(operand.i32);
 
-        const dst: []align(@sizeOf(Value)) u8 = std.mem.asBytes(operand)[0..stride];
+        operand.* = undefined;
+        const dst: []align(@sizeOf(Value)) u8 = std.mem.asBytes(operand);
         const src: []align(@sizeOf(*anyopaque)) u8 = table.elementSlice(idx) catch {
             const info = Trap.init(
                 .table_access_out_of_bounds,
@@ -2050,6 +2057,7 @@ const opcode_handlers = struct {
         @memcpy(dst[0..stride], src);
         @memset(dst[stride..], 0); // fill `ExternRef` padding
 
+        std.debug.assert(vals.remaining == 1);
         return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
     }
 
@@ -2075,7 +2083,7 @@ const opcode_handlers = struct {
         vals.assertRemainingCountIs(0);
         const ref: *align(@sizeOf(Value)) const Value = &operands[1];
         const idx: u32 = @bitCast(operands[0].i32);
-        const dst = table.elementSlice(idx) catch {
+        const dst: []align(@sizeOf(*anyopaque)) u8 = table.elementSlice(idx) catch {
             const info = Trap.init(
                 .table_access_out_of_bounds,
                 .init(table_idx, .{ .@"table.set" = .{ .index = idx, .maximum = table.len } }),
@@ -2381,7 +2389,7 @@ const opcode_handlers = struct {
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 0, 1);
 
-        _ = instr.readByte();
+        _ = instr.skipValType();
         vals.pushArray(1)[0] = std.mem.zeroes(Value);
 
         return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
@@ -2403,10 +2411,9 @@ const opcode_handlers = struct {
         const top: *align(@sizeOf(Value)) Value = &vals.topArray(1)[0];
         // Better codegen than `std.mem.allEqual` producing 16 `cmpb` on x86_64
         const is_null = @reduce(.Or, top.i64x2) == 0;
-        // std.debug.dumpHex(std.mem.asBytes(top));
         // std.debug.print(
-        //     "> ref.is_null (ref.extern {?}) -> {}\n",
-        //     .{ top.externref.addr.nat.toInt(), is_null },
+        //     "> ref.is_null [{f}] -> {}\n",
+        //     .{ top.bytesFormatter(), is_null },
         // );
 
         top.* = .{ .i32 = @intFromBool(is_null) };
@@ -2761,13 +2768,13 @@ const opcode_handlers = struct {
         const n: u32 = @bitCast(operands[2].i32);
         const dupe: *align(@sizeOf(Value)) const Value = &operands[1];
         const d: u32 = @bitCast(operands[0].i32);
-        @memset(operands, undefined);
 
         table.fill(n, std.mem.asBytes(dupe)[0..table.stride.toBytes()], d) catch {
             const info = Trap.init(.table_access_out_of_bounds, .init(table_idx, .@"table.fill"));
             return Transition.trap(table_fill_ip, eip, sp, stp, interp, info);
         };
 
+        @memset(operands, undefined);
         return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
     }
 };

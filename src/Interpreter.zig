@@ -204,6 +204,10 @@ pub const State = union(Tag) {
                 if (@intFromPtr(frame.wasm.stp) > @intFromPtr(side_table_end)) {
                     std.debug.panic("side table OOB: {*} > {*}", .{ frame.wasm.stp, side_table_end });
                 }
+
+                std.debug.assert( // value stack underflow
+                    @intFromPtr(frame.valueStackBase()) <= @intFromPtr(interp.stack_top.ptr),
+                );
             }
 
             // std.debug.print("ENTERING MAIN LOOP (ver = {})\n", .{interp.version.number});
@@ -499,7 +503,7 @@ pub const State = union(Tag) {
             );
 
             errdefer unreachable;
-            interp.stack_top = new_frame.top;
+            interp.stack_top = new_frame.top();
 
             for ( // copy parameters
                 new_frame.frame.localValues(&interp.stack)[0..signature.param_count],
@@ -560,12 +564,14 @@ pub const State = union(Tag) {
             };
 
             if (start_func.funcInst()) |start| {
-                _ = interp.stack.pushFrameWithinCapacity(
+                const start_frame = interp.stack.pushFrameWithinCapacity(
                     interp.stack_top,
                     &module.instantiated,
                     .preallocated, // no parameters
                     start,
                 ) catch unreachable; // bad reserve for module start function
+
+                interp.stack_top = start_frame.top();
 
                 return switch (start.expanded()) {
                     .host => state.inner.transition(Status{ .awaiting_host = .{} }),
