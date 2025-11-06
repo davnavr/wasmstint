@@ -18,7 +18,7 @@ pub fn waitForDebugger() void {
         };
 
         while (debugapi.IsDebuggerPresent() == 0) {
-            std.Thread.sleep(100);
+            std.os.windows.kernel32.SleepEx(100, 0);
         }
     } else {
         if (os.tag == .linux) {
@@ -28,7 +28,7 @@ pub fn waitForDebugger() void {
         var dbg: usize = 0;
         const dbg_ptr: *volatile usize = &dbg;
         while (dbg_ptr.* == 0) {
-            std.Thread.sleep(100);
+            std.posix.nanosleep(0, 100_000_000);
         }
     }
 }

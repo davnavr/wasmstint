@@ -5,6 +5,7 @@ const NamedModule = struct {
     instance: ModuleInst,
 };
 
+io: Io,
 module_arena: ArenaAllocator,
 /// Allocated in `std.heap.page_allocator`.
 module_lookup: std.StringHashMapUnmanaged(NamedModule),
@@ -15,21 +16,23 @@ interpreter: Interpreter,
 starting_fuel: Interpreter.Fuel,
 
 imports: *Imports,
-script_dir: std.fs.Dir,
+script_dir: Io.Dir,
 rng: *std.Random.Xoshiro256,
 
 const Error = error{ScriptError};
 
 pub fn init(
     state: *State,
+    io: Io,
     interpreter_allocator: std.mem.Allocator,
     max_memory_size: usize,
     starting_fuel: Interpreter.Fuel,
     imports: *Imports,
-    script_dir: std.fs.Dir,
+    script_dir: Io.Dir,
     rng: *std.Random.Xoshiro256,
 ) void {
     state.* = .{
+        .io = io,
         .module_arena = ArenaAllocator.init(std.heap.page_allocator),
         .module_lookup = .empty,
         .current_module = null,
@@ -146,6 +149,7 @@ fn openModuleContents(
     output: Output,
 ) Error!file_content.FileContent {
     return file_content.readFilePortable(
+        state.io,
         state.script_dir,
         filename,
         contents_allocator,
@@ -296,7 +300,7 @@ fn processModuleCommand(
     _ = try state.expectResultValues(
         interp,
         &fuel,
-        &Parser.Command.Expected.Vec{},
+        &.{},
         output,
         alloca,
     );
@@ -567,7 +571,7 @@ fn expectResultValues(
     state: *State,
     interp: Interpreter.State,
     fuel: *Interpreter.Fuel,
-    expected: *const Parser.Command.Expected.Vec,
+    expected: Parser.Command.Expected.Vec,
     output: Output,
     scratch: *ArenaAllocator,
 ) Error![]const Interpreter.TaggedValue {
@@ -590,8 +594,7 @@ fn expectResultValues(
         .{ expected.len, actual_results.len },
     );
 
-    for (0.., actual_results) |i, *actual_val| {
-        const expected_val: *const Parser.Command.Expected = expected.at(i);
+    for (expected, actual_results, 0..) |*expected_val, *actual_val, i| {
         try resultValueMatches(actual_val, expected_val, i, output);
     }
 
@@ -706,14 +709,13 @@ fn fmtModuleName(name: ?Name) std.fmt.Alt(?Name, formatModuleName) {
 
 // TODO: What if arguments could be allocated directly in the Interpreter's value_stack?
 fn allocateFunctionArguments(
-    arguments: *const Parser.Command.Const.Vec,
+    arguments: Parser.Command.Const.Vec,
     arena: *ArenaAllocator,
 ) []const Interpreter.TaggedValue {
     const dst_values = arena.allocator().alloc(Interpreter.TaggedValue, arguments.len) catch
         @panic("oom");
 
-    for (dst_values, 0..) |*dst, i| {
-        const src: *const Parser.Command.Const = arguments.at(i);
+    for (dst_values, arguments) |*dst, *src| {
         dst.* = switch (src.*) {
             inline .i32, .i64, .f32, .f64 => |c, tag| @unionInit(
                 Interpreter.TaggedValue,
@@ -763,7 +765,7 @@ fn processActionCommand(
             const invoke_state = state.interpreter.reset().awaiting_host.beginCall(
                 state.interpreter_allocator,
                 callee,
-                allocateFunctionArguments(&invoke.args, scratch),
+                allocateFunctionArguments(invoke.args, scratch),
                 fuel,
             ) catch |e| switch (e) {
                 error.OutOfMemory => @panic("oom"),
@@ -990,7 +992,7 @@ fn processAssertReturn(
             const results = try state.expectResultValues(
                 interp,
                 &fuel,
-                &command.expected,
+                command.expected,
                 output,
                 scratch,
             );
@@ -1014,12 +1016,9 @@ fn processAssertReturn(
                 );
             }
 
-            try resultValueMatches(&actual_value, command.expected.at(0), 0, output);
+            try resultValueMatches(&actual_value, &command.expected[0], 0, output);
 
-            output.print(
-                "get {f} yielded {f}\n",
-                .{ command.action.field, actual_value },
-            );
+            output.print("get {f} yielded {f}\n", .{ command.action.field, actual_value });
         },
     }
 }
@@ -1461,6 +1460,7 @@ fn processAssertUnlinkable(
 }
 
 const std = @import("std");
+const Io = std.Io;
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const file_content = @import("file_content");

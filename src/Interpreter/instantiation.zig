@@ -75,7 +75,7 @@ pub fn setupModule(
         const offset: u32 = offset: switch (active_elem.header.offset_tag) {
             .@"i32.const" => active_elem.offset.@"i32.const",
             .@"global.get" => {
-                const global = module_inst.globalAddr(active_elem.offset.@"global.get");
+                const global = module_inst.globalAddr(active_elem.offset.@"global.get".idx);
                 std.debug.assert(global.global_type.val_type == .i32);
                 break :offset @as(*const u32, @ptrCast(@alignCast(global.value))).*;
             },
@@ -109,7 +109,7 @@ pub fn setupModule(
         const offset: u32 = switch (active_data.header.offset_tag) {
             .@"i32.const" => active_data.offset.@"i32.const",
             .@"global.get" => get: {
-                const global = module_inst.globalAddr(active_data.offset.@"global.get");
+                const global = module_inst.globalAddr(active_data.offset.@"global.get".idx);
                 std.debug.assert(global.global_type.val_type == .i32);
                 break :get @as(*const u32, @ptrCast(@alignCast(global.value))).*;
             },

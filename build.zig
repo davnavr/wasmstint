@@ -597,7 +597,7 @@ fn buildSpecificationTests(
     for (spectests.items) |test_spec| {
         const run_test_spec = b.addRunArtifact(interpreter.exe);
         run_test_spec.max_stdio_size = 15 * 1024 * 1024;
-        run_test_spec.step.max_rss = ByteSize.mib(30).bytes;
+        run_test_spec.step.max_rss = ByteSize.mib(45).bytes;
         run_test_spec.setName(b.fmt("spectest/{s}.wast", .{test_spec.name}));
         run_test_spec.addArg("--run");
         run_test_spec.addFileArg(test_spec.json_path);

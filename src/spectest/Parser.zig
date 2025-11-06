@@ -212,7 +212,7 @@ pub const Command = struct {
         funcref, // ?u32
         externref: ?u31,
 
-        pub const Vec = std.SegmentedList(Const, 1);
+        pub const Vec = []const Const;
     };
 
     const ValueLookupKey = @typeInfo(Const).@"union".tag_type.?;
@@ -221,12 +221,15 @@ pub const Command = struct {
         parser: *Parser,
         arena: *ArenaAllocator,
         comptime T: type,
-        scratch: *ArenaAllocator,
-    ) Error!std.SegmentedList(T, 1) {
+        temporary: *ArenaAllocator,
+    ) Error![]const T {
         try parser.expectNextToken(.array_begin);
-        var list = std.SegmentedList(T, 1){};
+        var list = try std.ArrayList(T).initCapacity(temporary.allocator(), 1);
+        var scratch = ArenaAllocator.init(temporary.allocator());
+        defer _ = temporary.reset(.retain_capacity);
+
         while (true) {
-            switch (try parser.nextToken(scratch)) {
+            switch (try parser.nextToken(&scratch)) {
                 .array_end => break,
                 .object_end => unreachable,
                 .object_begin => {},
@@ -234,9 +237,9 @@ pub const Command = struct {
             }
             _ = scratch.reset(.retain_capacity);
 
-            try parser.expectNextTokenStringEql(scratch, "type");
+            try parser.expectNextTokenStringEql(&scratch, "type");
             _ = scratch.reset(.retain_capacity);
-            const type_string = try parser.expectNextTokenString(scratch);
+            const type_string = try parser.expectNextTokenString(&scratch);
             _ = scratch.reset(.retain_capacity);
 
             const type_tag = parser.value_lookup.get(type_string) orelse
@@ -244,11 +247,11 @@ pub const Command = struct {
 
             // Would parse "lane_type" here if V128 support was added
 
-            try parser.expectNextTokenStringEql(scratch, "value");
+            try parser.expectNextTokenStringEql(&scratch, "value");
             _ = scratch.reset(.retain_capacity);
 
             // V128 support would require an array of strings instead
-            const value_string = try parser.expectNextTokenString(scratch);
+            const value_string = try parser.expectNextTokenString(&scratch);
 
             const value: T = value: switch (type_tag) {
                 .i32 => .{
@@ -297,10 +300,10 @@ pub const Command = struct {
             };
 
             try parser.expectNextToken(.object_end);
-            try list.append(arena.allocator(), value);
+            try list.append(temporary.allocator(), value);
         }
 
-        return list;
+        return arena.allocator().dupe(T, list.items);
     }
 
     pub const Action = struct {
@@ -380,7 +383,7 @@ pub const Command = struct {
         funcref, // ?u32
         externref: ?u31,
 
-        pub const Vec = std.SegmentedList(Expected, 1);
+        pub const Vec = []const Expected;
 
         pub const Nan = enum {
             canonical,

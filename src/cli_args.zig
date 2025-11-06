@@ -868,10 +868,8 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             @branchHint(.cold);
             {
                 var stderr_buffer: [1024]u8 align(16) = undefined;
-                const stderr = std.debug.lockStderrWriter(&stderr_buffer);
+                const stderr, const color = std.debug.lockStderrWriter(&stderr_buffer);
                 defer std.debug.unlockStderrWriter();
-
-                const color = std.Io.tty.detectConfig(std.fs.File.stderr());
 
                 if (diagnostics) |diag| {
                     diag.print(stderr, color) catch {};

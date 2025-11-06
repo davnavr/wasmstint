@@ -232,10 +232,10 @@ pub const ModuleInst = packed struct(usize) {
     fn exportVal(inst: ModuleInst, exp: *align(4) const Module.Export) ExternVal {
         const instance = inst.header();
         return switch (exp.desc_tag) {
-            .func => .{ .func = instance.funcAddr(exp.desc.func) },
-            .table => .{ .table = instance.tableAddr(exp.desc.table) },
-            .mem => .{ .mem = instance.memAddr(exp.desc.mem) },
-            .global => .{ .global = instance.globalAddr(exp.desc.global) },
+            .func => .{ .func = instance.funcAddr(exp.desc.func.idx) },
+            .table => .{ .table = instance.tableAddr(exp.desc.table.idx) },
+            .mem => .{ .mem = instance.memAddr(exp.desc.mem.idx) },
+            .global => .{ .global = instance.globalAddr(exp.desc.global.idx) },
         };
     }
 
