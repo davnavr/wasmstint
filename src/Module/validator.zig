@@ -45,7 +45,10 @@ pub const Code = extern struct {
         pop_count: u8,
         /// Set to the same value as `fixup_origin` to catch bugs during side table construction.
         origin: if (builtin.mode == .Debug) u32 else void,
-        padding: if (builtin.mode == .Debug) u32 else u0 = undefined,
+        safety_flags: if (builtin.mode == .Debug) packed struct(u32) {
+            finished: bool = false,
+            padding: enum(u31) { padding } = .padding,
+        } else u0 = if (builtin.mode == .Debug) .{} else 0,
     };
 
     pub const Inner = extern struct {
@@ -870,6 +873,9 @@ const SideTableBuilder = struct {
                 return Error.WasmImplementationLimit;
 
             entry.delta_ip = .{ .done = delta_ip };
+            if (builtin.mode == .Debug) {
+                entry.safety_flags.finished = true;
+            }
 
             const delta_stp = std.math.negateCast(idx - target.side_table_idx) catch
                 return Error.WasmImplementationLimit;
@@ -909,6 +915,10 @@ const SideTableBuilder = struct {
             .done = std.math.cast(i32, end_offset - origin) orelse
                 return error.WasmImplementationLimit,
         };
+
+        if (builtin.mode == .Debug) {
+            entry.safety_flags.finished = true;
+        }
 
         entry.delta_stp = std.math.cast(i16, target_side_table_idx - fixup_entry.entry_idx) orelse
             return error.WasmImplementationLimit;
@@ -2185,20 +2195,21 @@ pub fn rawValidate(
     errdefer comptime unreachable;
 
     for (final_side_table, 0..) |*entry, i| {
-        // Catch any entries that were not fixed up when safety checks are enabled.
-        _ = entry.delta_ip.done;
-        _ = i;
+        if (builtin.mode == .Debug and !entry.safety_flags.finished) {
+            std.debug.panic("entry #{} was not fixed up", .{i});
+        }
 
-        //std.debug.print(
-        //    "#{}: delta_ip = {}, delta_stp = {}, copied = {}, popped = {}\n",
-        //    .{
-        //        i,
-        //        entry.delta_ip.done,
-        //        entry.delta_stp,
-        //        entry.copy_count,
-        //        entry.pop_count,
-        //    },
-        //);
+        // std.debug.print(
+        //     "#{}: \u{394}ip={}, \u{394}stp={}, copy={}, pop={}, origin={X:0>6}\n",
+        //     .{
+        //         i,
+        //         entry.delta_ip.done,
+        //         entry.delta_stp,
+        //         entry.copy_count,
+        //         entry.pop_count,
+        //         (instructions + entry.origin) - module.inner.wasm.ptr,
+        //     },
+        // );
     }
 
     return .{

@@ -1703,7 +1703,7 @@ const opcode_handlers = struct {
             actual_target,
         );
 
-        return instr.dispatchNextOpcode(new_sp, fuel, stp, locals, module, interp);
+        return instr.dispatchNextOpcode(new_sp, fuel, side_table.next, locals, module, interp);
     }
 
     pub const @"return" = returnFromWasm;

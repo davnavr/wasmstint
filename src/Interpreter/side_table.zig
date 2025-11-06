@@ -43,8 +43,9 @@ pub const SideTable = packed struct(usize) {
         const wasm_base_ptr = @intFromPtr(current_frame.function.expanded().wasm
             .module.header().module.inner.wasm.ptr);
 
-        // std.debug.print("SIDE TABLE PTR = {*} + {}\n", .{ table.next.ptr, branch });
+        // std.debug.print("SIDE TABLE PTR = {*} + {}\n", .{ table.next, branch });
         const target: *const Module.Code.SideTableEntry = &table.next[branch];
+        const target_idx: u32 = @intCast(target - code.inner.side_table_ptr);
         std.debug.assert(@intFromPtr(code.inner.side_table_ptr) <= @intFromPtr(target));
 
         if (builtin.mode == .Debug) {
@@ -53,11 +54,11 @@ pub const SideTable = packed struct(usize) {
 
             if (@intFromPtr(target) > @intFromPtr(side_table_end)) {
                 std.debug.panic( // oob past side table
-                    "side table entry {X} (index {}) is OOB past side table end at {X}..{X} " ++
+                    "side table entry {X} (index {d}) is OOB past side table end at {X}..{X} " ++
                         "({} entries)",
                     .{
                         @intFromPtr(target),
-                        target - code.inner.side_table_ptr,
+                        target_idx,
                         @intFromPtr(code.inner.side_table_ptr),
                         @intFromPtr(side_table_end),
                         code.inner.side_table_len,
@@ -68,17 +69,21 @@ pub const SideTable = packed struct(usize) {
             const origin_ip = code.inner.instructions_start + target.origin;
             if (@intFromPtr(base_ip) != @intFromPtr(origin_ip)) {
                 std.debug.panic(
-                    "expected this branch to originate from {X:0>6}, but got {X:0>6}",
-                    .{ @intFromPtr(origin_ip) - wasm_base_ptr, @intFromPtr(base_ip) - wasm_base_ptr },
+                    "expected branch #{d} to originate from {X:0>6}, but got {X:0>6}",
+                    .{
+                        target_idx,
+                        @intFromPtr(origin_ip) - wasm_base_ptr,
+                        @intFromPtr(base_ip) - wasm_base_ptr,
+                    },
                 );
             }
         }
 
         // std.debug.print(
-        //     " ? TGT BRANCH #{} (current is #{}): delta_ip={}, delta_stp={}, copy={}, pop={}\n",
+        //     " ? TGT BRANCH #{} (current is #{}): \u{394}ip={}, \u{394}stp={}, copy={}, pop={}\n",
         //     .{
-        //         (@intFromPtr(target) - @intFromPtr(code.inner.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry),
-        //         (@intFromPtr(s.*) - @intFromPtr(code.inner.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry),
+        //         target_idx,
+        //         (table.next - code.inner.side_table_ptr),
         //         target.delta_ip.done,
         //         target.delta_stp,
         //         target.copy_count,
@@ -88,25 +93,21 @@ pub const SideTable = packed struct(usize) {
 
         instr.next = addPtrWithOffset(base_ip, target.delta_ip.done);
         std.debug.assert(@intFromPtr(code.inner.instructions_end) == @intFromPtr(instr.end));
-        _ = instr.bytes();
         std.debug.assert(@intFromPtr(code.inner.instructions_start) <= @intFromPtr(instr.next));
 
         // std.debug.print(
         //     " ? NEXT[{X:0>6}]: 0x{X} ({s})\n",
         //     .{
-        //         @intFromPtr(i.p) - wasm_base_ptr,
-        //         i.p[0],
-        //         @tagName(@as(opcodes.ByteOpcode, @enumFromInt(i.p[0]))),
+        //         @intFromPtr(instr.next) - wasm_base_ptr,
+        //         instr.next[0],
+        //         @tagName(@as(@import("../opcodes.zig").ByteOpcode, @enumFromInt(instr.next[0]))),
         //     },
         // );
 
         table.next = addPtrWithOffset(table.next + branch, target.delta_stp);
         table.checkBounds(stack);
 
-        // std.debug.print(
-        //     " ? STP=#{}\n",
-        //     .{(@intFromPtr(s.*) - @intFromPtr(code.inner.side_table_ptr)) / @sizeOf(Module.Code.SideTableEntry)},
-        // );
+        // std.debug.print(" ? STP=#{}\n", .{table.next - code.inner.side_table_ptr});
 
         // std.debug.print(" ? value stack height was {}\n", .{vals.items.len});
 
