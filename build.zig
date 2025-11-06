@@ -545,7 +545,7 @@ fn buildSpecificationTests(
         }
 
         var wast2json = b.addSystemCommand(&.{tool_paths.getOrDefault(.wast2json)});
-        wast2json.step.max_rss = ByteSize.mib(16).bytes;
+        wast2json.step.max_rss = ByteSize.mib(19).bytes;
         translate_step.dependOn(&wast2json.step);
         wast2json.setCwd(translate_output_dir);
         wast2json.addFileArg(tests_dir.path(b, tests_entry.name));
@@ -588,7 +588,8 @@ fn buildSpecificationTests(
 
     for (spectests.items) |test_spec| {
         const run_test_spec = b.addRunArtifact(interpreter.exe);
-        run_test_spec.step.max_rss = ByteSize.mib(20).bytes;
+        run_test_spec.max_stdio_size = 15 * 1024 * 1024;
+        run_test_spec.step.max_rss = ByteSize.mib(30).bytes;
         run_test_spec.setName(b.fmt("spectest/{s}.wast", .{test_spec.name}));
         run_test_spec.addArg("--run");
         run_test_spec.addFileArg(test_spec.json_path);
