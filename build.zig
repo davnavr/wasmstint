@@ -6,8 +6,10 @@ const ProjectOptions = struct {
     target: Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     optimize_interpreter: std.builtin.OptimizeMode,
-    // TODO(zig): https://github.com/ziglang/zig/issues/24044
-    comptime use_llvm: bool = true,
+    use_llvm: packed struct(u2) {
+        interpreter: bool,
+        other: bool,
+    },
     /// Should never be `false`, that would imply `libc` is *prohibited*.
     link_libc: ?bool,
     /// Implies `link_libc`.
@@ -28,6 +30,14 @@ const ProjectOptions = struct {
             "Require linking to the C standard library",
         ) orelse false;
 
+        const Llvm = enum { never, interpreter, always };
+
+        const llvm = b.option(
+            Llvm,
+            "use-llvm",
+            "Specifies when the LLVM backend is used",
+        ) orelse if (optimize == .Debug) Llvm.never else .interpreter;
+
         return .{
             .target = b.standardTargetOptions(.{}),
             .optimize = optimize,
@@ -37,6 +47,10 @@ const ProjectOptions = struct {
                 "Override optimization level for interpreter",
             ) orelse optimize,
             .link_libc = if (enable_coz or link_libc) true else null,
+            .use_llvm = .{
+                .interpreter = llvm != .never,
+                .other = llvm == .always,
+            },
             .enable_coz = enable_coz,
         };
     }
@@ -198,7 +212,7 @@ fn addCheck(
     comptime kind: enum { @"test", exe },
     module: *Build.Module,
     name: []const u8,
-    options: struct { max_rss: ByteSize, use_llvm: ?bool = null },
+    options: struct { max_rss: ByteSize, use_llvm: bool },
 ) void {
     const Args = switch (kind) {
         .@"test" => Build.TestOptions,
@@ -251,13 +265,17 @@ const Modules = struct {
                 .name = name,
                 .root_module = module,
                 .max_rss = ByteSize.mib(234).bytes,
+                .use_llvm = options.use_llvm.other,
             });
 
             const tests_run = &b.addRunArtifact(tests).step;
             tests_run.max_rss = ByteSize.mib(16).bytes;
             steps.@"test-unit".dependOn(tests_run);
 
-            addCheck(b, steps, .@"test", module, name, .{ .max_rss = .mib(110) });
+            addCheck(b, steps, .@"test", module, name, .{
+                .max_rss = .mib(110),
+                .use_llvm = options.use_llvm.other,
+            });
             return .{ .module = module };
         }
     };
@@ -294,38 +312,30 @@ const Modules = struct {
             options: *const ProjectOptions,
             imports: struct { coz: Coz, allocators: Allocators },
         ) Wasmstint {
-            const module = b.addModule(
-                name,
-                .{
-                    .root_source_file = b.path("src/root.zig"),
-                    .target = options.target,
-                    .optimize = options.optimize_interpreter,
-                    .link_libc = options.link_libc,
-                },
-            );
+            const module = b.addModule(name, .{
+                .root_source_file = b.path("src/root.zig"),
+                .target = options.target,
+                .optimize = options.optimize_interpreter,
+                .link_libc = options.link_libc,
+            });
             addAsImportTo(Coz, imports.coz, module);
             addAsImportTo(Allocators, imports.allocators, module);
 
-            // TODO(zig): https://github.com/ziglang/zig/issues/23423
-            const use_llvm = true;
             const tests = b.addTest(.{
                 .name = name,
                 .root_module = module,
-                .use_llvm = use_llvm,
+                // TODO(zig): https://github.com/ziglang/zig/issues/23423
+                .use_llvm = true,
                 .max_rss = ByteSize.mib(257).bytes,
             });
 
             const tests_run = &b.addRunArtifact(tests).step;
             tests_run.max_rss = ByteSize.mib(19).bytes;
             steps.@"test-unit".dependOn(tests_run);
-            addCheck(
-                b,
-                steps,
-                .@"test",
-                module,
-                name,
-                .{ .max_rss = .mib(126), .use_llvm = use_llvm },
-            );
+            addCheck(b, steps, .@"test", module, name, .{
+                .max_rss = .mib(126),
+                .use_llvm = options.use_llvm.interpreter,
+            });
             return .{ .module = module };
         }
     };
@@ -352,8 +362,7 @@ const Modules = struct {
             const tests = b.addTest(.{
                 .name = name,
                 .root_module = module,
-                // TODO(zig): https://github.com/ziglang/zig/issues/23423
-                .use_llvm = true,
+                .use_llvm = options.use_llvm.other,
                 .max_rss = ByteSize.mib(236).bytes,
             });
 
@@ -361,7 +370,10 @@ const Modules = struct {
             tests_run.max_rss = ByteSize.mib(16).bytes;
             steps.@"test-unit".dependOn(tests_run);
 
-            addCheck(b, steps, .@"test", module, name, .{ .max_rss = .mib(109) });
+            addCheck(b, steps, .@"test", module, name, .{
+                .max_rss = ByteSize.mib(109),
+                .use_llvm = options.use_llvm.other,
+            });
             return .{ .module = module };
         }
     };
@@ -394,13 +406,17 @@ const Modules = struct {
                 .name = name,
                 .root_module = module,
                 .max_rss = ByteSize.mib(219).bytes,
+                .use_llvm = options.use_llvm.interpreter,
             });
 
             const tests_run = &b.addRunArtifact(tests).step;
             tests_run.max_rss = ByteSize.mib(16).bytes;
             steps.@"test-unit".dependOn(tests_run);
 
-            addCheck(b, steps, .@"test", module, name, .{ .max_rss = .mib(106) });
+            addCheck(b, steps, .@"test", module, name, .{
+                .max_rss = .mib(106),
+                .use_llvm = options.use_llvm.other,
+            });
             return .{ .module = module };
         }
     };
@@ -472,7 +488,7 @@ const SpectestInterp = struct {
         const exe = b.addExecutable(.{
             .name = "wasmstint-spectest",
             .root_module = module,
-            .use_llvm = proj_opts.use_llvm,
+            .use_llvm = proj_opts.use_llvm.interpreter,
             .max_rss = ByteSize.mib(447).bytes,
         });
 
@@ -487,18 +503,10 @@ const SpectestInterp = struct {
             b.step("run-wast", "Run the specification test interpreter").dependOn(&run.step);
         }
 
-        addCheck(
-            b,
-            steps,
-            .exe,
-            module,
-            exe.name,
-            .{
-                .max_rss = .mib(160),
-                // Prevent compile errors due to https://github.com/ziglang/zig/issues/24044
-                .use_llvm = proj_opts.use_llvm,
-            },
-        );
+        addCheck(b, steps, .exe, module, exe.name, .{
+            .max_rss = ByteSize.mib(160),
+            .use_llvm = proj_opts.use_llvm.interpreter,
+        });
 
         return .{ .exe = exe };
     }
@@ -632,18 +640,14 @@ const Wasip1Interp = struct {
         const exe = b.addExecutable(.{
             .name = "wasmstint-wasip1",
             .root_module = module,
-            .use_llvm = proj_opts.use_llvm,
+            .use_llvm = proj_opts.use_llvm.interpreter,
             .max_rss = ByteSize.mib(755).bytes,
         });
 
-        addCheck(
-            b,
-            steps,
-            .exe,
-            module,
-            exe.name,
-            .{ .max_rss = .mib(175), .use_llvm = proj_opts.use_llvm },
-        );
+        addCheck(b, steps, .exe, module, exe.name, .{
+            .max_rss = .mib(175),
+            .use_llvm = proj_opts.use_llvm.interpreter,
+        });
 
         {
             const run = b.addRunArtifact(exe);
@@ -759,14 +763,10 @@ fn buildWasiSamplePrograms(
             .max_rss = exe_max_rss.bytes,
         });
 
-        addCheck(
-            b,
-            steps,
-            .exe,
-            sample_exe.root_module,
-            sample_exe.name,
-            .{ .max_rss = exe_max_rss },
-        );
+        addCheck(b, steps, .exe, sample_exe.root_module, sample_exe.name, .{
+            .max_rss = exe_max_rss,
+            .use_llvm = options.project.use_llvm.other,
+        });
 
         const install_sample = b.addInstallArtifact(
             sample_exe,
@@ -787,6 +787,7 @@ fn buildWasiSamplePrograms(
                 .optimize = options.project.optimize,
             }),
             .max_rss = ByteSize.mib(278).bytes,
+            .use_llvm = options.project.use_llvm.other,
         });
         invoke_test.root_module.addOptions("test_paths", test_options);
         Modules.addAsImportTo(Modules.Subprocess, modules.subprocess, invoke_test.root_module);
