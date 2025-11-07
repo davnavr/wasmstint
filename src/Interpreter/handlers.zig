@@ -170,11 +170,11 @@ inline fn transition(
     update_wasm_frame_token: Transition.UpdateWasmFrameToken,
     new_state: @FieldType(Interpreter, "current_state"),
 ) Transition {
+    _ = update_wasm_frame_token;
     interp.current_state = new_state;
     interp.version.increment();
     return Transition{
         .version = interp.version,
-        .update_wasm_frame_token = update_wasm_frame_token,
     };
 }
 
@@ -197,11 +197,15 @@ fn updateWasmFrameState(
 }
 
 /// Is a `packed struct` to work around https://github.com/ziglang/zig/issues/18189
-pub const Transition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version))) {
+pub const Transition = packed struct {
     version: Version,
-    update_wasm_frame_token: UpdateWasmFrameToken,
+    // Can't use `u0` here
+    // TODO(Zig): https://github.com/ziglang/zig/issues/25846
+    //update_wasm_frame_token: UpdateWasmFrameToken,
 
-    const UpdateWasmFrameToken = enum(u0) { wrote_ip_and_stp_to_the_current_stack_frame };
+    const UpdateWasmFrameToken = enum(u0) {
+        wrote_ip_and_stp_to_the_current_stack_frame,
+    };
 
     fn trap(
         trap_ip: Ip,
@@ -246,6 +250,7 @@ pub const Transition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version)
         interp: *Interpreter,
         callee_signature: *const Module.FuncType,
         status: TransitionToHost,
+        update_wasm_frame_token: UpdateWasmFrameToken,
     ) Transition {
         const result_types = switch (status) {
             .returning_to_host => callee_signature.results(),
@@ -258,7 +263,7 @@ pub const Transition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version)
         interp.stack_top = sp;
         return transition(
             interp,
-            .wrote_ip_and_stp_to_the_current_stack_frame,
+            update_wasm_frame_token,
             .{ .awaiting_host = .{ .result_types = result_types } },
         );
     }
@@ -352,7 +357,13 @@ fn returnFromWasm(
         comptime unreachable;
     }
 
-    return Transition.awaitingHost(popped.top, interp, popped.signature, .returning_to_host);
+    return Transition.awaitingHost(
+        popped.top,
+        interp,
+        popped.signature,
+        .returning_to_host,
+        .wrote_ip_and_stp_to_the_current_stack_frame, // no need to save, since this returns to host
+    );
 }
 
 /// Attempts to allocate a stack frame for the `target_function`, with arguments expected to be on
@@ -388,7 +399,7 @@ inline fn invokeWithinWasm(
     );
     const current_frame = interp.stack.frameAt(interp.stack.current_frame).?;
 
-    _ = updateWasmFrameState(current_frame, old_instr, old_stp);
+    const saved_token = updateWasmFrameState(current_frame, old_instr, old_stp);
 
     // std.debug.print(
     //     "WASM {f} WANTS TO CALL {f} (current depth = {}, args @ {*})\n",
@@ -459,6 +470,7 @@ inline fn invokeWithinWasm(
                 interp,
                 &host.func.signature,
                 .calling_host,
+                saved_token,
             );
         },
     }
