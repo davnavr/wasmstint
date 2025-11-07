@@ -328,7 +328,9 @@ const ValStack = struct {
         return @intCast(val_stack.buf.items.len);
     }
 
-    fn pushAny(val_stack: *ValStack, arena: *ArenaAllocator, val: Val) !void {
+    const PushError = Allocator.Error || error{WasmImplementationLimit};
+
+    fn pushAny(val_stack: *ValStack, arena: *ArenaAllocator, val: Val) PushError!void {
         try val_stack.buf.append(arena.allocator(), val);
         // Note, if someone pushes a known value over an unknown, the max will grow anyway
         // TODO: check that current frame is reachable instead.
@@ -338,7 +340,7 @@ const ValStack = struct {
         // }
     }
 
-    fn push(val_stack: *ValStack, arena: *ArenaAllocator, val_type: ValType) !void {
+    fn push(val_stack: *ValStack, arena: *ArenaAllocator, val_type: ValType) PushError!void {
         return val_stack.pushAny(arena, valTypeToVal(val_type));
     }
 
@@ -1539,10 +1541,7 @@ pub fn rawValidate(
                     return diag.print(.validation, "type mismatch: {t} != {t}", .{ t_1, t_2 });
                 }
 
-                val_stack.pushAny(
-                    undefined,
-                    if (t_1 == .unknown) t_2 else t_1,
-                ) catch unreachable;
+                val_stack.pushAny(scratch, if (t_1 == .unknown) t_2 else t_1) catch unreachable;
             },
             .@"select t" => {
                 const type_count = try reader.readUleb128(u32, diag, "select arity");
@@ -1556,7 +1555,10 @@ pub fn rawValidate(
 
                 const t = try ValType.parse(reader, diag);
                 try val_stack.popManyExpecting(&ctrl_stack, &.{ t, t, .i32 }, diag);
-                try val_stack.push(undefined, t);
+                val_stack.push(scratch, t) catch |e| switch (e) {
+                    error.OutOfMemory => unreachable,
+                    else => |err| return err,
+                };
             },
 
             .@"local.get" => {

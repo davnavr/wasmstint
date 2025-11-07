@@ -264,7 +264,7 @@ fn resize(
 
     if (alignment.toByteUnits() > pageSize()) {
         @branchHint(.cold);
-        return false;
+        return false; // can't change to large alignment
     }
 
     if (new_len == 0) {
