@@ -6,7 +6,6 @@ pub const ReservationAllocator = reservation_allocator.ReservationAllocator;
 pub const ArenaFallbackAllocator = @import("allocators/ArenaFallbackAllocator.zig");
 pub const virtual_memory = @import("allocators/virtual_memory.zig");
 pub const PageAllocation = @import("allocators/PageAllocation.zig");
-pub const UnrolledLinkedList = @import("allocators/unrolled_linked_list.zig").UnrolledLinkedList;
 
 test {
     _ = LimitedAllocator;
@@ -14,5 +13,4 @@ test {
     _ = ArenaFallbackAllocator;
     _ = virtual_memory;
     _ = PageAllocation;
-    _ = UnrolledLinkedList;
 }
