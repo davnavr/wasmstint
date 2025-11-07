@@ -37,17 +37,13 @@ pub fn fmtArgv(argv: []const []const u8) std.fmt.Alt([]const []const u8, formatA
 }
 
 fn formatSignalNumber(num: u32, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    inline for (@typeInfo(std.posix.SIG).@"struct".decls) |decl| {
-        const field = @field(std.posix.SIG, decl.name);
-        if (@TypeOf(field) == comptime_int) {
-            if (field == num) {
-                try writer.writeAll(decl.name);
-                return;
-            }
-        }
+    if (std.enums.fromInt(std.posix.SIG, num)) |known| {
+        try writer.print("SIG{t}", .{known});
+    } else {
+        try writer.writeAll("unknown signal");
     }
 
-    try writer.writeAll("unknown signal");
+    try writer.print(" {d}", .{num});
 }
 
 pub fn fmtSignalNumber(num: u32) std.fmt.Alt(u32, formatSignalNumber) {
@@ -248,8 +244,7 @@ fn isAsciiString(s: []const u8) bool {
 fn printDiff(expected: []const u8, actual: []const u8, diff_index: usize) !void {
     @branchHint(.unlikely);
     var stderr_buf: [256]u8 align(16) = undefined;
-    const color = std.Io.tty.detectConfig(std.fs.File.stderr());
-    const stderr = std.debug.lockStderrWriter(&stderr_buf);
+    const stderr, const color = std.debug.lockStderrWriter(&stderr_buf);
     defer stderr.flush() catch {};
 
     std.debug.assert(@max(expected.len, actual.len) > 0);
