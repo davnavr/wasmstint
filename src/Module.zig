@@ -1057,7 +1057,7 @@ const Sections = struct {
         reader: Reader,
         known_sections: *Known,
         arena: *ArenaAllocator,
-        custom_sections: *std.ArrayList(CustomSection),
+        custom_sections: *UnrolledLinkedList(CustomSection, 3),
         options: *const ParseOptions,
     ) ParseError!Sections {
         var section_order = Order.any;
@@ -1086,6 +1086,7 @@ const Sections = struct {
 
                     if (options.keep_custom_sections) {
                         try custom_sections.append(
+                            .allocator,
                             arena.allocator(),
                             CustomSection{
                                 .ptr = section_name.bytes.ptr,
@@ -1196,7 +1197,7 @@ pub fn parse(
 
     defer _ = alloca.reset(.retain_capacity);
 
-    var custom_sections_buf = std.ArrayList(CustomSection).empty; // in `alloca`
+    var custom_sections_buf = UnrolledLinkedList(CustomSection, 3).empty; // in `alloca`
 
     var known_sections: Sections.Known = undefined;
     var sections = sections: {
@@ -1212,9 +1213,12 @@ pub fn parse(
         );
     };
 
-    if (custom_sections_buf.items.len > std.math.maxInt(u32)) {
-        return error.WasmImplementationLimit; // too many custom sections
+    comptime {
+        std.debug.assert(@FieldType(@TypeOf(custom_sections_buf), "total_count") == u32);
     }
+    // if (custom_sections_buf.items.len > std.math.maxInt(u32)) {
+    //     return error.WasmImplementationLimit; // too many custom sections
+    // }
 
     const has_data_count_section = !sections.readers.data_count.isEmpty();
 
@@ -1258,7 +1262,7 @@ pub fn parse(
         try allocator.reserve([*]const u8, counts.data);
         try allocator.reserve(Code.Entry, counts.code);
         try allocator.reserve(Code, counts.code);
-        try allocator.reserve(CustomSection, custom_sections_buf.items.len);
+        try allocator.reserve(CustomSection, custom_sections_buf.total_count);
 
         break :allocator try allocator.arenaFallbackAllocatorWithHeaderAligned(
             &module_arena,
@@ -1333,10 +1337,7 @@ pub fn parse(
         );
     };
 
-    const custom_sections = try module.alloc.allocator().dupe(
-        CustomSection,
-        custom_sections_buf.items,
-    );
+    const custom_sections = try custom_sections_buf.allocSlice(module.alloc.allocator());
 
     const start: Start = start: {
         errdefer wasm.* = sections.known.start;
@@ -2372,6 +2373,7 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const allocators = @import("allocators");
 const ArenaFallbackAllocator = allocators.ArenaFallbackAllocator;
+const UnrolledLinkedList = allocators.UnrolledLinkedList;
 const Reader = @import("Module/Reader.zig");
 const opcodes = @import("opcodes.zig");
 const validator = @import("Module/validator.zig");
