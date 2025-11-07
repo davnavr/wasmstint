@@ -320,7 +320,7 @@ fn free(
     std.debug.assert(@intFromPtr(memory.ptr) == @intFromPtr(self.current.ptr));
     std.debug.assert(memory.len == self.current.len);
 
-    self.current = &.{};
+    self.current.len = 0;
 }
 
 pub fn deinit(ctx: *PageAllocation) void {
