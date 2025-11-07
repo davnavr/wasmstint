@@ -12,29 +12,12 @@ const DispatchBackend = enum {
     ///
     /// Workaround for <https://github.com/ziglang/zig/issues/24044>.
     x86_64_sysv_inline,
-
-    fn callingConvention(comptime backend: DispatchBackend) CallingConvention {
-        return switch (backend) {
-            .x86_64_sysv_inline => .{ .x86_64_sysv = .{} },
-            // The Intel x86-64 register calling convention allows passing more parameters via
-            // registers and removes instructions for saving callee-saved registers, but is
-            // currently not supported in Zig's x86-64 backend.
-            //
-            // For more information see <https://reviews.llvm.org/D25022>.
-            .auto => if (CallingConvention.c == .x86_64_sysv)
-                .{ .x86_64_regcall_v3_sysv = .{} }
-            else if (CallingConvention.c == .x86_64_win)
-                .{ .x86_64_regcall_v4_win = .{} }
-            else
-                // TODO(Zig): waiting for a calling convention w/o callee-saved registers
-                // - (i.e. `preserve_none` or `ghccc` in LLVM)
-                .auto,
-        };
-    }
 };
 
 const dispatch_backend: DispatchBackend = switch (builtin.zig_backend) {
-    .stage2_x86_64 => if (CallingConvention.c == .x86_64_sysv)
+    .stage2_x86_64 => if (builtin.omit_frame_pointer)
+        @compileError("frame pointers are required, use LLVM backend instead")
+    else if (CallingConvention.c == .x86_64_sysv)
         .x86_64_sysv_inline
     else
         @compileError("use LLVM backend instead: https://github.com/ziglang/zig/issues/24044"),
@@ -45,7 +28,21 @@ const dispatch_backend: DispatchBackend = switch (builtin.zig_backend) {
 };
 
 /// Opcode handler calling convention.
-const ohcc = dispatch_backend.callingConvention();
+const ohcc: CallingConvention = switch (dispatch_backend) {
+    .x86_64_sysv_inline => .{ .x86_64_sysv = .{} },
+    .auto => switch (CallingConvention.c) {
+        // The Intel x86-64 register calling convention allows passing more parameters via
+        // registers and removes instructions for saving callee-saved registers, but is
+        // currently not supported in Zig's x86-64 backend.
+        //
+        // For more information see <https://reviews.llvm.org/D25022>.
+        .x86_64_sysv => .{ .x86_64_regcall_v3_sysv = .{} },
+        .x86_64_win => .{ .x86_64_regcall_v4_win = .{} },
+        // TODO(Zig): waiting for a calling convention w/o callee-saved registers
+        // - (i.e. `preserve_none` or `ghccc` in LLVM)
+        else => .auto,
+    },
+};
 
 pub const OpcodeHandler = fn (
     ip: Ip,
@@ -81,10 +78,51 @@ inline fn handlerTailCall(
     interp: *Interpreter,
     eip: Eip,
 ) Transition {
-    switch (dispatch_backend) {
+    return switch (dispatch_backend) {
         .auto => @call(.always_tail, handler, .{ ip, sp, fuel, stp, locals, module, interp, eip }),
-        .x86_64_sysv_inline => @panic("TODO: ASM"),
-    }
+        // Remember: source before destination
+        .x86_64_sysv_inline => asm volatile (
+        // Writing to `%rsp` is pretty bad [citation needed] for performance, since modern CPUs
+        // have caches? and stuff tracking pushes & pops, and `movq` means they get out of sync
+            \\movq %[eip], 0x18(%%rbp)
+            \\movq %[interp], 0x10(%%rbp)
+            \\movq %%rbp, %%rsp
+            \\popq %%rbp
+            \\jmp *%[handler]
+            : [ret] "={rax}" (-> Transition), // probably does nothing
+            : [handler] "{rax}" (handler),
+              [ip] "{rdi}" (ip),
+              [sp] "{rsi}" (sp.ptr),
+              [fuel] "{rdx}" (fuel),
+              [stp] "{rcx}" (stp),
+              [locals] "{r8}" (locals.ptr),
+              [module] "{r9}" (module.inner),
+              // Parameters passed via stack
+              [interp] "{r10}" (interp),
+              [eip] "{r11}" (eip),
+            : .{
+              .memory = true, // just to be safe, since writes into param area on stack happen
+              // Are declaring clobbers here even necessary?
+              .rsp = true,
+              // System V scratch registers
+              .xmm0 = true,
+              .xmm1 = true,
+              .xmm2 = true,
+              .xmm3 = true,
+              .xmm4 = true,
+              .xmm5 = true,
+              .xmm6 = true,
+              .xmm7 = true,
+              .xmm8 = true,
+              .xmm9 = true,
+              .xmm10 = true,
+              .xmm11 = true,
+              .xmm12 = true,
+              .xmm13 = true,
+              .xmm14 = true,
+              .xmm15 = true,
+            }),
+    };
 }
 
 /// `inline` since a tail call is used to jump to the next opcode handler.
@@ -1754,7 +1792,7 @@ const opcode_handlers = struct {
         interp: *Interpreter,
         eip: Eip,
     ) callconv(ohcc) Transition {
-        defer coz.progessNamed("wasmstint.Interpreter.end");
+        defer coz.progressNamed("wasmstint.Interpreter.end");
         const end_ptr: Eip = @ptrCast(ip - 1);
         _ = end_ptr.*;
         return if (@intFromPtr(end_ptr) == @intFromPtr(eip))
