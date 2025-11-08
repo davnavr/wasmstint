@@ -18,7 +18,7 @@ pub fn waitForDebugger() void {
         };
 
         while (debugapi.IsDebuggerPresent() == 0) {
-            std.os.windows.kernel32.SleepEx(100, 0);
+            _ = std.os.windows.kernel32.SleepEx(100, 0);
         }
     } else {
         if (os.tag == .linux) {

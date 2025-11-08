@@ -40,7 +40,7 @@ pub fn readFilePortable(
         // TODO(zig): https://github.com/ziglang/zig/issues/18849
         const sub_path_nt = try allocator.create(windows.PathSpace);
         defer allocator.destroy(sub_path_nt);
-        sub_path_nt.* = try windows.wToPrefixedFileW(dir.fd, sub_path_dos);
+        sub_path_nt.* = try windows.wToPrefixedFileW(dir.handle, sub_path_dos);
 
         return mapFileWindows(io, dir, sub_path_nt.span());
     } else if (virtual_memory.mman.has_mmap_anonymous) {
@@ -242,7 +242,7 @@ pub fn mapFileWindows(
     const file = try windows.OpenFile(
         sub_path_w,
         windows.OpenFileOptions{
-            .dir = dir.fd,
+            .dir = dir.handle,
             .access_mask = windows.FILE_READ_DATA | windows.SYNCHRONIZE,
             .creation = windows.FILE_OPEN,
             // Prevent other processes from modifying the file

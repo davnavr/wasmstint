@@ -879,7 +879,7 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             }
 
             if (builtin.os.tag == .windows) {
-                std.os.windows.kernel32.ExitProcess(std.math.maxInt(u32));
+                std.os.windows.ntdll.RtlExitUserProcess(@bitCast(@as(i32, -1)));
             } else {
                 std.process.exit(2);
             }
