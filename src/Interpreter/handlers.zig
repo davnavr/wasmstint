@@ -12,6 +12,8 @@ const DispatchBackend = enum {
     ///
     /// Workaround for <https://github.com/ziglang/zig/issues/24044>.
     x86_64_sysv_inline,
+    /// Similar to `DispatchBackend.x86_64_sysv_inline`, but for the Windows calling convention.
+    x86_64_win_inline,
 };
 
 const dispatch_backend: DispatchBackend = switch (builtin.zig_backend) {
@@ -19,17 +21,21 @@ const dispatch_backend: DispatchBackend = switch (builtin.zig_backend) {
         @compileError("frame pointers are required, use LLVM backend instead")
     else if (CallingConvention.c == .x86_64_sysv)
         .x86_64_sysv_inline
+    else if (CallingConvention.c == .x86_64_win)
+        .x86_64_win_inline
     else
-        @compileError("use LLVM backend instead: https://github.com/ziglang/zig/issues/24044"),
-    .other, // assume tail calls are supported
-    .stage2_llvm,
-    => .auto,
+        unreachable,
+
+    .other, .stage2_llvm => .auto, // assume tail calls are supported
+
     else => |bad| @compileError(@tagName(bad) ++ " backend might not support tail calls"),
+    // @compileError("use LLVM backend instead: https://github.com/ziglang/zig/issues/24044"),
 };
 
 /// Opcode handler calling convention.
 const ohcc: CallingConvention = switch (dispatch_backend) {
     .x86_64_sysv_inline => .{ .x86_64_sysv = .{} },
+    .x86_64_win_inline => .{ .x86_64_win = .{} },
     .auto => switch (CallingConvention.c) {
         // The Intel x86-64 register calling convention allows passing more parameters via
         // registers and removes instructions for saving callee-saved registers, but is
@@ -83,16 +89,22 @@ inline fn handlerTailCall(
 ) Transition {
     return switch (dispatch_backend) {
         .auto => @call(.always_tail, handler, .{ ip, sp, fuel, stp, locals, module, interp, eip }),
-        // Remember: source before destination
-        .x86_64_sysv_inline => asm volatile (
         // Writing to `%rsp` is pretty bad [citation needed] for performance, since modern CPUs
         // have caches? and stuff tracking pushes & pops, and `movq` means they get out of sync
+        //
+        // Sources:
+        // - https://eli.thegreenplace.net/2011/09/06/stack-frame-layout-on-x86-64
+        // - https://wiki.osdev.org/System_V_ABI#x86-64
+        //
+        // Remember: source before destination
+        .x86_64_sysv_inline => asm volatile (
             \\movq %[eip], 0x18(%%rbp)
             \\movq %[interp], 0x10(%%rbp)
             \\movq %%rbp, %%rsp
             \\popq %%rbp
             \\jmp *%[handler]
-            : [ret] "={rax}" (-> Transition), // probably does nothing
+            // probably does nothing, though this might be cause of crash in ReleaseSafe due to zero sized struct
+            : [ret] "={rax}" (-> Transition),
             : [handler] "{rax}" (handler),
               [ip] "{rdi}" (ip),
               [sp] "{rsi}" (sp.ptr),
@@ -124,6 +136,46 @@ inline fn handlerTailCall(
               .xmm13 = true,
               .xmm14 = true,
               .xmm15 = true,
+            }),
+        // On Windows, function epilogues are expected to be in a certain format, but since this
+        // uses `jmp` and not a `ret`, it should be fine.
+        //
+        // Thankfully, `push` and `pop` can't be used outside of prologues and epilogues, due to
+        // the 16-byte stack alignment requirement.
+        //
+        // Sources:
+        // - https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention
+        // - https://learn.microsoft.com/en-us/cpp/build/stack-usage
+        // - https://learn.microsoft.com/en-us/cpp/build/prolog-and-epilog
+        // - https://blog.s-schoener.com/2025-01-17-access-violation-aligned-access/
+        // - https://www.agner.org/optimize/calling_conventions.pdf
+        //
+        // This needs to reach into the stack space containing the last 4 arguments and update it.
+        .x86_64_win_inline => asm volatile (
+            \\movq %[eip], 0x48(%%rbp)
+            \\movq %[interp], 0x40(%%rbp)
+            \\movq %[module], 0x38(%%rbp)
+            \\movq %[locals], 0x30(%%rbp)
+            \\movq %%rbp, %%rsp
+            \\popq %%rbp
+            \\jmp *%[handler]
+            // probably does nothing, though this might be cause of crash in ReleaseSafe due to zero sized struct
+            : [ret] "={rax}" (-> Transition),
+            : [handler] "{rax}" (handler),
+              [ip] "{rcx}" (ip),
+              [sp] "{rdx}" (sp.ptr),
+              [fuel] "{r8}" (fuel),
+              [stp] "{r9}" (stp),
+              // Parameters passed via stack
+              [locals] "{r10}" (locals.ptr),
+              [module] "{r11}" (module.inner),
+              // Using callee-save registers is fine at the end of the current function call
+              [interp] "{rbx}" (interp),
+              [eip] "{rsi}" (eip),
+            : .{
+              .memory = true, // just to be safe, since writes into param area on stack happen
+              // Are declaring clobbers here even necessary?
+              .rsp = true,
             }),
     };
 }
