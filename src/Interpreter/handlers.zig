@@ -37,7 +37,10 @@ const ohcc: CallingConvention = switch (dispatch_backend) {
         //
         // For more information see <https://reviews.llvm.org/D25022>.
         .x86_64_sysv => .{ .x86_64_regcall_v3_sysv = .{} },
-        .x86_64_win => .{ .x86_64_regcall_v4_win = .{} },
+
+        // TODO(llvm): fix regcall on windows https://github.com/llvm/llvm-project/issues/51523
+        // .x86_64_win => .{ .x86_64_regcall_v4_win = .{} },
+
         // TODO(Zig): waiting for a calling convention w/o callee-saved registers
         // - (i.e. `preserve_none` or `ghccc` in LLVM)
         else => .auto,
