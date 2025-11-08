@@ -107,9 +107,9 @@ const fail = struct {
     fn printInitialMessage(
         comptime fmt: []const u8,
         args: anytype,
-        color: std.Io.tty.Config,
-        stderr: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
+        color: Io.tty.Config,
+        stderr: *Io.Writer,
+    ) Io.Writer.Error!void {
         color.setColor(stderr, .bright_red) catch {};
         stderr.writeAll("error: ") catch {};
         color.setColor(stderr, .reset) catch {};
@@ -123,16 +123,13 @@ const fail = struct {
         context: anytype,
         comptime printFollowupMessage: fn (
             @TypeOf(context),
-            std.Io.tty.Config,
-            *std.Io.Writer,
-        ) std.Io.Writer.Error!void,
+            Io.tty.Config,
+            *Io.Writer,
+        ) Io.Writer.Error!void,
     ) Error {
         @branchHint(.cold);
         var buf: [256]u8 align(16) = undefined;
-        const stderr = std.debug.lockStderrWriter(&buf);
-        const color = std.Io.tty.detectConfig(
-            @as(*std.fs.File.Writer, @fieldParentPtr("interface", stderr)).file,
-        );
+        const stderr, const color = std.debug.lockStderrWriter(&buf);
         printInitialMessage(fmt, args, color, stderr) catch {};
         printFollowupMessage(context, color, stderr) catch {};
         stderr.flush() catch {};
@@ -146,11 +143,7 @@ const fail = struct {
             args,
             {},
             struct {
-                fn nothing(
-                    _: void,
-                    _: std.Io.tty.Config,
-                    _: *std.Io.Writer,
-                ) std.Io.Writer.Error!void {}
+                fn nothing(_: void, _: Io.tty.Config, _: *Io.Writer) Io.Writer.Error!void {}
             }.nothing,
         );
     }
@@ -409,7 +402,7 @@ fn parseArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) ParsedArgume
     };
 }
 
-var log_file: ?std.fs.File = null;
+var log_file: ?Io.File = null;
 var log_level: ?std.log.Level = std_options.log_level;
 var log_counter: u64 = 0;
 
@@ -425,10 +418,11 @@ fn logger(
 
     var buffer: [1024]u8 align(16) = undefined;
     var log_file_writer: std.fs.File.Writer = undefined;
-    var writer: *std.Io.Writer = if (log_file) |f| writer: {
-        log_file_writer = f.writerStreaming(&buffer);
+    var writer: *Io.Writer = if (log_file) |f| writer: {
+        // TODO(zig): https://github.com/ziglang/zig/issues/25738
+        log_file_writer = std.fs.File.adaptFromNewApi(f).writerStreaming(&buffer);
         break :writer &log_file_writer.interface;
-    } else std.debug.lockStderrWriter(&buffer);
+    } else std.debug.lockStderrWriter(&buffer)[0];
 
     // Zig `std` does not yet providing printing of timestamps.
     defer log_counter +%= 1;
@@ -460,7 +454,7 @@ pub fn main() void {
 
     if (builtin.os.tag == .windows) {
         // TODO: check exit_code != 3 (abort) https://github.com/WebAssembly/wasi-cli/issues/11
-        std.os.windows.kernel32.ExitProcess(exit_code);
+        std.os.windows.ntdll.RtlExitUserProcess(exit_code);
     } else {
         std.process.exit(
             std.math.cast(u8, exit_code) orelse @panic("TODO: how to truncate exit code"),
@@ -497,18 +491,19 @@ fn realMain() Error!i32 {
         return fail.print(error.BadCliFlag, "cannot use " ++ memory_export ++ " as an entrypoint");
     }
 
-    const cwd = std.fs.cwd();
+    var io_threaded = Io.Threaded.init_single_threaded;
+    const io = io_threaded.ioBasic();
+    const cwd = Io.Dir.cwd();
 
     log_level = arguments.@"log-level";
     if (arguments.@"log-file") |path| {
-        // https://github.com/ziglang/zig/issues/14375
-        const flags = std.fs.File.CreateFlags{ .truncate = false };
-        const creat = if (comptime builtin.os.tag == .windows)
-            std.fs.Dir.createFile
-        else
-            std.fs.Dir.createFileZ;
-
-        log_file = creat(cwd, path, flags) catch return fail.format(
+        log_file = Io.Dir.createFile(
+            cwd,
+            io,
+            path,
+            // https://github.com/ziglang/zig/issues/14375
+            Io.File.CreateFlags{ .truncate = false },
+        ) catch return fail.format(
             error.GenericError,
             "could not create log file {f}",
             .{std.unicode.fmtUtf8(path)},
@@ -538,6 +533,7 @@ fn realMain() Error!i32 {
 
     _ = scratch.reset(.retain_capacity);
     var wasm_binary = file_content.readFilePortable(
+        io,
         cwd,
         arguments.module,
         if (builtin.os.tag == .windows) scratch.allocator() else arena.allocator(),
@@ -562,7 +558,7 @@ fn realMain() Error!i32 {
     const rt_rng_seeds: [2]u64 = .{ @truncate(rt_rng_num), @truncate(rt_rng_num >> 64) };
 
     _ = scratch.reset(.retain_capacity);
-    var parse_diagnostics = std.Io.Writer.Allocating.init(arena.allocator());
+    var parse_diagnostics = Io.Writer.Allocating.init(arena.allocator());
     const parsed_module = module: {
         var wasm: []const u8 = wasm_binary.contents();
         break :module wasmstint.Module.parse(
@@ -625,8 +621,9 @@ fn realMain() Error!i32 {
     ) catch oom("preopen list");
 
     for (preopens, all_arguments.preopen_dirs) |*dst, *src| {
-        dst.* = WasiPreview1.PreopenDir.openAtZ(
+        dst.* = WasiPreview1.PreopenDir.openAt(
             cwd,
+            io,
             src.host,
             src.permissions,
             src.guest,
@@ -775,9 +772,9 @@ fn realMain() Error!i32 {
                 struct {
                     fn printFollowupMessage(
                         available_exports: wasmstint.runtime.ModuleInst.ExportVals,
-                        color: std.Io.tty.Config,
-                        out: *std.Io.Writer,
-                    ) std.Io.Writer.Error!void {
+                        color: Io.tty.Config,
+                        out: *Io.Writer,
+                    ) Io.Writer.Error!void {
                         color.setColor(out, .bright_cyan) catch {};
                         try out.writeAll("note: ");
                         color.setColor(out, .reset) catch {};
@@ -911,6 +908,7 @@ fn mainLoop(
 }
 
 const std = @import("std");
+const Io = std.Io;
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const file_content = @import("file_content");

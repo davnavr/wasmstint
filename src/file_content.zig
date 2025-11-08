@@ -17,7 +17,8 @@ else
 ///
 /// Don't forget to call `deinit()`!.
 pub fn readFilePortable(
-    dir: Dir,
+    io: Io,
+    dir: Io.Dir,
     sub_path: BytePath,
     /// - On Windows, this is used to allocate a temporary buffer containing a `WTF-16` version of
     /// `sub_path`.
@@ -39,17 +40,17 @@ pub fn readFilePortable(
         // TODO(zig): https://github.com/ziglang/zig/issues/18849
         const sub_path_nt = try allocator.create(windows.PathSpace);
         defer allocator.destroy(sub_path_nt);
-        sub_path_nt.* = try windows.wToPrefixedFileW(dir.fd, sub_path_dos);
+        sub_path_nt.* = try windows.wToPrefixedFileW(dir.handle, sub_path_dos);
 
-        return mapFileWindows(dir, sub_path_nt.span());
+        return mapFileWindows(io, dir, sub_path_nt.span());
     } else if (virtual_memory.mman.has_mmap_anonymous) {
-        return readFile(dir, sub_path);
+        return readFile(io, dir, sub_path);
     } else {
-        return readFileAlloc(dir, sub_path, allocator);
+        return readFileAlloc(io, dir, sub_path, allocator);
     }
 }
 
-pub const ReadFileError = Oom || fs.File.OpenError || fs.File.ReadError || fs.File.StatError;
+pub const ReadFileError = Oom || Io.File.OpenError || Io.File.Reader.Error || Io.File.StatError;
 
 pub const VirtualMemory = struct {
     allocation: []align(page_size_min) const u8,
@@ -110,13 +111,14 @@ pub const VirtualMemory = struct {
     }
 };
 
-fn openFileAt(dir: Dir, sub_path: BytePath) fs.File.OpenError!fs.File {
-    const open_options = fs.File.OpenFlags{ .mode = .read_only };
-    return switch (BytePath) {
-        [:0]const u8 => try dir.openFileZ(sub_path, open_options),
-        []const u8 => try dir.openFile(sub_path, open_options),
-        else => comptime unreachable,
-    };
+fn openFileAt(io: Io, dir: Io.Dir, sub_path: BytePath) Io.File.OpenError!Io.File {
+    const open_options = Io.File.OpenFlags{ .mode = .read_only };
+    // return switch (BytePath) {
+    //     [:0]const u8 => try dir.openFileZ(sub_path, open_options),
+    //     []const u8 => try dir.openFile(sub_path, open_options),
+    //     else => comptime unreachable,
+    // };
+    return dir.openFile(io, sub_path, open_options);
 }
 
 /// Reads the contents of a file into a read-only (`PROT_READ`) virtual memory allocation created
@@ -124,12 +126,12 @@ fn openFileAt(dir: Dir, sub_path: BytePath) fs.File.OpenError!fs.File {
 ///
 /// On Windows, this instead calls `VirtualAlloc()` with `PAGE_READONLY`. To create a file mapping
 /// instead, call `mapFileWindows`.
-pub fn readFile(dir: Dir, sub_path: BytePath) ReadFileError!VirtualMemory {
-    const file = try openFileAt(dir, sub_path);
-    defer file.close();
+pub fn readFile(io: Io, dir: Io.Dir, sub_path: BytePath) ReadFileError!VirtualMemory {
+    const file = try openFileAt(io, dir, sub_path);
+    defer file.close(io);
 
     const page_size = std.heap.pageSize();
-    const indicated_size = (try file.stat()).size;
+    const indicated_size = (try file.stat(io)).size;
 
     if (indicated_size == 0) {
         return VirtualMemory{ .allocation = &.{} };
@@ -165,7 +167,7 @@ pub fn readFile(dir: Dir, sub_path: BytePath) ReadFileError!VirtualMemory {
     } else posix.munmap(allocated);
 
     const actual_size = read: {
-        var reader = file.readerStreaming(allocated);
+        var reader = file.readerStreaming(io, allocated);
         reader.interface.fill(allocated.len) catch |e| switch (e) {
             error.EndOfStream => {},
             error.ReadFailed => return reader.err.?,
@@ -219,7 +221,7 @@ pub const WindowsMappedView = struct {
     }
 };
 
-pub const MapFileError = Oom || windows.OpenError || error{
+pub const MapFileError = Oom || windows.OpenError || Io.Cancelable || error{
     /// File was already locked
     FileLockConflict,
     FileMappingNotSupported,
@@ -232,14 +234,15 @@ pub const MapFileError = Oom || windows.OpenError || error{
 ///
 /// To instead allocate a buffer via `VirtualAlloc()` and read the file into it, call `readFile`.
 pub fn mapFileWindows(
-    dir: Dir,
+    io: Io,
+    dir: Io.Dir,
     /// WTF-16 encoded NT path to the file to open.
     sub_path_w: []const u16,
 ) MapFileError!WindowsMappedView {
     const file = try windows.OpenFile(
         sub_path_w,
         windows.OpenFileOptions{
-            .dir = dir.fd,
+            .dir = dir.handle,
             .access_mask = windows.FILE_READ_DATA | windows.SYNCHRONIZE,
             .creation = windows.FILE_OPEN,
             // Prevent other processes from modifying the file
@@ -248,6 +251,10 @@ pub fn mapFileWindows(
     );
     // Safe to close file handle after mapping is created
     defer windows.CloseHandle(file);
+
+    if (io.cancelRequested()) {
+        return error.Canceled;
+    }
 
     // Unfortunately have to get actual size of file, since neither `NtCreateSection` nor
     // `NtMapViewOfSection` provide a way to get a size that isn't rounded to page size.
@@ -272,6 +279,10 @@ pub fn mapFileWindows(
             else => return windows.unexpectedStatus(status),
         }
     };
+
+    if (io.cancelRequested()) {
+        return error.Canceled;
+    }
 
     const mapping: windows.HANDLE = mapping: {
         // ntdll equivalent of `CreateFileMappingW`
@@ -303,6 +314,10 @@ pub fn mapFileWindows(
         }
     };
     errdefer windows.CloseHandle(mapping);
+
+    if (io.cancelRequested()) {
+        return error.Canceled;
+    }
 
     const win = struct {
         /// Zig got values in `windows.SECTION_INHERIT` wrong.
@@ -382,16 +397,17 @@ pub const Allocated = struct {
 };
 
 pub fn readFileAlloc(
-    dir: Dir,
+    io: Io,
+    dir: Io.Dir,
     sub_path: []const u8,
     allocator: Allocator,
 ) ReadFileError!Allocated {
-    const file = try openFileAt(dir, sub_path);
+    const file = try openFileAt(io, dir, sub_path);
     defer file.close();
 
     const indicated_size = (try file.stat()).size;
     const buf = try allocator.alignedAlloc(u8, .@"16", indicated_size);
-    var reader = file.readerStreaming(buf);
+    var reader = file.readerStreaming(io, buf);
     reader.interface.fill(indicated_size) catch |e| switch (e) {
         error.EndOfStream => {},
         error.ReadError => return reader.err.?,
@@ -404,6 +420,7 @@ pub fn readFileAlloc(
 }
 
 const std = @import("std");
+const Io = std.Io;
 const builtin = @import("builtin");
 const virtual_memory = @import("allocators").virtual_memory;
 const posix = std.posix;
@@ -411,5 +428,3 @@ const windows = std.os.windows;
 const Allocator = std.mem.Allocator;
 const Oom = Allocator.Error;
 const page_size_min = std.heap.page_size_min;
-const fs = std.fs;
-const Dir = fs.Dir;

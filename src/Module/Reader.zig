@@ -234,7 +234,8 @@ fn testReadIleb128(comptime T: type, input_bytes: []const u8, expected: T) !void
     var reader = Reader.init(&input);
     const actual = value: {
         var diag_buffer: [128]u8 = undefined;
-        const diag = Diagnostics.init(std.debug.lockStderrWriter(&diag_buffer));
+        const stderr, _ = std.debug.lockStderrWriter(&diag_buffer);
+        const diag = Diagnostics.init(stderr);
         defer std.debug.unlockStdErr();
         break :value try reader.readIleb128(T, diag, @typeName(T));
     };

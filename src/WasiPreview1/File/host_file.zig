@@ -1,9 +1,14 @@
 //! Unbuffered access to a real, genuine, 100% all-natural OS file descriptor.
 
-pub const Close = enum { close, leave_open };
+/// Indicates whether the underlying OS file descriptor can be closed by the WASI guest.
+pub const Close = enum {
+    close,
+    /// Used to prevent the WASI guest program from closing the host's standard streams.
+    leave_open,
+};
 
 const HostFile = struct {
-    file: std.fs.File,
+    file: std.Io.File,
     close: Close,
 };
 
@@ -40,7 +45,7 @@ comptime {
 /// Callers must ensure that `fd` is an open file handle.
 ///
 /// Ownership of `fd` is transferred to the `File`.
-pub fn wrapFile(fd: std.fs.File, close: Close) File.Impl {
+pub fn wrapFile(fd: std.Io.File, close: Close) File.Impl {
     return File.Impl{
         .ctx = Ctx.init(HostFile{ .file = fd, .close = close }),
         .vtable = &vtable,
@@ -64,15 +69,15 @@ pub fn wrapStandardStreams() File.StandardStreams {
             .rights = File.Rights.init(
                 types.Rights.Valid.init(&(.{.fd_read} ++ common_rights)),
             ),
-            .impl = wrapFile(std.fs.File.stdin(), .leave_open),
+            .impl = wrapFile(std.Io.File.stdin(), .leave_open),
         },
         .stdout = File{
             .rights = out_rights,
-            .impl = wrapFile(std.fs.File.stdout(), .leave_open),
+            .impl = wrapFile(std.Io.File.stdout(), .leave_open),
         },
         .stderr = File{
             .rights = out_rights,
-            .impl = wrapFile(std.fs.File.stderr(), .leave_open),
+            .impl = wrapFile(std.Io.File.stderr(), .leave_open),
         },
     };
 }
@@ -133,10 +138,12 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
                     .disk => unreachable,
                     .char => return char_device,
                     .pipe => {
-                        // Unable to determine socket type (getsockopt with winsock?)
-                        // TODO: `std.fs.File.isCygwinPty` => `return char_device`
-                        // Zig wrapper does useless work, it checks if file is console
-                        log.err("encountered windows pipe in fd_fdstat_get", .{});
+                        // Zig `isCygwinPty` wrapper does useless work, it checks if file is console
+                        const pipe_pty = host_os.windows.isMsysOrCygwinPty(self.file.handle);
+                        switch (pipe_pty.tag) {
+                            .not_a_pty => {},
+                            .msys, .cygwin => return char_device,
+                        }
                     },
                     .unknown => switch (std.os.windows.GetLastError()) {
                         .SUCCESS => {},
@@ -204,9 +211,12 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
                 };
             }
 
-            break :type types.FileType.fromZigKind(
-                (try self.file.stat()).kind,
-            ) catch |e| switch (e) {
+            const stat = std.posix.fstat(self.file.handle) catch |e| switch (e) {
+                error.Canceled, error.Streaming => unreachable,
+                else => unreachable,
+            };
+
+            break :type types.FileType.fromPosixMode(stat.mode) catch |e| switch (e) {
                 error.UnknownSocketType => .unknown, // TODO: Requires getsockopt
             };
         },
@@ -474,8 +484,12 @@ fn fd_write(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!u32 {
     // }
 
     // TODO: How to handle Windows? multiple WriteFile calls?
-    const written = self.file.writev(File.Ciovec.castSlice(iovs)) catch |e| return switch (e) {
+    // TODO: Use `std.posix.writev`
+    const written = std.fs.File.adaptFromNewApi(self.file).writev(
+        File.Ciovec.castSlice(iovs),
+    ) catch |e| return switch (e) {
         error.NotOpenForWriting => error.BadFd,
+        error.Canceled => unreachable,
         else => |known| known,
     };
 

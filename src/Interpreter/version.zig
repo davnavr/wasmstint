@@ -5,8 +5,7 @@ pub const Version = packed struct {
         .ReleaseFast, .ReleaseSmall => false,
     };
 
-    number: if (enabled) u32 else void =
-        if (enabled) 0 else {},
+    number: if (enabled) u32 else u0 = 0,
 
     pub fn increment(ver: *Version) void {
         if (enabled) {

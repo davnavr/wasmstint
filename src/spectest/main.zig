@@ -65,22 +65,26 @@ pub fn main() u8 {
         wasmstint.waitForDebugger();
     }
 
+    var io_threaded = Io.Threaded.init_single_threaded;
+    const io = io_threaded.ioBasic();
+
     const stderr_buffer = std.heap.page_allocator.alignedAlloc(
         u8,
         .fromByteUnits(std.heap.page_size_min),
         8192,
     ) catch @panic("oom");
-    const stderr = State.Output{
-        .tty_config = std.Io.tty.detectConfig(std.fs.File.stderr()),
-        .writer = std.debug.lockStderrWriter(stderr_buffer),
+    const stderr = stderr: {
+        const locked = std.debug.lockStderrWriter(stderr_buffer);
+        break :stderr State.Output{ .tty_config = locked[1], .writer = locked[0] };
     };
     // Flush happens even if error occurs
     defer std.debug.unlockStderrWriter();
 
     const fmt_json_path = std.unicode.fmtUtf8(arguments.run);
 
-    const cwd = std.fs.cwd();
+    const cwd = Io.Dir.cwd();
     var json_file = file_content.readFilePortable(
+        io,
         cwd,
         arguments.run,
         if (builtin.os.tag == .windows) scratch.allocator() else arena.allocator(),
@@ -95,7 +99,8 @@ pub fn main() u8 {
     _ = scratch.reset(.retain_capacity);
     defer if (builtin.mode == .Debug) json_file.deinit();
 
-    var json_dir = std.fs.cwd().openDir(
+    var json_dir = cwd.openDir(
+        io,
         std.fs.path.dirname(arguments.run).?,
         .{ .access_sub_paths = true },
     ) catch |e| {
@@ -103,7 +108,7 @@ pub fn main() u8 {
         stderr.print("Could not open directory {f}: {t}\n", .{ fmt_json_path, e });
         return 1;
     };
-    errdefer json_dir.close();
+    errdefer json_dir.close(io);
 
     var rng = rng: {
         var init = std.Random.Xoshiro256{ .s = undefined };
@@ -146,6 +151,7 @@ pub fn main() u8 {
     var state: State = undefined;
     State.init(
         &state,
+        io,
         interpreter_allocator.allocator(),
         arguments.@"max-memory-size",
         .{ .remaining = arguments.fuel },
@@ -168,7 +174,7 @@ pub fn main() u8 {
             error.ScriptError => {
                 if (builtin.mode == .Debug) {
                     if (@errorReturnTrace()) |trace| {
-                        trace.format(stderr.writer) catch {};
+                        std.debug.writeStackTrace(trace, stderr.writer, stderr.tty_config) catch {};
                     }
                 }
                 break 1;
@@ -206,7 +212,7 @@ fn handleJsonError(
 
             if (builtin.mode == .Debug) {
                 if (@errorReturnTrace()) |trace| {
-                    trace.format(stderr.writer) catch {};
+                    std.debug.writeStackTrace(trace, stderr.writer, stderr.tty_config) catch {};
                 }
             }
         },
@@ -217,6 +223,7 @@ fn handleJsonError(
 }
 
 const std = @import("std");
+const Io = std.Io;
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const allocators = @import("allocators");

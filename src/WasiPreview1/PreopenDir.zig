@@ -1,4 +1,4 @@
-dir: std.fs.Dir,
+dir: Io.Dir,
 permissions: Permissions,
 guest_path: Path,
 
@@ -13,14 +13,18 @@ pub const Permissions = packed struct(u1) {
     };
 };
 
-pub fn openAtZ(
-    dir: std.fs.Dir,
-    sub_path: [:0]const u8,
+pub fn openAt(
+    dir: Io.Dir,
+    io: Io,
+    /// Host path to the directory to open.
+    sub_path: []const u8,
+    /// Specifies the operations the guest can perform within the directory.
     permissions: Permissions,
+    /// Cannot be empty.
     guest_path: Path,
-) std.fs.Dir.OpenError!PreopenDir {
+) Io.Dir.OpenError!PreopenDir {
     if (guest_path.len == 0) {
-        return error.BadPathName;
+        return error.BadPathName; // empty path
     }
 
     const open_options = std.fs.Dir.OpenOptions{
@@ -28,19 +32,16 @@ pub fn openAtZ(
         .iterate = true, // guest may choose to ask for entries at any time
     };
 
-    const opened_dir = switch (builtin.os.tag) {
-        .windows, .wasi => try dir.openDir(sub_path, open_options),
-        else => try dir.openDirZ(sub_path, open_options),
-    };
-
-    std.log.debug(
-        "preopen host {any} @ {f} at guest path {f} -> host {any}",
-        .{ dir.fd, std.unicode.fmtUtf8(sub_path), guest_path, opened_dir.fd },
-    );
+    const opened_dir = try dir.openDir(io, sub_path, open_options);
 
     errdefer comptime unreachable;
 
-    return .{
+    std.log.debug(
+        "preopen host {any} @ {f} at guest path {f} -> host {any}",
+        .{ dir.handle, std.unicode.fmtUtf8(sub_path), guest_path, opened_dir.handle },
+    );
+
+    return PreopenDir{
         .dir = opened_dir,
         .permissions = permissions,
         .guest_path = guest_path,
@@ -49,4 +50,5 @@ pub fn openAtZ(
 
 const std = @import("std");
 const builtin = @import("builtin");
+const Io = std.Io;
 const Path = @import("Path.zig");

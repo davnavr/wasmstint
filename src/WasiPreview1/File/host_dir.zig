@@ -1,7 +1,7 @@
 //! Wraps a host OS file descriptor referring to a directory.
 
 const HostDir = struct {
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     info: *Info,
 
     const Info = struct {
@@ -82,7 +82,7 @@ pub fn initPreopened(preopen: *PreopenDir, allocator: Allocator) Allocator.Error
         .guest_path_ptr = preopen.guest_path.ptr,
         .read_next_cookie = .start,
         .read_state = ReadState{
-            .iter = preopen.dir.iterate(),
+            .iter = std.fs.Dir.adaptFromNewApi(preopen.dir).iterate(),
             .name_buf = undefined,
             .cached = .current_dir,
         },
@@ -106,7 +106,7 @@ pub fn initPreopened(preopen: *PreopenDir, allocator: Allocator) Allocator.Error
 const log = std.log.scoped(.host_dir);
 
 fn init(
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     allocator: Allocator,
     rights: types.Rights.Valid,
 ) Allocator.Error!File.OpenedPath {
@@ -119,7 +119,7 @@ fn init(
         .guest_path_ptr = @as([]const u8, "").ptr,
         .read_next_cookie = .start,
         .read_state = ReadState{
-            .iter = dir.iterate(),
+            .iter = std.fs.Dir.adaptFromNewApi(dir).iterate(),
             .name_buf = undefined,
             .cached = .current_dir,
         },
@@ -359,7 +359,7 @@ fn fd_close(ctx: Ctx, allocator: Allocator) Error!void {
     const self = ctx.get(HostDir);
     // self.guestPath is not deallocated
     defer allocator.destroy(self.info);
-    try host_file.closeHandle(self.dir.fd);
+    try host_file.closeHandle(self.dir.handle);
 }
 
 fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
@@ -424,7 +424,7 @@ fn SetOpenFlags(comptime Args: type) type {
 ///
 /// [`openat2`]: https://man7.org/linux/man-pages/man2/openat2.2.html
 fn accessSubPathLinux(
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     scratch: *ArenaAllocator,
     flags: types.LookupFlags.Valid,
     path: Path,
@@ -480,7 +480,7 @@ fn accessSubPathLinux(
     const new_fd: std.os.linux.fd_t = while (true) {
         const result = std.os.linux.syscall4(
             std.os.linux.SYS.openat2,
-            @bitCast(@as(isize, dir.fd)),
+            @bitCast(@as(isize, dir.handle)),
             @intFromPtr(path_z.ptr),
             @intFromPtr(&how),
             @sizeOf(OpenHow),
@@ -539,7 +539,7 @@ fn AccessSubPathReturnType(comptime Accessor: type) type {
 /// This is an implementation of the path resolution algorithm described
 /// [here](https://github.com/WebAssembly/wasi-filesystem/blob/main/path-resolution.md).
 fn accessSubPathPortable(
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     scratch: *ArenaAllocator,
     flags: types.LookupFlags.Valid,
     path: Path,
@@ -604,19 +604,20 @@ fn accessSubPathPortable(
     // target is reached.
 
     var path_arena = ArenaAllocator.init(scratch.allocator());
-    var final_dir = dir;
+    var final_dir = std.fs.Dir.adaptFromNewApi(dir);
     if (initial_components.len > 1) {
         for (0.., initial_components[0 .. initial_components.len - 1]) |i, comp| {
             var coz_open_comp_dir = coz.begin("wasmstint.WasiPreview1.host_dir.accessSubPath-openDir");
             defer coz_open_comp_dir.end();
 
-            var old_dir = final_dir;
+            var old_dir: std.fs.Dir = final_dir;
             defer if (i > 0 and i < initial_components.len - 1) {
                 // log.debug("closing intermediate directory {any}", .{old_dir.fd});
                 old_dir.close();
             };
 
             const comp_bytes = comp.bytes(path);
+            // TODO: Make own openDir wrapper
             const comp_str = if (builtin.os.tag == .windows)
                 std.unicode.utf8ToUtf16LeAllocZ(
                     path_arena.allocator(),
@@ -626,25 +627,29 @@ fn accessSubPathPortable(
                     error.OutOfMemory => |oom| return oom,
                 }
             else
-                try path_arena.allocator().dupeZ(u8, comp_bytes);
+                // try path_arena.allocator().dupeZ(u8, comp_bytes);
+                comp_bytes;
 
             // TODO: Use O_PATH on Linux, requires using platform-specific APIs
 
-            const zigOpenDir = if (builtin.os.tag == .windows)
-                std.fs.Dir.openDirW
-            else
-                std.fs.Dir.openDirZ;
+            var io = std.Io.Threaded.init_single_threaded;
+            const open_options = std.Io.Dir.OpenOptions{
+                .access_sub_paths = true,
+                // TODO(zig): no_follow weird on windows https://github.com/ziglang/zig/issues/18335
+                .follow_symlinks = false,
+            };
 
-            final_dir = zigOpenDir(
-                old_dir,
-                comp_str,
-                std.fs.Dir.OpenOptions{
-                    .access_sub_paths = true,
-                    // TODO(zig): no_follow weird on windows https://github.com/ziglang/zig/issues/18335
-                    .no_follow = true,
-                },
-            ) catch |e| return switch (e) {
+            final_dir = (if (builtin.os.tag == .windows) next: {
+                break :next std.fs.Dir.adaptFromNewApi(
+                    io.dirOpenDirWindows(
+                        old_dir.adaptToNewApi(),
+                        comp_str,
+                        open_options,
+                    ) catch |e| break :next e,
+                );
+            } else old_dir.openDir(comp_str, open_options)) catch |e| return switch (e) {
                 // error.NotDir might happen on windows because a symlink is obviously not a directory
+                error.Canceled => unreachable,
                 error.SymLinkLoop => if (builtin.os.tag == .windows)
                     unreachable
                 else if (!flags.symlink_follow)
@@ -655,7 +660,6 @@ fn accessSubPathPortable(
                     log.debug("TODO: Expand symlinks in accessSubPathPortable for {f}", .{path});
                     return error.Unimplemented;
                 },
-                error.InvalidUtf8, error.InvalidWtf8 => unreachable,
                 error.NetworkNotFound => error.DirNotFound,
                 else => |err| err,
             };
@@ -946,12 +950,17 @@ fn accessSubPathPortable(
             o_flags_no_follow,
             0,
         ) catch |e| return switch (e) {
-            error.InvalidWtf8, error.NetworkNotFound => unreachable, // Windows-only
+            error.AntivirusInterference,
+            error.SharingViolation,
+            error.NetworkNotFound,
+            error.PipeBusy,
+            => unreachable, // Windows-only
             error.FileLocksNotSupported => unreachable,
             error.SymLinkLoop => {
                 log.err("TODO: final path component of {f} was a symlink", .{path});
                 return error.Unimplemented;
             },
+            error.Canceled => unreachable,
             else => |err| err,
         };
 
@@ -968,7 +977,7 @@ fn accessSubPathPortable(
 ///
 /// [WASI support in `wasmtime`]: https://docs.rs/cap-primitives/3.4.4/src/cap_primitives/rustix/linux/fs/open_impl.rs.html
 fn accessSubPath(
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     /// Used for temporary allocations of file paths.
     scratch: *ArenaAllocator,
     flags: types.LookupFlags.Valid,
@@ -1218,24 +1227,25 @@ fn pathOpen(
             if (info.FileAttributes & std.os.windows.FILE_ATTRIBUTE_DIRECTORY == 0) {
                 log.debug(opened_msg, .{path});
                 return File.OpenedPath{
-                    .file = host_file.wrapFile(std.fs.File{ .handle = new_fd }, .close),
+                    .file = host_file.wrapFile(std.Io.File{ .handle = new_fd }, .close),
                     .rights = rights.intersection(host_file.possible_rights),
                 };
             }
         }
     } else if (@hasDecl(std.posix.system, "O") and std.posix.O != void) {
         if (!open_flags.directory) {
-            const as_file = std.fs.File{ .handle = new_fd };
-            const kind = (try as_file.stat()).kind;
-            switch (kind) {
-                .directory => {},
-                else => {
-                    log.debug(opened_msg, .{path});
-                    return File.OpenedPath{
-                        .file = host_file.wrapFile(as_file, .close),
-                        .rights = rights.intersection(host_file.possible_rights),
-                    };
-                },
+            // TODO: On linux, use statx to determine if directory
+            const stat = std.posix.fstat(new_fd) catch |e| switch (e) {
+                error.Canceled, error.Streaming => unreachable,
+                else => |err| return err,
+            };
+
+            if (types.FileType.fromPosixMode(stat.mode) catch .unknown != .directory) {
+                log.debug(opened_msg, .{path});
+                return File.OpenedPath{
+                    .file = host_file.wrapFile(std.Io.File{ .handle = new_fd }, .close),
+                    .rights = rights.intersection(host_file.possible_rights),
+                };
             }
         }
     } else {
@@ -1243,7 +1253,7 @@ fn pathOpen(
     }
 
     log.debug("successfully opened directory {f}", .{path});
-    const as_dir = std.fs.Dir{ .fd = new_fd };
+    const as_dir = std.Io.Dir{ .handle = new_fd };
     return init(as_dir, allocator, rights);
 }
 

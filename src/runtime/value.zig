@@ -54,7 +54,10 @@ pub const FuncAddr = extern struct {
     /// If the lowest bit is `0`, then this is a `ModuleInst`.
     module_or_host: *anyopaque,
     func: packed union {
-        wasm: Module.FuncIdx,
+        wasm: packed struct(usize) {
+            idx: Module.FuncIdx,
+            padding: std.meta.Int(.unsigned, @bitSizeOf(usize) - @bitSizeOf(Module.FuncIdx)) = 0,
+        },
         host_data: ?*anyopaque,
     },
 
@@ -130,7 +133,7 @@ pub const FuncAddr = extern struct {
                 .host => |*host| @ptrFromInt(@intFromPtr(host.func) | 1),
             },
             .func = switch (inst) {
-                .wasm => |*wasm| .{ .wasm = wasm.idx },
+                .wasm => |*wasm| .{ .wasm = .{ .idx = wasm.idx } },
                 .host => |*host| .{ .host_data = host.data },
             },
         };
@@ -141,7 +144,7 @@ pub const FuncAddr = extern struct {
         return if (module_or_host & 1 == 0) Expanded{
             .wasm = .{
                 .module = ModuleInst{ .inner = @ptrFromInt(module_or_host) },
-                .idx = inst.func.wasm,
+                .idx = inst.func.wasm.idx,
             },
         } else .{
             .host = .{

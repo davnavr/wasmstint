@@ -88,7 +88,11 @@ pub fn fileStat(
             ),
         };
     } else if (@hasDecl(std.posix.system, "Stat") and std.posix.Stat != void) {
-        const stat = try std.posix.fstat(fd);
+        const stat = std.posix.fstat(fd) catch |e| switch (e) {
+            error.Canceled, error.Streaming => unreachable,
+            else => |err| return err,
+        };
+
         return wasi_types.FileStat.fromPosixStat(&stat, device_hash_seed, inode_hash_seed);
     } else {
         @compileError("no fileStat implementation for " ++ @tagName(builtin.os.tag));

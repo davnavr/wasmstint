@@ -264,7 +264,7 @@ fn resize(
 
     if (alignment.toByteUnits() > pageSize()) {
         @branchHint(.cold);
-        return false;
+        return false; // can't change to large alignment
     }
 
     if (new_len == 0) {
@@ -320,7 +320,7 @@ fn free(
     std.debug.assert(@intFromPtr(memory.ptr) == @intFromPtr(self.current.ptr));
     std.debug.assert(memory.len == self.current.len);
 
-    self.current = &.{};
+    self.current.len = 0;
 }
 
 pub fn deinit(ctx: *PageAllocation) void {

@@ -22,6 +22,15 @@ pub const Timestamp = packed struct(u64) {
         return Timestamp{ .ns = @as(u64, @bitCast(time)) *| win_time_unit_per_ns };
     }
 
+    pub fn fromPosixTimespec(time: std.posix.timespec) Timestamp {
+        return Timestamp{
+            .ns = @truncate(@as(
+                u128,
+                @bitCast((@as(i128, time.sec) *| std.time.ns_per_s) +| @as(i128, time.nsec)),
+            )),
+        };
+    }
+
     pub fn format(stat: *const Timestamp, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{d}", .{stat.ns});
     }
@@ -356,19 +365,18 @@ pub const FileStat = extern struct {
         device_hash_seed: Device.HashSeed,
         inode_hash_seed: INode.HashSeed,
     ) FileStat {
-        const zig_stat = std.fs.File.Stat.fromPosix(stat.*);
         return FileStat{
             .dev = Device.init(device_hash_seed, stat.dev),
             .ino = INode.init(inode_hash_seed, stat.ino),
-            .type = FileType.fromZigKind(zig_stat.kind) catch |e| switch (e) {
+            .type = FileType.fromPosixMode(stat.mode) catch |e| switch (e) {
                 // TODO: need `getsockopt()` to determine exact type of socket
                 error.UnknownSocketType => .unknown,
             },
             .nlink = stat.nlink,
-            .size = FileSize{ .bytes = zig_stat.size },
-            .atim = Timestamp{ .ns = @truncate(@as(u128, @bitCast(zig_stat.atime))) },
-            .mtim = Timestamp{ .ns = @truncate(@as(u128, @bitCast(zig_stat.mtime))) },
-            .ctim = Timestamp{ .ns = @truncate(@as(u128, @bitCast(zig_stat.ctime))) },
+            .size = FileSize{ .bytes = @bitCast(stat.size) },
+            .atim = Timestamp.fromPosixTimespec(stat.atim),
+            .mtim = Timestamp.fromPosixTimespec(stat.mtim),
+            .ctim = Timestamp.fromPosixTimespec(stat.ctim),
         };
     }
 
@@ -461,6 +469,22 @@ pub const FileType = enum(u8) {
     socket_stream,
     symbolic_link,
 
+    pub fn fromPosixMode(
+        mode: @FieldType(std.posix.Stat, "mode"),
+    ) error{UnknownSocketType}!FileType {
+        const S = std.posix.S;
+        return switch (mode & std.posix.S.IFMT) {
+            S.IFBLK => .block_device,
+            S.IFCHR => .character_device,
+            S.IFDIR => .directory,
+            S.IFIFO => .unknown,
+            S.IFLNK => .symbolic_link,
+            S.IFREG => .regular_file,
+            S.IFSOCK => error.UnknownSocketType,
+            else => .unknown,
+        };
+    }
+
     pub fn fromZigKind(kind: std.fs.File.Kind) error{UnknownSocketType}!FileType {
         const is_windows = builtin.os.tag == .windows;
         return switch (kind) {
@@ -475,7 +499,7 @@ pub const FileType = enum(u8) {
             else
                 unreachable,
             .whiteout => if (!is_windows) .unknown else unreachable, // BSD thing
-            .door, .event_port => if (builtin.os.tag.isSolarish()) .unknown else unreachable,
+            .door, .event_port => if (builtin.os.tag == .illumos) .unknown else unreachable,
             .unknown => .unknown,
         };
     }

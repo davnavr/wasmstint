@@ -6,31 +6,230 @@ const Eip = *const Module.Code.End;
 const Sp = Stack.Top;
 const Stp = SideTable.Ptr;
 
-const cconv: std.builtin.CallingConvention = switch (builtin.zig_backend) {
-    .stage2_x86_64 => if (false and std.builtin.CallingConvention.C == .x86_64_sysv)
-        .{ .x86_64_sysv = .{} }
-    else
-        @compileError("use LLVM backend instead: https://github.com/ziglang/zig/issues/24044"),
-    .other, // assume tail calls are present
-    .stage2_llvm,
-    => .auto,
-    else => |bad| @compileError(@tagName(bad) ++ " backend might not support tail calls"),
+const DispatchBackend = enum {
+    auto,
+    /// Uses inline assembly to perform tail calls.
+    ///
+    /// Workaround for <https://github.com/ziglang/zig/issues/24044>.
+    x86_64_sysv_inline,
+    /// Similar to `DispatchBackend.x86_64_sysv_inline`, but for the Windows calling convention.
+    x86_64_win_inline,
 };
 
-// TODO(Zig): waiting for a calling convention w/o callee-saved registers
-// - (i.e. `preserve_none` or `ghccc` in LLVM)
+const dispatch_backend: DispatchBackend = switch (builtin.zig_backend) {
+    .stage2_x86_64 => if (builtin.omit_frame_pointer)
+        @compileError("frame pointers are required, use LLVM backend instead")
+    else if (CallingConvention.c == .x86_64_sysv)
+        .x86_64_sysv_inline
+    else if (CallingConvention.c == .x86_64_win)
+        .x86_64_win_inline
+    else
+        unreachable,
+
+    .other, .stage2_llvm => .auto, // assume tail calls are supported
+
+    else => |bad| @compileError(@tagName(bad) ++ " backend might not support tail calls"),
+    // @compileError("use LLVM backend instead: https://github.com/ziglang/zig/issues/24044"),
+};
+
+/// Opcode handler calling convention.
+const ohcc: CallingConvention = switch (dispatch_backend) {
+    .x86_64_sysv_inline => .{ .x86_64_sysv = .{} },
+    .x86_64_win_inline => .{ .x86_64_win = .{} },
+    .auto => switch (CallingConvention.c) {
+        // The Intel x86-64 register calling convention allows passing more parameters via
+        // registers and removes instructions for saving callee-saved registers, but is
+        // currently not supported in Zig's x86-64 backend.
+        //
+        // For more information see <https://reviews.llvm.org/D25022>.
+        .x86_64_sysv => .{ .x86_64_regcall_v3_sysv = .{} },
+
+        // TODO(llvm): fix regcall on windows https://github.com/llvm/llvm-project/issues/51523
+        // .x86_64_win => .{ .x86_64_regcall_v4_win = .{} },
+
+        // TODO(Zig): waiting for a calling convention w/o callee-saved registers
+        // - (i.e. `preserve_none` or `ghccc` in LLVM)
+        else => .auto,
+    },
+};
+
 pub const OpcodeHandler = fn (
     ip: Ip,
     sp: Sp,
     fuel: *Fuel,
     stp: Stp,
-    // `x86_64-windows` passes 4 parameters in registers
+    // `x86_64_win` passes 4 parameters in registers
     locals: Locals,
     module: runtime.ModuleInst,
-    // `x86_64` System V ABI passes 6 parameters in registers
+    // `x86_64_sysv` passes 6 parameters in registers
     interp: *Interpreter,
     eip: Eip,
-) callconv(cconv) Transition;
+    // `x86_64_regcall_v3_sysv` and `x86_64_regcall_v4_win` pass all parameters in registers
+) callconv(ohcc) Transition;
+
+/// Helper function to perform a tail call on an `OpcodeHandler`.
+///
+/// Due to limitations in LLVM and the Zig compiler, the signature of the calling function must
+/// match the signature of `OpcodeHandler`.
+///
+/// This function is marked `inline` due to the same limitations, and because a tail call is used to
+/// jump to the next opcode handler.
+inline fn handlerTailCall(
+    handler: *const OpcodeHandler,
+    ip: Ip,
+    sp: Sp,
+    fuel: *Fuel,
+    stp: Stp,
+    // `x86_64_win` passes 4 parameters in registers
+    locals: Locals,
+    module: runtime.ModuleInst,
+    // `x86_64_sysv` passes 6 parameters in registers
+    interp: *Interpreter,
+    eip: Eip,
+) Transition {
+    return switch (dispatch_backend) {
+        .auto => @call(.always_tail, handler, .{ ip, sp, fuel, stp, locals, module, interp, eip }),
+        // Writing to `%rsp` is pretty bad [citation needed] for performance, since modern CPUs
+        // have caches? and stuff tracking pushes & pops, and `movq` means they get out of sync
+        //
+        // Sources:
+        // - https://eli.thegreenplace.net/2011/09/06/stack-frame-layout-on-x86-64
+        // - https://wiki.osdev.org/System_V_ABI#x86-64
+        //
+        // Remember: source before destination
+        .x86_64_sysv_inline => asm volatile (
+            \\movq %[eip], 0x18(%%rbp)
+            \\movq %[interp], 0x10(%%rbp)
+            \\movq %%rbp, %%rsp
+            \\popq %%rbp
+            \\jmp *%[handler]
+            // probably does nothing, though this might be cause of crash in ReleaseSafe due to zero sized struct
+            : [ret] "={rax}" (-> Transition),
+            : [handler] "{rax}" (handler),
+              [ip] "{rdi}" (ip),
+              [sp] "{rsi}" (sp.ptr),
+              [fuel] "{rdx}" (fuel),
+              [stp] "{rcx}" (stp),
+              [locals] "{r8}" (locals.ptr),
+              [module] "{r9}" (module.inner),
+              // Parameters passed via stack
+              [interp] "{r10}" (interp),
+              [eip] "{r11}" (eip),
+            : .{
+              .memory = true, // just to be safe, since writes into param area on stack happen
+              // Are declaring clobbers here even necessary?
+              .rsp = true,
+              // System V scratch registers
+              .xmm0 = true,
+              .xmm1 = true,
+              .xmm2 = true,
+              .xmm3 = true,
+              .xmm4 = true,
+              .xmm5 = true,
+              .xmm6 = true,
+              .xmm7 = true,
+              .xmm8 = true,
+              .xmm9 = true,
+              .xmm10 = true,
+              .xmm11 = true,
+              .xmm12 = true,
+              .xmm13 = true,
+              .xmm14 = true,
+              .xmm15 = true,
+            }),
+        // On Windows, function epilogues are expected to be in a certain format, but since this
+        // uses `jmp` and not a `ret`, it should be fine.
+        //
+        // Thankfully, `push` and `pop` can't be used outside of prologues and epilogues, due to
+        // the 16-byte stack alignment requirement.
+        //
+        // Sources:
+        // - https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention
+        // - https://learn.microsoft.com/en-us/cpp/build/stack-usage
+        // - https://learn.microsoft.com/en-us/cpp/build/prolog-and-epilog
+        // - https://blog.s-schoener.com/2025-01-17-access-violation-aligned-access/
+        // - https://www.agner.org/optimize/calling_conventions.pdf
+        //
+        // This needs to reach into the stack space containing the last 4 arguments and update it.
+        .x86_64_win_inline => asm volatile (
+            \\movq %[eip], 0x48(%%rbp)
+            \\movq %[interp], 0x40(%%rbp)
+            \\movq %[module], 0x38(%%rbp)
+            \\movq %[locals], 0x30(%%rbp)
+            \\movq %%rbp, %%rsp
+            \\popq %%rbp
+            \\jmp *%[handler]
+            // probably does nothing, though this might be cause of crash in ReleaseSafe due to zero sized struct
+            : [ret] "={rax}" (-> Transition),
+            : [handler] "{rax}" (handler),
+              [ip] "{rcx}" (ip),
+              [sp] "{rdx}" (sp.ptr),
+              [fuel] "{r8}" (fuel),
+              [stp] "{r9}" (stp),
+              // Parameters passed via stack
+              [locals] "{r10}" (locals.ptr),
+              [module] "{r11}" (module.inner),
+              // Using callee-save registers is fine at the end of the current function call
+              [interp] "{rbx}" (interp),
+              [eip] "{rsi}" (eip),
+            : .{
+              .memory = true, // just to be safe, since writes into param area on stack happen
+              // Are declaring clobbers here even necessary?
+              .rsp = true,
+            }),
+    };
+}
+
+/// `inline` since a tail call is used to jump to the next opcode handler.
+inline fn dispatchNextOpcode(
+    instr: Instr,
+    sp: Stack.Top,
+    fuel: *Fuel,
+    stp: SideTable.Ptr,
+    locals: Locals,
+    module: runtime.ModuleInst,
+    interp: *Interpreter,
+) Transition {
+    defer coz.progressNamed("wasmstint.Interpreter.dispatchNextOpcode");
+    if (builtin.mode == .Debug) {
+        const current_frame: *const Stack.Frame = interp.stack.currentFrame().?;
+        const wasm_func = current_frame.function.expanded().wasm;
+        std.debug.assert(@intFromPtr(module.inner) == @intFromPtr(wasm_func.module.inner));
+
+        const vals_base: [*]align(@sizeOf(Value)) const Value = current_frame.valueStackBase();
+        if (@intFromPtr(vals_base) > @intFromPtr(sp.ptr)) {
+            std.debug.panic(
+                "value stack {*} underflowed stack {*} by {d} values",
+                .{ sp.ptr, vals_base, vals_base - sp.ptr },
+            );
+        }
+
+        const max_val_stack = wasm_func.code().inner.max_values;
+        const val_stack_limit = @intFromPtr(vals_base + max_val_stack);
+        // std.log.debug(
+        //     "ip={f}, sp={*}, base={*}",
+        //     .{ std.fmt.Alt(Ptr, Stack.Walker.formatIp){ .data = reader.next }, sp.ptr, vals_base },
+        // );
+        if (@intFromPtr(sp.ptr) > val_stack_limit) {
+            std.debug.panic(
+                "value stack 0x{X} cannot exceed 0x{X}, function has maximum of {d} < {d}\nip={*}\n{f}",
+                .{
+                    @intFromPtr(sp.ptr),
+                    val_stack_limit,
+                    max_val_stack,
+                    sp.ptr - vals_base,
+                    instr.next,
+                    interp.stack.walkCallStack(),
+                },
+            );
+        }
+    }
+
+    var i = instr;
+    const handler = i.readNextOpcodeHandler(fuel, locals, module, interp);
+    // std.debug.print("DISP {*}, ip={X}\n", .{ module.inner, @intFromPtr(reader.next) });
+    return handlerTailCall(handler, i.next, sp, fuel, stp, locals, module, interp, i.end);
+}
 
 // const WrappedOpcodeHandler = fn (
 //     i: *Instructions,
@@ -64,11 +263,11 @@ inline fn transition(
     update_wasm_frame_token: Transition.UpdateWasmFrameToken,
     new_state: @FieldType(Interpreter, "current_state"),
 ) Transition {
+    _ = update_wasm_frame_token;
     interp.current_state = new_state;
     interp.version.increment();
     return Transition{
         .version = interp.version,
-        .update_wasm_frame_token = update_wasm_frame_token,
     };
 }
 
@@ -91,11 +290,15 @@ fn updateWasmFrameState(
 }
 
 /// Is a `packed struct` to work around https://github.com/ziglang/zig/issues/18189
-pub const Transition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version))) {
+pub const Transition = packed struct {
     version: Version,
-    update_wasm_frame_token: UpdateWasmFrameToken,
+    // Can't use `u0` here
+    // TODO(Zig): https://github.com/ziglang/zig/issues/25846
+    //update_wasm_frame_token: UpdateWasmFrameToken,
 
-    const UpdateWasmFrameToken = enum(u0) { wrote_ip_and_stp_to_the_current_stack_frame };
+    const UpdateWasmFrameToken = enum(u0) {
+        wrote_ip_and_stp_to_the_current_stack_frame,
+    };
 
     fn trap(
         trap_ip: Ip,
@@ -140,6 +343,7 @@ pub const Transition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version)
         interp: *Interpreter,
         callee_signature: *const Module.FuncType,
         status: TransitionToHost,
+        update_wasm_frame_token: UpdateWasmFrameToken,
     ) Transition {
         const result_types = switch (status) {
             .returning_to_host => callee_signature.results(),
@@ -152,7 +356,7 @@ pub const Transition = packed struct(std.meta.Int(.unsigned, @bitSizeOf(Version)
         interp.stack_top = sp;
         return transition(
             interp,
-            .wrote_ip_and_stp_to_the_current_stack_frame,
+            update_wasm_frame_token,
             .{ .awaiting_host = .{ .result_types = result_types } },
         );
     }
@@ -195,8 +399,8 @@ pub const Locals = packed struct(usize) {
 /// Execution of the handlers for the `end` (only when it is last opcode of a function)
 /// and `return` instructions ends up here.
 ///
-/// To ensure the interpreter cannot overflow the native stack, opcode handlers must call this
-/// function via `@call` with either `.always_tail` or `always_inline`.
+/// To ensure the interpreter cannot overflow the native stack, calls to this function must occur
+/// via tail call or be inlined.
 fn returnFromWasm(
     ip: Ip,
     old_sp: Sp,
@@ -206,7 +410,7 @@ fn returnFromWasm(
     old_module: runtime.ModuleInst,
     interp: *Interpreter,
     old_eip: Eip,
-) Transition {
+) callconv(ohcc) Transition {
     _ = ip;
     _ = old_stp;
     _ = old_locals;
@@ -230,7 +434,8 @@ fn returnFromWasm(
             .wasm => |wasm| {
                 // std.log.debug("returning to WASM {f} with top {*}", .{ frame.function, popped.top.ptr });
                 const new_locals = Locals{ .ptr = frame.localValues(&interp.stack).ptr };
-                return Instr.init(frame.wasm.ip, frame.wasm.eip).dispatchNextOpcode(
+                return dispatchNextOpcode(
+                    Instr.init(frame.wasm.ip, frame.wasm.eip),
                     popped.top,
                     fuel,
                     frame.wasm.stp,
@@ -245,7 +450,13 @@ fn returnFromWasm(
         comptime unreachable;
     }
 
-    return Transition.awaitingHost(popped.top, interp, popped.signature, .returning_to_host);
+    return Transition.awaitingHost(
+        popped.top,
+        interp,
+        popped.signature,
+        .returning_to_host,
+        .wrote_ip_and_stp_to_the_current_stack_frame, // no need to save, since this returns to host
+    );
 }
 
 /// Attempts to allocate a stack frame for the `target_function`, with arguments expected to be on
@@ -281,7 +492,7 @@ inline fn invokeWithinWasm(
     );
     const current_frame = interp.stack.frameAt(interp.stack.current_frame).?;
 
-    _ = updateWasmFrameState(current_frame, old_instr, old_stp);
+    const saved_token = updateWasmFrameState(current_frame, old_instr, old_stp);
 
     // std.debug.print(
     //     "WASM {f} WANTS TO CALL {f} (current depth = {}, args @ {*})\n",
@@ -331,7 +542,8 @@ inline fn invokeWithinWasm(
             //     "AFTER CALL args={*}, sp={*}\n",
             //     .{ args.ptr, new_frame.top().ptr },
             // );
-            return Instr.init(new_frame.frame.wasm.ip, new_frame.frame.wasm.eip).dispatchNextOpcode(
+            return dispatchNextOpcode(
+                Instr.init(new_frame.frame.wasm.ip, new_frame.frame.wasm.eip),
                 new_frame.top(),
                 fuel,
                 new_frame.frame.wasm.stp,
@@ -351,6 +563,7 @@ inline fn invokeWithinWasm(
                 interp,
                 &host.func.signature,
                 .calling_host,
+                saved_token,
             );
         },
     }
@@ -435,7 +648,7 @@ fn linearMemoryAccessor(
             module: runtime.ModuleInst,
             interp: *Interpreter,
             eip: Eip,
-        ) Transition {
+        ) callconv(ohcc) Transition {
             var coz_begin = coz.begin("wasmstint.Interpreter.accessLinearMemory");
             defer coz_begin.end();
 
@@ -516,7 +729,7 @@ fn linearMemoryHandlers(comptime field: Value.Tag, comptime prefix_len: u2) type
         ) Transition {
             vals.assertRemainingCountIs(0);
             vals.pushTyped(&.{field}, .{@as(T, @bitCast(access.*))});
-            return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+            return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
         }
 
         pub const load = linearMemoryAccessor(
@@ -546,7 +759,7 @@ fn linearMemoryHandlers(comptime field: Value.Tag, comptime prefix_len: u2) type
         ) Transition {
             vals.assertRemainingCountIs(0);
             access.* = @bitCast(value);
-            return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+            return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
         }
 
         pub const store = linearMemoryAccessor(
@@ -586,7 +799,7 @@ fn extendingLinearMemoryLoad(
         ) Transition {
             vals.assertRemainingCountIs(0);
             vals.pushTyped(&.{field}, .{@as(S, @bitCast(access.*))});
-            return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+            return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
         }
 
         pub const extendingLoad = linearMemoryAccessor(
@@ -632,7 +845,7 @@ fn narrowingLinearMemoryStore(
         ) Transition {
             vals.assertRemainingCountIs(0);
             access.* = @bitCast(narrowed);
-            return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+            return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
         }
 
         pub const narrowingStore = linearMemoryAccessor(
@@ -667,9 +880,8 @@ fn defineBinOp(
             module: runtime.ModuleInst,
             interp: *Interpreter,
             eip: Eip,
-        ) Transition {
+        ) callconv(ohcc) Transition {
             const trap_ip: Ip = ip - (1 - prefix_len);
-            var instr = Instr.init(ip, eip);
             var vals = Stack.Values.init(sp, &interp.stack, 2, 2);
 
             const operands = vals.popTyped(&(.{value_field} ** 2));
@@ -683,7 +895,15 @@ fn defineBinOp(
 
             vals.pushTyped(&.{value_field}, .{result});
 
-            return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+            return dispatchNextOpcode(
+                Instr.init(ip, eip),
+                vals.top,
+                fuel,
+                stp,
+                locals,
+                module,
+                interp,
+            );
         }
     }.binOpHandler;
 }
@@ -703,8 +923,7 @@ fn defineUnOp(
             module: runtime.ModuleInst,
             interp: *Interpreter,
             eip: Eip,
-        ) Transition {
-            var instr = Instr.init(ip, eip);
+        ) callconv(ohcc) Transition {
             var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
 
             const c_1 = vals.popTyped(&.{value_field}).@"0";
@@ -712,7 +931,15 @@ fn defineUnOp(
             const result = @call(.always_inline, op, .{c_1});
             vals.pushTyped(&.{value_field}, .{result});
 
-            return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+            return dispatchNextOpcode(
+                Instr.init(ip, eip),
+                vals.top,
+                fuel,
+                stp,
+                locals,
+                module,
+                interp,
+            );
         }
     }.unOpHandler;
 }
@@ -732,8 +959,7 @@ fn defineTestOp(
             module: runtime.ModuleInst,
             interp: *Interpreter,
             eip: Eip,
-        ) Transition {
-            var instr = Instr.init(ip, eip);
+        ) callconv(ohcc) Transition {
             var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
 
             const c_1 = vals.popTyped(&.{value_field}).@"0";
@@ -741,7 +967,15 @@ fn defineTestOp(
             const result = @call(.always_inline, op, .{c_1});
             vals.pushTyped(&.{.i32}, .{@intFromBool(result)});
 
-            return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+            return dispatchNextOpcode(
+                Instr.init(ip, eip),
+                vals.top,
+                fuel,
+                stp,
+                locals,
+                module,
+                interp,
+            );
         }
     }.handler;
 }
@@ -761,8 +995,7 @@ fn defineRelOp(
             module: runtime.ModuleInst,
             interp: *Interpreter,
             eip: Eip,
-        ) Transition {
-            var instr = Instr.init(ip, eip);
+        ) callconv(ohcc) Transition {
             var vals = Stack.Values.init(sp, &interp.stack, 2, 2);
 
             const operands = vals.popTyped(&(.{value_field} ** 2));
@@ -772,7 +1005,15 @@ fn defineRelOp(
             const result = @call(.always_inline, op, .{ c_1, c_2 });
             vals.pushTyped(&.{.i32}, .{@intFromBool(result)});
 
-            return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+            return dispatchNextOpcode(
+                Instr.init(ip, eip),
+                vals.top,
+                fuel,
+                stp,
+                locals,
+                module,
+                interp,
+            );
         }
     }.handler;
 }
@@ -796,9 +1037,8 @@ fn defineConvOp(
             module: runtime.ModuleInst,
             interp: *Interpreter,
             eip: Eip,
-        ) Transition {
+        ) callconv(ohcc) Transition {
             const trap_ip: Ip = ip - 1 - prefix_len;
-            var instr = Instr.init(ip, eip);
             var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
 
             const t_1 = vals.popTyped(&.{src_tag}).@"0";
@@ -810,7 +1050,15 @@ fn defineConvOp(
 
             vals.pushTyped(&.{dst_tag}, .{result});
 
-            return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+            return dispatchNextOpcode(
+                Instr.init(ip, eip),
+                vals.top,
+                fuel,
+                stp,
+                locals,
+                module,
+                interp,
+            );
         }
     }.handler;
 }
@@ -1025,7 +1273,7 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
             module: runtime.ModuleInst,
             interp: *Interpreter,
             eip: Eip,
-        ) Transition {
+        ) callconv(ohcc) Transition {
             var instr = Instr.init(ip, eip);
             var vals = Stack.Values.init(sp, &interp.stack, 0, 1);
 
@@ -1037,7 +1285,7 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
             //     .{ n, @intFromPtr(ip - 1), sp.ptr },
             // );
 
-            return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+            return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
         }
 
         const eqz = defineTestOp(value_field, operators.eqz);
@@ -1283,7 +1531,7 @@ fn floatOpcodeHandlers(comptime F: type) type {
             module: runtime.ModuleInst,
             interp: *Interpreter,
             eip: Eip,
-        ) Transition {
+        ) callconv(ohcc) Transition {
             var instr = Instr.init(ip, eip);
             var vals = Stack.Values.init(sp, &interp.stack, 0, 1);
 
@@ -1295,7 +1543,7 @@ fn floatOpcodeHandlers(comptime F: type) type {
 
             vals.pushTyped(&.{value_field}, .{@bitCast(z)});
 
-            return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+            return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
         }
 
         const eq = defineRelOp(value_field, operators.eq);
@@ -1377,7 +1625,7 @@ fn prefixDispatchTable(comptime prefix: opcodes.ByteOpcode, comptime Opcode: typ
             module: runtime.ModuleInst,
             interp: *Interpreter,
             eip: Eip,
-        ) Transition {
+        ) callconv(ohcc) Transition {
             _ = sp;
             _ = fuel;
             _ = stp;
@@ -1407,14 +1655,10 @@ fn prefixDispatchTable(comptime prefix: opcodes.ByteOpcode, comptime Opcode: typ
             module: runtime.ModuleInst,
             interp: *Interpreter,
             eip: Eip,
-        ) Transition {
+        ) callconv(ohcc) Transition {
             var instr = Instr.init(ip, eip);
             const next = entries[@intFromEnum(instr.readIdx(Opcode))];
-            return @call(
-                .always_tail,
-                next,
-                .{ instr.next, sp, fuel, stp, locals, module, interp, eip },
-            );
+            return handlerTailCall(next, instr.next, sp, fuel, stp, locals, module, interp, eip);
         }
     };
 }
@@ -1430,7 +1674,7 @@ pub fn outOfFuelHandler(
     module: runtime.ModuleInst,
     interp: *Interpreter,
     eip: Eip,
-) Transition {
+) callconv(ohcc) Transition {
     std.debug.assert(fuel.remaining == 0);
     _ = locals;
     _ = module;
@@ -1447,7 +1691,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         _ = sp;
         _ = fuel;
         _ = stp;
@@ -1480,7 +1724,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         _ = fuel;
         _ = locals;
         _ = module;
@@ -1510,8 +1754,9 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
-        return Instr.init(ip, eip).dispatchNextOpcode(
+    ) callconv(ohcc) Transition {
+        return dispatchNextOpcode(
+            Instr.init(ip, eip),
             sp,
             fuel,
             stp,
@@ -1530,10 +1775,11 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         instr.skipBlockType();
-        return instr.dispatchNextOpcode(
+        return dispatchNextOpcode(
+            instr,
             sp,
             fuel,
             stp,
@@ -1554,7 +1800,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(old_sp, &interp.stack, 1, 1);
         var side_table = SideTable.init(stp, &interp.stack);
@@ -1572,7 +1818,7 @@ const opcode_handlers = struct {
             break :nope vals.top;
         };
 
-        return instr.dispatchNextOpcode(new_sp, fuel, side_table.next, locals, module, interp);
+        return dispatchNextOpcode(instr, new_sp, fuel, side_table.next, locals, module, interp);
     }
 
     pub fn @"else"(
@@ -1584,11 +1830,11 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         var side_table = SideTable.init(stp, &interp.stack);
         const new_sp = side_table.takeBranch(&interp.stack, old_sp, ip - 1, &instr, 0);
-        return instr.dispatchNextOpcode(new_sp, fuel, side_table.next, locals, module, interp);
+        return dispatchNextOpcode(instr, new_sp, fuel, side_table.next, locals, module, interp);
     }
 
     pub fn end(
@@ -1600,18 +1846,14 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
-        defer coz.progessNamed("wasmstint.Interpreter.end");
+    ) callconv(ohcc) Transition {
+        defer coz.progressNamed("wasmstint.Interpreter.end");
         const end_ptr: Eip = @ptrCast(ip - 1);
         _ = end_ptr.*;
         return if (@intFromPtr(end_ptr) == @intFromPtr(eip))
-            @call(
-                .always_tail,
-                returnFromWasm,
-                .{ ip, sp, fuel, stp, locals, module, interp, eip },
-            )
+            handlerTailCall(returnFromWasm, ip, sp, fuel, stp, locals, module, interp, eip)
         else
-            Instr.init(ip, eip).dispatchNextOpcode(sp, fuel, stp, locals, module, interp);
+            dispatchNextOpcode(Instr.init(ip, eip), sp, fuel, stp, locals, module, interp);
     }
 
     pub fn br(
@@ -1623,7 +1865,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         var side_table = SideTable.init(stp, &interp.stack);
 
@@ -1631,7 +1873,7 @@ const opcode_handlers = struct {
         const br_ptr: Ip = ip - 1;
         std.debug.assert(br_ptr[0] == @intFromEnum(opcodes.ByteOpcode.br));
         const new_sp = side_table.takeBranch(&interp.stack, old_sp, br_ptr, &instr, 0);
-        return instr.dispatchNextOpcode(new_sp, fuel, side_table.next, locals, module, interp);
+        return dispatchNextOpcode(instr, new_sp, fuel, side_table.next, locals, module, interp);
     }
 
     pub fn br_if(
@@ -1643,7 +1885,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(old_sp, &interp.stack, 1, 1);
         var side_table = SideTable.init(stp, &interp.stack);
@@ -1663,7 +1905,7 @@ const opcode_handlers = struct {
             break :fallthrough vals.top;
         };
 
-        return instr.dispatchNextOpcode(new_sp, fuel, side_table.next, locals, module, interp);
+        return dispatchNextOpcode(instr, new_sp, fuel, side_table.next, locals, module, interp);
     }
 
     pub fn br_table(
@@ -1675,7 +1917,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         const br_table_ip: Ip = ip - 1;
         std.debug.assert(br_table_ip[0] == @intFromEnum(opcodes.ByteOpcode.br_table));
 
@@ -1703,7 +1945,7 @@ const opcode_handlers = struct {
             actual_target,
         );
 
-        return instr.dispatchNextOpcode(new_sp, fuel, side_table.next, locals, module, interp);
+        return dispatchNextOpcode(instr, new_sp, fuel, side_table.next, locals, module, interp);
     }
 
     pub const @"return" = returnFromWasm;
@@ -1717,7 +1959,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         _ = locals;
         const call_ip = ip - 1;
         std.debug.assert(call_ip[0] == @intFromEnum(opcodes.ByteOpcode.call));
@@ -1744,7 +1986,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         _ = locals;
         const call_ip = ip - 1;
         std.debug.assert(call_ip[0] == @intFromEnum(opcodes.ByteOpcode.call_indirect));
@@ -1808,7 +2050,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
 
         const to_drop = &vals.popArray(1)[0];
@@ -1817,7 +2059,7 @@ const opcode_handlers = struct {
 
         // std.debug.print(" height after drop: {}\n", .{vals.items.len});
 
-        return Instr.init(ip, eip).dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(Instr.init(ip, eip), vals.top, fuel, stp, locals, module, interp);
     }
 
     pub fn select(
@@ -1829,7 +2071,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var vals = Stack.Values.init(sp, &interp.stack, 3, 3);
 
         const popped = vals.popArray(2);
@@ -1840,7 +2082,7 @@ const opcode_handlers = struct {
         }
 
         @memset(popped, undefined);
-        return Instr.init(ip, eip).dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(Instr.init(ip, eip), vals.top, fuel, stp, locals, module, interp);
     }
 
     pub fn @"select t"(
@@ -1852,7 +2094,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
 
         const type_count: u32 = instr.readIdxRaw();
@@ -1862,15 +2104,12 @@ const opcode_handlers = struct {
             instr.skipValType();
         }
 
+        const args = .{ instr.next, sp, fuel, stp, locals, module, interp, eip };
         if (type_count == 1)
-            return @call(
-                switch (builtin.mode) {
-                    .Debug, .ReleaseSmall => .always_tail,
-                    .ReleaseSafe, .ReleaseFast => .always_inline,
-                },
-                select,
-                .{ instr.next, sp, fuel, stp, locals, module, interp, eip },
-            )
+            return switch (builtin.mode) {
+                .Debug, .ReleaseSmall => @call(.always_inline, handlerTailCall, .{select} ++ args),
+                .ReleaseSafe, .ReleaseFast => @call(.always_inline, select, args),
+            }
         else
             unreachable;
     }
@@ -1884,7 +2123,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 0, 1);
 
@@ -1896,7 +2135,7 @@ const opcode_handlers = struct {
 
         // std.debug.print(" > (local.get {}) (i32.const {})\n", .{ n, value.i32 });
 
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     pub fn @"local.set"(
@@ -1908,7 +2147,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
 
@@ -1919,7 +2158,7 @@ const opcode_handlers = struct {
         src.* = undefined;
         vals.assertRemainingCountIs(0);
 
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     pub fn @"local.tee"(
@@ -1931,7 +2170,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
 
@@ -1939,7 +2178,7 @@ const opcode_handlers = struct {
         locals.get(&interp.stack, n).* = vals.topArray(1)[0];
         vals.assertRemainingCountIs(1);
 
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     pub fn @"global.get"(
@@ -1951,7 +2190,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         std.debug.assert((ip - 1)[0] == @intFromEnum(opcodes.ByteOpcode.@"global.get"));
 
         var instr = Instr.init(ip, eip);
@@ -1980,7 +2219,7 @@ const opcode_handlers = struct {
             ),
         }};
 
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     pub fn @"global.set"(
@@ -1992,7 +2231,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
 
@@ -2018,7 +2257,7 @@ const opcode_handlers = struct {
         }
 
         popped.* = undefined;
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-get
@@ -2031,7 +2270,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         const table_get_ip: Ip = ip - 1;
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
@@ -2058,7 +2297,7 @@ const opcode_handlers = struct {
         @memset(dst[stride..], 0); // fill `ExternRef` padding
 
         std.debug.assert(vals.remaining == 1);
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-set
@@ -2071,7 +2310,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         const table_set_ip: Ip = ip - 1;
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 2, 2);
@@ -2094,7 +2333,7 @@ const opcode_handlers = struct {
         @memcpy(dst, std.mem.asBytes(ref)[0..table.stride.toBytes()]);
 
         operands.* = undefined;
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     pub const @"i32.load" = linearMemoryHandlers(.i32, 0).load;
@@ -2130,7 +2369,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 0, 1);
 
@@ -2139,7 +2378,7 @@ const opcode_handlers = struct {
         const size = module.header().memAddr(mem_idx).size / runtime.MemInst.page_size;
         vals.pushTyped(&.{.i32}, .{@bitCast(@as(u32, @intCast(size)))});
 
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     pub fn @"memory.grow"(
@@ -2151,7 +2390,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
 
@@ -2190,7 +2429,7 @@ const opcode_handlers = struct {
             });
         }
 
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     pub const @"i32.const" = i32_opcode_handlers.@"const";
@@ -2385,14 +2624,14 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 0, 1);
 
         _ = instr.skipValType();
         vals.pushArray(1)[0] = std.mem.zeroes(Value);
 
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     pub fn @"ref.is_null"(
@@ -2404,8 +2643,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
-        var instr = Instr.init(ip, eip);
+    ) callconv(ohcc) Transition {
         var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
 
         const top: *align(@sizeOf(Value)) Value = &vals.topArray(1)[0];
@@ -2418,7 +2656,7 @@ const opcode_handlers = struct {
 
         top.* = .{ .i32 = @intFromBool(is_null) };
 
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(Instr.init(ip, eip), vals.top, fuel, stp, locals, module, interp);
     }
 
     pub fn @"ref.func"(
@@ -2430,14 +2668,14 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 0, 1);
 
         const func_idx = instr.readIdx(Module.FuncIdx);
         vals.pushTyped(&.{.funcref}, .{@bitCast(module.header().funcAddr(func_idx))});
 
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     pub const @"0xFC" = fc_prefixed_dispatch.handler;
@@ -2460,7 +2698,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         const memory_init_ip = ip - 2;
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 3, 3);
@@ -2484,7 +2722,7 @@ const opcode_handlers = struct {
             return Transition.trap(memory_init_ip, eip, sp, stp, interp, info);
         };
 
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     pub fn @"data.drop"(
@@ -2496,11 +2734,11 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         const data_idx = instr.readIdx(Module.DataIdx);
         module.header().dataSegmentDropFlag(data_idx).drop();
-        return instr.dispatchNextOpcode(sp, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, sp, fuel, stp, locals, module, interp);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-memory-copy
@@ -2513,7 +2751,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         const memory_copy_ip = ip - 2;
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 3, 3);
@@ -2539,7 +2777,7 @@ const opcode_handlers = struct {
             return Transition.trap(memory_copy_ip, eip, sp, stp, interp, info);
         };
 
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-memory-fill
@@ -2552,7 +2790,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         const memory_fill_ip = ip - 2;
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 3, 3);
@@ -2575,7 +2813,7 @@ const opcode_handlers = struct {
             return Transition.trap(memory_fill_ip, eip, sp, stp, interp, info);
         };
 
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-init
@@ -2588,7 +2826,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         const table_init_ip = ip - 2;
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 3, 3);
@@ -2613,7 +2851,7 @@ const opcode_handlers = struct {
             return Transition.trap(table_init_ip, eip, sp, stp, interp, info);
         };
 
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     pub fn @"elem.drop"(
@@ -2625,11 +2863,11 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         const elem_idx = instr.readIdx(Module.ElemIdx);
         module.header().elemSegmentDropFlag(elem_idx).drop();
-        return instr.dispatchNextOpcode(sp, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, sp, fuel, stp, locals, module, interp);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-copy
@@ -2642,7 +2880,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         const table_copy_ip = ip - 2;
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 3, 3);
@@ -2671,7 +2909,7 @@ const opcode_handlers = struct {
             return Transition.trap(table_copy_ip, eip, sp, stp, interp, info);
         };
 
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-grow
@@ -2684,7 +2922,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 2, 2);
 
@@ -2723,7 +2961,7 @@ const opcode_handlers = struct {
 
         result_or_elem.* = .{ .i32 = result };
 
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-size
@@ -2736,13 +2974,13 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 0, 1);
 
         const table_idx = instr.readIdx(Module.TableIdx);
         vals.pushTyped(&.{.i32}, .{@bitCast(module.header().tableAddr(table_idx).table.len)});
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-fill
@@ -2755,7 +2993,7 @@ const opcode_handlers = struct {
         module: runtime.ModuleInst,
         interp: *Interpreter,
         eip: Eip,
-    ) Transition {
+    ) callconv(ohcc) Transition {
         const table_fill_ip = ip - 2;
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 3, 3);
@@ -2775,7 +3013,7 @@ const opcode_handlers = struct {
         };
 
         @memset(operands, undefined);
-        return instr.dispatchNextOpcode(vals.top, fuel, stp, locals, module, interp);
+        return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 };
 
@@ -2787,6 +3025,7 @@ pub const byte_dispatch_table = dispatchTable(
 );
 
 const std = @import("std");
+const CallingConvention = std.builtin.CallingConvention;
 const builtin = @import("builtin");
 const opcodes = @import("../opcodes.zig");
 const coz = @import("coz");

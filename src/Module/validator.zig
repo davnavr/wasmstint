@@ -217,8 +217,6 @@ inline fn valTypeToVal(val_type: ValType) Val {
     return @enumFromInt(@intFromEnum(val_type));
 }
 
-const ValBuf = std.SegmentedList(Val, 128);
-
 const BlockType = union(enum) {
     type: packed struct(u32) {
         results_only: bool = false,
@@ -320,27 +318,29 @@ const CtrlFrame = struct {
     }
 };
 
-const CtrlStack = std.SegmentedList(CtrlFrame, 16);
+const CtrlStack = std.ArrayList(CtrlFrame);
 
 const ValStack = struct {
-    buf: ValBuf,
-    max: u16 = 0,
+    buf: std.ArrayList(Val),
+    max: u16,
 
     inline fn len(val_stack: *const ValStack) u16 {
-        return @intCast(val_stack.buf.len);
+        return @intCast(val_stack.buf.items.len);
     }
 
-    fn pushAny(val_stack: *ValStack, arena: *ArenaAllocator, val: Val) !void {
+    const PushError = Allocator.Error || error{WasmImplementationLimit};
+
+    fn pushAny(val_stack: *ValStack, arena: *ArenaAllocator, val: Val) PushError!void {
         try val_stack.buf.append(arena.allocator(), val);
         // Note, if someone pushes a known value over an unknown, the max will grow anyway
         // TODO: check that current frame is reachable instead.
         // if (val != .unknown) {
-        val_stack.max = @max(val_stack.max, std.math.cast(u16, val_stack.buf.len) orelse
+        val_stack.max = @max(val_stack.max, std.math.cast(u16, val_stack.buf.items.len) orelse
             return Error.WasmImplementationLimit);
         // }
     }
 
-    fn push(val_stack: *ValStack, arena: *ArenaAllocator, val_type: ValType) !void {
+    fn push(val_stack: *ValStack, arena: *ArenaAllocator, val_type: ValType) PushError!void {
         return val_stack.pushAny(arena, valTypeToVal(val_type));
     }
 
@@ -349,12 +349,9 @@ const ValStack = struct {
         const new_len = std.math.add(u16, val_stack.len(), @intCast(types.len)) catch
             return Error.WasmImplementationLimit;
 
-        if (new_len > ValBuf.prealloc_count) {
-            try val_stack.buf.growCapacity(arena.allocator(), new_len);
-        }
-
+        try val_stack.buf.ensureUnusedCapacity(arena.allocator(), new_len);
         for (types) |ty| {
-            val_stack.buf.append(undefined, valTypeToVal(ty)) catch unreachable;
+            val_stack.buf.appendAssumeCapacity(valTypeToVal(ty));
         }
 
         // TODO: check that current frame is reachable instead.
@@ -370,7 +367,7 @@ const ValStack = struct {
     }
 
     fn popAny(val_stack: *ValStack, ctrl_stack: *const CtrlStack, diag: Diagnostics) !Val {
-        const current_frame: *const CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
+        const current_frame: *const CtrlFrame = &ctrl_stack.items[ctrl_stack.items.len - 1];
         return if (val_stack.len() == current_frame.info.height)
             if (current_frame.info.@"unreachable")
                 Val.unknown
@@ -405,9 +402,9 @@ const ValStack = struct {
         replacement: ValType,
         diag: Diagnostics,
     ) !void {
-        const current_frame: *const CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
+        const current_frame: *const CtrlFrame = &ctrl_stack.items[ctrl_stack.items.len - 1];
         if (val_stack.len() > current_frame.info.height) {
-            const top: *Val = val_stack.buf.at(val_stack.len() - 1);
+            const top: *Val = &val_stack.buf.items[val_stack.len() - 1];
 
             if (top.* != valTypeToVal(expected) and top.* != .unknown) {
                 return diag.print(
@@ -444,7 +441,7 @@ const ValStack = struct {
         expected: []const ValType,
         diag: Diagnostics,
     ) !void {
-        const current_frame: *const CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
+        const current_frame: *const CtrlFrame = &ctrl_stack.items[ctrl_stack.items.len - 1];
         for (0..expected.len) |i| {
             const expected_type = valTypeToVal(expected[expected.len - 1 - i]);
             const current_height = val_stack.len() - i;
@@ -454,7 +451,7 @@ const ValStack = struct {
                 else
                     return errorValueStackUnderflow(current_frame.info.height, diag)
             else
-                val_stack.buf.at(current_height - 1).*;
+                val_stack.buf.items[current_height - 1];
 
             if (actual_type != expected_type and actual_type != .unknown) {
                 return diag.print(
@@ -578,8 +575,8 @@ const Label = struct {
         module: Module,
         diag: Diagnostics,
     ) !Label {
-        const frame: *const CtrlFrame = if (depth < ctrl_stack.len)
-            ctrl_stack.at(ctrl_stack.len - 1 - depth)
+        const frame: *const CtrlFrame = if (depth < ctrl_stack.items.len)
+            &ctrl_stack.items[ctrl_stack.items.len - 1 - depth]
         else
             return diag.print(.validation, "unknown label {}", .{depth});
 
@@ -642,11 +639,11 @@ fn popCtrlFrame(
     module: Module,
     diag: Diagnostics,
 ) !CtrlFrame {
-    if (ctrl_stack.len == 0) {
+    if (ctrl_stack.items.len == 0) {
         return diag.writeAll(.validation, "control stack underflow");
     }
 
-    const frame: CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1).*;
+    const frame: CtrlFrame = ctrl_stack.items[ctrl_stack.items.len - 1];
     const result_types = frame.types.funcType(module).results();
     // std.debug.print("processing {t} {any}\n", .{ frame.info.opcode, result_types });
 
@@ -659,13 +656,14 @@ fn popCtrlFrame(
         );
     }
 
-    ctrl_stack.len -= 1;
+    _ = ctrl_stack.pop().?;
     return frame;
 }
 
 fn markUnreachable(val_stack: *ValStack, ctrl_stack: *CtrlStack) void {
-    const current_frame: *CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
-    val_stack.buf.len = current_frame.info.height;
+    const current_frame: *CtrlFrame = &ctrl_stack.items[ctrl_stack.items.len - 1];
+    @memset(val_stack.buf.items[current_frame.info.height..], undefined);
+    val_stack.buf.shrinkRetainingCapacity(current_frame.info.height);
     current_frame.info.@"unreachable" = true;
 }
 
@@ -769,7 +767,7 @@ const BranchFixup = packed struct(u32) {
 
 const SideTableBuilder = struct {
     const Entry = Code.SideTableEntry;
-    const Entries = std.SegmentedList(Entry, 4);
+    // const Entries = std.SegmentedList(Entry, 4); // TODO: unrolled link list based on cache line size
 
     const ActiveList = struct {
         block_offset: BlockOffset,
@@ -780,17 +778,17 @@ const SideTableBuilder = struct {
 
     /// The contents of the side table, which contain branch targets inserted in increasing
     /// origin offset order.
-    entries: Entries = .{},
+    entries: std.ArrayList(Entry),
     /// Maps pending fixups to each frame in the WebAssembly validation control stack.
     ///
     /// Since `loop`s never need fixups, they only push empty lists.
-    active: std.SegmentedList(ActiveList, 4) = .{},
+    active: std.ArrayList(ActiveList) = .empty,
     /// Separate stack used to fixup branches in `if`/`else` blocks.
-    alternate: std.SegmentedList(BranchFixup, 4) = .{},
+    alternate: std.ArrayList(BranchFixup) = .empty,
     free: BranchFixup.List = .empty,
 
     fn nextEntryIdx(table: *const SideTableBuilder) Module.LimitError!u32 {
-        return std.math.cast(u32, table.entries.len) orelse return error.WasmImplementationLimit;
+        return std.math.cast(u32, table.entries.items.len) orelse error.WasmImplementationLimit;
     }
 
     fn pushFixupList(
@@ -817,10 +815,7 @@ const SideTableBuilder = struct {
 
         try table.active.append(
             arena.allocator(),
-            ActiveList{
-                .block_offset = block_offset,
-                .fixups = fixups,
-            },
+            ActiveList{ .block_offset = block_offset, .fixups = fixups },
         );
     }
 
@@ -833,7 +828,10 @@ const SideTableBuilder = struct {
     ) (Module.LimitError || Allocator.Error)!void {
         const idx = try table.nextEntryIdx();
         const entry = try table.entries.addOne(arena.allocator());
+        errdefer _ = table.entries.pop().?;
         const fixup = try table.alternate.addOne(arena.allocator());
+
+        errdefer comptime unreachable;
 
         fixup.* = .{ .entry_idx = idx };
         entry.* = Entry{
@@ -852,6 +850,8 @@ const SideTableBuilder = struct {
         side_table_idx: u32,
     };
 
+    const AppendError = Module.LimitError || Allocator.Error;
+
     fn append(
         table: *SideTableBuilder,
         arena: *ArenaAllocator,
@@ -861,9 +861,10 @@ const SideTableBuilder = struct {
         pop_count: u8,
         block_offset: ActiveList.BlockOffset,
         target_depth: u32,
-    ) (Module.LimitError || Allocator.Error)!u32 {
+    ) AppendError!u32 {
         const idx = try table.nextEntryIdx();
         const entry = try table.entries.addOne(arena.allocator());
+        errdefer _ = table.entries.pop().?;
         entry.copy_count = copy_count;
         entry.pop_count = pop_count;
         entry.origin = if (builtin.mode == .Debug) origin else {};
@@ -891,7 +892,8 @@ const SideTableBuilder = struct {
             entry.delta_ip = .{ .fixup_origin = origin };
             entry.delta_stp = undefined;
 
-            const current_list: *ActiveList = table.active.at(table.active.len - 1 - target_depth);
+            const current_list: *ActiveList =
+                &table.active.items[table.active.items.len - 1 - target_depth];
             std.debug.assert(current_list.block_offset == block_offset);
             try current_list.fixups.append(arena, .{ .entry_idx = idx });
         }
@@ -908,7 +910,7 @@ const SideTableBuilder = struct {
         var coz_begin = coz.begin("wasmstint.validator.resolveFixupEntry");
         defer coz_begin.end();
 
-        const entry: *Entry = table.entries.at(fixup_entry.entry_idx);
+        const entry: *Entry = &table.entries.items[fixup_entry.entry_idx];
         const origin = entry.delta_ip.fixup_origin;
 
         entry.delta_ip = .{
@@ -954,8 +956,8 @@ const SideTableBuilder = struct {
         std.debug.assert(block_offset == popped.block_offset);
 
         const popped_header = popped.fixups.header;
-        if (table.active.len > 0 and popped_header.capacity > 0) {
-            const other: *ActiveList = table.active.at(table.active.len - 1);
+        if (table.active.items.len > 0 and popped_header.capacity > 0) {
+            const other: *ActiveList = &table.active.items[table.active.items.len - 1];
             const other_header = other.fixups.header;
             if (@intFromPtr(popped_header) == @intFromPtr(other_header)) {
                 if (builtin.mode != .Debug) unreachable;
@@ -999,8 +1001,8 @@ const SideTableBuilder = struct {
         end_offset: u32,
     ) Module.LimitError!void {
         const target_side_table_idx = try table.nextEntryIdx();
-        const fixup: *const BranchFixup = table.alternate.at(table.alternate.len - 1);
-        defer _ = table.alternate.pop();
+        const fixup: *const BranchFixup = &table.alternate.items[table.alternate.items.len - 1];
+        defer _ = table.alternate.pop().?;
         try table.resolveFixupEntry(
             fixup,
             target_side_table_idx,
@@ -1014,7 +1016,7 @@ fn appendSideTableEntry(
     side_table: *SideTableBuilder,
     origin_offset: u32,
     target: Label,
-) !void {
+) SideTableBuilder.AppendError!void {
     const loop_target = target.frame.info.opcode == .loop;
     // if (loop_target)
     //     std.debug.print("BRNCH targeting 0x{X} (loop) originating from 0x{X}\n", .{ target.frame.offset, origin_offset });
@@ -1082,7 +1084,6 @@ pub fn rawValidate(
 
     const func_type = signature.funcType(module);
 
-    var val_stack: ValStack = undefined;
     const locals: struct { types: []const ValType, count: u16 } = locals: {
         var coz_all_locals = coz.begin("wasmstint.validator.locals");
         defer coz_all_locals.end();
@@ -1108,49 +1109,36 @@ pub fn rawValidate(
             return error.WasmImplementationLimit; // too many locals
         }
 
-        const buf = try scratch.allocator().alloc(ValType, total_locals_count);
-        @memcpy(buf[0..func_type.param_count], func_type.parameters());
-        var local_vars = ValBuf{};
-        const locals_only_count = total_locals_count - func_type.param_count;
-        if (locals_only_count > ValBuf.prealloc_count) {
-            // TODO(Zig): handle OOMs properly for std.SegmentedList
-            // https://github.com/ziglang/zig/issues/23027
-            try local_vars.growCapacity(scratch.allocator(), locals_only_count);
-        }
+        const locals_buf = try scratch.allocator().alloc(ValType, total_locals_count);
+        @memcpy(locals_buf[0..func_type.param_count], func_type.parameters());
 
         errdefer comptime unreachable;
 
         var local_idx: u16 = func_type.param_count;
         for (local_groups) |*group| {
             for (0..group.count) |_| {
-                local_vars.append(undefined, valTypeToVal(group.type)) catch unreachable;
-                buf[local_idx] = group.type;
+                locals_buf[local_idx] = group.type;
                 local_idx += 1;
             }
         }
 
-        std.debug.assert(local_idx == buf.len);
-        local_vars.clearRetainingCapacity();
-        val_stack = ValStack{ .buf = local_vars };
-        break :locals .{ .types = buf, .count = @intCast(total_locals_count) };
+        std.debug.assert(local_idx == locals_buf.len);
+        break :locals .{ .types = locals_buf, .count = @intCast(total_locals_count) };
     };
 
-    var side_table = SideTableBuilder{};
+    var side_table = SideTableBuilder{ .entries = try .initCapacity(scratch.allocator(), 4) };
     _ = &side_table;
 
-    var ctrl_stack = CtrlStack{};
-    ctrl_stack.append(
-        undefined,
-        CtrlFrame{
-            .types = .{ .type = .{ .idx = signature, .results_only = true } },
-            .info = .{
-                .height = 0,
-                .opcode = .block,
-            },
-            .offset = 0,
-            .side_table_idx = 0,
+    var ctrl_stack = try CtrlStack.initCapacity(scratch.allocator(), 16);
+    ctrl_stack.appendAssumeCapacity(CtrlFrame{
+        .types = .{ .type = .{ .idx = signature, .results_only = true } },
+        .info = .{
+            .height = 0,
+            .opcode = .block,
         },
-    ) catch unreachable;
+        .offset = 0,
+        .side_table_idx = 0,
+    });
 
     side_table.pushFixupList(
         scratch,
@@ -1160,8 +1148,9 @@ pub fn rawValidate(
 
     const instructions: Code.Ip = @ptrCast(reader.bytes.ptr);
 
+    var val_stack = ValStack{ .buf = .empty, .max = 0 };
     var instr_offset: u32 = 0;
-    while (ctrl_stack.len > 0) {
+    while (ctrl_stack.items.len > 0) {
         var coz_instr = coz.begin("wasmstint.validator.instruction");
         defer coz_instr.end();
 
@@ -1313,7 +1302,8 @@ pub fn rawValidate(
                 try side_table.popAndResolveAlternate(instr_offset + 1);
 
                 if (builtin.mode == .Debug) {
-                    side_table.active.at(side_table.active.len - 1).block_offset = instr_offset;
+                    side_table.active.items[side_table.active.items.len - 1].block_offset =
+                        instr_offset;
                 }
             },
             .end => {
@@ -1325,7 +1315,7 @@ pub fn rawValidate(
 
                 // TODO: Skip branch fixup processing for unreachable code.
 
-                const current_list = side_table.active.at(side_table.active.len - 1);
+                const current_list = &side_table.active.items[side_table.active.items.len - 1];
                 if (builtin.mode == .Debug) {
                     std.debug.assert(frame.offset == current_list.block_offset);
                 }
@@ -1395,19 +1385,7 @@ pub fn rawValidate(
                 const label_count = try reader.readUleb128(u32, diag, "br_table label count");
                 const labels = try per_instr_arena.allocator().alloc(u32, label_count);
 
-                // Reserve space for the new side table entries.
-                {
-                    const grow_side_table = std.math.add(
-                        usize,
-                        std.math.add(usize, 1, labels.len) catch
-                            return error.OutOfMemory,
-                        side_table.entries.len,
-                    ) catch return error.OutOfMemory;
-
-                    if (grow_side_table > SideTableBuilder.Entries.prealloc_count) {
-                        try side_table.entries.growCapacity(scratch.allocator(), grow_side_table);
-                    }
-                }
+                try side_table.entries.ensureUnusedCapacity(scratch.allocator(), labels.len);
 
                 // Validation bases the "arity" on the default branch, so all labels must be parsed
                 // to get to the default label.
@@ -1439,7 +1417,15 @@ pub fn rawValidate(
                         diag,
                     );
 
-                    try appendSideTableEntry(scratch, &side_table, instr_offset, l);
+                    appendSideTableEntry(
+                        scratch,
+                        &side_table,
+                        instr_offset,
+                        l,
+                    ) catch |e| switch (e) {
+                        error.OutOfMemory => unreachable,
+                        else => |err| return err,
+                    };
 
                     const l_types = l.frame.labelTypes(module);
                     if (l_types.len != arity) {
@@ -1526,7 +1512,7 @@ pub fn rawValidate(
             .select => {
                 try val_stack.popExpecting(&ctrl_stack, .i32, diag);
 
-                const current_frame: *const CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
+                const current_frame: *const CtrlFrame = &ctrl_stack.items[ctrl_stack.items.len - 1];
                 if (val_stack.len() == current_frame.info.height and
                     !current_frame.info.@"unreachable")
                 {
@@ -1555,10 +1541,7 @@ pub fn rawValidate(
                     return diag.print(.validation, "type mismatch: {t} != {t}", .{ t_1, t_2 });
                 }
 
-                val_stack.pushAny(
-                    undefined,
-                    if (t_1 == .unknown) t_2 else t_1,
-                ) catch unreachable;
+                val_stack.pushAny(scratch, if (t_1 == .unknown) t_2 else t_1) catch unreachable;
             },
             .@"select t" => {
                 const type_count = try reader.readUleb128(u32, diag, "select arity");
@@ -1572,7 +1555,10 @@ pub fn rawValidate(
 
                 const t = try ValType.parse(reader, diag);
                 try val_stack.popManyExpecting(&ctrl_stack, &.{ t, t, .i32 }, diag);
-                try val_stack.push(undefined, t);
+                val_stack.push(scratch, t) catch |e| switch (e) {
+                    error.OutOfMemory => unreachable,
+                    else => |err| return err,
+                };
             },
 
             .@"local.get" => {
@@ -2176,21 +2162,18 @@ pub fn rawValidate(
 
     try reader.expectEnd(diag, "END opcode expected as last byte");
 
-    if (ctrl_stack.len != 0) {
+    if (ctrl_stack.items.len != 0) {
         return diag.writeAll(.parse, "END opcode expected, but control stack was not empty");
     }
 
     std.debug.assert(val_stack.len() == func_type.result_count);
-    std.debug.assert(side_table.active.len == 0);
-    std.debug.assert(side_table.alternate.len == 0);
+    std.debug.assert(side_table.active.items.len == 0);
+    std.debug.assert(side_table.alternate.items.len == 0);
 
     const eip: *const Code.End = @ptrCast(instructions + instr_offset);
     const max_values: u16 = val_stack.max;
-    const final_side_table: []const Code.SideTableEntry = side_table: {
-        const copied = try allocator.alloc(Code.SideTableEntry, side_table.entries.len);
-        side_table.entries.writeToSlice(copied, 0);
-        break :side_table copied;
-    };
+    const final_side_table: []const Code.SideTableEntry =
+        try allocator.dupe(Code.SideTableEntry, side_table.entries.items);
 
     errdefer comptime unreachable;
 
