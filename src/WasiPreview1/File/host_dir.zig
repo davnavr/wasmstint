@@ -610,7 +610,7 @@ fn accessSubPathPortable(
             var coz_open_comp_dir = coz.begin("wasmstint.WasiPreview1.host_dir.accessSubPath-openDir");
             defer coz_open_comp_dir.end();
 
-            var old_dir = final_dir;
+            var old_dir: std.fs.Dir = final_dir;
             defer if (i > 0 and i < initial_components.len - 1) {
                 // log.debug("closing intermediate directory {any}", .{old_dir.fd});
                 old_dir.close();
@@ -639,10 +639,15 @@ fn accessSubPathPortable(
                 .follow_symlinks = false,
             };
 
-            final_dir = (if (builtin.os.tag == .windows)
-                io.dirOpenDirWindows(old_dir, comp_str, open_options)
-            else
-                old_dir.openDir(comp_str, open_options)) catch |e| return switch (e) {
+            final_dir = (if (builtin.os.tag == .windows) next: {
+                break :next std.fs.Dir.adaptFromNewApi(
+                    io.dirOpenDirWindows(
+                        old_dir.adaptToNewApi(),
+                        comp_str,
+                        open_options,
+                    ) catch |e| break :next e,
+                );
+            } else old_dir.openDir(comp_str, open_options)) catch |e| return switch (e) {
                 // error.NotDir might happen on windows because a symlink is obviously not a directory
                 error.Canceled => unreachable,
                 error.SymLinkLoop => if (builtin.os.tag == .windows)

@@ -454,7 +454,7 @@ pub fn main() void {
 
     if (builtin.os.tag == .windows) {
         // TODO: check exit_code != 3 (abort) https://github.com/WebAssembly/wasi-cli/issues/11
-        std.os.windows.kernel32.ExitProcess(exit_code);
+        std.os.windows.ntdll.RtlExitUserProcess(exit_code);
     } else {
         std.process.exit(
             std.math.cast(u8, exit_code) orelse @panic("TODO: how to truncate exit code"),
