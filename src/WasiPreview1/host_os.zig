@@ -1,23 +1,33 @@
-//! Abstractions over OS APIs for implementing the WASI preview 1 API.
+//! Abstractions over OS APIs used for implementing the WASI preview 1 API.
 
 // Platform specific modules.
 pub const windows = @import("host_os/windows.zig");
 pub const unix_like = @import("host_os/unix_like.zig");
 pub const linux = @import("host_os/linux.zig");
 
-pub const Fd = std.posix.fd_t;
+pub const path = @import("host_os/path.zig");
+pub const Path = path.Slice;
+pub const Dir = @import("host_os/Dir.zig");
 
+pub const Handle = std.posix.fd_t;
 pub const WasiError = @import("errno.zig").Error;
+
+pub const is_windows = builtin.os.tag == .windows;
+
+pub const InterruptedError = error{
+    /// Corresponds to `std.posix.E.INTR`.
+    Interrupted,
+};
 
 /// Used to implement [`fd_filestat_get()`].
 ///
 /// [`fd_filestat_get()`]: https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#fd_filestat_get
 pub fn fileStat(
-    fd: Fd,
+    fd: Handle,
     device_hash_seed: wasi_types.Device.HashSeed,
     inode_hash_seed: wasi_types.INode.HashSeed,
 ) WasiError!wasi_types.FileStat {
-    if (builtin.os.tag == .windows) {
+    if (is_windows) {
         // Kernel32 equivalent is `GetFileInformationByHandleEx`
 
         const all_info = info: {
@@ -104,7 +114,7 @@ const builtin = @import("builtin");
 const wasi_types = @import("types.zig");
 
 test {
-    if (builtin.os.tag == .windows) {
+    if (is_windows) {
         _ = windows;
     }
 

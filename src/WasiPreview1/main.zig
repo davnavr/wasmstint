@@ -620,19 +620,31 @@ fn realMain() Error!i32 {
         all_arguments.preopen_dirs.len,
     ) catch oom("preopen list");
 
-    for (preopens, all_arguments.preopen_dirs) |*dst, *src| {
-        dst.* = WasiPreview1.PreopenDir.openAt(
-            cwd,
-            io,
-            src.host,
-            src.permissions,
-            src.guest,
-        ) catch |e| return fail.format(
-            error.GenericError,
-            "{t}: failed to open preopen directory {f}",
-            .{ e, std.unicode.fmtUtf8(src.host) },
-        );
+    {
+        var preopen_path_arena = ArenaAllocator.init(scratch.allocator());
+        for (preopens, all_arguments.preopen_dirs) |*dst, *src| {
+            dst.* = WasiPreview1.PreopenDir.openAt(
+                WasiPreview1.host_os.Dir{ .handle = cwd.handle },
+                // TODO(Zig): cli argument iteration should be able to return [:0]u16 on windows
+                WasiPreview1.host_os.path.allocFromBytesZ(
+                    src.host,
+                    .alloc_windows,
+                    preopen_path_arena.allocator(),
+                ) catch |e| switch (e) {
+                    error.OutOfMemory => oom("preopen host path"),
+                    error.InvalidWtf8 => unreachable,
+                },
+                src.permissions,
+                src.guest,
+            ) catch |e| return fail.format(
+                error.GenericError,
+                "{t}: failed to open preopen directory {f}",
+                .{ e, std.unicode.fmtUtf8(src.host) },
+            );
+            _ = preopen_path_arena.reset(.retain_capacity);
+        }
     }
+    _ = scratch.reset(.retain_capacity);
 
     var wasi = WasiPreview1.init(
         limited_page_allocator.allocator(), // std.heap.smp_allocator,

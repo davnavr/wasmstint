@@ -1,4 +1,7 @@
-dir: Io.Dir,
+//! A pre-opened directory, which grant a WASI program the ability to perform operations within
+//! an existing host directory.
+
+dir: host_os.Dir,
 permissions: Permissions,
 guest_path: Path,
 
@@ -14,31 +17,28 @@ pub const Permissions = packed struct(u1) {
 };
 
 pub fn openAt(
-    dir: Io.Dir,
-    io: Io,
+    dir: host_os.Dir,
     /// Host path to the directory to open.
-    sub_path: []const u8,
+    sub_path: host_os.Path,
     /// Specifies the operations the guest can perform within the directory.
     permissions: Permissions,
     /// Cannot be empty.
     guest_path: Path,
-) Io.Dir.OpenError!PreopenDir {
+) host_os.Dir.OpenError!PreopenDir {
     if (guest_path.len == 0) {
         return error.BadPathName; // empty path
     }
 
-    const open_options = std.fs.Dir.OpenOptions{
+    const opened_dir = try dir.openDir(sub_path, host_os.Dir.OpenOptions{
         .access_sub_paths = true, // always needed to e.g. access files in the directory
         .iterate = true, // guest may choose to ask for entries at any time
-    };
-
-    const opened_dir = try dir.openDir(io, sub_path, open_options);
+    });
 
     errdefer comptime unreachable;
 
     std.log.debug(
         "preopen host {any} @ {f} at guest path {f} -> host {any}",
-        .{ dir.handle, std.unicode.fmtUtf8(sub_path), guest_path, opened_dir.handle },
+        .{ dir, std.unicode.fmtUtf8(sub_path), guest_path, opened_dir.handle },
     );
 
     return PreopenDir{
@@ -50,5 +50,5 @@ pub fn openAt(
 
 const std = @import("std");
 const builtin = @import("builtin");
-const Io = std.Io;
+const host_os = @import("host_os.zig");
 const Path = @import("Path.zig");

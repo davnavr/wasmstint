@@ -1,4 +1,4 @@
-//! Wrappers over UNIX-like OS APIs.
+//! Low-level wrappers over UNIX-like OS APIs.
 //!
 //! Linux man pages: https://man7.org/linux/man-pages/dir_section_2.html
 //! POSIX specification: https://pubs.opengroup.org/onlinepubs/9799919799/
@@ -24,12 +24,15 @@ pub fn fcntlGetFl(fd: Fd) WasiError!std.posix.O {
 pub const lfs64_abi = builtin.os.tag == .linux and std.os.linux.wrapped.lfs64_abi;
 
 // Duplicated code from `std.posix.pwritev` (MIT License).
-pub const pwritev = if (lfs64_abi) std.c.pwritev64 else std.posix.system.pwritev;
+pub const pwritev = if (lfs64_abi) std.c.pwritev64 else system.pwritev;
 
 // Could also add check for 32-bit linux to use `llseek` instead
-pub const lseek = if (lfs64_abi) std.c.lseek64 else std.posix.system.lseek;
+pub const lseek = if (lfs64_abi) std.c.lseek64 else system.lseek;
+
+pub const openat = if (lfs64_abi) std.c.openat64 else system.openat;
 
 const std = @import("std");
+const system = std.posix.system;
 const builtin = @import("builtin");
 const Fd = std.posix.fd_t;
 const host_os = @import("../host_os.zig");

@@ -1,15 +1,25 @@
 //! Wraps a host OS file descriptor referring to a directory.
 
 const HostDir = struct {
-    dir: std.Io.Dir,
+    dir: host_os.Dir,
     info: *Info,
 
     const Info = struct {
+        const total_size = 4096;
+        const buffer_size = total_size - @sizeOf(usize) - @sizeOf(Path.Ptr) -
+            @sizeOf(types.DirCookie) - @sizeOf(host_os.Dir.Iterator);
+
+        comptime {
+            std.debug.assert(host_os.Dir.Iterator.min_buffer_size <= buffer_size);
+            std.debug.assert(@sizeOf(Info) <= total_size);
+        }
+
+        read_buffer: [buffer_size]u8 align(host_os.Dir.Iterator.buffer_align),
         // Guest `Path` is split to reduce padding
         guest_path_len: Path.Len, // maybe u1 bit in Path.Len to indicate ownership/constness?
         guest_path_ptr: Path.Ptr,
         read_next_cookie: types.DirCookie, // TODO: Hash cookies? Could use `std.hash.int`
-        read_state: ReadState,
+        read_state: host_os.Dir.Iterator,
     };
 
     fn guestPath(ctx: *const HostDir) ?Path {
@@ -69,23 +79,19 @@ comptime {
 pub fn initPreopened(preopen: *PreopenDir, allocator: Allocator) Allocator.Error!File {
     std.debug.assert(preopen.guest_path.len > 0);
 
-    defer preopen.* = undefined;
-
     const perm = preopen.permissions;
 
     // Right now `main.zig` allocates paths in an `arena`, so no `dupe` call is necessary
     const info = try allocator.create(HostDir.Info);
     errdefer comptime unreachable;
+    defer preopen.* = undefined;
 
     info.* = HostDir.Info{
         .guest_path_len = preopen.guest_path.len,
         .guest_path_ptr = preopen.guest_path.ptr,
         .read_next_cookie = .start,
-        .read_state = ReadState{
-            .iter = std.fs.Dir.adaptFromNewApi(preopen.dir).iterate(),
-            .name_buf = undefined,
-            .cached = .current_dir,
-        },
+        .read_state = preopen.dir.iterate(&info.read_buffer),
+        .read_buffer = undefined,
     };
 
     return File{
@@ -106,7 +112,7 @@ pub fn initPreopened(preopen: *PreopenDir, allocator: Allocator) Allocator.Error
 const log = std.log.scoped(.host_dir);
 
 fn init(
-    dir: std.Io.Dir,
+    dir: host_os.Dir,
     allocator: Allocator,
     rights: types.Rights.Valid,
 ) Allocator.Error!File.OpenedPath {
@@ -118,11 +124,8 @@ fn init(
         .guest_path_len = 0,
         .guest_path_ptr = @as([]const u8, "").ptr,
         .read_next_cookie = .start,
-        .read_state = ReadState{
-            .iter = std.fs.Dir.adaptFromNewApi(dir).iterate(),
-            .name_buf = undefined,
-            .cached = .current_dir,
-        },
+        .read_state = dir.iterate(&info.read_buffer),
+        .read_buffer = undefined,
     };
 
     return File.OpenedPath{
@@ -216,63 +219,6 @@ const EntryBuf = struct {
     }
 };
 
-const ReadState = struct {
-    iter: std.fs.Dir.Iterator,
-    name_buf: [std.fs.max_name_bytes]u8 align(16),
-    cached: Cached,
-
-    const Cached = union(enum) {
-        current_dir,
-        parent_dir,
-        entry: struct {
-            kind: std.fs.File.Kind,
-            name_len: std.math.IntFittingRange(0, std.fs.max_name_bytes),
-        },
-        none,
-    };
-
-    fn peekCached(state: *const ReadState) ?std.fs.Dir.Entry {
-        return switch (state.cached) {
-            .current_dir => .{ .name = ".", .kind = .directory },
-            .parent_dir => .{ .name = "..", .kind = .directory },
-            .entry => |entry| .{ .name = state.name_buf[0..entry.name_len], .kind = entry.kind },
-            .none => null,
-        };
-    }
-
-    const NextError = std.fs.Dir.Iterator.Error || error{
-        /// `std.fs.Dir.Iterator.ErrorLinux`.
-        ///
-        /// Corresponds to `ENOENT`.
-        DirNotFound,
-    };
-
-    fn nextCached(state: *ReadState) ?std.fs.Dir.Entry {
-        if (state.peekCached()) |entry| {
-            state.cached = switch (state.cached) {
-                .current_dir => .parent_dir,
-                .parent_dir, .entry, .none => .none,
-            };
-            return entry;
-        } else {
-            return null;
-        }
-    }
-
-    fn next(state: *ReadState) NextError!?std.fs.Dir.Entry {
-        return state.nextCached() orelse switch (builtin.os.tag) {
-            .linux => state.iter.nextLinux(),
-            else => state.iter.next(),
-        };
-    }
-
-    fn reset(state: *ReadState) void {
-        state.iter.reset();
-        @memset(&state.name_buf, undefined);
-        state.cached = .current_dir;
-    }
-};
-
 pub fn fd_readdir(
     ctx: Ctx,
     inode_hash_seed: types.INode.HashSeed,
@@ -282,29 +228,40 @@ pub fn fd_readdir(
 ) Error!types.Size {
     const self = ctx.get(HostDir);
 
-    // TODO: Buffer required to support `fd_readdir` seeking, especially on Windows
+    // Buffer would required to support `fd_readdir` seeking, especially on Windows
     // See https://github.com/WebAssembly/wasi-filesystem/issues/7
 
+    // TODO: On POSIX, can use lseek
     if (cookie.n <= self.info.read_next_cookie.n) {
         @branchHint(.unlikely);
         self.info.read_state.reset();
 
         if (cookie.n != types.DirCookie.start.n) {
+            log.debug("readdir seek backwards to {d} ", .{cookie.n});
+
             // Seek forwards to previous position
             var seek_cookie = types.DirCookie.start;
             while (seek_cookie.n < cookie.n) {
                 defer seek_cookie.n += 1;
-                _ = (try self.info.read_state.next()) orelse return error.InvalidArgument;
+                _ = (try self.info.read_state.next()) orelse {
+                    return error.InvalidArgument; // invalid dir cookie to seek to previous position
+                };
             }
         }
     } else if (self.info.read_next_cookie.n < cookie.n) {
         @branchHint(.unlikely);
+        log.debug(
+            "readdir seek forwards skipping {d} entries",
+            .{cookie.n - self.info.read_next_cookie.n},
+        );
 
         // Seek to skip some entries
         var seek_cookie = cookie;
         while (seek_cookie.n < self.info.read_next_cookie.n) {
             defer seek_cookie.n += 1;
-            _ = (try self.info.read_state.next()) orelse return error.InvalidArgument;
+            _ = (try self.info.read_state.next()) orelse {
+                return error.InvalidArgument; // invalid dir cookie to skip past entries
+            };
         }
     }
 
@@ -312,8 +269,9 @@ pub fn fd_readdir(
     defer self.info.read_next_cookie = current_cookie;
     var entries = EntryBuf{ .bytes = buf };
     while (entries.bytes.len > 0) {
-        const next = (try self.info.read_state.next()) orelse break;
-        const name = Path.init(next.name) catch |e| switch (e) {
+        const next = (try self.info.read_state.peek()) orelse break;
+        // TODO: Need scratch allocator to convert windows WTF-16 name
+        const name = Path.init(host_os.Dir.entry.name(next)) catch |e| switch (e) {
             error.PathTooLong => unreachable, // no supported OS's allow names this long
             // Could silently skip non-UTF-8 entries, but Zig `std` feels the need to catch it
             error.InvalidUtf8 => |err| return err,
@@ -321,34 +279,43 @@ pub fn fd_readdir(
 
         errdefer comptime unreachable;
 
-        const @"type" = types.FileType.fromZigKind(next.kind) catch |e| switch (e) {
-            // TODO: need `getsockopt()` to determine exact type of socket
-            error.UnknownSocketType => .unknown,
+        const entry_type: types.FileType = switch (builtin.os.tag) {
+            .linux => switch (host_os.Dir.entry.typeOf(next)) {
+                host_os.linux.DT.BLK => .block_device,
+                host_os.linux.DT.CHR => .character_device,
+                host_os.linux.DT.DIR => .directory,
+                host_os.linux.DT.LNK => .symbolic_link,
+                host_os.linux.DT.REG => .regular_file,
+                // TODO: `getsockopt` to determine exact type of socket
+                host_os.linux.DT.SOCK => .unknown,
+                host_os.linux.DT.FIFO,
+                host_os.linux.DT.UNKNOWN,
+                host_os.linux.DT.WHT,
+                _,
+                => .unknown,
+            },
+            else => |bad| @compileError("dir entry type for " ++ @tagName(bad)),
         };
 
-        // Zig doesn't expose POSIX inode/Windows IndexNumber in `Dir.Iterator`.
-
-        // TODO: Copy `std.fs.Dir.Iterator` impls to obtain inode information that it skips
-        // TODO: This returns different results than fd_fdstat_get impl, maybe do a `stat()` here (needed to find socket type anyway)?
-        // TODO: Could use NtQueryInformationFile & FILE_INTERNAL_INFORMATION on Windows
+        const inode: u64 = switch (builtin.os.tag) {
+            .linux => next.ino,
+            else => |bad| @compileError("dir entry inode for " ++ @tagName(bad)),
+        };
 
         const next_cookie = types.DirCookie{ .n = current_cookie.n + 1 };
         const written = entries.writeEntry(
             next_cookie,
-            .init(inode_hash_seed, 0x0123_4567_89AB_CDEF),
+            .init(inode_hash_seed, inode),
             name,
-            @"type",
+            entry_type,
         );
         switch (written) {
             .none => unreachable,
-            .full => current_cookie = next_cookie,
-            .partial => {
-                @memcpy(self.info.read_state.name_buf[0..name.len], name.bytes());
-                self.info.read_state.cached = .{
-                    .entry = .{ .kind = next.kind, .name_len = @intCast(name.len) },
-                };
-                break;
+            .full => {
+                current_cookie = next_cookie;
+                self.info.read_state.advance();
             },
+            .partial => break,
         }
     }
 
@@ -424,7 +391,7 @@ fn SetOpenFlags(comptime Args: type) type {
 ///
 /// [`openat2`]: https://man7.org/linux/man-pages/man2/openat2.2.html
 fn accessSubPathLinux(
-    dir: std.Io.Dir,
+    dir: host_os.Dir,
     scratch: *ArenaAllocator,
     flags: types.LookupFlags.Valid,
     path: Path,
@@ -486,7 +453,7 @@ fn accessSubPathLinux(
             @sizeOf(OpenHow),
         );
 
-        switch (host_os.linux.errno(result)) {
+        switch (std.os.linux.E.init(result)) {
             .SUCCESS => break @intCast(result),
             .INTR => continue,
             .NOSYS => {
@@ -539,7 +506,7 @@ fn AccessSubPathReturnType(comptime Accessor: type) type {
 /// This is an implementation of the path resolution algorithm described
 /// [here](https://github.com/WebAssembly/wasi-filesystem/blob/main/path-resolution.md).
 fn accessSubPathPortable(
-    dir: std.Io.Dir,
+    dir: host_os.Dir,
     scratch: *ArenaAllocator,
     flags: types.LookupFlags.Valid,
     path: Path,
@@ -604,20 +571,19 @@ fn accessSubPathPortable(
     // target is reached.
 
     var path_arena = ArenaAllocator.init(scratch.allocator());
-    var final_dir = std.fs.Dir.adaptFromNewApi(dir);
+    var final_dir: host_os.Dir = dir;
     if (initial_components.len > 1) {
         for (0.., initial_components[0 .. initial_components.len - 1]) |i, comp| {
             var coz_open_comp_dir = coz.begin("wasmstint.WasiPreview1.host_dir.accessSubPath-openDir");
             defer coz_open_comp_dir.end();
 
-            var old_dir: std.fs.Dir = final_dir;
+            var old_dir: host_os.Dir = final_dir;
             defer if (i > 0 and i < initial_components.len - 1) {
                 // log.debug("closing intermediate directory {any}", .{old_dir.fd});
                 old_dir.close();
             };
 
             const comp_bytes = comp.bytes(path);
-            // TODO: Make own openDir wrapper
             const comp_str = if (builtin.os.tag == .windows)
                 std.unicode.utf8ToUtf16LeAllocZ(
                     path_arena.allocator(),
@@ -627,29 +593,18 @@ fn accessSubPathPortable(
                     error.OutOfMemory => |oom| return oom,
                 }
             else
-                // try path_arena.allocator().dupeZ(u8, comp_bytes);
-                comp_bytes;
+                try path_arena.allocator().dupeZ(u8, comp_bytes);
 
             // TODO: Use O_PATH on Linux, requires using platform-specific APIs
 
-            var io = std.Io.Threaded.init_single_threaded;
-            const open_options = std.Io.Dir.OpenOptions{
+            const open_options = host_os.Dir.OpenOptions{
                 .access_sub_paths = true,
                 // TODO(zig): no_follow weird on windows https://github.com/ziglang/zig/issues/18335
                 .follow_symlinks = false,
             };
 
-            final_dir = (if (builtin.os.tag == .windows) next: {
-                break :next std.fs.Dir.adaptFromNewApi(
-                    io.dirOpenDirWindows(
-                        old_dir.adaptToNewApi(),
-                        comp_str,
-                        open_options,
-                    ) catch |e| break :next e,
-                );
-            } else old_dir.openDir(comp_str, open_options)) catch |e| return switch (e) {
+            final_dir = old_dir.openDir(comp_str, open_options) catch |e| return switch (e) {
                 // error.NotDir might happen on windows because a symlink is obviously not a directory
-                error.Canceled => unreachable,
                 error.SymLinkLoop => if (builtin.os.tag == .windows)
                     unreachable
                 else if (!flags.symlink_follow)
@@ -735,7 +690,7 @@ fn accessSubPathPortable(
         const has_obj_dont_reparse =
             builtin.os.version_range.windows.isAtLeast(obj_dont_reparse_min_version);
 
-        const new_fd: std.fs.File.Handle = if (has_obj_dont_reparse == true) opened: {
+        const new_fd: host_os.Handle = if (has_obj_dont_reparse == true) opened: {
             var attrs = std.os.windows.OBJECT_ATTRIBUTES{
                 .Length = @sizeOf(std.os.windows.OBJECT_ATTRIBUTES),
                 .RootDirectory = final_dir.fd,
@@ -747,7 +702,7 @@ fn accessSubPathPortable(
 
             // Recreates some logic for `std.os.windows.OpenFile`
             while (true) {
-                var opened_handle: std.fs.File.Handle = undefined;
+                var opened_handle: host_os.Handle = undefined;
                 var io: std.os.windows.IO_STATUS_BLOCK = undefined;
                 const status = host_os.windows.NtCreateFile(
                     &opened_handle,
@@ -824,7 +779,7 @@ fn accessSubPathPortable(
             while (true) {
                 // Logic copied from Zig's `std.os.windows.ReadLink`, except that this does not
                 // allow absolute paths.
-                var maybe_symlink_handle: std.fs.File.Handle = undefined;
+                var maybe_symlink_handle: host_os.Handle = undefined;
                 var maybe_symlink_io: std.os.windows.IO_STATUS_BLOCK = undefined;
                 const maybe_symlink_status = std.os.windows.ntdll.NtCreateFile(
                     &maybe_symlink_handle,
@@ -945,12 +900,11 @@ fn accessSubPathPortable(
         const final_name_z = if (final_name) |b| try path_arena.allocator().dupeZ(u8, b) else ".";
 
         const new_fd = std.posix.openatZ(
-            final_dir.fd,
+            final_dir.handle,
             final_name_z,
             o_flags_no_follow,
             0,
         ) catch |e| return switch (e) {
-            error.AntivirusInterference,
             error.SharingViolation,
             error.NetworkNotFound,
             error.PipeBusy,
@@ -977,7 +931,7 @@ fn accessSubPathPortable(
 ///
 /// [WASI support in `wasmtime`]: https://docs.rs/cap-primitives/3.4.4/src/cap_primitives/rustix/linux/fs/open_impl.rs.html
 fn accessSubPath(
-    dir: std.Io.Dir,
+    dir: host_os.Dir,
     /// Used for temporary allocations of file paths.
     scratch: *ArenaAllocator,
     flags: types.LookupFlags.Valid,
@@ -1253,8 +1207,7 @@ fn pathOpen(
     }
 
     log.debug("successfully opened directory {f}", .{path});
-    const as_dir = std.Io.Dir{ .handle = new_fd };
-    return init(as_dir, allocator, rights);
+    return init(host_os.Dir{ .handle = new_fd }, allocator, rights);
 }
 
 fn path_open(

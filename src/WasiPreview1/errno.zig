@@ -181,6 +181,7 @@ pub const Errno = enum(u16) {
             error.Unexpected => unexpected,
 
             error.AccessDenied => .notcapable, // .acces,
+            error.AntivirusInterference => .acces,
             error.NotCapable => .notcapable,
             error.BrokenPipe => .pipe,
             error.ConnectionResetByPeer => .connreset,
@@ -195,6 +196,7 @@ pub const Errno = enum(u16) {
             error.InputOutput => .io,
             error.InvalidArgument => .inval,
             error.InvalidUtf8, error.BadPathName => .ilseq,
+            error.Interrupted => .intr,
             error.IsDir => .isdir,
             error.LockedRegionLimitExceeded => .nolck,
             error.MessageOversize => .msgsize,
@@ -232,6 +234,7 @@ pub const Error = std.mem.Allocator.Error ||
     std.posix.UnexpectedError ||
     error{
         AccessDenied,
+        AntivirusInterference,
         BrokenPipe,
         ConnectionResetByPeer,
         ConnectionTimedOut,
@@ -247,6 +250,7 @@ pub const Error = std.mem.Allocator.Error ||
         InputOutput,
         InvalidArgument,
         InvalidUtf8,
+        Interrupted,
         IsDir,
         LockedRegionLimitExceeded,
         MessageOversize,

@@ -53,6 +53,7 @@ const Api = @import("WasiPreview1/api.zig").Api;
 pub const Csprng = @import("WasiPreview1/Csprng.zig");
 pub const Path = @import("WasiPreview1/Path.zig");
 pub const PreopenDir = @import("WasiPreview1/PreopenDir.zig");
+pub const host_os = @import("WasiPreview1/host_os.zig");
 
 allocator: Allocator,
 scratch: struct {

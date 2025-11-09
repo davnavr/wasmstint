@@ -3,19 +3,23 @@
 //! See the `unix_like` modules for wrappers over POSIX/Unix-like ABIs instead.
 
 pub const Fd = system.fd_t;
-pub const Errno = system.E;
+pub const Errno = std.os.linux.E;
 
-/// Used in situations where `std.posix.errno` can't be used, since it checks `errno` when `libc`
-/// is linked.
-///
-/// This is useful when making system calls that are not available via `libc` wrappers.
-pub fn errno(result: usize) Errno {
-    const result_signed: isize = @bitCast(result);
-    return if (-4096 < result_signed and result_signed < 0)
-        @enumFromInt(-result_signed)
-    else
-        .SUCCESS;
-}
+pub const DT = @Type(.{
+    .@"enum" = .{
+        .tag_type = u8,
+        .is_exhaustive = false,
+        .decls = &.{},
+        .fields = fields: {
+            const src_decls = @typeInfo(std.os.linux.DT).@"struct".decls;
+            var fields: [src_decls.len]std.builtin.Type.EnumField = undefined;
+            for (src_decls, &fields) |src, *dst| {
+                dst.* = .{ .name = src.name, .value = @field(std.os.linux.DT, src.name) };
+            }
+            break :fields &fields;
+        },
+    },
+});
 
 const statx_available = builtin.os.isAtLeast(.linux, .{ .major = 4, .minor = 11, .patch = 0 });
 
@@ -120,7 +124,7 @@ pub fn statx(
     buf.* = undefined;
     const result = system.statx(dir, path, @bitCast(flags), @bitCast(mask), buf);
     const requested_mask = @as(u32, @bitCast(mask));
-    switch (errno(result)) {
+    switch (Errno.init(result)) {
         .SUCCESS => if (buf.mask & requested_mask != requested_mask) {
             return error.MissingRequestedFields;
         },

@@ -484,25 +484,6 @@ pub const FileType = enum(u8) {
             else => .unknown,
         };
     }
-
-    pub fn fromZigKind(kind: std.fs.File.Kind) error{UnknownSocketType}!FileType {
-        const is_windows = builtin.os.tag == .windows;
-        return switch (kind) {
-            .block_device => if (!is_windows) .block_device else unreachable,
-            .character_device => if (!is_windows) .character_device else unreachable,
-            .directory => .directory,
-            .named_pipe => if (!is_windows) .unknown else unreachable,
-            .sym_link => if (!is_windows) .symbolic_link else unreachable,
-            .file => .regular_file,
-            .unix_domain_socket => if (!is_windows)
-                error.UnknownSocketType
-            else
-                unreachable,
-            .whiteout => if (!is_windows) .unknown else unreachable, // BSD thing
-            .door, .event_port => if (builtin.os.tag == .illumos) .unknown else unreachable,
-            .unknown => .unknown,
-        };
-    }
 };
 
 /// https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#fdflags
