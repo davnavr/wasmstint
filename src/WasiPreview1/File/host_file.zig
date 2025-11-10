@@ -8,7 +8,7 @@ pub const Close = enum {
 };
 
 const HostFile = struct {
-    file: std.Io.File,
+    file: host_os.Handle,
     close: Close,
 };
 
@@ -42,12 +42,10 @@ comptime {
     std.debug.assert(possible_rights.contains(write_rights));
 }
 
-/// Callers must ensure that `fd` is an open file handle.
-///
-/// Ownership of `fd` is transferred to the `File`.
-pub fn wrapFile(fd: std.Io.File, close: Close) File.Impl {
+/// Ownership of `file` is transferred to the `File`.
+pub fn wrapFile(file: std.Io.File, close: Close) File.Impl {
     return File.Impl{
-        .ctx = Ctx.init(HostFile{ .file = fd, .close = close }),
+        .ctx = Ctx.init(HostFile{ .file = file.handle, .close = close }),
         .vtable = &vtable,
     };
 }
@@ -104,7 +102,7 @@ fn fd_close(ctx: Ctx, allocator: std.mem.Allocator) Error!void {
     _ = allocator;
     switch (self.close) {
         .leave_open => {},
-        .close => try closeHandle(self.file.handle),
+        .close => try closeHandle(self.file),
     }
 }
 
@@ -117,7 +115,7 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
         // Equivalent in `kernel32` is `GetFileInformationByHandle`
         // Simplified version of implementation of `std.fs.File.stat`
         const status = host_os.windows.ntQueryInformationFile(
-            self.file.handle,
+            self.file,
             &status_block,
             // Need both `FILE_ACCESS_INFORMATION` and `FILE_STANDARD_INFORMATION`
             .FileAllInformation,
@@ -134,12 +132,12 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
                 };
 
                 // Not a file, check for a console handle (standard streams)
-                switch (host_os.windows.GetFileType(self.file.handle)) {
+                switch (host_os.windows.GetFileType(self.file)) {
                     .disk => unreachable,
                     .char => return char_device,
                     .pipe => {
                         // Zig `isCygwinPty` wrapper does useless work, it checks if file is console
-                        const pipe_pty = host_os.windows.isMsysOrCygwinPty(self.file.handle);
+                        const pipe_pty = host_os.windows.isMsysOrCygwinPty(self.file);
                         switch (pipe_pty.tag) {
                             .not_a_pty => {},
                             .msys, .cygwin => return char_device,
@@ -172,14 +170,14 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
     } else return .{
         .flags = types.FdFlags{
             .valid = types.FdFlags.Valid.fromFlagsPosix(
-                try host_os.unix_like.fcntlGetFl(self.file.handle),
+                try host_os.unix_like.fcntlGetFl(self.file),
             ),
         },
         .type = type: {
             if (builtin.os.tag == .linux) fallback: {
                 var statx: std.os.linux.Statx = undefined;
                 host_os.linux.statx(
-                    self.file.handle,
+                    self.file,
                     "",
                     .{ .EMPTY_PATH = true, .SYMLINK_NOFOLLOW = true },
                     .{ .TYPE = true },
@@ -211,7 +209,7 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
                 };
             }
 
-            const stat = std.posix.fstat(self.file.handle) catch |e| switch (e) {
+            const stat = std.posix.fstat(self.file) catch |e| switch (e) {
                 error.Canceled, error.Streaming => unreachable,
                 else => unreachable,
             };
@@ -229,7 +227,7 @@ fn fd_filestat_get(
     inode_hash_seed: types.INode.HashSeed,
 ) Error!types.FileStat {
     const self = ctx.get(HostFile);
-    return host_os.fileStat(self.file.handle, device_hash_seed, inode_hash_seed);
+    return host_os.fileStat(self.file, device_hash_seed, inode_hash_seed);
 }
 
 fn overflowsSignedSize(total_len: u32) bool {
@@ -275,7 +273,7 @@ fn iovsBytesLenBounded(iovs: anytype, total_len: u32) @TypeOf(iovs) {
 //                 std.posix.system.preadv;
 //             while (true) {
 //                 const written = preadv(
-//                     self.file.handle,
+//                     self.file,
 //                     ciovs.ptr,
 //                     @min(ciovs.len, std.posix.IOV_MAX),
 //                     @as(i64, @bitCast(offset.bytes)),
@@ -307,7 +305,7 @@ fn fd_pwrite(
             while (true) {
                 // Zig unfortunately conflates NXIO, SPIPE, and OVERFLOW into one error
                 const written = host_os.unix_like.pwritev(
-                    self.file.handle,
+                    self.file,
                     ciovs.ptr,
                     @min(ciovs.len, std.posix.IOV_MAX),
                     @as(i64, @bitCast(offset.bytes)),
@@ -368,7 +366,7 @@ fn fd_read(ctx: Ctx, iovs: []const File.Iovec, total_len: u32) Error!u32 {
             var number_of_bytes_read: std.os.windows.DWORD = undefined;
             // `kernel32.ReadFile` handles reading from consoles, not just normal files
             const success = std.os.windows.kernel32.ReadFile(
-                self.file.handle,
+                self.file,
                 buffer.ptr,
                 @as(u32, @intCast(buffer.len)),
                 &number_of_bytes_read,
@@ -399,7 +397,7 @@ fn fd_read(ctx: Ctx, iovs: []const File.Iovec, total_len: u32) Error!u32 {
         // Zig conflates `ENOBUFS` and `ENOMEM`
         while (true) {
             const amt = std.posix.system.readv(
-                self.file.handle,
+                self.file,
                 os_iovs.ptr,
                 @min(os_iovs.len, std.posix.IOV_MAX),
             );
@@ -430,10 +428,8 @@ fn fd_read(ctx: Ctx, iovs: []const File.Iovec, total_len: u32) Error!u32 {
 
 fn fd_tell(ctx: Ctx) Error!types.FileSize {
     const self = ctx.get(HostFile);
-    // Zig conflates multiple errors (e.g. `EINVAL`, `ESPIPE`, etc.) into `error.Unseekable`
-    //return self.file.getPos();
-    //return std.posix.lseek_CUR_get(self.file.handle);
-    //return std.os.windows.SetFilePointerEx_CURRENT_get(self.file.handle);
+    // Zig conflates multiple errors (e.g. `EINVAL`, `ESPIPE`, etc.) into `error.Unseekable`, so
+    // platform-specific APIs are required.
 
     if (builtin.os.tag == .windows) {
         // Similar code to `std.os.windows.kernel32.SetFilePointerEx_CURRENT_get()`
@@ -442,7 +438,7 @@ fn fd_tell(ctx: Ctx) Error!types.FileSize {
         var io: std.os.windows.IO_STATUS_BLOCK = undefined;
         var info: std.os.windows.FILE_POSITION_INFORMATION = undefined;
         const status = host_os.windows.ntQueryInformationFile(
-            self.file.handle,
+            self.file,
             &io,
             .FilePositionInformation,
             &info,
@@ -459,7 +455,7 @@ fn fd_tell(ctx: Ctx) Error!types.FileSize {
     } else if (@hasDecl(std.posix.system, "SEEK") and std.posix.SEEK != void) {
         // Duplicated code from `std.posix.lseek_CUR_get()`.
         // Could also add check for 32-bit linux to use `llseek` instead
-        const pos = host_os.unix_like.lseek(self.file.handle, 0, std.posix.SEEK.CUR);
+        const pos = host_os.unix_like.lseek(self.file, 0, std.posix.SEEK.CUR);
         return switch (std.posix.errno(pos)) {
             .SUCCESS => types.FileSize{ .bytes = @bitCast(pos) },
             .BADF => unreachable,
@@ -479,13 +475,10 @@ fn fd_write(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!u32 {
 
     // OS needs a chance to return errors, even if length is 0
     _ = total_len;
-    // if (total_len == 0) {
-    //     return 0;
-    // }
+    //if (total_len == 0) return 0;
 
-    // TODO: How to handle Windows? multiple WriteFile calls?
-    // TODO: Use `std.posix.writev`
-    const written = std.fs.File.adaptFromNewApi(self.file).writev(
+    const written = std.posix.writev(
+        self.file,
         File.Ciovec.castSlice(iovs),
     ) catch |e| return switch (e) {
         error.NotOpenForWriting => error.BadFd,
