@@ -23,6 +23,17 @@ pub fn allocFromBytesZ(path: [:0]const u8, mode: AllocMode, alloc: Allocator) Al
     };
 }
 
+pub fn format(path: Slice, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    try writer.print(
+        "{f}",
+        .{if (host_os.is_windows) std.unicode.fmtUtf16Le(path) else std.unicode.fmtUtf8(path)},
+    );
+}
+
+pub fn fmt(path: Slice) std.fmt.Alt(Slice, format) {
+    return .{ .data = path };
+}
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const host_os = @import("../host_os.zig");

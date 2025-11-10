@@ -54,6 +54,7 @@ pub const AccessMask = Mask(enum {
     DELETE,
     FILE_READ_DATA,
     FILE_READ_ATTRIBUTES,
+    FILE_READ_EA,
     FILE_WRITE_DATA,
     FILE_WRITE_ATTRIBUTES,
     FILE_APPEND_DATA,
@@ -66,18 +67,18 @@ pub const AccessMask = Mask(enum {
     SYNCHRONIZE,
 });
 
-/// `ShareAccess` parameter in [`NtCreateFile()`].
-///
-/// [`NtCreateFile()`]: https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile
+/// `ShareAccess` parameter in `NtCreateFile()`.
 pub const ShareAccess = Mask(enum {
     FILE_SHARE_READ,
     FILE_SHARE_WRITE,
     FILE_SHARE_DELETE,
 });
 
-/// `CreateDisposition` parameter in [`NtCreateFile()`].
-///
-/// [`NtCreateFile()`]: https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile
+pub const share_access_default = ShareAccess.init(
+    &.{ .FILE_SHARE_READ, .FILE_SHARE_WRITE, .FILE_SHARE_DELETE },
+);
+
+/// `CreateDisposition` parameter in `NtCreateFile()`.
 pub const CreateDisposition = @Type(std.builtin.Type{
     .@"enum" = std.builtin.Type.Enum{
         .tag_type = std.os.windows.ULONG,
@@ -106,9 +107,7 @@ pub const CreateDisposition = @Type(std.builtin.Type{
     },
 });
 
-/// `CreateOptions` parameter in [`NtCreateFile()`].
-///
-/// [`NtCreateFile()`]: https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile
+/// `CreateOptions` parameter in `NtCreateFile()`.
 pub const CreateOptions = Mask(enum {
     FILE_DIRECTORY_FILE,
     FILE_NON_DIRECTORY_FILE,
@@ -122,10 +121,31 @@ pub const CreateOptions = Mask(enum {
     FILE_OPEN_FOR_BACKUP_INTENT,
 });
 
+pub const FileAttributes = Mask(enum {
+    FILE_ATTRIBUTE_READONLY,
+    FILE_ATTRIBUTE_HIDDEN,
+    FILE_ATTRIBUTE_SYSTEM,
+    FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_ARCHIVE,
+    FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_TEMPORARY,
+    FILE_ATTRIBUTE_COMPRESSED,
+});
+
 pub const DUPLICATE_SAME_ATTRIBUTES = 0x0000_0004;
 
+/// `OBJ_DONT_REPARSE` fails on paths like `C:\Users\You\file.txt`, so it should only be used when
+/// processing relative paths.
+///
+// For more information see:
 /// https://www.tiraniddo.dev/2020/05/objdontreparse-is-mostly-useless.html
 pub const OBJ_DONT_REPARSE = 0x0000_1000;
+
+/// Documentation for `NtCreateFile` only lists `OBJ_CASE_INSENSITIVE` for `Attributes`
+pub const obj_dont_reparse_min_version = std.Target.Os.WindowsVersion.win10_rs1;
+
+pub const has_obj_dont_reparse = builtin.os.version_range.windows
+    .isAtLeast(obj_dont_reparse_min_version);
 
 /// https://ntdoc.m417z.com/ntduplicateobject
 /// https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-zwduplicateobject
@@ -137,7 +157,7 @@ pub extern "ntdll" fn NtDuplicateObject(
     desired_access: AccessMask,
     handle_attributes: std.os.windows.ULONG,
     options: std.os.windows.ULONG,
-) callconv(.winapi) NtStatus;
+) callconv(.winapi) Status;
 
 /// https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile
 pub extern "ntdll" fn NtCreateFile(
@@ -146,16 +166,16 @@ pub extern "ntdll" fn NtCreateFile(
     object_attributes: *std.os.windows.OBJECT_ATTRIBUTES,
     io_status_block: *std.os.windows.IO_STATUS_BLOCK,
     allocation_size: ?*std.os.windows.LARGE_INTEGER,
-    file_attributes: std.os.windows.ULONG,
+    file_attributes: FileAttributes,
     share_access: ShareAccess,
     create_disposition: CreateDisposition,
     create_options: CreateOptions,
     ea_buffer: ?*anyopaque,
     ea_length: std.os.windows.ULONG,
-) callconv(.winapi) NtStatus;
+) callconv(.winapi) Status;
 
 /// Returned when `OBJ_DONT_REPARSE` is used and a reparse point was encountered.
-pub const STATUS_REPARSE_POINT_ENCOUNTERED: NtStatus = @enumFromInt(0xC000_050B);
+pub const STATUS_REPARSE_POINT_ENCOUNTERED: Status = @enumFromInt(0xC000_050B);
 
 /// https://learn.microsoft.com/en-us/windows/win32/api/ntdef/ns-ntdef-_unicode_string
 pub fn initUnicodeString(str: []u16) std.os.windows.UNICODE_STRING {
@@ -167,71 +187,12 @@ pub fn initUnicodeString(str: []u16) std.os.windows.UNICODE_STRING {
     };
 }
 
-/// https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_stat_lx_information
-pub const FILE_STAT_LX_INFORMATION = extern struct {
-    FileId: std.os.windows.FILE_INTERNAL_INFORMATION,
-    CreationTime: std.os.windows.LARGE_INTEGER,
-    LastAccessTime: std.os.windows.LARGE_INTEGER,
-    LastWriteTime: std.os.windows.LARGE_INTEGER,
-    ChangeTime: std.os.windows.LARGE_INTEGER,
-    AllocationSize: std.os.windows.LARGE_INTEGER,
-    EndOfFile: std.os.windows.LARGE_INTEGER,
-    FileAttributes: std.os.windows.ULONG,
-    ReparseTag: std.os.windows.ULONG,
-    NumberOfLinks: std.os.windows.ULONG,
-    EffectiveAccess: std.os.windows.ACCESS_MASK,
-    LxFlags: std.os.windows.ULONG,
-    LxUid: std.os.windows.ULONG,
-    LxGid: std.os.windows.ULONG,
-    LxMode: Mode,
-    LxDeviceIdMajor: std.os.windows.ULONG,
-    LxDeviceIdMinor: std.os.windows.ULONG,
-
-    pub const Mode = packed struct(std.os.windows.ULONG) {
-        _0: u6 = 0,
-        exec: bool = false,
-        write: bool = false,
-        read: bool = false,
-        _9: u3 = 0,
-        fmt: Fmt,
-        _16: u16 = 0,
-
-        test {
-            try std.testing.expectEqual(
-                0x4000 | 0x0100,
-                @as(u32, @bitCast(Mode{ .read = true, .fmt = .dir })),
-            );
-            try std.testing.expectEqual(
-                0x8000 | 0x0100 | 0x0080,
-                @as(u32, @bitCast(Mode{ .read = true, .write = true, .fmt = .reg })),
-            );
-        }
-    };
-
-    pub const Fmt = enum(u4) {
-        /// Directory.
-        dir = 0x4,
-        /// Character special.
-        chr = 0x2,
-        /// Pipe.
-        fifo = 0x1,
-        /// Regular.
-        reg = 0x8,
-        _,
-    };
-
-    test {
-        _ = Mode;
-    }
-};
-
 pub fn FileInformationType(comptime class: std.os.windows.FILE_INFORMATION_CLASS) type {
     return switch (class) {
         .FileBasicInformation => std.os.windows.FILE_BASIC_INFORMATION,
         .FilePositionInformation => std.os.windows.FILE_POSITION_INFORMATION,
         .FileAllInformation => std.os.windows.FILE_ALL_INFORMATION,
-        .FileStatLxInformation => FILE_STAT_LX_INFORMATION,
-        else => @compileError("specify FILE_INFORMATION_ struct for " ++ @tagName(class)),
+        else => @compileError("specify file information struct for " ++ @tagName(class)),
     };
 }
 
@@ -240,13 +201,56 @@ pub fn ntQueryInformationFile(
     io_status_block: *std.os.windows.IO_STATUS_BLOCK,
     comptime file_information_class: std.os.windows.FILE_INFORMATION_CLASS,
     file_information: *FileInformationType(file_information_class),
-) NtStatus {
+) Status {
     return std.os.windows.ntdll.NtQueryInformationFile(
         handle,
         io_status_block,
         file_information,
         @sizeOf(FileInformationType(file_information_class)),
         file_information_class,
+    );
+}
+
+/// Assumed to be available in all versions of Windows supported by Zig.
+///
+/// https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_id_full_dir_information
+pub const FILE_ID_FULL_DIR_INFORMATION = extern struct {
+    NextEntryOffset: std.os.windows.ULONG,
+    FileIndex: std.os.windows.ULONG,
+    CreationTime: std.os.windows.LARGE_INTEGER,
+    LastAccessTime: std.os.windows.LARGE_INTEGER,
+    LastWriteTime: std.os.windows.LARGE_INTEGER,
+    ChangeTime: std.os.windows.LARGE_INTEGER,
+    EndOfFile: std.os.windows.LARGE_INTEGER,
+    AllocationSize: std.os.windows.LARGE_INTEGER,
+    FileAttributes: FileAttributes,
+    /// In bytes.
+    FileNameLength: std.os.windows.ULONG,
+    EaSize: std.os.windows.ULONG,
+    FileId: std.os.windows.LARGE_INTEGER,
+    FileName: [0]std.os.windows.WCHAR,
+};
+
+pub fn queryDirectoryFile(
+    handle: Handle,
+    io_status_block: *std.os.windows.IO_STATUS_BLOCK,
+    file_information: []u8,
+    file_information_class: std.os.windows.FILE_INFORMATION_CLASS,
+    scan: enum(u1) { restart = std.os.windows.TRUE, @"resume" = 0 },
+) Status {
+    return std.os.windows.ntdll.NtQueryDirectoryFile(
+        handle,
+        null,
+        null,
+        null,
+        io_status_block,
+        file_information.ptr,
+        std.math.cast(std.os.windows.ULONG, file_information.len) orelse
+            std.math.maxInt(std.os.windows.ULONG),
+        file_information_class,
+        std.os.windows.FALSE,
+        null,
+        @intFromEnum(scan),
     );
 }
 
@@ -557,13 +561,13 @@ pub fn fileStatNonDisk(
 }
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Handle = std.os.windows.HANDLE;
-const NtStatus = std.os.windows.NTSTATUS;
+const Status = std.os.windows.NTSTATUS;
 const wideLiteral = std.unicode.wtf8ToWtf16LeStringLiteral;
 const WasiError = @import("../errno.zig").Error;
 const wasi_types = @import("../types.zig");
 
 test {
     _ = NamedPipePty;
-    _ = FILE_STAT_LX_INFORMATION;
 }

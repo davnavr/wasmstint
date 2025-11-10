@@ -38,7 +38,7 @@ pub fn openAt(
 
     std.log.debug(
         "preopen host {any} @ {f} at guest path {f} -> host {any}",
-        .{ dir, std.unicode.fmtUtf8(sub_path), guest_path, opened_dir.handle },
+        .{ dir, host_os.path.fmt(sub_path), guest_path, opened_dir.handle },
     );
 
     return PreopenDir{

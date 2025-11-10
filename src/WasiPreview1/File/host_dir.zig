@@ -222,7 +222,6 @@ const EntryBuf = struct {
 pub fn fd_readdir(
     ctx: Ctx,
     inode_hash_seed: types.INode.HashSeed,
-    // allocator: Allocator,
     buf: []u8,
     cookie: types.DirCookie,
 ) Error!types.Size {
@@ -265,16 +264,29 @@ pub fn fd_readdir(
         }
     }
 
+    const NameBuffer = if (host_os.is_windows) struct {
+        space: [std.os.windows.NAME_MAX]u8 align(16) = undefined,
+    } else void;
+
+    var name_buffer = if (host_os.is_windows) NameBuffer{};
+
     var current_cookie = cookie;
     defer self.info.read_next_cookie = current_cookie;
     var entries = EntryBuf{ .bytes = buf };
     while (entries.bytes.len > 0) {
         const next = (try self.info.read_state.peek()) orelse break;
-        // TODO: Need scratch allocator to convert windows WTF-16 name
-        const name = Path.init(host_os.Dir.entry.name(next)) catch |e| switch (e) {
+        const host_name = host_os.Dir.entry.name(next);
+        const wtf8_name = if (host_os.is_windows)
+            name_buffer.space[0..std.unicode.wtf16LeToWtf8(&name_buffer.space, host_name)]
+        else
+            host_name;
+
+        defer if (host_os.is_windows) @memset(&name_buffer.space, undefined);
+
+        const name = Path.init(wtf8_name) catch |e| switch (e) {
             error.PathTooLong => unreachable, // no supported OS's allow names this long
             // Could silently skip non-UTF-8 entries, but Zig `std` feels the need to catch it
-            error.InvalidUtf8 => |err| return err,
+            error.InvalidUtf8 => |err| if (host_os.is_windows) unreachable else return err,
         };
 
         errdefer comptime unreachable;
@@ -294,11 +306,22 @@ pub fn fd_readdir(
                 _,
                 => .unknown,
             },
+            .windows => win: {
+                const attr = next.FileAttributes;
+                break :win if (attr.containsFlag(.FILE_ATTRIBUTE_DIRECTORY))
+                    .directory
+                else if (attr.containsFlag(.FILE_ATTRIBUTE_NORMAL))
+                    .regular_file
+                else
+                    // TODO: See if windows detects FILE_ATTRIBUTE_REPARSE_POINT here
+                    .unknown;
+            },
             else => |bad| @compileError("dir entry type for " ++ @tagName(bad)),
         };
 
         const inode: u64 = switch (builtin.os.tag) {
             .linux => next.ino,
+            .windows => @bitCast(next.FileId),
             else => |bad| @compileError("dir entry inode for " ++ @tagName(bad)),
         };
 
@@ -346,13 +369,9 @@ fn path_create_directory(ctx: Ctx, path: []const u8) Error!void {
 const WindowsOpenFlags = struct {
     access_mask: host_os.windows.AccessMask,
     comptime file_attributes: std.os.windows.ULONG = std.os.windows.FILE_ATTRIBUTE_NORMAL,
-    share_access: host_os.windows.ShareAccess = share_access_default,
+    share_access: host_os.windows.ShareAccess = host_os.windows.share_access_default,
     create_disposition: host_os.windows.CreateDisposition,
     create_options: host_os.windows.CreateOptions,
-
-    const share_access_default = host_os.windows.ShareAccess.init(
-        &.{ .FILE_SHARE_READ, .FILE_SHARE_WRITE, .FILE_SHARE_DELETE },
-    );
 };
 
 const OsOpenFlags = if (builtin.os.tag == .windows)
@@ -595,19 +614,14 @@ fn accessSubPathPortable(
             else
                 try path_arena.allocator().dupeZ(u8, comp_bytes);
 
-            // TODO: Use O_PATH on Linux, requires using platform-specific APIs
-
             const open_options = host_os.Dir.OpenOptions{
                 .access_sub_paths = true,
-                // TODO(zig): no_follow weird on windows https://github.com/ziglang/zig/issues/18335
                 .follow_symlinks = false,
             };
 
             final_dir = old_dir.openDir(comp_str, open_options) catch |e| return switch (e) {
                 // error.NotDir might happen on windows because a symlink is obviously not a directory
-                error.SymLinkLoop => if (builtin.os.tag == .windows)
-                    unreachable
-                else if (!flags.symlink_follow)
+                error.SymLinkLoop => if (!flags.symlink_follow)
                     error.SymLinkLoop
                 else {
                     // readLink + std.path.isAbsolute
@@ -652,7 +666,7 @@ fn accessSubPathPortable(
             var new_fd: std.os.windows.HANDLE = undefined;
             const result = host_os.windows.NtDuplicateObject(
                 current_process,
-                final_dir.fd,
+                final_dir.handle,
                 current_process,
                 &new_fd,
                 // TODO: Figure out access denied error or use ReOpenFile
@@ -679,21 +693,10 @@ fn accessSubPathPortable(
 
         var final_name_unicode = host_os.windows.initUnicodeString(final_name_w);
 
-        // Documentation for `NtCreateFile` only lists `OBJ_CASE_INSENSITIVE` for `Attributes`
-        //
-        // `OBJ_DONT_REPARSE` fails on paths like `C:\Users\You\file.txt`, but this only needs to
-        // process relative paths.
-        //
-        // For more information see:
-        // https://www.tiraniddo.dev/2020/05/objdontreparse-is-mostly-useless.html
-        const obj_dont_reparse_min_version = std.Target.Os.WindowsVersion.win10_rs1;
-        const has_obj_dont_reparse =
-            builtin.os.version_range.windows.isAtLeast(obj_dont_reparse_min_version);
-
-        const new_fd: host_os.Handle = if (has_obj_dont_reparse == true) opened: {
+        const new_fd: host_os.Handle = if (host_os.windows.has_obj_dont_reparse == true) opened: {
             var attrs = std.os.windows.OBJECT_ATTRIBUTES{
                 .Length = @sizeOf(std.os.windows.OBJECT_ATTRIBUTES),
-                .RootDirectory = final_dir.fd,
+                .RootDirectory = final_dir.handle,
                 .ObjectName = &final_name_unicode,
                 .Attributes = host_os.windows.OBJ_DONT_REPARSE,
                 .SecurityDescriptor = null,
@@ -710,7 +713,7 @@ fn accessSubPathPortable(
                     &attrs,
                     &io,
                     null,
-                    std.os.windows.FILE_ATTRIBUTE_NORMAL,
+                    host_os.windows.FileAttributes.init(&.{.FILE_ATTRIBUTE_NORMAL}),
                     initial_flags.share_access,
                     initial_flags.create_disposition,
                     initial_flags.create_options,
@@ -732,6 +735,15 @@ fn accessSubPathPortable(
                     .OBJECT_NAME_INVALID => return error.BadPathName,
                     .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
                     .BAD_NETWORK_PATH, .BAD_NETWORK_NAME => return error.NetworkNotFound,
+                    .NOT_A_DIRECTORY => return error.NotDir,
+                    .DELETE_PENDING => {
+                        @branchHint(.cold);
+                        _ = std.os.windows.kernel32.SleepEx(
+                            42, // arbitrary amount
+                            std.os.windows.TRUE,
+                        );
+                        continue;
+                    },
                     else => return std.os.windows.unexpectedStatus(status),
                 }
             }
@@ -744,7 +756,7 @@ fn accessSubPathPortable(
                         "remove the version check.",
                     .{
                         .actual = builtin.os.version_range.windows.min,
-                        .expected = obj_dont_reparse_min_version,
+                        .expected = host_os.windows.obj_dont_reparse_min_version,
                         .cpu = builtin.cpu.arch,
                     },
                 ));

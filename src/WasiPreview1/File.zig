@@ -272,7 +272,6 @@ pub const VTable = struct {
     fd_readdir: *const fn (
         ctx: Ctx,
         inode_hash_seed: types.INode.HashSeed,
-        // allocator: Allocator,
         buf: []u8,
         cookie: types.DirCookie,
     ) Error!types.Size,
