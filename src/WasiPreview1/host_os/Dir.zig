@@ -57,6 +57,7 @@ pub fn openDir(dir: Dir, path: Path, options: OpenOptions) OpenError!Dir {
         var object_name = host_os.windows.initUnicodeString(@constCast(path));
         var attrs = std.os.windows.OBJECT_ATTRIBUTES{
             .Length = @sizeOf(std.os.windows.OBJECT_ATTRIBUTES),
+            //.RootDirectory = if (std.fs.path.isAbsoluteWindowsWtf16(path)) null else dir.handle,
             .RootDirectory = dir.handle,
             // TODO: Try std.os.windows.removeDotDirsSanitized and look into proper converion of
             // Win32 paths to NT paths
@@ -168,9 +169,7 @@ const LinuxEntry = std.os.linux.dirent64;
 
 const WindowsEntry = host_os.windows.FILE_ID_FULL_DIR_INFORMATION;
 
-pub const Entry = if (builtin.link_libc and has_dirent)
-    std.c.dirent
-else switch (builtin.os.tag) {
+pub const Entry = switch (builtin.os.tag) {
     .linux => LinuxEntry,
     .windows => WindowsEntry,
     else => |bad| @compileError("no dirent for " ++ @tagName(bad) ++ ", try linking libc"),
@@ -263,9 +262,16 @@ pub const Iterator = struct {
         AccessDenied,
     };
 
-    fn readWindows(iter: *Iterator) Error!?*align(2) const Entry {
-        std.debug.assert(iter.remaining.len == 0);
+    fn peekWindows(iter: *Iterator) Error!?*align(2) const Entry {
+        if (!iter.needs_reset) {
+            if (iter.current()) |peeked_entry| {
+                return peeked_entry;
+            }
+        }
+
         @memset(iter.buffer, undefined);
+        iter.remaining = iter.buffer[0..0];
+
         var io: std.os.windows.IO_STATUS_BLOCK = undefined;
         const status = host_os.windows.queryDirectoryFile(
             iter.dir.handle,
@@ -290,8 +296,7 @@ pub const Iterator = struct {
         };
     }
 
-    fn readPosix(iter: *Iterator) Error!?*align(1) const Entry {
-        std.debug.assert(iter.remaining.len == 0);
+    fn peekPosix(iter: *Iterator) Error!?*align(1) const Entry {
         if (iter.needs_reset) {
             @branchHint(.unlikely);
             std.posix.lseek_SET(iter.dir.handle, 0) catch |e| switch (e) {
@@ -303,8 +308,14 @@ pub const Iterator = struct {
             iter.needs_reset = false;
         }
 
+        if (iter.current()) |peeked_entry| {
+            return peeked_entry;
+        }
+
+        iter.remaining = iter.buffer[0..0];
+        @memset(iter.buffer, 0);
+
         if (builtin.os.tag == .linux) {
-            @memset(iter.buffer, 0);
             const result = std.os.linux.getdents64(
                 iter.dir.handle,
                 iter.buffer.ptr,
@@ -331,15 +342,10 @@ pub const Iterator = struct {
 
     /// May deinitialize any previous `Entry`s that were returned by `.next()`.
     pub fn peek(iter: *Iterator) Error!?*align(entry_align) const Entry {
-        if (iter.current()) |peeked_entry| {
-            return peeked_entry;
-        }
-
-        iter.remaining = iter.buffer[0..0];
         if (host_os.is_windows) {
-            return iter.readWindows();
+            return iter.peekWindows();
         } else {
-            return iter.readPosix();
+            return iter.peekPosix();
         }
     }
 
