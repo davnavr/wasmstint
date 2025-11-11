@@ -175,12 +175,20 @@ pub const Entry = switch (builtin.os.tag) {
     else => |bad| @compileError("no dirent for " ++ @tagName(bad) ++ ", try linking libc"),
 };
 
-pub const entry_align = if (host_os.is_windows) 2 else 1;
-
 pub const entry = struct {
     pub const NameLen = std.math.IntFittingRange(0, max_name_bytes);
 
-    pub fn nameBytesLen(ent: *align(entry_align) const Entry) NameLen {
+    const name_align = switch (builtin.os.tag) {
+        .windows => 8,
+        else => 1,
+    };
+
+    pub const Name = if (host_os.is_windows)
+        []align(name_align) const u16
+    else
+        [:0]align(name_align) const u8;
+
+    pub fn nameBytesLen(ent: *const Entry) NameLen {
         return @intCast(switch (builtin.os.tag) {
             .linux => len: {
                 const max = ent.reclen - @offsetOf(Entry, "name") - 1;
@@ -193,15 +201,15 @@ pub const entry = struct {
         });
     }
 
-    pub fn name(ent: *align(entry_align) const Entry) host_os.Path {
-        return switch (builtin.os.tag) {
+    pub fn name(ent: *const Entry) Name {
+        return @alignCast(switch (builtin.os.tag) {
             .linux => @as([*]const u8, @ptrCast(&ent.name))[0..nameBytesLen(ent) :0],
             .windows => @as(
                 [*]const std.os.windows.WCHAR,
                 @ptrCast(&ent.FileName),
             )[0..@divExact(nameBytesLen(ent), 2)],
             else => |bad| @compileError("name of entry for " ++ @tagName(bad)),
-        };
+        });
     }
 
     pub const Type = switch (builtin.os.tag) {
@@ -209,7 +217,7 @@ pub const entry = struct {
         else => |bad| @compileError("directory entry type for " ++ @tagName(bad)),
     };
 
-    pub fn typeOf(ent: *align(entry_align) const Entry) Type {
+    pub fn typeOf(ent: *const Entry) Type {
         switch (builtin.os.tag) {
             .linux => return @enumFromInt(ent.type),
             else => |bad| @compileError("directory entry type for " ++ @tagName(bad)),
@@ -226,7 +234,7 @@ pub fn iterate(dir: Dir, buffer: []align(Iterator.buffer_align) u8) Iterator {
         .dir = dir,
         .needs_reset = false,
         .buffer = buffer,
-        .remaining = buffer[0..1],
+        .remaining = buffer[0..0],
     };
 }
 
@@ -234,26 +242,26 @@ pub fn iterate(dir: Dir, buffer: []align(Iterator.buffer_align) u8) Iterator {
 pub const Iterator = struct {
     pub const min_buffer_size = @sizeOf(Entry) + max_name_bytes;
 
-    pub const buffer_align = @max(entry_align, @alignOf(Entry));
+    pub const buffer_align = @alignOf(Entry);
 
     dir: Dir,
     needs_reset: bool,
     buffer: []align(buffer_align) u8,
-    remaining: []align(entry_align) const u8,
+    remaining: []align(buffer_align) const u8,
 
-    fn current(iter: *const Iterator) ?*align(entry_align) const Entry {
+    fn current(iter: *const Iterator) ?*const Entry {
         if (iter.remaining.len <= @sizeOf(Entry)) {
             return null;
         }
 
         switch (builtin.os.tag) {
             .linux => {
-                const peeked_entry: *align(1) const LinuxEntry = @ptrCast(iter.remaining);
+                const peeked_entry: *const LinuxEntry = @ptrCast(iter.remaining);
                 std.debug.assert(@sizeOf(LinuxEntry) <= peeked_entry.reclen);
                 return if (iter.remaining.len < peeked_entry.reclen) null else peeked_entry;
             },
             .windows => {
-                const peeked_entry: *align(2) const WindowsEntry = @ptrCast(iter.remaining);
+                const peeked_entry: *const WindowsEntry = @ptrCast(iter.remaining);
                 return if (iter.remaining.len - @sizeOf(WindowsEntry) < peeked_entry.FileNameLength)
                     null
                 else
@@ -267,7 +275,7 @@ pub const Iterator = struct {
         AccessDenied,
     };
 
-    fn peekWindows(iter: *Iterator) Error!?*align(2) const Entry {
+    fn peekWindows(iter: *Iterator) Error!?*const WindowsEntry {
         if (!iter.needs_reset) {
             if (iter.current()) |peeked_entry| {
                 return peeked_entry;
@@ -301,7 +309,7 @@ pub const Iterator = struct {
         };
     }
 
-    fn peekPosix(iter: *Iterator) Error!?*align(1) const Entry {
+    fn peekPosix(iter: *Iterator) Error!?*const Entry {
         if (iter.needs_reset) {
             @branchHint(.unlikely);
             std.posix.lseek_SET(iter.dir.handle, 0) catch |e| switch (e) {
@@ -330,7 +338,7 @@ pub const Iterator = struct {
             return switch (std.os.linux.E.init(result)) {
                 .SUCCESS => if (result == 0) null else {
                     iter.remaining = iter.buffer[0..result];
-                    const peeked_entry: *align(1) const LinuxEntry = @ptrCast(iter.remaining);
+                    const peeked_entry: *const LinuxEntry = @ptrCast(iter.remaining);
                     return peeked_entry;
                 },
                 .BADF => unreachable,
@@ -346,7 +354,7 @@ pub const Iterator = struct {
     }
 
     /// May deinitialize any previous `Entry`s that were returned by `.next()`.
-    pub fn peek(iter: *Iterator) Error!?*align(entry_align) const Entry {
+    pub fn peek(iter: *Iterator) Error!?*const Entry {
         if (host_os.is_windows) {
             return iter.peekWindows();
         } else {
@@ -368,7 +376,7 @@ pub const Iterator = struct {
         iter.remaining = @alignCast(iter.remaining[size..]);
     }
 
-    pub fn next(iter: *Iterator) Error!?*align(entry_align) const Entry {
+    pub fn next(iter: *Iterator) Error!?*const Entry {
         const ent = (try iter.peek()) orelse return null;
         iter.advance();
         return ent;
@@ -376,7 +384,7 @@ pub const Iterator = struct {
 
     pub fn reset(iter: *Iterator) void {
         iter.needs_reset = true;
-        iter.remaining = iter.buffer[0..1];
+        iter.remaining = iter.buffer[0..0];
     }
 };
 
