@@ -261,12 +261,11 @@ pub fn mapFileWindows(
     const size = size: {
         var io_status_block: windows.IO_STATUS_BLOCK = undefined;
         var info: windows.FILE_STANDARD_INFORMATION = undefined;
-        const status = windows.ntdll.NtQueryInformationFile(
+        const status = sys.windows.ntQueryInformationFile(
             file,
             &io_status_block,
-            &info,
-            @sizeOf(@TypeOf(info)),
             .FileStandardInformation,
+            &info,
         );
 
         switch (status) {
@@ -422,6 +421,7 @@ pub fn readFileAlloc(
 const std = @import("std");
 const Io = std.Io;
 const builtin = @import("builtin");
+const sys = @import("sys");
 const virtual_memory = @import("allocators").virtual_memory;
 const posix = std.posix;
 const windows = std.os.windows;

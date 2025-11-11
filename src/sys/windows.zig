@@ -192,6 +192,7 @@ pub fn FileInformationType(comptime class: std.os.windows.FILE_INFORMATION_CLASS
         .FileBasicInformation => std.os.windows.FILE_BASIC_INFORMATION,
         .FilePositionInformation => std.os.windows.FILE_POSITION_INFORMATION,
         .FileAllInformation => std.os.windows.FILE_ALL_INFORMATION,
+        .FileStandardInformation => std.os.windows.FILE_STANDARD_INFORMATION,
         else => @compileError("specify file information struct for " ++ @tagName(class)),
     };
 }

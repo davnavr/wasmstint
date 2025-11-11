@@ -79,12 +79,12 @@ pub const nt = struct {
             @intFromEnum(protection),
         );
 
-        switch (status) {
-            .SUCCESS => return @ptrCast(@alignCast(ret_base_address.?)),
-            .ALREADY_COMMITTED => return error.AlreadyCommitted,
-            .COMMITMENT_LIMIT, .NO_MEMORY => return Oom.OutOfMemory,
-            .INSUFFICIENT_RESOURCES => return error.SystemResources,
-            .CONFLICTING_ADDRESSES => return error.ConflictingAddresses,
+        return switch (status) {
+            .SUCCESS => @ptrCast(@alignCast(ret_base_address.?)),
+            .ALREADY_COMMITTED => error.AlreadyCommitted,
+            .COMMITMENT_LIMIT, .NO_MEMORY => Oom.OutOfMemory,
+            .INSUFFICIENT_RESOURCES => error.SystemResources,
+            .CONFLICTING_ADDRESSES => error.ConflictingAddresses,
             .INVALID_HANDLE => unreachable,
             .INVALID_PAGE_PROTECTION => unreachable,
             .INVALID_PARAMETER_2 => unreachable, // base address ptr
@@ -92,10 +92,10 @@ pub const nt = struct {
             .INVALID_PARAMETER_4 => unreachable, // region size ptr
             .INVALID_PARAMETER_5 => unreachable, // allocation type
             .INVALID_PARAMETER_6 => unreachable, // protection flags
-            .PROCESS_IS_TERMINATING => return Oom.OutOfMemory, // Going to die anyways.
+            .PROCESS_IS_TERMINATING => Oom.OutOfMemory, // Going to die anyways.
             // .ACCESS_DENIED, .OBJECT_TYPE_MISMATCH,
-            else => return windows.unexpectedStatus(status),
-        }
+            else => windows.unexpectedStatus(status),
+        };
     }
 
     pub const FreeType = enum(windows.ULONG) {
