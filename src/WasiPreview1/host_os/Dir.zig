@@ -182,7 +182,12 @@ pub const entry = struct {
 
     pub fn nameBytesLen(ent: *align(entry_align) const Entry) NameLen {
         return @intCast(switch (builtin.os.tag) {
-            .linux => ent.reclen - @offsetOf(Entry, "name") - 1,
+            .linux => len: {
+                const max = ent.reclen - @offsetOf(Entry, "name") - 1;
+                const actual = std.mem.len(@as([*:0]const u8, @ptrCast(&ent.name)));
+                std.debug.assert(actual <= max);
+                break :len actual;
+            },
             .windows => ent.FileNameLength,
             else => |bad| @compileError("name len of entry for " ++ @tagName(bad)),
         });
