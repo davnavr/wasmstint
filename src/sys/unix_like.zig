@@ -5,19 +5,10 @@
 //! FreeBSD manual pages: https://man.freebsd.org/cgi/man.cgi
 
 /// https://man7.org/linux/man-pages/man2/F_GETFL.2const.html
-pub fn fcntlGetFl(fd: Fd) WasiError!std.posix.O {
+pub fn fcntlGetFl(fd: Fd) std.posix.FcntlError!std.posix.O {
     return @bitCast(@as(
         @typeInfo(std.posix.O).@"struct".backing_integer.?,
-        @intCast(
-            std.posix.fcntl(
-                fd,
-                std.posix.F.GETFL,
-                undefined,
-            ) catch |e| return switch (e) {
-                error.Locked => error.WouldBlock,
-                else => |err| err,
-            },
-        ),
+        @intCast(try std.posix.fcntl(fd, std.posix.F.GETFL, undefined)),
     ));
 }
 
@@ -31,10 +22,9 @@ pub const lseek = if (lfs64_abi) std.c.lseek64 else system.lseek;
 
 pub const openat = if (lfs64_abi) std.c.openat64 else system.openat;
 
+pub const fstat = if (lfs64_abi) system.fstat64 else system.fstat;
+
 const std = @import("std");
 const system = std.posix.system;
 const builtin = @import("builtin");
 const Fd = std.posix.fd_t;
-const host_os = @import("../host_os.zig");
-const WasiError = host_os.WasiError;
-const wasi_types = @import("../types.zig");

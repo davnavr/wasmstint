@@ -1,40 +1,22 @@
 //! Abstractions over OS APIs used for implementing the WASI preview 1 API.
 
-// Platform specific modules.
-pub const windows = @import("host_os/windows.zig");
-pub const unix_like = @import("host_os/unix_like.zig");
-pub const linux = @import("host_os/linux.zig");
-
-pub const path = @import("host_os/path.zig");
-pub const Path = path.Slice;
-pub const PathZ = path.SliceZ;
-pub const Dir = @import("host_os/Dir.zig");
-
-pub const Handle = std.posix.fd_t;
 pub const WasiError = @import("errno.zig").Error;
-
-pub const is_windows = builtin.os.tag == .windows;
-
-pub const InterruptedError = error{
-    /// Corresponds to `std.posix.E.INTR`.
-    Interrupted,
-};
 
 /// Used to implement [`fd_filestat_get()`].
 ///
 /// [`fd_filestat_get()`]: https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/preview1/docs.md#fd_filestat_get
 pub fn fileStat(
-    fd: Handle,
+    fd: sys.Handle,
     device_hash_seed: wasi_types.Device.HashSeed,
     inode_hash_seed: wasi_types.INode.HashSeed,
 ) WasiError!wasi_types.FileStat {
-    if (is_windows) {
+    if (sys.is_windows) {
         // Kernel32 equivalent is `GetFileInformationByHandleEx`
 
         const all_info = info: {
             var io: std.os.windows.IO_STATUS_BLOCK = undefined;
             var info: std.os.windows.FILE_ALL_INFORMATION = undefined;
-            const status = windows.ntQueryInformationFile(fd, &io, .FileAllInformation, &info);
+            const status = sys.windows.ntQueryInformationFile(fd, &io, .FileAllInformation, &info);
             switch (status) {
                 .SUCCESS, .BUFFER_OVERFLOW => break :info info,
                 .INFO_LENGTH_MISMATCH => unreachable,
@@ -43,7 +25,7 @@ pub fn fileStat(
                 .NOT_SUPPORTED => unreachable,
                 inline .INVALID_DEVICE_REQUEST => |bad| {
                     std.log.debug("could not obtain volume information: " ++ @tagName(bad), .{});
-                    return windows.fileStatNonDisk(fd, device_hash_seed, inode_hash_seed);
+                    return fileStatWindowsNonDisk(fd, device_hash_seed, inode_hash_seed);
                 },
                 else => return std.os.windows.unexpectedStatus(status),
             }
@@ -66,7 +48,7 @@ pub fn fileStat(
                 .ACCESS_DENIED => return error.AccessDenied,
                 inline .INVALID_DEVICE_REQUEST => |bad| {
                     std.log.debug("could not obtain volume information: " ++ @tagName(bad), .{});
-                    return windows.fileStatNonDisk(fd, device_hash_seed, inode_hash_seed);
+                    return fileStatWindowsNonDisk(fd, device_hash_seed, inode_hash_seed);
                 },
                 else => return std.os.windows.unexpectedStatus(status),
             }
@@ -110,16 +92,120 @@ pub fn fileStat(
     }
 }
 
+/// Implements `fd_filestat_get()` for `HANDLE`s not referring to a file or directory on disk.
+///
+/// Asserts that `GetFileType(handle)` does not return `FileType.disk`.
+pub fn fileStatWindowsNonDisk(
+    handle: sys.Handle,
+    device_hash_seed: wasi_types.Device.HashSeed,
+    inode_hash_seed: wasi_types.INode.HashSeed,
+) WasiError!wasi_types.FileStat {
+    // `VolumeSerialNumber` of real files are 32-bit, leaving high 32-bits
+    // for our use.
+    const fake_device = struct {
+        pub const real_console = 0xC0C0_4EA1_0000_0000;
+        pub const msys_console: u64 = 0xC0C0_3575_2000_0000;
+        pub const cygwin_console: u64 = 0xC0C0_C793_3140_0000;
+    };
+
+    // Since non-file handles have no `IndexNumber`, and handles are meaningless
+    // when a process dies anyway, this makes up an `inode` based on the handle
+    // value. Unfortunately, Windows doesn't provide a way to get a unique ID
+    // for different handles that refer to the same "thing".
+    const ino_from_handle = wasi_types.INode.init(inode_hash_seed, @intFromPtr(handle));
+
+    const file_type = sys.windows.GetFileType(handle);
+    switch (file_type) {
+        .disk => unreachable,
+        .char => return wasi_types.FileStat{
+            .dev = wasi_types.Device.init(
+                device_hash_seed,
+                fake_device.real_console,
+            ),
+            .ino = ino_from_handle,
+            .type = wasi_types.FileType.character_device,
+            .nlink = 1, // can't make hardlinks
+            // standard stream sizes seem to always be zero on Linux
+            .size = wasi_types.FileSize{ .bytes = 0 },
+
+            // On Linux, atim and mtim seem to be the current time/last time a
+            // print (idk about reads) occurred, while ctim was when the stream was
+            // created.
+            //
+            // Windows doesn't track times for console handles, because they aren't
+            // files. Possible workarounds:
+            // - For `ctim`, could cheat and use the time WASI state was
+            //   initialized as the creation time
+            // - Could make a new `File` implementation (`console_file.zig`, would
+            //   also use `Read/WriteConsole`) that updates times on every
+            //   read/write, but that is annoying
+            // - Could cheat and supply current time every time `fd_filestat_get` is
+            //   called
+            //
+            // Since there are other ways for a guest to detect a Windows host
+            // anyways, this just gives up and puts zeroes.
+            .atim = wasi_types.Timestamp.zero,
+            .mtim = wasi_types.Timestamp.zero,
+            .ctim = wasi_types.Timestamp.zero,
+        },
+        .pipe => pipe: {
+            const pipe_pty = sys.windows.isMsysOrCygwinPty(handle);
+            if (pipe_pty.tag == .not_a_pty) {
+                break :pipe;
+            }
+
+            const INodeBits = packed struct(u64) {
+                type: sys.windows.NamedPipePty.Type,
+                number: u7,
+                low_installation_bits: u54,
+            };
+
+            return wasi_types.FileStat{
+                .dev = wasi_types.Device.init(
+                    device_hash_seed,
+                    switch (pipe_pty.tag) {
+                        .not_a_pty => unreachable,
+                        .msys => fake_device.msys_console,
+                        .cygwin => fake_device.cygwin_console,
+                    } | std.math.shr(u64, pipe_pty.id.installation_key, 54),
+                ),
+                .ino = wasi_types.INode.init(
+                    inode_hash_seed,
+                    @as(
+                        u64,
+                        @bitCast(INodeBits{
+                            .type = pipe_pty.id.type,
+                            .number = pipe_pty.id.number,
+                            .low_installation_bits = @truncate(pipe_pty.id.installation_key),
+                        }),
+                    ),
+                ),
+                .type = wasi_types.FileType.character_device,
+                // Windows allows fetching the # of pipe instances
+                .nlink = 1,
+                // Windows allows peeking size of data in pipe
+                .size = wasi_types.FileSize{ .bytes = 0 },
+                // See `.char` handler for why these are zero
+                .atim = wasi_types.Timestamp.zero,
+                .mtim = wasi_types.Timestamp.zero,
+                .ctim = wasi_types.Timestamp.zero,
+            };
+        },
+        .unknown => switch (std.os.windows.GetLastError()) {
+            .SUCCESS => {},
+            else => |bad| return std.os.windows.unexpectedError(bad),
+        },
+        .remote, _ => {},
+    }
+
+    std.log.err(
+        "fd_filestat_get on unknown windows file type {s} {X}",
+        .{ std.enums.tagName(sys.windows.FileType, file_type) orelse "invalid", file_type },
+    );
+    return error.AccessDenied;
+}
+
 const std = @import("std");
 const builtin = @import("builtin");
+const sys = @import("sys");
 const wasi_types = @import("types.zig");
-
-test {
-    if (is_windows) {
-        _ = windows;
-    }
-
-    if (builtin.os.tag == .linux) {
-        _ = linux;
-    }
-}

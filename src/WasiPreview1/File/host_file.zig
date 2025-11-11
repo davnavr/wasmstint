@@ -8,7 +8,7 @@ pub const Close = enum {
 };
 
 const HostFile = struct {
-    file: host_os.Handle,
+    file: sys.Handle,
     close: Close,
 };
 
@@ -114,7 +114,7 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
 
         // Equivalent in `kernel32` is `GetFileInformationByHandle`
         // Simplified version of implementation of `std.fs.File.stat`
-        const status = host_os.windows.ntQueryInformationFile(
+        const status = sys.windows.ntQueryInformationFile(
             self.file,
             &status_block,
             // Need both `FILE_ACCESS_INFORMATION` and `FILE_STANDARD_INFORMATION`
@@ -132,12 +132,12 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
                 };
 
                 // Not a file, check for a console handle (standard streams)
-                switch (host_os.windows.GetFileType(self.file)) {
+                switch (sys.windows.GetFileType(self.file)) {
                     .disk => unreachable,
                     .char => return char_device,
                     .pipe => {
                         // Zig `isCygwinPty` wrapper does useless work, it checks if file is console
-                        const pipe_pty = host_os.windows.isMsysOrCygwinPty(self.file);
+                        const pipe_pty = sys.windows.isMsysOrCygwinPty(self.file);
                         switch (pipe_pty.tag) {
                             .not_a_pty => {},
                             .msys, .cygwin => return char_device,
@@ -170,13 +170,16 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
     } else return .{
         .flags = types.FdFlags{
             .valid = types.FdFlags.Valid.fromFlagsPosix(
-                try host_os.unix_like.fcntlGetFl(self.file),
+                sys.unix_like.fcntlGetFl(self.file) catch |e| return switch (e) {
+                    error.Locked => error.WouldBlock,
+                    else => |err| err,
+                },
             ),
         },
         .type = type: {
             if (builtin.os.tag == .linux) fallback: {
                 var statx: std.os.linux.Statx = undefined;
-                host_os.linux.statx(
+                sys.linux.statx(
                     self.file,
                     "",
                     .{ .EMPTY_PATH = true, .SYMLINK_NOFOLLOW = true },
@@ -209,10 +212,15 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
                 };
             }
 
-            const stat = std.posix.fstat(self.file) catch |e| switch (e) {
-                error.Canceled, error.Streaming => unreachable,
-                else => unreachable,
-            };
+            var stat = std.mem.zeroes(std.posix.Stat);
+            switch (std.posix.errno(sys.unix_like.fstat(self.file, &stat))) {
+                .SUCCESS => {},
+                .INVAL => unreachable,
+                .BADF => unreachable, // Always a race condition.
+                .NOMEM => return error.SystemResources,
+                .ACCES => return error.AccessDenied,
+                else => |err| return std.posix.unexpectedErrno(err),
+            }
 
             break :type types.FileType.fromPosixMode(stat.mode) catch |e| switch (e) {
                 error.UnknownSocketType => .unknown, // TODO: Requires getsockopt
@@ -304,7 +312,7 @@ fn fd_pwrite(
             // Duplicated code from `std.posix.pwritev`.
             while (true) {
                 // Zig unfortunately conflates NXIO, SPIPE, and OVERFLOW into one error
-                const written = host_os.unix_like.pwritev(
+                const written = sys.unix_like.pwritev(
                     self.file,
                     ciovs.ptr,
                     @min(ciovs.len, std.posix.IOV_MAX),
@@ -437,7 +445,7 @@ fn fd_tell(ctx: Ctx) Error!types.FileSize {
         // var offset: std.os.windows.LARGE_INTEGER = undefined;
         var io: std.os.windows.IO_STATUS_BLOCK = undefined;
         var info: std.os.windows.FILE_POSITION_INFORMATION = undefined;
-        const status = host_os.windows.ntQueryInformationFile(
+        const status = sys.windows.ntQueryInformationFile(
             self.file,
             &io,
             .FilePositionInformation,
@@ -455,7 +463,7 @@ fn fd_tell(ctx: Ctx) Error!types.FileSize {
     } else if (@hasDecl(std.posix.system, "SEEK") and std.posix.SEEK != void) {
         // Duplicated code from `std.posix.lseek_CUR_get()`.
         // Could also add check for 32-bit linux to use `llseek` instead
-        const pos = host_os.unix_like.lseek(self.file, 0, std.posix.SEEK.CUR);
+        const pos = sys.unix_like.lseek(self.file, 0, std.posix.SEEK.CUR);
         return switch (std.posix.errno(pos)) {
             .SUCCESS => types.FileSize{ .bytes = @bitCast(pos) },
             .BADF => unreachable,
@@ -609,6 +617,7 @@ fn path_unlink_file(_: Ctx, _: []const u8) Error!void {
 const std = @import("std");
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
+const sys = @import("sys");
 const host_os = @import("../host_os.zig");
 const File = @import("../File.zig");
 const types = @import("../types.zig");

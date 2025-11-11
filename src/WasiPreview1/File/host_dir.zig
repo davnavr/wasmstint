@@ -1,25 +1,25 @@
 //! Wraps a host OS file descriptor referring to a directory.
 
 const HostDir = struct {
-    dir: host_os.Dir,
+    dir: sys.Dir,
     info: *Info,
 
     const Info = struct {
         const total_size = 4096;
         const buffer_size = total_size - @sizeOf(usize) - @sizeOf(Path.Ptr) -
-            @sizeOf(types.DirCookie) - @sizeOf(host_os.Dir.Iterator);
+            @sizeOf(types.DirCookie) - @sizeOf(sys.Dir.Iterator);
 
         comptime {
-            std.debug.assert(host_os.Dir.Iterator.min_buffer_size <= buffer_size);
+            std.debug.assert(sys.Dir.Iterator.min_buffer_size <= buffer_size);
             std.debug.assert(@sizeOf(Info) <= total_size);
         }
 
-        read_buffer: [buffer_size]u8 align(host_os.Dir.Iterator.buffer_align),
+        read_buffer: [buffer_size]u8 align(sys.Dir.Iterator.buffer_align),
         // Guest `Path` is split to reduce padding
         guest_path_len: Path.Len, // maybe u1 bit in Path.Len to indicate ownership/constness?
         guest_path_ptr: Path.Ptr,
         read_next_cookie: types.DirCookie, // TODO: Hash cookies? Could use `std.hash.int`
-        read_state: host_os.Dir.Iterator,
+        read_state: sys.Dir.Iterator,
     };
 
     fn guestPath(ctx: *const HostDir) ?Path {
@@ -112,7 +112,7 @@ pub fn initPreopened(preopen: *PreopenDir, allocator: Allocator) Allocator.Error
 const log = std.log.scoped(.host_dir);
 
 fn init(
-    dir: host_os.Dir,
+    dir: sys.Dir,
     allocator: Allocator,
     rights: types.Rights.Valid,
 ) Allocator.Error!File.OpenedPath {
@@ -264,45 +264,45 @@ pub fn fd_readdir(
         }
     }
 
-    const NameBuffer = if (host_os.is_windows) struct {
+    const NameBuffer = if (sys.is_windows) struct {
         space: [std.os.windows.NAME_MAX]u8 align(16) = undefined,
     } else void;
 
-    var name_buffer = if (host_os.is_windows) NameBuffer{};
+    var name_buffer = if (sys.is_windows) NameBuffer{};
 
     var current_cookie = cookie;
     defer self.info.read_next_cookie = current_cookie;
     var entries = EntryBuf{ .bytes = buf };
     while (entries.bytes.len > 0) {
         const next = (try self.info.read_state.peek()) orelse break;
-        const host_name = host_os.Dir.entry.name(next);
-        const wtf8_name = if (host_os.is_windows)
+        const host_name = sys.Dir.entry.name(next);
+        const wtf8_name = if (sys.is_windows)
             name_buffer.space[0..std.unicode.wtf16LeToWtf8(&name_buffer.space, host_name)]
         else
             host_name;
 
-        defer if (host_os.is_windows) @memset(&name_buffer.space, undefined);
+        defer if (sys.is_windows) @memset(&name_buffer.space, undefined);
 
         const name = Path.init(wtf8_name) catch |e| switch (e) {
             error.PathTooLong => unreachable, // no supported OS's allow names this long
             // Could silently skip non-UTF-8 entries, but Zig `std` feels the need to catch it
-            error.InvalidUtf8 => |err| if (host_os.is_windows) unreachable else return err,
+            error.InvalidUtf8 => |err| if (sys.is_windows) unreachable else return err,
         };
 
         errdefer comptime unreachable;
 
         const entry_type: types.FileType = switch (builtin.os.tag) {
-            .linux => switch (host_os.Dir.entry.typeOf(next)) {
-                host_os.linux.DT.BLK => .block_device,
-                host_os.linux.DT.CHR => .character_device,
-                host_os.linux.DT.DIR => .directory,
-                host_os.linux.DT.LNK => .symbolic_link,
-                host_os.linux.DT.REG => .regular_file,
+            .linux => switch (sys.Dir.entry.typeOf(next)) {
+                sys.linux.DT.BLK => .block_device,
+                sys.linux.DT.CHR => .character_device,
+                sys.linux.DT.DIR => .directory,
+                sys.linux.DT.LNK => .symbolic_link,
+                sys.linux.DT.REG => .regular_file,
                 // TODO: `getsockopt` to determine exact type of socket
-                host_os.linux.DT.SOCK => .unknown,
-                host_os.linux.DT.FIFO,
-                host_os.linux.DT.UNKNOWN,
-                host_os.linux.DT.WHT,
+                sys.linux.DT.SOCK => .unknown,
+                sys.linux.DT.FIFO,
+                sys.linux.DT.UNKNOWN,
+                sys.linux.DT.WHT,
                 _,
                 => .unknown,
             },
@@ -367,11 +367,11 @@ fn path_create_directory(ctx: Ctx, path: []const u8) Error!void {
 }
 
 const WindowsOpenFlags = struct {
-    access_mask: host_os.windows.AccessMask,
+    access_mask: sys.windows.AccessMask,
     comptime file_attributes: std.os.windows.ULONG = std.os.windows.FILE_ATTRIBUTE_NORMAL,
-    share_access: host_os.windows.ShareAccess = host_os.windows.share_access_default,
-    create_disposition: host_os.windows.CreateDisposition,
-    create_options: host_os.windows.CreateOptions,
+    share_access: sys.windows.ShareAccess = sys.windows.share_access_default,
+    create_disposition: sys.windows.CreateDisposition,
+    create_options: sys.windows.CreateOptions,
 };
 
 const OsOpenFlags = if (builtin.os.tag == .windows)
@@ -410,7 +410,7 @@ fn SetOpenFlags(comptime Args: type) type {
 ///
 /// [`openat2`]: https://man7.org/linux/man-pages/man2/openat2.2.html
 fn accessSubPathLinux(
-    dir: host_os.Dir,
+    dir: sys.Dir,
     scratch: *ArenaAllocator,
     flags: types.LookupFlags.Valid,
     path: Path,
@@ -525,7 +525,7 @@ fn AccessSubPathReturnType(comptime Accessor: type) type {
 /// This is an implementation of the path resolution algorithm described
 /// [here](https://github.com/WebAssembly/wasi-filesystem/blob/main/path-resolution.md).
 fn accessSubPathPortable(
-    dir: host_os.Dir,
+    dir: sys.Dir,
     scratch: *ArenaAllocator,
     flags: types.LookupFlags.Valid,
     path: Path,
@@ -590,20 +590,20 @@ fn accessSubPathPortable(
     // target is reached.
 
     var path_arena = ArenaAllocator.init(scratch.allocator());
-    var final_dir: host_os.Dir = dir;
+    var final_dir: sys.Dir = dir;
     if (initial_components.len > 1) {
         for (0.., initial_components[0 .. initial_components.len - 1]) |i, comp| {
             var coz_open_comp_dir = coz.begin("wasmstint.WasiPreview1.host_dir.accessSubPath-openDir");
             defer coz_open_comp_dir.end();
 
-            var old_dir: host_os.Dir = final_dir;
+            var old_dir: sys.Dir = final_dir;
             defer if (i > 0 and i < initial_components.len - 1) {
                 // log.debug("closing intermediate directory {any}", .{old_dir.fd});
                 old_dir.close();
             };
 
             const comp_bytes = comp.bytes(path);
-            const comp_str: host_os.PathZ = if (builtin.os.tag == .windows)
+            const comp_str: sys.PathZ = if (builtin.os.tag == .windows)
                 std.unicode.utf8ToUtf16LeAllocZ(
                     path_arena.allocator(),
                     comp_bytes,
@@ -614,7 +614,7 @@ fn accessSubPathPortable(
             else
                 try path_arena.allocator().dupeZ(u8, comp_bytes);
 
-            const open_options = host_os.Dir.OpenOptions{
+            const open_options = sys.Dir.OpenOptions{
                 .access_sub_paths = true,
                 .follow_symlinks = false,
                 .relative_name_only = true,
@@ -665,7 +665,7 @@ fn accessSubPathPortable(
             @branchHint(.unlikely);
             const current_process = std.os.windows.GetCurrentProcess();
             var new_fd: std.os.windows.HANDLE = undefined;
-            const result = host_os.windows.NtDuplicateObject(
+            const result = sys.windows.NtDuplicateObject(
                 current_process,
                 final_dir.handle,
                 current_process,
@@ -673,7 +673,7 @@ fn accessSubPathPortable(
                 // TODO: Figure out access denied error or use ReOpenFile
                 undefined, // initial_flags.access_mask.bits
                 undefined,
-                host_os.windows.DUPLICATE_SAME_ATTRIBUTES | std.os.windows.DUPLICATE_SAME_ACCESS,
+                sys.windows.DUPLICATE_SAME_ATTRIBUTES | std.os.windows.DUPLICATE_SAME_ACCESS,
             );
 
             return switch (result) {
@@ -692,29 +692,29 @@ fn accessSubPathPortable(
             error.OutOfMemory => |oom| return oom,
         };
 
-        var final_name_unicode = host_os.windows.initUnicodeString(final_name_w);
+        var final_name_unicode = sys.windows.initUnicodeString(final_name_w);
 
-        const new_fd: host_os.Handle = if (host_os.windows.has_obj_dont_reparse == true) opened: {
+        const new_fd: sys.Handle = if (sys.windows.has_obj_dont_reparse == true) opened: {
             var attrs = std.os.windows.OBJECT_ATTRIBUTES{
                 .Length = @sizeOf(std.os.windows.OBJECT_ATTRIBUTES),
                 .RootDirectory = final_dir.handle,
                 .ObjectName = &final_name_unicode,
-                .Attributes = host_os.windows.OBJ_DONT_REPARSE,
+                .Attributes = sys.windows.OBJ_DONT_REPARSE,
                 .SecurityDescriptor = null,
                 .SecurityQualityOfService = null,
             };
 
             // Recreates some logic for `std.os.windows.OpenFile`
             while (true) {
-                var opened_handle: host_os.Handle = undefined;
+                var opened_handle: sys.Handle = undefined;
                 var io: std.os.windows.IO_STATUS_BLOCK = undefined;
-                const status = host_os.windows.NtCreateFile(
+                const status = sys.windows.NtCreateFile(
                     &opened_handle,
                     initial_flags.access_mask,
                     &attrs,
                     &io,
                     null,
-                    host_os.windows.FileAttributes.init(&.{.FILE_ATTRIBUTE_NORMAL}),
+                    sys.windows.FileAttributes.init(&.{.FILE_ATTRIBUTE_NORMAL}),
                     initial_flags.share_access,
                     initial_flags.create_disposition,
                     initial_flags.create_options,
@@ -723,7 +723,7 @@ fn accessSubPathPortable(
                 );
                 switch (status) {
                     .SUCCESS => break :opened opened_handle,
-                    host_os.windows.STATUS_REPARSE_POINT_ENCOUNTERED => {
+                    sys.windows.STATUS_REPARSE_POINT_ENCOUNTERED => {
                         log.err(
                             "TODO: windows accessSubPathPortable reparse point while opening {f}",
                             .{path},
@@ -757,7 +757,7 @@ fn accessSubPathPortable(
                         "remove the version check.",
                     .{
                         .actual = builtin.os.version_range.windows.min,
-                        .expected = host_os.windows.obj_dont_reparse_min_version,
+                        .expected = sys.windows.obj_dont_reparse_min_version,
                         .cpu = builtin.cpu.arch,
                     },
                 ));
@@ -792,7 +792,7 @@ fn accessSubPathPortable(
             while (true) {
                 // Logic copied from Zig's `std.os.windows.ReadLink`, except that this does not
                 // allow absolute paths.
-                var maybe_symlink_handle: host_os.Handle = undefined;
+                var maybe_symlink_handle: sys.Handle = undefined;
                 var maybe_symlink_io: std.os.windows.IO_STATUS_BLOCK = undefined;
                 const maybe_symlink_status = std.os.windows.ntdll.NtCreateFile(
                     &maybe_symlink_handle,
@@ -944,7 +944,7 @@ fn accessSubPathPortable(
 ///
 /// [WASI support in `wasmtime`]: https://docs.rs/cap-primitives/3.4.4/src/cap_primitives/rustix/linux/fs/open_impl.rs.html
 fn accessSubPath(
-    dir: host_os.Dir,
+    dir: sys.Dir,
     /// Used for temporary allocations of file paths.
     scratch: *ArenaAllocator,
     flags: types.LookupFlags.Valid,
@@ -1021,12 +1021,12 @@ fn accessSubPath(
 fn pathFileStatGetFlags() SetOpenFlagsError!OsOpenFlags {
     if (builtin.os.tag == .windows) {
         return WindowsOpenFlags{
-            .access_mask = host_os.windows.AccessMask.init(&.{
+            .access_mask = sys.windows.AccessMask.init(&.{
                 .STANDARD_RIGHTS_READ,
                 .FILE_READ_ATTRIBUTES,
             }),
             .create_disposition = .FILE_OPEN,
-            .create_options = host_os.windows.CreateOptions.zero,
+            .create_options = sys.windows.CreateOptions.zero,
         };
     } else {
         var flags = std.posix.O{
@@ -1115,13 +1115,13 @@ fn pathOpenFlags(
         }
 
         const init_flags = &.{ .STANDARD_RIGHTS_READ, .FILE_TRAVERSE };
-        const write_flags = host_os.windows.AccessMask.init(&.{
+        const write_flags = sys.windows.AccessMask.init(&.{
             .STANDARD_RIGHTS_WRITE,
             if (fd_flags.append) .FILE_APPEND_DATA else .FILE_WRITE_DATA,
         });
 
         return WindowsOpenFlags{
-            .access_mask = host_os.windows.AccessMask.init(init_flags)
+            .access_mask = sys.windows.AccessMask.init(init_flags)
                 .setConditional(rights.canWrite(), write_flags)
                 .setFlagConditional(rights.fd_read, .FILE_READ_DATA)
                 .setFlagConditional(rights.fd_sync, .SYNCHRONIZE)
@@ -1139,7 +1139,7 @@ fn pathOpenFlags(
                 .FILE_OVERWRITE
             else
                 .FILE_OPEN,
-            .create_options = host_os.windows.CreateOptions.init(&.{
+            .create_options = sys.windows.CreateOptions.init(&.{
                 .FILE_SYNCHRONOUS_IO_NONALERT,
                 .FILE_OPEN_FOR_BACKUP_INTENT,
             }).setFlagConditional(open_flags.directory, .FILE_DIRECTORY_FILE),
@@ -1177,7 +1177,7 @@ fn pathOpen(
         if (!open_flags.directory) {
             var io: std.os.windows.IO_STATUS_BLOCK = undefined;
             var info: std.os.windows.FILE_BASIC_INFORMATION = undefined;
-            const status = host_os.windows.ntQueryInformationFile(
+            const status = sys.windows.ntQueryInformationFile(
                 new_fd,
                 &io,
                 .FileBasicInformation,
@@ -1220,7 +1220,7 @@ fn pathOpen(
     }
 
     log.debug("successfully opened directory {f}", .{path});
-    return init(host_os.Dir{ .handle = new_fd }, allocator, rights);
+    return init(sys.Dir{ .handle = new_fd }, allocator, rights);
 }
 
 fn path_open(
@@ -1373,6 +1373,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const host_os = @import("../host_os.zig");
+const sys = @import("sys");
 const types = @import("../types.zig");
 const pointer = @import("wasmstint").pointer;
 const PreopenDir = @import("../PreopenDir.zig");

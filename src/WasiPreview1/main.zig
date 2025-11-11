@@ -624,9 +624,9 @@ fn realMain() Error!i32 {
         var preopen_path_arena = ArenaAllocator.init(scratch.allocator());
         for (preopens, all_arguments.preopen_dirs) |*dst, *src| {
             dst.* = WasiPreview1.PreopenDir.openAtZ(
-                WasiPreview1.host_os.Dir{ .handle = cwd.handle },
+                sys.Dir{ .handle = cwd.handle },
                 // TODO(Zig): cli argument iteration should be able to return [:0]u16 on windows
-                WasiPreview1.host_os.path.allocFromBytesZ(
+                sys.path.allocFromBytesZ(
                     src.host,
                     .alloc_windows,
                     preopen_path_arena.allocator(),
@@ -923,6 +923,7 @@ const std = @import("std");
 const Io = std.Io;
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
+const sys = @import("sys");
 const file_content = @import("file_content");
 const allocators = @import("allocators");
 const wasmstint = @import("wasmstint");

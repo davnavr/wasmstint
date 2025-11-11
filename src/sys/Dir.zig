@@ -2,13 +2,13 @@
 //!
 //! Provides wrappers over synchronous OS APIs for operations on directories.
 
-handle: Handle,
+handle: sys.Handle,
 
 const Dir = @This();
 
 pub const OpenError = std.Io.Dir.PathNameError ||
     std.posix.UnexpectedError ||
-    host_os.InterruptedError ||
+    sys.InterruptedError ||
     std.mem.Allocator.Error ||
     error{
         AccessDenied,
@@ -35,28 +35,28 @@ pub const OpenOptions = struct {
 };
 
 /// Similar of `std.Io.Dir.openDir`.
-pub fn openDirZ(dir: Dir, path: host_os.PathZ, options: OpenOptions) OpenError!Dir {
+pub fn openDirZ(dir: Dir, path: sys.PathZ, options: OpenOptions) OpenError!Dir {
     if (builtin.mode == .Debug and options.relative_name_only) {
-        std.debug.assert(!host_os.path.eql(path, host_os.path.literal(".")));
-        std.debug.assert(!host_os.path.eql(path, host_os.path.literal("..")));
+        std.debug.assert(!sys.path.eql(path, sys.path.literal(".")));
+        std.debug.assert(!sys.path.eql(path, sys.path.literal("..")));
         for (path) |c| {
-            std.debug.assert(!host_os.path.isSeparator(c));
+            std.debug.assert(!sys.path.isSeparator(c));
         }
     }
 
     const attempt_count = @as(u8, options.interrupt_retry_count) + 1;
-    if (host_os.is_windows) {
-        if (host_os.windows.has_obj_dont_reparse != true) {
+    if (sys.is_windows) {
+        if (sys.windows.has_obj_dont_reparse != true) {
             @compileError(std.fmt.comptimePrint(
                 "OBJ_DONT_REPARSE to handle !follow_symlinks requires windows version {t}, got {t}",
                 .{
-                    @tagName(host_os.windows.obj_dont_reparse_min_version),
+                    @tagName(sys.windows.obj_dont_reparse_min_version),
                     @tagName(builtin.os.version_range.windows.min),
                 },
             ));
         }
 
-        const base_access_flags = host_os.windows.AccessMask.init(&.{
+        const base_access_flags = sys.windows.AccessMask.init(&.{
             .STANDARD_RIGHTS_READ,
             .FILE_READ_ATTRIBUTES,
             .FILE_READ_EA,
@@ -66,20 +66,20 @@ pub fn openDirZ(dir: Dir, path: host_os.PathZ, options: OpenOptions) OpenError!D
             .setFlagConditional(options.access_sub_paths, .FILE_TRAVERSE)
             .setFlagConditional(options.iterate, .FILE_LIST_DIRECTORY);
 
-        var opened: host_os.Handle = undefined;
+        var opened: sys.Handle = undefined;
         var io: std.os.windows.IO_STATUS_BLOCK = undefined;
 
-        var root_directory: ?host_os.Handle = dir.handle;
+        var root_directory: ?sys.Handle = dir.handle;
         var object_name: std.os.windows.UNICODE_STRING = undefined;
         var allocated_object_name = std.mem.zeroes(std.os.windows.UNICODE_STRING);
 
         // Not using `std.os.windows.wToPrefixedFileW` for now
         // TODO(zig): https://github.com/ziglang/zig/issues/18849
         if (options.relative_name_only) {
-            object_name = host_os.windows.initUnicodeString(@constCast(path));
+            object_name = sys.windows.initUnicodeString(@constCast(path));
         } else converted: {
-            var relative_name = std.mem.zeroes(host_os.windows.RTL_RELATIVE_NAME);
-            const convert_status = host_os.windows.RtlDosPathNameToNtPathName_U_WithStatus(
+            var relative_name = std.mem.zeroes(sys.windows.RTL_RELATIVE_NAME);
+            const convert_status = sys.windows.RtlDosPathNameToNtPathName_U_WithStatus(
                 path.ptr,
                 &allocated_object_name,
                 null,
@@ -117,22 +117,22 @@ pub fn openDirZ(dir: Dir, path: host_os.PathZ, options: OpenOptions) OpenError!D
             .Length = @sizeOf(std.os.windows.OBJECT_ATTRIBUTES),
             .RootDirectory = root_directory,
             .ObjectName = &object_name,
-            .Attributes = if (options.follow_symlinks) 0 else host_os.windows.OBJ_DONT_REPARSE,
+            .Attributes = if (options.follow_symlinks) 0 else sys.windows.OBJ_DONT_REPARSE,
             .SecurityDescriptor = null,
             .SecurityQualityOfService = null,
         };
 
         for (0..attempt_count) |_| {
-            const status = host_os.windows.NtCreateFile(
+            const status = sys.windows.NtCreateFile(
                 &opened,
                 access_flags,
                 &attrs,
                 &io,
                 null,
-                host_os.windows.FileAttributes.init(&.{.FILE_ATTRIBUTE_NORMAL}),
-                host_os.windows.share_access_default,
-                host_os.windows.CreateDisposition.FILE_OPEN,
-                host_os.windows.CreateOptions.init(&.{
+                sys.windows.FileAttributes.init(&.{.FILE_ATTRIBUTE_NORMAL}),
+                sys.windows.share_access_default,
+                sys.windows.CreateDisposition.FILE_OPEN,
+                sys.windows.CreateOptions.init(&.{
                     .FILE_DIRECTORY_FILE,
                     .FILE_SYNCHRONOUS_IO_NONALERT,
                     .FILE_OPEN_FOR_BACKUP_INTENT,
@@ -144,7 +144,7 @@ pub fn openDirZ(dir: Dir, path: host_os.PathZ, options: OpenOptions) OpenError!D
             return switch (status) {
                 .SUCCESS => Dir{ .handle = opened },
                 .ACCESS_DENIED => error.AccessDenied,
-                host_os.windows.STATUS_REPARSE_POINT_ENCOUNTERED => if (options.follow_symlinks)
+                sys.windows.STATUS_REPARSE_POINT_ENCOUNTERED => if (options.follow_symlinks)
                     unreachable
                 else
                     error.SymLinkLoop,
@@ -178,7 +178,7 @@ pub fn openDirZ(dir: Dir, path: host_os.PathZ, options: OpenOptions) OpenError!D
         }
 
         for (0..attempt_count) |_| {
-            const result = host_os.unix_like.openat(
+            const result = sys.unix_like.openat(
                 dir.handle,
                 path,
                 flags,
@@ -215,14 +215,14 @@ pub fn openDirZ(dir: Dir, path: host_os.PathZ, options: OpenOptions) OpenError!D
 const has_dirent = @hasDecl(std.posix.system, "dirent") and std.posix.system.dirent != void;
 
 /// Does not include *any* null-terminators, if they are usually used in host OS APIs.
-pub const max_name_bytes = if (host_os.is_windows)
+pub const max_name_bytes = if (sys.is_windows)
     std.os.windows.NAME_MAX * 2
 else
     std.posix.system.NAME_MAX;
 
 const LinuxEntry = std.os.linux.dirent64;
 
-const WindowsEntry = host_os.windows.FILE_ID_FULL_DIR_INFORMATION;
+const WindowsEntry = sys.windows.FILE_ID_FULL_DIR_INFORMATION;
 
 pub const Entry = switch (builtin.os.tag) {
     .linux => LinuxEntry,
@@ -238,7 +238,7 @@ pub const entry = struct {
         else => 1,
     };
 
-    pub const Name = if (host_os.is_windows)
+    pub const Name = if (sys.is_windows)
         []align(name_align) const u16
     else
         [:0]align(name_align) const u8;
@@ -268,7 +268,7 @@ pub const entry = struct {
     }
 
     pub const Type = switch (builtin.os.tag) {
-        .linux => host_os.linux.DT,
+        .linux => sys.linux.DT,
         else => |bad| @compileError("directory entry type for " ++ @tagName(bad)),
     };
 
@@ -341,7 +341,7 @@ pub const Iterator = struct {
         iter.remaining = iter.buffer[0..0];
 
         var io: std.os.windows.IO_STATUS_BLOCK = undefined;
-        const status = host_os.windows.queryDirectoryFile(
+        const status = sys.windows.queryDirectoryFile(
             iter.dir.handle,
             &io,
             iter.buffer,
@@ -410,7 +410,7 @@ pub const Iterator = struct {
 
     /// May deinitialize any previous `Entry`s that were returned by `.next()`.
     pub fn peek(iter: *Iterator) Error!?*const Entry {
-        if (host_os.is_windows) {
+        if (sys.is_windows) {
             return iter.peekWindows();
         } else {
             return iter.peekPosix();
@@ -449,5 +449,4 @@ pub fn close(dir: Dir) void {
 
 const std = @import("std");
 const builtin = @import("builtin");
-const host_os = @import("../host_os.zig");
-const Handle = host_os.Handle;
+const sys = @import("../sys.zig");
