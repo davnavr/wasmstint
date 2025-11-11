@@ -7,6 +7,7 @@ pub const linux = @import("host_os/linux.zig");
 
 pub const path = @import("host_os/path.zig");
 pub const Path = path.Slice;
+pub const PathZ = path.SliceZ;
 pub const Dir = @import("host_os/Dir.zig");
 
 pub const Handle = std.posix.fd_t;

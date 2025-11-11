@@ -6,30 +6,44 @@ handle: Handle,
 
 const Dir = @This();
 
-pub const OpenError = error{
-    AccessDenied,
-    AntivirusInterference,
-    DeviceBusy,
-    FileNotFound,
-    NetworkNotFound,
-    NoDevice,
-    NotDir,
-    PermissionDenied,
-    ProcessFdQuotaExceeded,
-    SymLinkLoop,
-    SystemFdQuotaExceeded,
-    SystemResources,
-} || std.Io.Dir.PathNameError || std.posix.UnexpectedError || host_os.InterruptedError;
+pub const OpenError = std.Io.Dir.PathNameError ||
+    std.posix.UnexpectedError ||
+    host_os.InterruptedError ||
+    std.mem.Allocator.Error ||
+    error{
+        AccessDenied,
+        AntivirusInterference,
+        DeviceBusy,
+        FileNotFound,
+        NetworkNotFound,
+        NoDevice,
+        NotDir,
+        PermissionDenied,
+        ProcessFdQuotaExceeded,
+        SymLinkLoop,
+        SystemFdQuotaExceeded,
+        SystemResources,
+    };
 
 pub const OpenOptions = struct {
     access_sub_paths: bool = true,
     iterate: bool = true,
     follow_symlinks: bool = true,
     interrupt_retry_count: u7 = 5,
+    /// The `path` is only the name a file or directory, and does not contain any path separators.
+    relative_name_only: bool = false,
 };
 
-/// Equivalent of `std.Io.Dir.openDir`.
-pub fn openDir(dir: Dir, path: Path, options: OpenOptions) OpenError!Dir {
+/// Similar of `std.Io.Dir.openDir`.
+pub fn openDirZ(dir: Dir, path: host_os.PathZ, options: OpenOptions) OpenError!Dir {
+    if (builtin.mode == .Debug and options.relative_name_only) {
+        std.debug.assert(!host_os.path.eql(path, host_os.path.literal(".")));
+        std.debug.assert(!host_os.path.eql(path, host_os.path.literal("..")));
+        for (path) |c| {
+            std.debug.assert(!host_os.path.isSeparator(c));
+        }
+    }
+
     const attempt_count = @as(u8, options.interrupt_retry_count) + 1;
     if (host_os.is_windows) {
         if (host_os.windows.has_obj_dont_reparse != true) {
@@ -54,13 +68,54 @@ pub fn openDir(dir: Dir, path: Path, options: OpenOptions) OpenError!Dir {
 
         var opened: host_os.Handle = undefined;
         var io: std.os.windows.IO_STATUS_BLOCK = undefined;
-        var object_name = host_os.windows.initUnicodeString(@constCast(path));
+
+        var root_directory: ?host_os.Handle = dir.handle;
+        var object_name: std.os.windows.UNICODE_STRING = undefined;
+        var allocated_object_name = std.mem.zeroes(std.os.windows.UNICODE_STRING);
+
+        // Not using `std.os.windows.wToPrefixedFileW` for now
+        // TODO(zig): https://github.com/ziglang/zig/issues/18849
+        if (options.relative_name_only) {
+            object_name = host_os.windows.initUnicodeString(@constCast(path));
+        } else converted: {
+            var relative_name = std.mem.zeroes(host_os.windows.RTL_RELATIVE_NAME);
+            const convert_status = host_os.windows.RtlDosPathNameToNtPathName_U_WithStatus(
+                path.ptr,
+                &allocated_object_name,
+                null,
+                &relative_name,
+            );
+            return switch (convert_status) {
+                .SUCCESS => {
+                    std.debug.assert(relative_name.CurDirRef == null);
+                    std.debug.assert(relative_name.ContainingDirectory == null);
+
+                    object_name = if (relative_name.RelativeName.Buffer != null)
+                        // Seems to be a slice of the passed `allocated_object_name`
+                        relative_name.RelativeName
+                    else absolute: {
+                        root_directory = null;
+                        break :absolute allocated_object_name;
+                    };
+
+                    break :converted;
+                },
+                .NO_MEMORY => error.OutOfMemory,
+                .NAME_TOO_LONG => error.NameTooLong,
+                .OBJECT_NAME_INVALID => error.BadPathName,
+                else => std.os.windows.unexpectedStatus(convert_status),
+            };
+        }
+
+        defer if (!options.relative_name_only) {
+            std.os.windows.ntdll.RtlFreeUnicodeString(&allocated_object_name);
+        };
+
+        std.debug.assert(object_name.Buffer != null);
+
         var attrs = std.os.windows.OBJECT_ATTRIBUTES{
             .Length = @sizeOf(std.os.windows.OBJECT_ATTRIBUTES),
-            //.RootDirectory = if (std.fs.path.isAbsoluteWindowsWtf16(path)) null else dir.handle,
-            .RootDirectory = dir.handle,
-            // TODO: Try std.os.windows.removeDotDirsSanitized and look into proper converion of
-            // Win32 paths to NT paths
+            .RootDirectory = root_directory,
             .ObjectName = &object_name,
             .Attributes = if (options.follow_symlinks) 0 else host_os.windows.OBJ_DONT_REPARSE,
             .SecurityDescriptor = null,
@@ -395,5 +450,4 @@ pub fn close(dir: Dir) void {
 const std = @import("std");
 const builtin = @import("builtin");
 const host_os = @import("../host_os.zig");
-const Path = host_os.Path;
 const Handle = host_os.Handle;

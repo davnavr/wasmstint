@@ -603,7 +603,7 @@ fn accessSubPathPortable(
             };
 
             const comp_bytes = comp.bytes(path);
-            const comp_str = if (builtin.os.tag == .windows)
+            const comp_str: host_os.PathZ = if (builtin.os.tag == .windows)
                 std.unicode.utf8ToUtf16LeAllocZ(
                     path_arena.allocator(),
                     comp_bytes,
@@ -617,9 +617,10 @@ fn accessSubPathPortable(
             const open_options = host_os.Dir.OpenOptions{
                 .access_sub_paths = true,
                 .follow_symlinks = false,
+                .relative_name_only = true,
             };
 
-            final_dir = old_dir.openDir(comp_str, open_options) catch |e| return switch (e) {
+            final_dir = old_dir.openDirZ(comp_str, open_options) catch |e| return switch (e) {
                 // error.NotDir might happen on windows because a symlink is obviously not a directory
                 error.SymLinkLoop => if (!flags.symlink_follow)
                     error.SymLinkLoop

@@ -16,10 +16,10 @@ pub const Permissions = packed struct(u1) {
     };
 };
 
-pub fn openAt(
+pub fn openAtZ(
     dir: host_os.Dir,
     /// Host path to the directory to open.
-    sub_path: host_os.Path,
+    sub_path: host_os.PathZ,
     /// Specifies the operations the guest can perform within the directory.
     permissions: Permissions,
     /// Cannot be empty.
@@ -29,7 +29,7 @@ pub fn openAt(
         return error.BadPathName; // empty path
     }
 
-    const opened_dir = try dir.openDir(sub_path, host_os.Dir.OpenOptions{
+    const opened_dir = try dir.openDirZ(sub_path, host_os.Dir.OpenOptions{
         .access_sub_paths = true, // always needed to e.g. access files in the directory
         .iterate = true, // guest may choose to ask for entries at any time
     });

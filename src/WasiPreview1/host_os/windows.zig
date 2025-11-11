@@ -254,6 +254,25 @@ pub fn queryDirectoryFile(
     );
 }
 
+pub const RTL_RELATIVE_NAME = extern struct {
+    /// Seems to store a path relative to `ContainingDirectory`, if it is not `null`.
+    RelativeName: std.os.windows.UNICODE_STRING,
+    ContainingDirectory: ?Handle,
+    CurDirRef: ?*anyopaque,
+};
+
+/// https://learn.microsoft.com/en-us/windows/win32/devnotes/rtldospathnametontpathname_u_withstatus
+pub extern "ntdll" fn RtlDosPathNameToNtPathName_U_WithStatus(
+    dos_path_name: [*:0]const u16,
+    /// On successful return, will contain the NT path name.
+    nt_path_name: *std.os.windows.UNICODE_STRING,
+    file_part: ?*?[*:0]const u16,
+    /// Undocumented API, use at your own risk!
+    ///
+    /// https://googleprojectzero.blogspot.com/2016/02/the-definitive-guide-on-win32-to-nt.html
+    relative_name: ?*RTL_RELATIVE_NAME,
+) callconv(.winapi) Status;
+
 /// Includes console handle detection logic that is not provided by the equivalent `ntdll` API.
 ///
 /// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfiletype

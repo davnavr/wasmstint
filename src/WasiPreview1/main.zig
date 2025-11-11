@@ -623,7 +623,7 @@ fn realMain() Error!i32 {
     {
         var preopen_path_arena = ArenaAllocator.init(scratch.allocator());
         for (preopens, all_arguments.preopen_dirs) |*dst, *src| {
-            dst.* = WasiPreview1.PreopenDir.openAt(
+            dst.* = WasiPreview1.PreopenDir.openAtZ(
                 WasiPreview1.host_os.Dir{ .handle = cwd.handle },
                 // TODO(Zig): cli argument iteration should be able to return [:0]u16 on windows
                 WasiPreview1.host_os.path.allocFromBytesZ(
