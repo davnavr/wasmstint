@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Build = std.Build;
 const Step = Build.Step;
 
@@ -56,33 +57,6 @@ const ProjectOptions = struct {
     }
 };
 
-const ToolPaths = struct {
-    wast2json: ?[]const u8,
-    // @"wasm-opt": ?[]const u8,
-    // @"wasm-reduce": []const u8,
-    // @"wasm-tools": []const u8,
-
-    fn getOrDefault(
-        paths: *const ToolPaths,
-        comptime tool: std.meta.FieldEnum(ToolPaths),
-    ) []const u8 {
-        return @field(paths, @tagName(tool)) orelse @tagName(tool);
-    }
-
-    fn init(b: *Build) ToolPaths {
-        var options: ToolPaths = undefined;
-        inline for (@typeInfo(ToolPaths).@"struct".fields) |field| {
-            @field(options, field.name) = b.option(
-                []const u8,
-                field.name,
-                "Path to " ++ field.name ++ " executable",
-            ) orelse field.name;
-        }
-
-        return options;
-    }
-};
-
 const TopLevelSteps = struct {
     check: *Step,
     @"test": *Step,
@@ -97,7 +71,6 @@ const top_level_steps: []const struct { std.meta.FieldEnum(TopLevelSteps), [:0]c
 
 pub fn build(b: *Build) void {
     const project_options = ProjectOptions.init(b);
-    const tool_paths = ToolPaths.init(b);
 
     const steps = steps: {
         var init: TopLevelSteps = undefined;
@@ -170,7 +143,7 @@ pub fn build(b: *Build) void {
         },
     );
 
-    buildSpecificationTests(b, spectest_exe, &steps, &tool_paths);
+    buildSpecificationTests(b, spectest_exe, &steps);
 
     // const wasip1_test_runner = Wasip1TestRunner.build(
     //     b,
@@ -183,19 +156,15 @@ pub fn build(b: *Build) void {
     //     },
     // );
 
-    buildFuzzers(
-        b,
-        &steps,
-        .{ .project = &project_options, .tool_paths = &tool_paths },
-        .{ .wasmstint = modules.wasmstint, .cli_args = modules.cli_args },
-    );
+    buildFuzzers(b, &steps, .{ .project = &project_options }, .{
+        .wasmstint = modules.wasmstint,
+        .cli_args = modules.cli_args,
+    });
 
-    buildWasiSamplePrograms(
-        b,
-        &steps,
-        .{ .project = &project_options, .tool_paths = &tool_paths },
-        .{ .interpreter = wasip1_exe, .subprocess = modules.subprocess },
-    );
+    buildWasiSamplePrograms(b, &steps, .{ .project = &project_options }, .{
+        .interpreter = wasip1_exe,
+        .subprocess = modules.subprocess,
+    });
 
     // buildWasiTestsuite(
     //     b,
@@ -544,98 +513,260 @@ const SpectestInterp = struct {
     }
 };
 
+const WabtTools = struct {
+    wast2json: *Step.Compile,
+};
+
+fn buildWabtTools(b: *Build, wabt_dep: *Build.Dependency) WabtTools {
+    const host_os = b.graph.host.result.os;
+    const unix_like = @intFromBool(host_os.tag != .windows);
+    const config_header = b.addConfigHeader(
+        .{
+            .style = .{ .cmake = wabt_dep.path("src/config.h.in") },
+            .include_path = "wabt/config.h",
+        },
+        .{
+            .WABT_VERSION_STRING = "1.0.39",
+            .WABT_DEBUG = null,
+            .HAVE_ALLOCA_H = unix_like,
+            .HAVE_UNISTD_H = unix_like,
+            .HAVE_SNPRINTF = 1,
+            .HAVE_SSIZE_T = unix_like,
+            .HAVE_STRCASECMP = unix_like,
+            .HAVE_WIN32_VT100 = @intFromBool(host_os.isAtLeast(.windows, .win10) == true),
+            .WABT_BIG_ENDIAN = builtin.target.cpu.arch.endian() == .big,
+            .COMPILER_IS_CLANG = 1,
+            .WITH_EXCEPTIONS = 0,
+            .SIZEOF_SIZE_T = @sizeOf(usize),
+        },
+    );
+    const flags = &.{
+        "-Wall",
+        "-Wextra",
+        "-Wno-unused-parameter",
+        "-Wpointer-arith",
+        "-Wuninitialized",
+        "-Wimplicit-fallthrough",
+        "-fno-exceptions",
+    };
+
+    const wabt_lib = b.addLibrary(.{
+        .name = "wabt",
+        .root_module = b.createModule(.{
+            .target = b.graph.host,
+            .optimize = .ReleaseSmall,
+        }),
+        .use_llvm = true,
+        .max_rss = ByteSize.mib(500).bytes, // arbitrary value
+    });
+    wabt_lib.addConfigHeader(config_header);
+    wabt_lib.addIncludePath(wabt_dep.path("include"));
+    wabt_lib.addCSourceFiles(.{
+        .root = wabt_dep.path("."),
+        .files = &.{
+            // "src/apply-names.cc",
+            "src/binary-reader-ir.cc",
+            "src/binary-reader-logging.cc",
+            "src/binary-reader.cc",
+            "src/binary-writer-spec.cc",
+            "src/binary-writer.cc",
+            "src/binary.cc",
+            "src/binding-hash.cc",
+            "src/color.cc",
+            "src/common.cc",
+            "src/config.cc",
+            // "src/decompiler.cc",
+            "src/error-formatter.cc",
+            "src/expr-visitor.cc",
+            "src/feature.cc",
+            "src/filenames.cc",
+            "src/generate-names.cc",
+            "src/ir-util.cc",
+            "src/ir.cc",
+            "src/leb128.cc",
+            "src/lexer-source-line-finder.cc",
+            "src/lexer-source.cc",
+            "src/literal.cc",
+            "src/opcode-code-table.c",
+            "src/opcode.cc",
+            "src/option-parser.cc",
+            "src/resolve-names.cc",
+            // "src/sha256.cc", // requires openssl or picosha
+            "src/shared-validator.cc",
+            "src/stream.cc",
+            "src/token.cc",
+            "src/tracing.cc",
+            "src/type-checker.cc",
+            "src/utf8.cc",
+            "src/validator.cc",
+            "src/wast-lexer.cc",
+            "src/wast-parser.cc",
+            "src/wat-writer.cc",
+            // "src/c-writer.cc",
+            // "src/prebuilt/wasm2c_header_top.cc",
+            // "src/prebuilt/wasm2c_header_bottom.cc",
+            // "src/prebuilt/wasm2c_source_includes.cc",
+            // "src/prebuilt/wasm2c_source_declarations.cc",
+            // "src/prebuilt/wasm2c_simd_source_declarations.cc",
+            // "src/prebuilt/wasm2c_atomicops_source_declarations.cc",
+            // "src/interp/binary-reader-interp.cc",
+            // "src/interp/interp.cc",
+            // "src/interp/interp-util.cc",
+            // "src/interp/istream.cc",
+        },
+        .flags = flags,
+    });
+    wabt_lib.linkLibCpp();
+
+    const wast2json_exe = b.addExecutable(.{
+        .name = "wast2json",
+        .root_module = b.createModule(.{
+            .target = b.graph.host,
+            .optimize = .ReleaseSmall,
+        }),
+        .use_llvm = true,
+        .max_rss = ByteSize.mib(500).bytes, // arbitrary value
+    });
+    wast2json_exe.addConfigHeader(config_header);
+    wast2json_exe.addIncludePath(wabt_dep.path("include"));
+    wast2json_exe.addCSourceFile(.{
+        .file = wabt_dep.path("src/tools/wast2json.cc"),
+        .flags = flags,
+    });
+    wast2json_exe.linkLibrary(wabt_lib);
+    wast2json_exe.linkLibCpp();
+
+    {
+        const run = b.addRunArtifact(wast2json_exe);
+        if (b.args) |args| {
+            run.addArgs(args);
+        }
+        b.step("run-wast2json", "Run WABT wast2json executable").dependOn(&run.step);
+    }
+
+    return WabtTools{ .wast2json = wast2json_exe };
+}
+
 fn buildSpecificationTests(
     b: *Build,
     interpreter: SpectestInterp,
     top_steps: *const TopLevelSteps,
-    tool_paths: *const ToolPaths,
 ) void {
-    const Test = struct {
-        name: []const u8,
-        json_path: Build.LazyPath,
-        run: *Build.Step.Run,
+    const wabt_dep = b.lazyDependency("wabt", .{}) orelse return;
+    const spectest_dep = b.lazyDependency("spectest", .{}) orelse return;
+    const wabt = buildWabtTools(b, wabt_dep);
+
+    const test_names = [_][]const u8{
+        "address",
+        "align",
+        "binary-leb128",
+        "binary",
+        "block",
+        "br_if",
+        "br_table",
+        "br",
+        "bulk",
+        "call_indirect",
+        "call",
+        "comments",
+        "const",
+        "conversions",
+        "custom",
+        "data",
+        "elem",
+        "endianness",
+        "exports",
+        "f32_bitwise",
+        "f32_cmp",
+        "f32",
+        "f64_bitwise",
+        "f64_cmp",
+        "f64",
+        "fac",
+        "float_exprs",
+        "float_literals",
+        "float_memory",
+        "float_misc",
+        "forward",
+        "func_ptrs",
+        "func",
+        "global",
+        "i32",
+        "i64",
+        "if",
+        "imports",
+        "inline-module",
+        "int_exprs",
+        "int_literals",
+        "labels",
+        "left-to-right",
+        "linking",
+        "load",
+        "local_get",
+        "local_set",
+        "local_tee",
+        "loop",
+        "memory_copy",
+        "memory_fill",
+        "memory_grow",
+        "memory_init",
+        "memory_redundancy",
+        "memory_size",
+        "memory_trap",
+        "memory",
+        "names",
+        "nop",
+        "obsolete-keywords",
+        "ref_func",
+        "ref_is_null",
+        "ref_null",
+        "return",
+        "select",
+        "skip-stack-guard-page",
+        "stack",
+        "start",
+        "store",
+        "switch",
+        "table_copy",
+        "table_fill",
+        "table_get",
+        "table_grow",
+        "table_init",
+        "table_set",
+        "table_size",
+        "table-sub",
+        "table",
+        "token",
+        "traps",
+        "type",
+        "unreachable",
+        "unreached-invalid",
+        "unreached-valid",
+        "unwind",
+        "utf8-custom-section-id",
+        "utf8-import-field",
+        "utf8-import-module",
+        "utf8-invalid-encoding",
     };
-
-    var spectests = std.ArrayList(Test).initCapacity(b.allocator, 147) catch
-        @panic("OOM");
-
-    const tests_dir = b.path("tests/spec");
-    const tests_dir_handle = b.build_root.handle.openDir(
-        tests_dir.src_path.sub_path,
-        .{ .iterate = true },
-    ) catch @panic("could not open tests directory");
-
-    var translate_step = b.allocator.create(Step) catch @panic("OOM");
-    translate_step.* = Step.init(.{
-        .id = .custom,
-        .name = @typeName(@This()),
-        .owner = b,
-    });
-    const translate_output = b.addWriteFiles();
-    const translate_output_dir = translate_output.getDirectory();
-    translate_step.dependOn(&translate_output.step);
-
-    var tests_iter = tests_dir_handle.iterateAssumeFirstIteration();
-    while (tests_iter.next() catch @panic("bad entry in tests directory")) |tests_entry| {
-        if (tests_entry.kind != .file or
-            !std.mem.eql(u8, ".wast", std.fs.path.extension(tests_entry.name)) or
-            std.mem.startsWith(u8, tests_entry.name, "simd_"))
-        {
-            continue;
-        }
-
-        var wast2json = b.addSystemCommand(&.{tool_paths.getOrDefault(.wast2json)});
-        wast2json.step.max_rss = ByteSize.mib(19).bytes;
-        translate_step.dependOn(&wast2json.step);
-        wast2json.setCwd(translate_output_dir);
-        wast2json.addFileArg(tests_dir.path(b, tests_entry.name));
-
-        const name = b.dupe(tests_entry.name[0 .. tests_entry.name.len - 5]);
-        const json_name = b.fmt("{s}.json", .{name});
-        wast2json.addArgs(&.{ "--output", json_name });
-        // addPrefixedFileArg would mean each .json is in a separate dir
-        const json_path = translate_output_dir.path(b, json_name);
-
-        spectests.append(
-            b.allocator,
-            .{ .name = name, .json_path = json_path, .run = wast2json },
-        ) catch @panic("OOM");
-    }
-
-    const step = if (spectests.items.len == 0)
-        &b.addFail("no .wast files found in test directory").step
-    else
-        translate_step;
-
-    const install_step = b.step(
-        "install-spectest",
-        "Translate specification tests with wast2json",
-    );
-    install_step.dependOn(step);
-
-    if (spectests.items.len > 0) {
-        const install_spectests = b.addInstallDirectory(.{
-            .source_dir = translate_output_dir,
-            .install_dir = .{ .custom = "spectest" },
-            .install_subdir = ".",
-        });
-
-        install_spectests.step.dependOn(translate_step);
-        install_step.dependOn(&install_spectests.step);
-    }
 
     const test_spec_step = b.step("test-spec", "Run specification tests");
 
-    for (spectests.items) |test_spec| {
-        const run_test_spec = b.addRunArtifact(interpreter.exe);
-        run_test_spec.max_stdio_size = 15 * 1024 * 1024;
-        run_test_spec.step.max_rss = ByteSize.mib(45).bytes;
-        run_test_spec.setName(b.fmt("spectest/{s}.wast", .{test_spec.name}));
-        run_test_spec.addArg("--run");
-        run_test_spec.addFileArg(test_spec.json_path);
-        run_test_spec.step.dependOn(&test_spec.run.step);
-        run_test_spec.expectExitCode(0);
-        test_spec_step.dependOn(&run_test_spec.step);
+    for (test_names) |name| {
+        var wast2json = b.addRunArtifact(wabt.wast2json);
+        wast2json.step.max_rss = ByteSize.mib(19).bytes;
+        const wast_name = b.fmt("{s}.wast", .{name});
+        wast2json.addFileArg(spectest_dep.path(wast_name));
+        wast2json.addArgs(&.{"--output"});
+        const output_json = wast2json.addOutputFileArg(b.fmt("{s}.json", .{name}));
+
+        const run_test = b.addRunArtifact(interpreter.exe);
+        run_test.max_stdio_size = 15 * 1024 * 1024;
+        run_test.step.max_rss = ByteSize.mib(45).bytes;
+        run_test.setName(wast_name);
+        run_test.addArg("--run");
+        run_test.addFileArg(output_json);
+        run_test.expectExitCode(0);
+        test_spec_step.dependOn(&run_test.step);
     }
 
     top_steps.@"test".dependOn(test_spec_step);
@@ -748,7 +879,7 @@ const Wasip1TestRunner = struct {
 fn buildFuzzers(
     b: *Build,
     steps: *const TopLevelSteps,
-    options: struct { project: *const ProjectOptions, tool_paths: *const ToolPaths },
+    options: struct { project: *const ProjectOptions },
     modules: struct { wasmstint: Modules.Wasmstint, cli_args: Modules.CliArgs },
 ) void {
     _ = b;
@@ -760,7 +891,7 @@ fn buildFuzzers(
 fn buildWasiSamplePrograms(
     b: *Build,
     steps: *const TopLevelSteps,
-    options: struct { project: *const ProjectOptions, tool_paths: *const ToolPaths },
+    options: struct { project: *const ProjectOptions },
     modules: struct {
         interpreter: Wasip1Interp,
         subprocess: Modules.Subprocess,
@@ -836,7 +967,7 @@ fn buildWasiSamplePrograms(
 fn buildWasiTestsuite(
     b: *Build,
     steps: *const TopLevelSteps,
-    options: struct { project: *const ProjectOptions, tool_paths: *const ToolPaths },
+    options: struct { project: *const ProjectOptions },
     dependencies: struct { driver: Wasip1TestRunner, interpreter: Wasip1Interp },
 ) void {
     const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
