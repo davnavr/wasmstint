@@ -28,21 +28,28 @@ pub fn readFilePortable(
     allocator: Allocator,
 ) !FileContent {
     if (builtin.os.tag == .windows) {
-        const sub_path_dos = std.unicode.wtf8ToWtf16LeAllocZ(
+        const sub_path_wide = std.unicode.wtf8ToWtf16LeAllocZ(
             allocator,
             sub_path,
         ) catch |e| return switch (e) {
             error.OutOfMemory => |oom| oom,
             error.InvalidWtf8 => error.BadPathName,
         };
-        defer allocator.free(sub_path_dos);
+        defer allocator.free(sub_path_wide);
 
-        // TODO(zig): https://github.com/ziglang/zig/issues/18849
-        const sub_path_nt = try allocator.create(windows.PathSpace);
-        defer allocator.destroy(sub_path_nt);
-        sub_path_nt.* = try windows.wToPrefixedFileW(dir.handle, sub_path_dos);
+        var allocated_name = std.mem.zeroes(std.os.windows.UNICODE_STRING);
+        const nt_path = if (try sys.windows.relativeDosPathToNt(
+            dir.handle,
+            sub_path_wide,
+            &allocated_name,
+        )) |relative|
+            relative
+        else
+            allocated_name.Buffer.?[0..@divExact(allocated_name.Length, 2)];
 
-        return mapFileWindows(io, dir, sub_path_nt.span());
+        defer std.os.windows.ntdll.RtlFreeUnicodeString(&allocated_name);
+
+        return mapFileWindows(io, dir, nt_path);
     } else if (virtual_memory.mman.has_mmap_anonymous) {
         return readFile(io, dir, sub_path);
     } else {

@@ -70,45 +70,18 @@ pub fn openDirZ(dir: Dir, path: sys.PathZ, options: OpenOptions) OpenError!Dir {
         var io: std.os.windows.IO_STATUS_BLOCK = undefined;
 
         var root_directory: ?sys.Handle = dir.handle;
-        var object_name: std.os.windows.UNICODE_STRING = undefined;
-        var allocated_object_name = std.mem.zeroes(std.os.windows.UNICODE_STRING);
-
-        // Not using `std.os.windows.wToPrefixedFileW` for now
-        // TODO(zig): https://github.com/ziglang/zig/issues/18849
-        if (options.relative_name_only) {
-            object_name = sys.windows.initUnicodeString(@constCast(path));
-        } else converted: {
-            var relative_name = std.mem.zeroes(sys.windows.RTL_RELATIVE_NAME);
-            const convert_status = sys.windows.RtlDosPathNameToNtPathName_U_WithStatus(
-                path.ptr,
-                &allocated_object_name,
-                null,
-                &relative_name,
-            );
-            return switch (convert_status) {
-                .SUCCESS => {
-                    std.debug.assert(relative_name.CurDirRef == null);
-                    std.debug.assert(relative_name.ContainingDirectory == null);
-
-                    object_name = if (relative_name.RelativeName.Buffer != null)
-                        // Seems to be a slice of the passed `allocated_object_name`
-                        relative_name.RelativeName
-                    else absolute: {
-                        root_directory = null;
-                        break :absolute allocated_object_name;
-                    };
-
-                    break :converted;
-                },
-                .NO_MEMORY => error.OutOfMemory,
-                .NAME_TOO_LONG => error.NameTooLong,
-                .OBJECT_NAME_INVALID => error.BadPathName,
-                else => std.os.windows.unexpectedStatus(convert_status),
-            };
-        }
+        var allocated_name = std.mem.zeroes(std.os.windows.UNICODE_STRING);
+        var object_name = if (options.relative_name_only)
+            sys.windows.initUnicodeString(@constCast(path))
+        else if (try sys.windows.relativeDosPathToNt(dir.handle, path, &allocated_name)) |relative|
+            sys.windows.initUnicodeString(relative)
+        else not_relative: {
+            root_directory = null;
+            break :not_relative allocated_name;
+        };
 
         defer if (!options.relative_name_only) {
-            std.os.windows.ntdll.RtlFreeUnicodeString(&allocated_object_name);
+            std.os.windows.ntdll.RtlFreeUnicodeString(&allocated_name);
         };
 
         std.debug.assert(object_name.Buffer != null);

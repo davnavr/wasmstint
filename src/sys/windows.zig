@@ -187,6 +187,47 @@ pub fn initUnicodeString(str: []u16) std.os.windows.UNICODE_STRING {
     };
 }
 
+pub const PathConversionError = std.posix.UnexpectedError || error{
+    OutOfMemory,
+    NameTooLong,
+    BadPathName,
+};
+
+/// Calls into the Win32 API rather than `std.os.windows.wToPrefixedFileW`, at the cost of
+/// performing a heap allocation. See <https://github.com/ziglang/zig/issues/18849> for more
+/// information.
+///
+/// Returns `null` if the converted path is *not* relative.
+pub fn relativeDosPathToNt(
+    dir: Handle,
+    path: [:0]const u16,
+    /// Where the converted NT path is written after a successful conversion.
+    ///
+    /// Don't forget to call `std.os.windows.ntdll.RtlFreeUnicodeString`.
+    allocated_name: *std.os.windows.UNICODE_STRING,
+) PathConversionError!?[]u16 {
+    var relative_name = std.mem.zeroInit(RTL_RELATIVE_NAME, .{ .ContainingDirectory = dir });
+    const convert_status = RtlDosPathNameToNtPathName_U_WithStatus(
+        path.ptr,
+        allocated_name,
+        null,
+        &relative_name,
+    );
+    std.debug.assert(relative_name.CurDirRef == null);
+    std.debug.assert(relative_name.ContainingDirectory == null);
+    return switch (convert_status) {
+        .SUCCESS => if (relative_name.RelativeName.Buffer != null)
+            // Seems to be a slice of the passed `allocated_name`
+            relative_name.RelativeName.Buffer.?[0..@divExact(relative_name.RelativeName.Length, 2)]
+        else
+            null,
+        .NO_MEMORY => error.OutOfMemory,
+        .NAME_TOO_LONG => error.NameTooLong,
+        .OBJECT_NAME_INVALID => error.BadPathName,
+        else => std.os.windows.unexpectedStatus(convert_status),
+    };
+}
+
 pub fn FileInformationType(comptime class: std.os.windows.FILE_INFORMATION_CLASS) type {
     return switch (class) {
         .FileBasicInformation => std.os.windows.FILE_BASIC_INFORMATION,
