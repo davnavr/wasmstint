@@ -1,6 +1,6 @@
 const configuration = wasm_smith.Configuration{};
 
-fn doTest(_: void, input: []const u8) !void {
+fn doTest(input: []const u8) !void {
     var wasm_buffer: wasm_smith.ModuleBuffer = undefined;
     wasm_smith.generateModule(input, &wasm_buffer, &configuration) catch |e| return switch (e) {
         error.BadInput => error.SkipZigTest,
@@ -37,7 +37,10 @@ fn doTest(_: void, input: []const u8) !void {
 }
 
 test {
-    try std.testing.fuzz({}, doTest, .{});
+    // TODO(zig): Fix crash in fuzz test runner
+    if (true) {
+        try std.testing.fuzz({}, doTest, .{});
+    }
 }
 
 const std = @import("std");

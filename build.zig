@@ -731,6 +731,10 @@ fn buildFuzzers(
     options: struct { project: *const ProjectOptions },
     modules: struct { wasmstint: Modules.Wasmstint },
 ) void {
+    if (true) {
+        // TODO(zig): Fix crash in fuzz test runner
+        return;
+    }
     const fuzz_step = b.step("test-fuzz", "Run integrated fuzz tests");
 
     const validation_test = b.addTest(.{
