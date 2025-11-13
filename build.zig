@@ -156,10 +156,7 @@ pub fn build(b: *Build) void {
     //     },
     // );
 
-    buildFuzzers(b, &steps, .{ .project = &project_options }, .{
-        .wasmstint = modules.wasmstint,
-        .cli_args = modules.cli_args,
-    });
+    buildFuzzers(b, .{ .project = &project_options }, .{ .wasmstint = modules.wasmstint });
 
     buildWasiSamplePrograms(b, &steps, .{ .project = &project_options }, .{
         .interpreter = wasip1_exe,
@@ -350,14 +347,11 @@ const Modules = struct {
             steps: *const TopLevelSteps,
             options: *const ProjectOptions,
         ) CliArgs {
-            const module = b.addModule(
-                name,
-                .{
-                    .root_source_file = b.path("src/cli_args.zig"),
-                    .target = options.target,
-                    .optimize = options.optimize,
-                },
-            );
+            const module = b.createModule(.{
+                .root_source_file = b.path("src/cli_args.zig"),
+                .target = options.target,
+                .optimize = options.optimize,
+            });
 
             const tests = b.addTest(.{
                 .name = name,
@@ -389,15 +383,12 @@ const Modules = struct {
             options: *const ProjectOptions,
             imports: struct { wasmstint: Wasmstint, coz: Coz, allocators: Allocators, sys: Sys },
         ) Wasip1 {
-            const module = b.addModule(
-                name,
-                .{
-                    .root_source_file = b.path("src/WasiPreview1.zig"),
-                    .target = options.target,
-                    .optimize = options.optimize,
-                    .link_libc = options.link_libc,
-                },
-            );
+            const module = b.addModule(name, .{
+                .root_source_file = b.path("src/WasiPreview1.zig"),
+                .target = options.target,
+                .optimize = options.optimize,
+                .link_libc = options.link_libc,
+            });
             addAsImportTo(Wasmstint, imports.wasmstint, module);
             addAsImportTo(Coz, imports.coz, module);
             addAsImportTo(Allocators, imports.allocators, module);
@@ -737,14 +728,38 @@ const Wasip1TestRunner = struct {
 
 fn buildFuzzers(
     b: *Build,
-    steps: *const TopLevelSteps,
     options: struct { project: *const ProjectOptions },
-    modules: struct { wasmstint: Modules.Wasmstint, cli_args: Modules.CliArgs },
+    modules: struct { wasmstint: Modules.Wasmstint },
 ) void {
-    _ = b;
-    _ = steps;
-    _ = options;
-    _ = modules;
+    const fuzz_step = b.step("test-fuzz", "Run integrated fuzz tests");
+
+    const validation_test = b.addTest(.{
+        .name = "validation",
+        .use_llvm = options.project.use_llvm.interpreter,
+        .max_rss = ByteSize.mib(268).bytes,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("fuzz/targets/validation.zig"),
+            .link_libc = true,
+            .target = options.project.target,
+            .optimize = options.project.optimize,
+        }),
+    });
+    const wasm_smith = b.createModule(.{
+        .root_source_file = b.path("fuzz/wasm-smith/src/wrapper.zig"),
+        .target = options.project.target,
+        .optimize = options.project.optimize,
+    });
+    wasm_smith.addLibraryPath(b.path("fuzz/wasm-smith/target/release"));
+    wasm_smith.linkSystemLibrary(
+        "wasmstint_wasm_smith",
+        .{ .preferred_link_mode = .dynamic, .search_strategy = .paths_first },
+    );
+    validation_test.root_module.addImport("wasm-smith", wasm_smith);
+    Modules.addAsImportTo(Modules.Wasmstint, modules.wasmstint, validation_test.root_module);
+
+    const validation_run = &b.addRunArtifact(validation_test).step;
+    validation_run.max_rss = ByteSize.mib(16).bytes; // arbitrary value
+    fuzz_step.dependOn(validation_run);
 }
 
 fn buildWasiSamplePrograms(

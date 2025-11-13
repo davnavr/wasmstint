@@ -1,0 +1,22 @@
+[package]
+name = "wasmstint-wasm-smith"
+rust-version = "1.88"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+bench = false
+
+[profile.release]
+codegen-units = 2
+debug = "line-tables-only"
+panic = "abort"
+lto = "thin"
+
+[dependencies]
+wasm-smith = "0.240.0"
+# Existing dependencies of `wasm-smith`
+arbitrary = "1.4.2"
