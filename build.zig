@@ -858,25 +858,20 @@ fn buildFuzzers(
         return;
     }
 
-    fuzz_step.dependOn(switch (fuzz_runner) {
+    const runner_step: *Step.Run = switch (fuzz_runner) {
         .afl => afl: {
-            const run_afl = Step.Run.create(b, b.fmt("run AFL++ {t}", .{fuzz_target.?}));
+            const run_afl = Step.Run.create(b, "fuzz-validation");
             run_afl.addFileArg(afl_exe);
-            if (b.args) |args| {
-                run_afl.addArgs(args);
-            }
-
-            break :afl &run_afl.step;
+            break :afl run_afl;
         },
-        .standalone => standalone: {
-            const run_standalone = b.addRunArtifact(standalone_exe);
-            if (b.args) |args| {
-                run_standalone.addArgs(args);
-            }
+        .standalone => b.addRunArtifact(standalone_exe),
+    };
 
-            break :standalone &run_standalone.step;
-        },
-    });
+    if (b.args) |args| {
+        runner_step.addArgs(args);
+    }
+
+    fuzz_step.dependOn(&runner_step.step);
 }
 
 fn buildWasiSamplePrograms(
