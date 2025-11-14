@@ -1,16 +1,25 @@
-//! [`libfuzzer`] style fuzzer harness, for use with AFL++.
+//! [`libFuzzer`] style fuzzer harness, for use with AFL++.
+//!
+//! [`libFuzzer`]: https://www.llvm.org/docs/LibFuzzer.html
 
-const testOne: fn (
-    []const u8,
-    *std.heap.ArenaAllocator,
-    std.mem.Allocator,
-) anyerror!void = @import("target").testOne;
+inline fn testOne(
+    input: []const u8,
+    scratch: *std.heap.ArenaAllocator,
+    allocator: std.mem.Allocator,
+) anyerror!void {
+    return @import("target").testOne(input, scratch, allocator);
+}
 
 const Status = enum(c_int) {
     accept = 0,
     reject = -1,
     _,
 };
+
+/// Defined here to avoid "undefined symbol" linker errors.
+///
+/// https://clang.llvm.org/docs/SanitizerCoverage.html#tracing-stack-depth
+pub export threadlocal var __sancov_lowest_stack: usize = 0;
 
 pub export fn LLVMFuzzerTestOneInput(data: [*]const u8, size: usize) Status {
     var allocator = std.heap.DebugAllocator(.{ .safety = true }).init;
@@ -24,7 +33,7 @@ pub export fn LLVMFuzzerTestOneInput(data: [*]const u8, size: usize) Status {
     var scratch = std.heap.ArenaAllocator.init(allocator.allocator());
     defer scratch.deinit();
 
-    testOne(data[0..size], &scratch, allocator.allocator()) catch |e| switch (@as(anyerror, e)) {
+    testOne(data[0..size], &scratch, allocator.allocator()) catch |e| switch (e) {
         error.SkipZigTest => return Status.reject,
         error.OutOfMemory => {},
         else => {

@@ -825,12 +825,19 @@ fn buildFuzzers(
         &.{ "afl-clang-lto", "-g", "-Wall", "-fsanitize=fuzzer", "-lwasmstint_wasm_smith" },
     );
     afl_clang_lto.step.max_rss = ByteSize.mib(268).bytes; // arbitrary amount
+
     afl_clang_lto.addArg("-o");
     const afl_exe = afl_clang_lto.addOutputFileArg("fuzz-validation");
+
     afl_clang_lto.addArtifactArg(llvm_harness_lib);
+
     for (rust_include_paths.items) |include_path| {
         afl_clang_lto.addArg("-L");
         afl_clang_lto.addDirectoryArg(include_path);
+    }
+
+    if (b.verbose) {
+        afl_clang_lto.addArg("-v");
     }
 
     const standalone_exe = b.addExecutable(.{
