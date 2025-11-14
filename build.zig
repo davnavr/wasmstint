@@ -156,7 +156,10 @@ pub fn build(b: *Build) void {
     //     },
     // );
 
-    buildFuzzers(b, .{ .project = &project_options }, .{ .wasmstint = modules.wasmstint });
+    buildFuzzers(b, .{ .project = &project_options }, .{
+        .wasmstint = modules.wasmstint,
+        .file_content = modules.file_content,
+    });
 
     buildWasiSamplePrograms(b, &steps, .{ .project = &project_options }, .{
         .interpreter = wasip1_exe,
@@ -729,41 +732,142 @@ const Wasip1TestRunner = struct {
 fn buildFuzzers(
     b: *Build,
     options: struct { project: *const ProjectOptions },
-    modules: struct { wasmstint: Modules.Wasmstint },
+    modules: struct { wasmstint: Modules.Wasmstint, file_content: Modules.FileContent },
 ) void {
-    if (true) {
-        // TODO(zig): Fix crash in fuzz test runner
-        return;
-    }
-    const fuzz_step = b.step("test-fuzz", "Run integrated fuzz tests");
+    const fuzz_zig_step = b.step("fuzz-zig", "Run integrated fuzz tests");
+    fuzz_zig_step.dependOn(
+        &b.addFail(
+            "TODO(zig): fix crash in test runner: https://github.com/ziglang/zig/issues/25919",
+        ).step,
+    );
 
-    const validation_test = b.addTest(.{
-        .name = "validation",
-        .use_llvm = options.project.use_llvm.interpreter,
-        .max_rss = ByteSize.mib(268).bytes,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("fuzz/targets/validation.zig"),
-            .link_libc = true,
-            .target = options.project.target,
-            .optimize = options.project.optimize,
-        }),
-    });
-    const wasm_smith = b.createModule(.{
-        .root_source_file = b.path("fuzz/wasm-smith/src/wrapper.zig"),
+    var rust_include_paths_buf: [2]Build.LazyPath = undefined;
+    var rust_include_paths = std.ArrayList(Build.LazyPath).initBuffer(&rust_include_paths_buf);
+
+    // Currently, this does not invoke `cargo build release`
+    const rust_target_dir = b.path("fuzz/wasm-smith/target");
+    const native_target = b.graph.host.result;
+    const chosen_target = options.project.target.result;
+    if (native_target.cpu.arch == chosen_target.cpu.arch and
+        native_target.os.tag == chosen_target.os.tag and
+        native_target.abi == chosen_target.abi)
+    {
+        rust_include_paths.appendAssumeCapacity(rust_target_dir.path(b, "release"));
+    }
+
+    // TODO: translate `chosen_target` to Rust target triple
+    //rust_include_paths.appendAssumeCapacity();
+
+    if (rust_include_paths.items.len == 0) {
+        fuzz_zig_step.dependOn(
+            &b.addFail("could not determine include path for wasm-smith wrapper").step,
+        );
+    }
+
+    const FuzzTarget = enum {
+        validation,
+    };
+
+    const FuzzRunner = enum {
+        afl,
+        standalone,
+    };
+
+    const fuzz_step = b.step("fuzz", "Run an AFL++ fuzz test");
+
+    const fuzz_target = b.option(FuzzTarget, "fuzz-target", "Which fuzz target to run");
+    const fuzz_runner = b.option(
+        FuzzRunner,
+        "fuzz-runner",
+        "Specifies how a fuzz target is run",
+    ) orelse FuzzRunner.standalone;
+
+    const validation_module = b.createModule(.{
+        .root_source_file = b.path("fuzz/targets/validation.zig"),
         .target = options.project.target,
         .optimize = options.project.optimize,
     });
-    wasm_smith.addLibraryPath(b.path("fuzz/wasm-smith/target/release"));
+    Modules.addAsImportTo(Modules.Wasmstint, modules.wasmstint, validation_module);
+
+    const wasm_smith = b.createModule(.{
+        .root_source_file = b.path("fuzz/wasm-smith/src/wrapper.zig"),
+        .link_libc = true,
+        .target = options.project.target,
+        .optimize = options.project.optimize,
+    });
+    for (rust_include_paths.items) |include_path| {
+        wasm_smith.addLibraryPath(include_path);
+    }
     wasm_smith.linkSystemLibrary(
         "wasmstint_wasm_smith",
         .{ .preferred_link_mode = .dynamic, .search_strategy = .paths_first },
     );
-    validation_test.root_module.addImport("wasm-smith", wasm_smith);
-    Modules.addAsImportTo(Modules.Wasmstint, modules.wasmstint, validation_test.root_module);
+    validation_module.addImport("wasm-smith", wasm_smith);
 
-    const validation_run = &b.addRunArtifact(validation_test).step;
-    validation_run.max_rss = ByteSize.mib(16).bytes; // arbitrary value
-    fuzz_step.dependOn(validation_run);
+    const llvm_harness_lib = b.addLibrary(.{
+        .name = "fuzz-validation-llvm",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("fuzz/harness/llvm.zig"),
+            .target = options.project.target,
+            .optimize = options.project.optimize,
+        }),
+        .max_rss = ByteSize.mib(268).bytes, // arbitrary amount
+        .use_llvm = options.project.use_llvm.interpreter,
+        // .use_lld = options.project.use_llvm.interpreter,
+    });
+    llvm_harness_lib.sanitize_coverage_trace_pc_guard = true; // required for AFL++
+    llvm_harness_lib.root_module.addImport("target", validation_module);
+
+    // TODO(zig): find way to limit parallelism of afl-clang-lto https://github.com/ziglang/zig/issues/14934
+    const afl_clang_lto = b.addSystemCommand(
+        &.{ "afl-clang-lto", "-g", "-Wall", "-fsanitize=fuzzer", "-lwasmstint_wasm_smith" },
+    );
+    afl_clang_lto.step.max_rss = ByteSize.mib(268).bytes; // arbitrary amount
+    afl_clang_lto.addArg("-o");
+    const afl_exe = afl_clang_lto.addOutputFileArg("fuzz-validation");
+    afl_clang_lto.addArtifactArg(llvm_harness_lib);
+    for (rust_include_paths.items) |include_path| {
+        afl_clang_lto.addArg("-L");
+        afl_clang_lto.addDirectoryArg(include_path);
+    }
+
+    const standalone_exe = b.addExecutable(.{
+        .name = "fuzz-validation-standalone",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("fuzz/harness/main.zig"),
+            .target = options.project.target,
+            .optimize = options.project.optimize,
+        }),
+        .max_rss = ByteSize.mib(268).bytes, // arbitrary amount
+        .use_llvm = options.project.use_llvm.interpreter,
+    });
+    standalone_exe.root_module.addImport("target", validation_module);
+    Modules.addAsImportTo(Modules.FileContent, modules.file_content, standalone_exe.root_module);
+
+    if (fuzz_target != FuzzTarget.validation) {
+        fuzz_step.dependOn(&b.addFail("Specify fuzz target with -Dfuzz-target").step);
+        return;
+    }
+
+    fuzz_step.dependOn(switch (fuzz_runner) {
+        .afl => afl: {
+            const run_afl = Step.Run.create(b, b.fmt("run AFL++ {t}", .{fuzz_target.?}));
+            run_afl.addFileArg(afl_exe);
+            if (b.args) |args| {
+                run_afl.addArgs(args);
+            }
+
+            break :afl &run_afl.step;
+        },
+        .standalone => standalone: {
+            const run_standalone = b.addRunArtifact(standalone_exe);
+            if (b.args) |args| {
+                run_standalone.addArgs(args);
+            }
+
+            break :standalone &run_standalone.step;
+        },
+    });
 }
 
 fn buildWasiSamplePrograms(
