@@ -68,6 +68,7 @@ pub const Configuration = extern struct {
     allow_invalid_funcs: Flag = .disabled,
     wide_arithmetic_enabled: Flag = .disabled,
     extended_const_enabled: Flag = .disabled,
+    multi_memory_enabled: Flag = .disabled,
 };
 
 pub const ModuleBuffer = extern struct {

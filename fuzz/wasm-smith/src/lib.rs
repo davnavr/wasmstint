@@ -100,6 +100,8 @@ pub struct Configuration<'a> {
     pub allow_invalid_funcs: Flag,
     pub wide_arithmetic_enabled: Flag,
     pub extended_const_enabled: Flag,
+    /// Sets [`wasm_smith::Config.max_memories`].
+    pub multi_memory_enabled: Flag,
 }
 
 #[repr(C)]
@@ -176,7 +178,15 @@ fn generate_module(input: &[u8], config: &Configuration) -> arbitrary::Result<Ve
         max_imports: u.int_in_range(0..=MAX_MAXIMUM)?,
         max_instances: 0,
         max_instructions: u.int_in_range(0..=MAX_MAXIMUM)?,
-        max_memories: u.int_in_range(0..=100)?,
+        max_memories: {
+            let max_max_memory = if config.multi_memory_enabled.try_to_bool(&mut u)? {
+                100
+            } else {
+                1
+            };
+
+            u.int_in_range(0..=max_max_memory)
+        }?,
         max_memory32_bytes: u.int_in_range(0..=u32::MAX as u64 + 1)?,
         max_memory64_bytes: u.int_in_range(0..=u64::MAX as u128 + 1)?,
         max_modules: 0,
