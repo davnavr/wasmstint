@@ -812,10 +812,12 @@ fn buildFuzzers(
             .optimize = options.project.optimize,
         }),
         .max_rss = ByteSize.mib(268).bytes, // arbitrary amount
-        .use_llvm = options.project.use_llvm.interpreter,
+        .use_llvm = true,
         // .use_lld = options.project.use_llvm.interpreter,
     });
     llvm_harness_lib.sanitize_coverage_trace_pc_guard = true; // required for AFL++
+    llvm_harness_lib.lto = .full;
+    llvm_harness_lib.bundle_compiler_rt = true;
     llvm_harness_lib.root_module.addImport("target", validation_module);
 
     // TODO(zig): find way to limit parallelism of afl-clang-lto https://github.com/ziglang/zig/issues/14934
