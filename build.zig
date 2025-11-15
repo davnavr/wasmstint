@@ -809,10 +809,10 @@ fn buildFuzzers(
     );
     validation_module.addImport("wasm-smith", wasm_smith);
 
-    const llvm_harness_lib = b.addLibrary(.{
+    const libfuzzer_harness_lib = b.addLibrary(.{
         .name = "fuzz-validation-llvm",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("fuzz/harness/llvm.zig"),
+            .root_source_file = b.path("fuzz/harness/libfuzzer.zig"),
             .target = options.project.target,
             .optimize = options.project.optimize,
         }),
@@ -820,21 +820,22 @@ fn buildFuzzers(
         .use_llvm = true,
         // .use_lld = options.project.use_llvm.interpreter,
     });
-    llvm_harness_lib.sanitize_coverage_trace_pc_guard = true; // required for AFL++
-    llvm_harness_lib.lto = .full;
-    llvm_harness_lib.bundle_compiler_rt = true;
-    llvm_harness_lib.root_module.addImport("target", validation_module);
+    libfuzzer_harness_lib.sanitize_coverage_trace_pc_guard = true; // required for AFL++
+    libfuzzer_harness_lib.lto = .full;
+    libfuzzer_harness_lib.bundle_compiler_rt = true;
+    libfuzzer_harness_lib.root_module.addImport("target", validation_module);
 
     // TODO(zig): find way to limit parallelism of afl-clang-lto https://github.com/ziglang/zig/issues/14934
     const afl_clang_lto = b.addSystemCommand(
         &.{ "afl-clang-lto", "-g", "-Wall", "-fsanitize=fuzzer", "-lwasmstint_wasm_smith" },
     );
+    afl_clang_lto.disable_zig_progress = true;
     afl_clang_lto.step.max_rss = ByteSize.mib(268).bytes; // arbitrary amount
 
     afl_clang_lto.addArg("-o");
     const afl_exe = afl_clang_lto.addOutputFileArg("fuzz-validation");
 
-    afl_clang_lto.addArtifactArg(llvm_harness_lib);
+    afl_clang_lto.addArtifactArg(libfuzzer_harness_lib);
 
     for (rust_include_paths.items) |include_path| {
         afl_clang_lto.addArg("-L");
