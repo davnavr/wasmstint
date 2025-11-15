@@ -1,24 +1,12 @@
-const configuration = wasm_smith.Configuration{};
-
 pub fn testOne(
-    input: []const u8,
+    wasm_module: []const u8,
     scratch: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
-    harness: anytype,
 ) error{ OutOfMemory, SkipZigTest }!void {
-    var wasm_buffer: wasm_smith.ModuleBuffer = undefined;
-    wasm_smith.generateModule(input, &wasm_buffer, &configuration) catch |e| return switch (e) {
-        error.BadInput => error.SkipZigTest,
-    };
-
-    defer wasm_smith.freeModule(&wasm_buffer);
-
-    harness.generatedModule(wasm_buffer.bytes());
-
     var diagnostic_writer = try std.Io.Writer.Allocating.initCapacity(allocator, 128);
     defer diagnostic_writer.deinit();
 
-    var wasm = wasm_buffer.bytes();
+    var wasm: []const u8 = wasm_module;
     const module = wasmstint.Module.parse(
         allocator,
         &wasm,
@@ -98,5 +86,4 @@ pub fn testOne(
 // }
 
 const std = @import("std");
-const wasm_smith = @import("wasm-smith");
 const wasmstint = @import("wasmstint");

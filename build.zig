@@ -807,7 +807,6 @@ fn buildFuzzers(
         "wasmstint_wasm_smith",
         .{ .preferred_link_mode = .dynamic, .search_strategy = .paths_first },
     );
-    validation_module.addImport("wasm-smith", wasm_smith);
 
     const libfuzzer_harness_lib = b.addLibrary(.{
         .name = "fuzz-validation-llvm",
@@ -824,6 +823,7 @@ fn buildFuzzers(
     libfuzzer_harness_lib.lto = .full;
     libfuzzer_harness_lib.bundle_compiler_rt = true;
     libfuzzer_harness_lib.root_module.addImport("target", validation_module);
+    libfuzzer_harness_lib.root_module.addImport("wasm-smith", wasm_smith);
 
     // TODO(zig): find way to limit parallelism of afl-clang-lto https://github.com/ziglang/zig/issues/14934
     const afl_clang_lto = b.addSystemCommand(
@@ -858,6 +858,7 @@ fn buildFuzzers(
         .use_llvm = options.project.use_llvm.interpreter,
     });
     standalone_exe.root_module.addImport("target", validation_module);
+    standalone_exe.root_module.addImport("wasm-smith", wasm_smith);
     Modules.addAsImportTo(Modules.FileContent, modules.file_content, standalone_exe.root_module);
     Modules.addAsImportTo(Modules.CliArgs, modules.cli_args, standalone_exe.root_module);
 

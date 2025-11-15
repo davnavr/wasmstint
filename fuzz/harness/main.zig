@@ -16,52 +16,19 @@ const Arguments = cli_args.CliArgs(.{
             },
             "PATH",
         ),
+        cli_args.Flag.string(
+            .{
+                .long = "replace-module",
+                .description = "Path to WASM module to use instead",
+            },
+            "PATH",
+        ),
     },
 });
 
 const Input = union(enum) {
     stdin,
     path: [:0]const u8,
-};
-
-const Harness = struct {
-    const SaveError = std.Io.File.OpenError || std.fs.File.WriteError;
-
-    save_module_path: ?[:0]const u8,
-    file_err: ?SaveError = null,
-    io: std.Io,
-
-    fn saveGeneratedModule(
-        harness: *Harness,
-        path: [:0]const u8,
-        module: []const u8,
-    ) SaveError!void {
-        const file = try std.Io.Dir.cwd().createFile(harness.io, path, .{});
-        defer file.close(harness.io);
-
-        var writer = std.fs.File.adaptFromNewApi(file).writerStreaming(&.{});
-        writer.interface.writeAll(module) catch {
-            harness.file_err = writer.err;
-        };
-
-        std.debug.print("saved module to {f}\n", .{std.unicode.fmtUtf8(path)});
-    }
-
-    pub fn generatedModule(harness: *Harness, module: []const u8) void {
-        const save_path = if (harness.save_module_path) |path| path else return;
-        harness.saveGeneratedModule(save_path, module) catch |e| {
-            harness.file_err = e;
-        };
-    }
-
-    fn testOne(
-        harness: *Harness,
-        input: []const u8,
-        scratch: *std.heap.ArenaAllocator,
-        allocator: std.mem.Allocator,
-    ) anyerror!void {
-        try @import("target").testOne(input, scratch, allocator, harness);
-    }
 };
 
 pub fn main() !u8 {
@@ -145,12 +112,50 @@ pub fn main() !u8 {
 
     defer _ = scratch.reset(.retain_capacity);
 
-    var harness = Harness{
-        .save_module_path = arguments.@"save-module",
-        .io = io,
+    // Generate the WASM module
+    const configuration = wasm_smith.Configuration{};
+    var wasm_buffer: wasm_smith.ModuleBuffer = undefined;
+    wasm_smith.generateModule(input, &wasm_buffer, &configuration) catch |e| return switch (e) {
+        error.BadInput => error.SkipZigTest,
     };
 
-    harness.testOne(input, &scratch, allocator.allocator()) catch |e| switch (e) {
+    defer wasm_smith.freeModule(&wasm_buffer);
+
+    if (arguments.@"save-module") |save_module_path| {
+        const fmt_path = std.unicode.fmtUtf8(save_module_path);
+        const file = std.Io.Dir.cwd().createFile(io, save_module_path, .{}) catch |e| {
+            std.debug.print("error opening path to save module {f}: {t}\n", .{ fmt_path, e });
+            return 1;
+        };
+        defer file.close(io);
+
+        var writer = std.fs.File.adaptFromNewApi(file).writerStreaming(&.{});
+        writer.interface.writeAll(wasm_buffer.bytes()) catch {
+            std.debug.print("error saving module to {f}: {t}", .{ fmt_path, writer.err.? });
+            return 1;
+        };
+    }
+
+    var replaced_module: file_content.FileContent = undefined;
+    const wasm: []const u8 = if (arguments.@"replace-module") |replace_module_path| replace: {
+        replaced_module = file_content.readFilePortable(
+            io,
+            std.Io.Dir.cwd(),
+            replace_module_path,
+            allocator.allocator(),
+        ) catch |e| {
+            std.debug.print(
+                "could not open module file {f}: {t}\n",
+                .{ std.unicode.fmtUtf8(replace_module_path), e },
+            );
+            return 1;
+        };
+        break :replace replaced_module.contents();
+    } else wasm_buffer.bytes();
+
+    defer if (arguments.@"replace-module" != null) replaced_module.deinit();
+
+    @import("target").testOne(wasm, &scratch, allocator.allocator()) catch |e| switch (e) {
         error.SkipZigTest => {
             std.debug.print("test input rejected\n", .{});
             return 0;
@@ -158,14 +163,10 @@ pub fn main() !u8 {
         else => return e,
     };
 
-    if (harness.file_err) |e| {
-        std.debug.print("error saving module: {t}", .{e});
-        return 1;
-    }
-
     return 0;
 }
 
 const std = @import("std");
 const file_content = @import("file_content");
 const cli_args = @import("cli_args");
+const wasm_smith = @import("wasm-smith");
