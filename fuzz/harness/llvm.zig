@@ -2,12 +2,16 @@
 //!
 //! [`libFuzzer`]: https://www.llvm.org/docs/LibFuzzer.html
 
+const Harness = struct {
+    pub fn generatedModule(_: Harness, _: []const u8) void {}
+};
+
 inline fn testOne(
     input: []const u8,
     scratch: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
 ) anyerror!void {
-    return @import("target").testOne(input, scratch, allocator);
+    return @import("target").testOne(input, scratch, allocator, Harness{});
 }
 
 const Status = enum(c_int) {

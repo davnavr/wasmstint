@@ -1,28 +1,70 @@
-const testOne: fn (
-    []const u8,
-    *std.heap.ArenaAllocator,
-    std.mem.Allocator,
-) anyerror!void = @import("target").testOne;
+const Arguments = cli_args.CliArgs(.{
+    .description = "Standalone fuzz test case executor.",
+    .flags = &[_]cli_args.Flag{
+        cli_args.Flag.string(
+            .{
+                .long = "input",
+                .short = 'i',
+                .description = "Path to test input, or - to use stdin",
+            },
+            "PATH",
+        ).required(),
+        cli_args.Flag.string(
+            .{
+                .long = "save-module",
+                .description = "Path where the generated WASM module is written",
+            },
+            "PATH",
+        ),
+    },
+});
 
 const Input = union(enum) {
     stdin,
     path: [:0]const u8,
 };
 
+const Harness = struct {
+    const SaveError = std.Io.File.OpenError || std.fs.File.WriteError;
+
+    save_module_path: ?[:0]const u8,
+    file_err: ?SaveError = null,
+    io: std.Io,
+
+    fn saveGeneratedModule(
+        harness: *Harness,
+        path: [:0]const u8,
+        module: []const u8,
+    ) SaveError!void {
+        const file = try std.Io.Dir.cwd().createFile(harness.io, path, .{});
+        defer file.close(harness.io);
+
+        var writer = std.fs.File.adaptFromNewApi(file).writerStreaming(&.{});
+        writer.interface.writeAll(module) catch {
+            harness.file_err = writer.err;
+        };
+
+        std.debug.print("saved module to {f}\n", .{std.unicode.fmtUtf8(path)});
+    }
+
+    pub fn generatedModule(harness: *Harness, module: []const u8) void {
+        const save_path = if (harness.save_module_path) |path| path else return;
+        harness.saveGeneratedModule(save_path, module) catch |e| {
+            harness.file_err = e;
+        };
+    }
+
+    fn testOne(
+        harness: *Harness,
+        input: []const u8,
+        scratch: *std.heap.ArenaAllocator,
+        allocator: std.mem.Allocator,
+    ) anyerror!void {
+        try @import("target").testOne(input, scratch, allocator, harness);
+    }
+};
+
 pub fn main() !u8 {
-    const input_source = input: {
-        if (std.os.argv.len < 2) {
-            std.debug.print("specify path to input file or - for stdin\n", .{});
-            return 2;
-        }
-
-        const input_path: [:0]const u8 = std.mem.sliceTo(std.os.argv[1], 0);
-        break :input if (std.mem.eql(u8, input_path, "-"))
-            Input.stdin
-        else
-            Input{ .path = input_path };
-    };
-
     var allocator = std.heap.DebugAllocator(.{ .safety = true }).init;
     defer {
         const leak_count = allocator.detectLeaks();
@@ -35,6 +77,21 @@ pub fn main() !u8 {
 
     var scratch = std.heap.ArenaAllocator.init(allocator.allocator());
     defer scratch.deinit();
+
+    var arguments_arena = std.heap.ArenaAllocator.init(allocator.allocator());
+    defer arguments_arena.deinit();
+
+    const arguments = args: {
+        var parser: Arguments = undefined;
+        parser.init();
+        break :args parser.programArguments(&scratch, &arguments_arena) catch @panic("args oom");
+    };
+    _ = scratch.reset(.retain_capacity);
+
+    const input_source = if (std.mem.eql(u8, arguments.input, "-"))
+        Input.stdin
+    else
+        Input{ .path = arguments.input };
 
     var io_threaded = std.Io.Threaded.init_single_threaded;
     const io = io_threaded.ioBasic();
@@ -88,7 +145,12 @@ pub fn main() !u8 {
 
     defer _ = scratch.reset(.retain_capacity);
 
-    testOne(input, &scratch, allocator.allocator()) catch |e| switch (e) {
+    var harness = Harness{
+        .save_module_path = arguments.@"save-module",
+        .io = io,
+    };
+
+    harness.testOne(input, &scratch, allocator.allocator()) catch |e| switch (e) {
         error.SkipZigTest => {
             std.debug.print("test input rejected\n", .{});
             return 0;
@@ -96,8 +158,14 @@ pub fn main() !u8 {
         else => return e,
     };
 
+    if (harness.file_err) |e| {
+        std.debug.print("error saving module: {t}", .{e});
+        return 1;
+    }
+
     return 0;
 }
 
 const std = @import("std");
 const file_content = @import("file_content");
+const cli_args = @import("cli_args");

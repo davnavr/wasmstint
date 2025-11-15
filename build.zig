@@ -159,6 +159,7 @@ pub fn build(b: *Build) void {
     buildFuzzers(b, .{ .project = &project_options }, .{
         .wasmstint = modules.wasmstint,
         .file_content = modules.file_content,
+        .cli_args = modules.cli_args,
     });
 
     buildWasiSamplePrograms(b, &steps, .{ .project = &project_options }, .{
@@ -732,7 +733,11 @@ const Wasip1TestRunner = struct {
 fn buildFuzzers(
     b: *Build,
     options: struct { project: *const ProjectOptions },
-    modules: struct { wasmstint: Modules.Wasmstint, file_content: Modules.FileContent },
+    modules: struct {
+        wasmstint: Modules.Wasmstint,
+        file_content: Modules.FileContent,
+        cli_args: Modules.CliArgs,
+    },
 ) void {
     const fuzz_zig_step = b.step("fuzz-zig", "Run integrated fuzz tests");
     fuzz_zig_step.dependOn(
@@ -836,6 +841,7 @@ fn buildFuzzers(
         afl_clang_lto.addDirectoryArg(include_path);
     }
 
+    // TODO: Remove condition, remove -v flag causes zig to not use cached result
     if (b.verbose) {
         afl_clang_lto.addArg("-v");
     }
@@ -852,6 +858,7 @@ fn buildFuzzers(
     });
     standalone_exe.root_module.addImport("target", validation_module);
     Modules.addAsImportTo(Modules.FileContent, modules.file_content, standalone_exe.root_module);
+    Modules.addAsImportTo(Modules.CliArgs, modules.cli_args, standalone_exe.root_module);
 
     if (fuzz_target != FuzzTarget.validation) {
         fuzz_step.dependOn(&b.addFail("Specify fuzz target with -Dfuzz-target").step);

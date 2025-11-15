@@ -4,6 +4,7 @@ pub fn testOne(
     input: []const u8,
     scratch: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
+    harness: anytype,
 ) error{ OutOfMemory, SkipZigTest }!void {
     var wasm_buffer: wasm_smith.ModuleBuffer = undefined;
     wasm_smith.generateModule(input, &wasm_buffer, &configuration) catch |e| return switch (e) {
@@ -11,6 +12,8 @@ pub fn testOne(
     };
 
     defer wasm_smith.freeModule(&wasm_buffer);
+
+    harness.generatedModule(wasm_buffer.bytes());
 
     var diagnostic_writer = try std.Io.Writer.Allocating.initCapacity(allocator, 128);
     defer diagnostic_writer.deinit();
