@@ -592,6 +592,30 @@ fn buildWabtTools(b: *Build, wabt_dep: *Build.Dependency) WabtTools {
     return WabtTools{ .wast2json = wast2json_exe };
 }
 
+fn buildWastTest(
+    b: *Build,
+    interpreter: SpectestInterp,
+    wast_path: Build.LazyPath,
+    wabt: WabtTools,
+    name: []const u8,
+) *Step {
+    std.debug.assert(std.mem.endsWith(u8, name, ".wast"));
+    var wast2json = b.addRunArtifact(wabt.wast2json);
+    wast2json.step.max_rss = ByteSize.mib(19).bytes;
+    wast2json.addFileArg(wast_path);
+    wast2json.addArgs(&.{"--output"});
+    const output_json = wast2json.addOutputFileArg(b.fmt("{s}.json", .{name[0 .. name.len - 5]}));
+
+    const run_test = b.addRunArtifact(interpreter.exe);
+    run_test.max_stdio_size = 15 * 1024 * 1024;
+    run_test.step.max_rss = ByteSize.mib(45).bytes;
+    run_test.setName(name);
+    run_test.addArg("--run");
+    run_test.addFileArg(output_json);
+    run_test.expectExitCode(0);
+    return &run_test.step;
+}
+
 fn buildSpecificationTests(
     b: *Build,
     interpreter: SpectestInterp,
@@ -606,24 +630,18 @@ fn buildSpecificationTests(
     const test_spec_step = b.step("test-spec", "Run specification tests");
 
     for (test_names) |name| {
-        var wast2json = b.addRunArtifact(wabt.wast2json);
-        wast2json.step.max_rss = ByteSize.mib(19).bytes;
         const wast_name = b.fmt("{s}.wast", .{name});
-        wast2json.addFileArg(spectest_dep.path(wast_name));
-        wast2json.addArgs(&.{"--output"});
-        const output_json = wast2json.addOutputFileArg(b.fmt("{s}.json", .{name}));
-
-        const run_test = b.addRunArtifact(interpreter.exe);
-        run_test.max_stdio_size = 15 * 1024 * 1024;
-        run_test.step.max_rss = ByteSize.mib(45).bytes;
-        run_test.setName(wast_name);
-        run_test.addArg("--run");
-        run_test.addFileArg(output_json);
-        run_test.expectExitCode(0);
-        test_spec_step.dependOn(&run_test.step);
+        test_spec_step.dependOn(
+            buildWastTest(b, interpreter, spectest_dep.path(wast_name), wabt, wast_name),
+        );
     }
 
     top_steps.@"test".dependOn(test_spec_step);
+
+    const test_fuzzed_step = b.step("test-fuzzed", "Run test cases discovered by fuzzing");
+    test_fuzzed_step.dependOn(
+        buildWastTest(b, interpreter, b.path("tests/fuzzed/validation.wast"), wabt, "validation.wast"),
+    );
 }
 
 const Wasip1Interp = struct {
