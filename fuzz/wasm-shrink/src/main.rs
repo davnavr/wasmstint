@@ -115,11 +115,15 @@ fn run(args: &Arguments, wasm: &[u8]) -> anyhow::Result<bool> {
 struct Logger;
 
 impl log::Log for Logger {
-    fn enabled(&self, _metadata: &log::Metadata) -> bool {
-        true
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.target() == "wasm_shrink" && metadata.level() <= log::Level::Info
     }
 
     fn log(&self, record: &log::Record) {
+        if !log::Log::enabled(self, record.metadata()) {
+            return;
+        }
+
         println!("{}: {}", record.level(), record.args());
     }
 
