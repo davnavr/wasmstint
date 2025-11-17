@@ -136,7 +136,7 @@ pub fn main() !u8 {
     _ = scratch.reset(.retain_capacity);
 
     // Generate the WASM module
-    const configuration = wasm_smith.Configuration{};
+    const configuration = wasm_smith.Configuration.fromTarget(target);
     var wasm_buffer: wasm_smith.ModuleBuffer = undefined;
     wasm_smith.generateModule(
         input.contents(),
@@ -187,7 +187,7 @@ pub fn main() !u8 {
 
     defer if (arguments.@"replace-module" != null) replaced_module.deinit(allocator.allocator());
 
-    @import("target").testOne(wasm, &scratch, allocator.allocator()) catch |e| switch (e) {
+    target.testOne(wasm, &scratch, allocator.allocator()) catch |e| switch (e) {
         error.SkipZigTest => {
             std.debug.print("test input rejected\n", .{});
             return 0;
@@ -199,6 +199,7 @@ pub fn main() !u8 {
 }
 
 const std = @import("std");
+const target = @import("target");
 const file_content = @import("file_content");
 const cli_args = @import("cli_args");
 const wasm_smith = @import("wasm-smith");

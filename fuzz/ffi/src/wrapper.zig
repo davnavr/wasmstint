@@ -69,6 +69,13 @@ pub const Configuration = extern struct {
     wide_arithmetic_enabled: Flag = .disabled,
     extended_const_enabled: Flag = .disabled,
     multi_memory_enabled: Flag = .disabled,
+
+    pub fn fromTarget(comptime Container: type) Configuration {
+        return if (@hasDecl(Container, "wasm_smith_config"))
+            Container.wasm_smith_config
+        else
+            Configuration{};
+    }
 };
 
 pub const ModuleBuffer = extern struct {

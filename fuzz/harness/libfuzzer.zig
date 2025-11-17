@@ -7,7 +7,7 @@ inline fn testOne(
     scratch: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
 ) anyerror!void {
-    return @import("target").testOne(wasm, scratch, allocator);
+    return target.testOne(wasm, scratch, allocator);
 }
 
 const Status = enum(c_int) {
@@ -35,7 +35,7 @@ pub export fn LLVMFuzzerTestOneInput(data_ptr: [*]const u8, data_size: usize) St
     var scratch = std.heap.ArenaAllocator.init(allocator.allocator());
     defer scratch.deinit();
 
-    const configuration = wasm_smith.Configuration{};
+    const configuration = wasm_smith.Configuration.fromTarget(target);
     var wasm_buffer: wasm_smith.ModuleBuffer = undefined;
     wasm_smith.generateModule(data, &wasm_buffer, &configuration) catch |e| return switch (e) {
         error.BadInput => {
@@ -74,3 +74,4 @@ pub export fn LLVMFuzzerTestOneInput(data_ptr: [*]const u8, data_size: usize) St
 
 const std = @import("std");
 const wasm_smith = @import("wasm-smith");
+const target = @import("target");
