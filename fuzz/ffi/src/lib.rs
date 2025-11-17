@@ -1,3 +1,5 @@
+//! Provides a C API over Rust crates used for fuzz targets.
+//!
 //! # Safety
 //!
 //! The Zig callers of these functions must ensure they do not violate Rust's aliasing rules.
@@ -7,6 +9,8 @@
 
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
+
+// pub mod wasmi_diff;
 
 // Could try to use Zig `SmpAllocator` as the global allocator here, but how does that work when the
 // Rust side is a shared object?

@@ -20,3 +20,8 @@ lto = "thin"
 wasm-smith = "0.240.0"
 # Existing dependencies of `wasm-smith`
 arbitrary = "1.4.2"
+
+# [dependencies.wasmi]
+# version = "0.51.1"
+# default-features = false
+# features = [] # No std means no serde
