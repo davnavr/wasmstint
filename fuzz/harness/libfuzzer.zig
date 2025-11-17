@@ -2,16 +2,12 @@
 //!
 //! [`libFuzzer`]: https://www.llvm.org/docs/LibFuzzer.html
 
-const Harness = struct {
-    pub fn generatedModule(_: Harness, _: []const u8) void {}
-};
-
 inline fn testOne(
-    input: []const u8,
+    wasm: []const u8,
     scratch: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
 ) anyerror!void {
-    return @import("target").testOne(input, scratch, allocator, Harness{});
+    return @import("target").testOne(wasm, scratch, allocator);
 }
 
 const Status = enum(c_int) {
@@ -25,7 +21,9 @@ const Status = enum(c_int) {
 /// https://clang.llvm.org/docs/SanitizerCoverage.html#tracing-stack-depth
 pub export threadlocal var __sancov_lowest_stack: usize = 0;
 
-pub export fn LLVMFuzzerTestOneInput(data: [*]const u8, size: usize) Status {
+pub export fn LLVMFuzzerTestOneInput(data_ptr: [*]const u8, data_size: usize) Status {
+    const data: []const u8 = data_ptr[0..data_size];
+
     var allocator = std.heap.DebugAllocator(.{ .safety = true }).init;
     defer {
         const leaks = allocator.deinit();
@@ -37,7 +35,18 @@ pub export fn LLVMFuzzerTestOneInput(data: [*]const u8, size: usize) Status {
     var scratch = std.heap.ArenaAllocator.init(allocator.allocator());
     defer scratch.deinit();
 
-    testOne(data[0..size], &scratch, allocator.allocator()) catch |e| switch (e) {
+    const configuration = wasm_smith.Configuration{};
+    var wasm_buffer: wasm_smith.ModuleBuffer = undefined;
+    wasm_smith.generateModule(data, &wasm_buffer, &configuration) catch |e| return switch (e) {
+        error.BadInput => {
+            std.debug.print("failed to generate WASM module\n", .{});
+            return Status.reject;
+        },
+    };
+
+    defer wasm_smith.freeModule(&wasm_buffer);
+
+    testOne(wasm_buffer.bytes(), &scratch, allocator.allocator()) catch |e| switch (e) {
         error.SkipZigTest => return Status.reject,
         error.OutOfMemory => {},
         else => {
@@ -64,3 +73,4 @@ pub export fn LLVMFuzzerTestOneInput(data: [*]const u8, size: usize) Status {
 }
 
 const std = @import("std");
+const wasm_smith = @import("wasm-smith");
