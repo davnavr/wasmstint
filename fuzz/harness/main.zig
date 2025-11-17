@@ -135,11 +135,11 @@ pub fn main() !u8 {
 
     _ = scratch.reset(.retain_capacity);
 
-    var input = wasm_smith.Input.init(input_src.contents());
+    var input = ffi.Input.init(input_src.contents());
 
     // Generate the WASM module
-    const configuration = wasm_smith.Configuration.fromTarget(target);
-    var wasm_buffer: wasm_smith.ModuleBuffer = undefined;
+    const configuration = ffi.Configuration.fromTarget(target);
+    var wasm_buffer: ffi.ModuleBuffer = undefined;
     wasm_buffer.generate(&input, &configuration) catch |e| return switch (e) {
         error.BadInput => {
             std.debug.print("failed to generate WASM module\n", .{});
@@ -195,4 +195,4 @@ const std = @import("std");
 const target = @import("target");
 const file_content = @import("file_content");
 const cli_args = @import("cli_args");
-const wasm_smith = @import("wasm-smith");
+const ffi = @import("ffi");

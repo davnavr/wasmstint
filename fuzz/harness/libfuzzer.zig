@@ -35,10 +35,10 @@ pub export fn LLVMFuzzerTestOneInput(data_ptr: [*]const u8, data_size: usize) St
     var scratch = std.heap.ArenaAllocator.init(allocator.allocator());
     defer scratch.deinit();
 
-    var input = wasm_smith.Input.init(data);
+    var input = ffi.Input.init(data);
 
-    const configuration = wasm_smith.Configuration.fromTarget(target);
-    var wasm_buffer: wasm_smith.ModuleBuffer = undefined;
+    const configuration = ffi.Configuration.fromTarget(target);
+    var wasm_buffer: ffi.ModuleBuffer = undefined;
     wasm_buffer.generate(&input, &configuration) catch |e| return switch (e) {
         error.BadInput => {
             std.debug.print("failed to generate WASM module\n", .{});
@@ -74,5 +74,5 @@ pub export fn LLVMFuzzerTestOneInput(data_ptr: [*]const u8, data_size: usize) St
 }
 
 const std = @import("std");
-const wasm_smith = @import("wasm-smith");
+const ffi = @import("ffi");
 const target = @import("target");

@@ -1,6 +1,6 @@
 pub fn testOne(
     wasm_module: []const u8,
-    input: *wasm_smith.Input,
+    input: *ffi.Input,
     scratch: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
 ) error{ OutOfMemory, SkipZigTest }!void {
@@ -85,4 +85,4 @@ pub fn testOne(
 
 const std = @import("std");
 const wasmstint = @import("wasmstint");
-const wasm_smith = @import("wasm-smith");
+const ffi = @import("ffi");

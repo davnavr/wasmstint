@@ -786,7 +786,7 @@ fn buildFuzzers(
 
     if (rust_include_paths.items.len == 0) {
         fuzz_step.dependOn(
-            &b.addFail("could not determine include path for wasm-smith wrapper").step,
+            &b.addFail("could not determine include path for FFI wrapper").step,
         );
     }
 
@@ -812,7 +812,7 @@ fn buildFuzzers(
     ) orelse FuzzRunner.standalone;
 
     const ffi_module = b.createModule(.{
-        .root_source_file = b.path("fuzz/ffi/src/wrapper.zig"),
+        .root_source_file = b.path("fuzz/ffi/src/ffi.zig"),
         .link_libc = true,
         .target = options.project.target,
         .optimize = options.project.optimize,
@@ -832,7 +832,7 @@ fn buildFuzzers(
         .optimize = options.project.optimize,
     });
     Modules.addAsImportTo(Modules.Wasmstint, modules.wasmstint, target_module);
-    target_module.addImport("wasm-smith", ffi_module);
+    target_module.addImport("ffi", ffi_module);
 
     const libfuzzer_harness_lib = b.addLibrary(.{
         .name = b.fmt("fuzz-{t}-libfuzzer", .{fuzz_target}),
@@ -849,7 +849,7 @@ fn buildFuzzers(
     libfuzzer_harness_lib.lto = .full;
     libfuzzer_harness_lib.bundle_compiler_rt = true;
     libfuzzer_harness_lib.root_module.addImport("target", target_module);
-    libfuzzer_harness_lib.root_module.addImport("wasm-smith", ffi_module);
+    libfuzzer_harness_lib.root_module.addImport("ffi", ffi_module);
 
     // TODO(zig): find way to limit parallelism of afl-clang-lto https://github.com/ziglang/zig/issues/14934
     const afl_clang_lto = b.addSystemCommand(
@@ -879,7 +879,7 @@ fn buildFuzzers(
         .use_llvm = options.project.use_llvm.interpreter,
     });
     standalone_exe.root_module.addImport("target", target_module);
-    standalone_exe.root_module.addImport("wasm-smith", ffi_module);
+    standalone_exe.root_module.addImport("ffi", ffi_module);
     Modules.addAsImportTo(Modules.FileContent, modules.file_content, standalone_exe.root_module);
     Modules.addAsImportTo(Modules.CliArgs, modules.cli_args, standalone_exe.root_module);
 
