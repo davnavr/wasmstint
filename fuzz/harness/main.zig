@@ -26,20 +26,20 @@ const Arguments = cli_args.CliArgs(.{
     },
 });
 
-const Input = union(enum) {
+const InputSource = union(enum) {
     stdin: StdinBuffer,
     file: file_content.FileContent,
 
     const StdinBuffer = std.ArrayListAligned(u8, .fromByteUnits(16));
 
-    fn contents(input: *const Input) []const u8 {
+    fn contents(input: *const InputSource) []const u8 {
         return switch (input.*) {
             .stdin => |*buf| buf.items,
             .file => |*file| file.contents(),
         };
     }
 
-    fn deinit(input: *Input, allocator: std.mem.Allocator) void {
+    fn deinit(input: *InputSource, allocator: std.mem.Allocator) void {
         switch (input.*) {
             .stdin => |*buf| buf.deinit(allocator),
             .file => |*file| file.deinit(),
@@ -53,8 +53,8 @@ const Input = union(enum) {
         path: [:0]const u8,
         scratch: *std.heap.ArenaAllocator,
         allocator: std.mem.Allocator,
-    ) !Input {
-        return if (!std.mem.eql(u8, path, "-")) Input{
+    ) !InputSource {
+        return if (!std.mem.eql(u8, path, "-")) InputSource{
             .file = try file_content.readFilePortable(io, dir, path, scratch.allocator()),
         } else stdin: {
             var buf = StdinBuffer.empty;
@@ -70,7 +70,7 @@ const Input = union(enum) {
                 error.ReadFailed => streaming.err.?,
             };
 
-            break :stdin Input{ .stdin = buf };
+            break :stdin InputSource{ .stdin = buf };
         };
     }
 };
@@ -111,7 +111,7 @@ pub fn main() !u8 {
     const io = io_threaded.ioBasic();
 
     const cwd = std.Io.Dir.cwd();
-    var input = Input.read(
+    var input_src = InputSource.read(
         io,
         cwd,
         arguments.input,
@@ -131,22 +131,22 @@ pub fn main() !u8 {
         return 1;
     };
 
-    defer input.deinit(allocator.allocator());
+    defer input_src.deinit(allocator.allocator());
 
     _ = scratch.reset(.retain_capacity);
+
+    var input = wasm_smith.Input.init(input_src.contents());
 
     // Generate the WASM module
     const configuration = wasm_smith.Configuration.fromTarget(target);
     var wasm_buffer: wasm_smith.ModuleBuffer = undefined;
-    wasm_smith.generateModule(
-        input.contents(),
-        &wasm_buffer,
-        &configuration,
-    ) catch |e| return switch (e) {
-        error.BadInput => error.SkipZigTest,
+    wasm_buffer.generate(&input, &configuration) catch |e| return switch (e) {
+        error.BadInput => {
+            std.debug.print("failed to generate WASM module\n", .{});
+            return 1;
+        },
     };
-
-    defer wasm_smith.freeModule(&wasm_buffer);
+    defer wasm_buffer.deinit();
 
     if (arguments.@"save-module") |save_module_path| {
         const fmt_path = std.unicode.fmtUtf8(save_module_path);
@@ -167,9 +167,9 @@ pub fn main() !u8 {
         };
     }
 
-    var replaced_module: Input = undefined;
+    var replaced_module: InputSource = undefined;
     const wasm: []const u8 = if (arguments.@"replace-module") |replace_module_path| replace: {
-        replaced_module = Input.read(
+        replaced_module = InputSource.read(
             io,
             cwd,
             replace_module_path,
@@ -187,14 +187,7 @@ pub fn main() !u8 {
 
     defer if (arguments.@"replace-module" != null) replaced_module.deinit(allocator.allocator());
 
-    target.testOne(wasm, &scratch, allocator.allocator()) catch |e| switch (e) {
-        error.SkipZigTest => {
-            std.debug.print("test input rejected\n", .{});
-            return 0;
-        },
-        else => return e,
-    };
-
+    try target.testOne(wasm, &input, &scratch, allocator.allocator());
     return 0;
 }
 

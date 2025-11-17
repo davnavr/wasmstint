@@ -113,9 +113,33 @@ pub struct ModuleBuffer {
     pub cap: usize,
 }
 
-fn generate_module(input: &[u8], config: &Configuration) -> arbitrary::Result<Vec<u8>> {
-    let mut u = arbitrary::Unstructured::new(input);
+#[repr(C)]
+pub struct InputSlice {
+    pub ptr: NonNull<u8>,
+    pub len: usize,
+}
 
+struct Input<'a, 'b> {
+    ffi: &'b mut InputSlice,
+    u: arbitrary::Unstructured<'a>,
+}
+
+impl Drop for Input<'_, '_> {
+    fn drop(&mut self) {
+        let input = NonNull::<[u8]>::from(
+            std::mem::replace(&mut self.u, arbitrary::Unstructured::new(&mut [])).take_rest(),
+        );
+        *self.ffi = InputSlice {
+            len: input.len(),
+            ptr: input.cast(),
+        };
+    }
+}
+
+fn generate_module(
+    u: &mut arbitrary::Unstructured,
+    config: &Configuration,
+) -> arbitrary::Result<Vec<u8>> {
     const MAX_MAXIMUM: usize = 1000;
 
     // Slightly different from `<wasm_smith::Config as arbitrary::Arbitrary>::arbitrary()`
@@ -123,7 +147,7 @@ fn generate_module(input: &[u8], config: &Configuration) -> arbitrary::Result<Ve
         available_imports: config.available_imports.try_to_non_empty_vec(),
         exports: config.exports.try_to_non_empty_vec(),
         module_shape: config.module_shape.try_to_non_empty_vec(),
-        allow_start_export: config.allow_start_export.try_to_bool(&mut u)?,
+        allow_start_export: config.allow_start_export.try_to_bool(u)?,
         allowed_instructions: {
             use wasm_smith::InstructionKind;
 
@@ -160,15 +184,15 @@ fn generate_module(input: &[u8], config: &Configuration) -> arbitrary::Result<Ve
 
             wasm_smith::InstructionKinds::new(&selected[0..selected_len])
         },
-        allow_floats: config.allow_floats.try_to_bool(&mut u)?,
-        bulk_memory_enabled: config.bulk_memory_enabled.try_to_bool(&mut u)?,
-        canonicalize_nans: config.canonicalize_nans.try_to_bool(&mut u)?,
-        disallow_traps: config.disallow_traps.try_to_bool(&mut u)?,
-        exceptions_enabled: config.exceptions_enabled.try_to_bool(&mut u)?,
-        export_everything: config.export_everything.try_to_bool(&mut u)?,
-        gc_enabled: config.gc_enabled.try_to_bool(&mut u)?,
-        custom_page_sizes_enabled: config.custom_page_sizes_enabled.try_to_bool(&mut u)?,
-        generate_custom_sections: config.generate_custom_sections.try_to_bool(&mut u)?,
+        allow_floats: config.allow_floats.try_to_bool(u)?,
+        bulk_memory_enabled: config.bulk_memory_enabled.try_to_bool(u)?,
+        canonicalize_nans: config.canonicalize_nans.try_to_bool(u)?,
+        disallow_traps: config.disallow_traps.try_to_bool(u)?,
+        exceptions_enabled: config.exceptions_enabled.try_to_bool(u)?,
+        export_everything: config.export_everything.try_to_bool(u)?,
+        gc_enabled: config.gc_enabled.try_to_bool(u)?,
+        custom_page_sizes_enabled: config.custom_page_sizes_enabled.try_to_bool(u)?,
+        generate_custom_sections: config.generate_custom_sections.try_to_bool(u)?,
         max_aliases: u.int_in_range(0..=MAX_MAXIMUM)?,
         max_components: 0,
         max_data_segments: u.int_in_range(0..=MAX_MAXIMUM)?,
@@ -181,7 +205,7 @@ fn generate_module(input: &[u8], config: &Configuration) -> arbitrary::Result<Ve
         max_instances: 0,
         max_instructions: u.int_in_range(0..=MAX_MAXIMUM)?,
         max_memories: {
-            let max_max_memory = if config.multi_memory_enabled.try_to_bool(&mut u)? {
+            let max_max_memory = if config.multi_memory_enabled.try_to_bool(u)? {
                 100
             } else {
                 1
@@ -199,7 +223,7 @@ fn generate_module(input: &[u8], config: &Configuration) -> arbitrary::Result<Ve
         max_type_size: 1000,
         max_types: u.int_in_range(0..=MAX_MAXIMUM)?,
         max_values: 0,
-        memory64_enabled: config.memory64_enabled.try_to_bool(&mut u)?,
+        memory64_enabled: config.memory64_enabled.try_to_bool(u)?,
         memory_offset_choices: wasm_smith::MemoryOffsetChoices(
             config.memory_offset_choices.a,
             config.memory_offset_choices.b,
@@ -218,40 +242,41 @@ fn generate_module(input: &[u8], config: &Configuration) -> arbitrary::Result<Ve
         min_tags: 0,
         min_types: 0,
         min_uleb_size: u8::saturating_sub(u.int_in_range(0..=10)?, 5),
-        multi_value_enabled: config.multi_value_enabled.try_to_bool(&mut u)?,
-        reference_types_enabled: config.reference_types_enabled.try_to_bool(&mut u)?,
-        relaxed_simd_enabled: config.relaxed_simd_enabled.try_to_bool(&mut u)?,
-        saturating_float_to_int_enabled: config
-            .saturating_float_to_int_enabled
-            .try_to_bool(&mut u)?,
-        sign_extension_ops_enabled: config.sign_extension_ops_enabled.try_to_bool(&mut u)?,
+        multi_value_enabled: config.multi_value_enabled.try_to_bool(u)?,
+        reference_types_enabled: config.reference_types_enabled.try_to_bool(u)?,
+        relaxed_simd_enabled: config.relaxed_simd_enabled.try_to_bool(u)?,
+        saturating_float_to_int_enabled: config.saturating_float_to_int_enabled.try_to_bool(u)?,
+        sign_extension_ops_enabled: config.sign_extension_ops_enabled.try_to_bool(u)?,
         shared_everything_threads_enabled: config
             .shared_everything_threads_enabled
-            .try_to_bool(&mut u)?,
-        simd_enabled: config.simd_enabled.try_to_bool(&mut u)?,
-        tail_call_enabled: config.tail_call_enabled.try_to_bool(&mut u)?,
-        table_max_size_required: config.table_max_size_required.try_to_bool(&mut u)?,
-        threads_enabled: config.threads_enabled.try_to_bool(&mut u)?,
-        allow_invalid_funcs: config.allow_invalid_funcs.try_to_bool(&mut u)?,
-        wide_arithmetic_enabled: config.wide_arithmetic_enabled.try_to_bool(&mut u)?,
-        extended_const_enabled: config.extended_const_enabled.try_to_bool(&mut u)?,
+            .try_to_bool(u)?,
+        simd_enabled: config.simd_enabled.try_to_bool(u)?,
+        tail_call_enabled: config.tail_call_enabled.try_to_bool(u)?,
+        table_max_size_required: config.table_max_size_required.try_to_bool(u)?,
+        threads_enabled: config.threads_enabled.try_to_bool(u)?,
+        allow_invalid_funcs: config.allow_invalid_funcs.try_to_bool(u)?,
+        wide_arithmetic_enabled: config.wide_arithmetic_enabled.try_to_bool(u)?,
+        extended_const_enabled: config.extended_const_enabled.try_to_bool(u)?,
     };
 
-    Ok(wasm_smith::Module::new(config, &mut u)?.to_bytes())
+    Ok(wasm_smith::Module::new(config, u)?.to_bytes())
 }
 
 /// Thin wrapper over [`wasm-smith`].
 #[unsafe(no_mangle)]
 pub extern "C" fn wasmstint_fuzz_generate_module(
-    input_ptr: NonNull<u8>,
-    input_len: usize,
+    input: &mut InputSlice,
     config: &Configuration,
     buffer: &mut MaybeUninit<ModuleBuffer>,
 ) -> bool {
-    let input: &[u8] =
-        unsafe { NonNull::<[u8]>::slice_from_raw_parts(input_ptr, input_len).as_ref() };
+    let mut input = Input {
+        u: arbitrary::Unstructured::new(unsafe {
+            NonNull::<[u8]>::slice_from_raw_parts(input.ptr, input.len).as_mut()
+        }),
+        ffi: input,
+    };
 
-    match generate_module(input, config) {
+    match generate_module(&mut input.u, config) {
         Ok(bytes) => {
             let mut bytes = std::mem::ManuallyDrop::<Vec<u8>>::new(bytes);
             let cap = bytes.capacity();

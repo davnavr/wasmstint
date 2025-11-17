@@ -1,8 +1,11 @@
 pub fn testOne(
     wasm_module: []const u8,
+    input: *wasm_smith.Input,
     scratch: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
 ) error{ OutOfMemory, SkipZigTest }!void {
+    _ = input;
+
     var diagnostic_writer = try std.Io.Writer.Allocating.initCapacity(allocator, 128);
     defer diagnostic_writer.deinit();
 
@@ -14,14 +17,10 @@ pub fn testOne(
         .{ .diagnostics = .init(&diagnostic_writer.writer) },
     ) catch |e| switch (e) {
         error.OutOfMemory => |oom| return oom,
-        error.InvalidWasm, error.MalformedWasm => if (diagnostic_writer.written().len <= 4) {
-            @panic("no diagnostic was written");
-        } else {
-            std.debug.panic(
-                "module validation error {t}: {s}",
-                .{ e, diagnostic_writer.written() },
-            );
-        },
+        error.InvalidWasm, error.MalformedWasm => std.debug.panic(
+            "module validation error {t}: {s}",
+            .{ e, diagnostic_writer.written() },
+        ),
         error.WasmImplementationLimit => return,
     };
     defer module.deinitLeakCodeEntries(allocator);
@@ -41,11 +40,10 @@ pub fn testOne(
         .init(&diagnostic_writer.writer),
     ) catch |e| switch (e) {
         error.OutOfMemory => |oom| return oom,
-        error.InvalidWasm, error.MalformedWasm => if (diagnostic_writer.written().len <= 4) {
-            @panic("no diagnostic was written");
-        } else {
-            std.debug.panic("code validation error {t}: {s}", .{ e, diagnostic_writer.written() });
-        },
+        error.InvalidWasm, error.MalformedWasm => std.debug.panic(
+            "code validation error {t}: {s}",
+            .{ e, diagnostic_writer.written() },
+        ),
         error.WasmImplementationLimit => return,
     };
 
@@ -87,3 +85,4 @@ pub fn testOne(
 
 const std = @import("std");
 const wasmstint = @import("wasmstint");
+const wasm_smith = @import("wasm-smith");

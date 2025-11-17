@@ -765,7 +765,7 @@ fn buildFuzzers(
     //     ).step,
     // );
 
-    const fuzz_step = b.step("fuzz-afl", "Run an AFL++ fuzz test");
+    const fuzz_step = b.step("fuzz", "Run a fuzz test");
 
     var rust_include_paths_buf: [2]Build.LazyPath = undefined;
     var rust_include_paths = std.ArrayList(Build.LazyPath).initBuffer(&rust_include_paths_buf);

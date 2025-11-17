@@ -78,6 +78,14 @@ pub const Configuration = extern struct {
     }
 };
 
+pub const Input = extern struct {
+    bytes: ByteSlice,
+
+    pub fn init(bytes: []const u8) Input {
+        return Input{ .bytes = ByteSlice.init(bytes) };
+    }
+};
+
 pub const ModuleBuffer = extern struct {
     ptr: [*]const u8,
     len: usize,
@@ -87,12 +95,25 @@ pub const ModuleBuffer = extern struct {
         std.debug.assert(buffer.len <= buffer.cap);
         return buffer.ptr[0..buffer.len];
     }
+
+    pub fn generate(
+        module: *ModuleBuffer,
+        input: *Input,
+        config: *const Configuration,
+    ) error{BadInput}!void {
+        if (!api().generateModule(input, config, module)) {
+            return error.BadInput;
+        }
+    }
+
+    pub fn deinit(module: *ModuleBuffer) void {
+        api().freeModule(module);
+    }
 };
 
 const signatures = struct {
     const GenerateModule = *const fn (
-        input_ptr: [*]const u8,
-        input_len: usize,
+        input: *Input,
         config: *const Configuration,
         buffer: *ModuleBuffer,
     ) callconv(.c) bool;
@@ -127,20 +148,6 @@ fn api() *const Api {
 
     global.once.call();
     return &global.state;
-}
-
-pub fn generateModule(
-    input: []const u8,
-    module: *ModuleBuffer,
-    config: *const Configuration,
-) error{BadInput}!void {
-    if (!api().generateModule(input.ptr, input.len, config, module)) {
-        return error.BadInput;
-    }
-}
-
-pub fn freeModule(module: *ModuleBuffer) void {
-    api().freeModule(module);
 }
 
 const std = @import("std");
