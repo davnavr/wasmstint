@@ -444,14 +444,22 @@ const ValStack = struct {
         const current_frame: *const CtrlFrame = &ctrl_stack.items[ctrl_stack.items.len - 1];
         for (0..expected.len) |i| {
             const expected_type = valTypeToVal(expected[expected.len - 1 - i]);
-            const current_height = val_stack.len() - i;
-            const actual_type: Val = if (current_height == current_frame.info.height)
-                if (current_frame.info.@"unreachable")
-                    Val.unknown
+            const actual_type: Val = ty: {
+                const current_frame_height = current_frame.info.height;
+                const current_height = std.math.sub(u16, val_stack.len(), @intCast(i)) catch
+                    if (current_frame.info.@"unreachable")
+                        break :ty Val.unknown
+                    else
+                        return errorValueStackUnderflow(current_frame_height, diag);
+
+                break :ty if (current_height == current_frame_height)
+                    if (current_frame.info.@"unreachable")
+                        Val.unknown
+                    else
+                        return errorValueStackUnderflow(current_frame_height, diag)
                 else
-                    return errorValueStackUnderflow(current_frame.info.height, diag)
-            else
-                val_stack.buf.items[current_height - 1];
+                    val_stack.buf.items[current_height - 1];
+            };
 
             if (actual_type != expected_type and actual_type != .unknown) {
                 return diag.print(
@@ -1174,7 +1182,7 @@ pub fn rawValidate(
         const opcode_tag = std.meta.intToEnum(opcodes.ByteOpcode, opcode_byte) catch
             return diag.print(.parse, "illegal opcode 0x{X:0>2}", .{opcode_byte});
 
-        // std.debug.print("validate: {} 0x{X:0>2}\n", .{ opcode_tag, opcode_byte });
+        // std.log.debug("validate: {t} 0x{X:0>2}", .{ opcode_tag, opcode_byte });
         switch (opcode_tag) {
             .@"unreachable" => markUnreachable(&val_stack, &ctrl_stack),
             .nop => {},
