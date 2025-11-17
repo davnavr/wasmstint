@@ -642,6 +642,7 @@ fn buildSpecificationTests(
     test_fuzzed_step.dependOn(
         buildWastTest(b, interpreter, b.path("tests/fuzzed/validation.wast"), wabt, "validation.wast"),
     );
+    top_steps.@"test".dependOn(test_fuzzed_step);
 }
 
 const Wasip1Interp = struct {

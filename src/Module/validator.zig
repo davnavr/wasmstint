@@ -446,13 +446,8 @@ const ValStack = struct {
             const expected_type = valTypeToVal(expected[expected.len - 1 - i]);
             const actual_type: Val = ty: {
                 const current_frame_height = current_frame.info.height;
-                const current_height = std.math.sub(u16, val_stack.len(), @intCast(i)) catch
-                    if (current_frame.info.@"unreachable")
-                        break :ty Val.unknown
-                    else
-                        return errorValueStackUnderflow(current_frame_height, diag);
-
-                break :ty if (current_height == current_frame_height)
+                const current_height = val_stack.len() -| @as(u16, @intCast(i));
+                break :ty if (current_height <= current_frame_height)
                     if (current_frame.info.@"unreachable")
                         Val.unknown
                     else
