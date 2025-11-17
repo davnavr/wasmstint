@@ -769,7 +769,7 @@ fn buildFuzzers(
     var rust_include_paths = std.ArrayList(Build.LazyPath).initBuffer(&rust_include_paths_buf);
 
     // Currently, this does not invoke `cargo build release`
-    const rust_target_dir = b.path("fuzz/wasm-smith/target");
+    const rust_target_dir = b.path("fuzz/ffi/target");
     const native_target = b.graph.host.result;
     const chosen_target = options.project.target.result;
     if (native_target.cpu.arch == chosen_target.cpu.arch and
@@ -814,7 +814,7 @@ fn buildFuzzers(
     Modules.addAsImportTo(Modules.Wasmstint, modules.wasmstint, validation_module);
 
     const wasm_smith = b.createModule(.{
-        .root_source_file = b.path("fuzz/wasm-smith/src/wrapper.zig"),
+        .root_source_file = b.path("fuzz/ffi/src/wrapper.zig"),
         .link_libc = true,
         .target = options.project.target,
         .optimize = options.project.optimize,
@@ -823,7 +823,7 @@ fn buildFuzzers(
         wasm_smith.addLibraryPath(include_path);
     }
     wasm_smith.linkSystemLibrary(
-        "wasmstint_wasm_smith",
+        "wasmstint_fuzz_ffi",
         .{ .preferred_link_mode = .dynamic, .search_strategy = .paths_first },
     );
 
@@ -846,7 +846,7 @@ fn buildFuzzers(
 
     // TODO(zig): find way to limit parallelism of afl-clang-lto https://github.com/ziglang/zig/issues/14934
     const afl_clang_lto = b.addSystemCommand(
-        &.{ "afl-clang-lto", "-g", "-Wall", "-fsanitize=fuzzer", "-lwasmstint_wasm_smith" },
+        &.{ "afl-clang-lto", "-g", "-Wall", "-fsanitize=fuzzer", "-lwasmstint_fuzz_ffi" },
     );
     afl_clang_lto.disable_zig_progress = true;
     afl_clang_lto.step.max_rss = ByteSize.mib(268).bytes; // arbitrary amount

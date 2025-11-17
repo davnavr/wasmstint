@@ -1,5 +1,3 @@
-//! Thin wrapper over [`wasm-smith`].
-//!
 //! # Safety
 //!
 //! The Zig callers of these functions must ensure they do not violate Rust's aliasing rules.
@@ -238,6 +236,7 @@ fn generate_module(input: &[u8], config: &Configuration) -> arbitrary::Result<Ve
     Ok(wasm_smith::Module::new(config, &mut u)?.to_bytes())
 }
 
+/// Thin wrapper over [`wasm-smith`].
 #[unsafe(no_mangle)]
 pub extern "C" fn wasmstint_fuzz_generate_module(
     input_ptr: NonNull<u8>,
