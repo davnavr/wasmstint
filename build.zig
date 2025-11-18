@@ -156,7 +156,7 @@ pub fn build(b: *Build) void {
     //     },
     // );
 
-    buildFuzzers(b, .{ .project = &project_options }, .{
+    buildFuzzers(b, &steps, .{ .project = &project_options }, .{
         .wasmstint = modules.wasmstint,
         .file_content = modules.file_content,
         .cli_args = modules.cli_args,
@@ -751,6 +751,7 @@ const Wasip1TestRunner = struct {
 
 fn buildFuzzers(
     b: *Build,
+    steps: *const TopLevelSteps,
     options: struct { project: *const ProjectOptions },
     modules: struct {
         wasmstint: Modules.Wasmstint,
@@ -764,6 +765,21 @@ fn buildFuzzers(
     //         "TODO(zig): fix crash in test runner: https://github.com/ziglang/zig/issues/25919",
     //     ).step,
     // );
+
+    {
+        const ffi_test = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("fuzz/ffi/src/ffi.zig"),
+                .target = options.project.target,
+                .optimize = options.project.optimize,
+            }),
+            .max_rss = ByteSize.mib(127).bytes,
+            .use_llvm = options.project.use_llvm.other,
+        });
+        const ffi_tests_run = &b.addRunArtifact(ffi_test).step;
+        ffi_tests_run.max_rss = ByteSize.mib(10).bytes; // arbitrary amount
+        steps.@"test-unit".dependOn(ffi_tests_run);
+    }
 
     const fuzz_step = b.step("fuzz", "Run a fuzz test");
 
