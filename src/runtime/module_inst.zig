@@ -261,6 +261,12 @@ pub const ModuleInst = packed struct(usize) {
         pub const Export = struct {
             name: Module.Name,
             val: ExternVal,
+
+            pub fn format(self: *const Export, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+                try writer.writeAll("(export ");
+                try self.val.format(writer);
+                try writer.writeByte(')');
+            }
         };
 
         pub fn at(self: ExportVals, i: usize) Export {

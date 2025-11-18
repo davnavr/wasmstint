@@ -43,17 +43,34 @@ pub const Input = extern struct {
         ));
     }
 
-    /// Asserts that `max > 0`.
     pub fn uintLessThan(input: *Input, comptime T: type, max: T) Error!T {
         comptime {
             std.debug.assert(@typeInfo(T).int.signedness == .unsigned);
         }
-        return (try input.int(T)) % max;
+
+        const value: T = try input.int(T);
+        if (max != 0) {
+            const clamped: T = value % max;
+            std.debug.assert(clamped < max);
+            return clamped;
+        } else {
+            @branchHint(.unlikely);
+            return 0;
+        }
     }
 
-    /// Asserts that `max > min`.
+    /// Asserts that `max >= min`.
     pub fn uintInRangeExclusive(input: *Input, comptime T: type, min: T, max: T) Error!T {
-        return min + (try input.uintLessThan(T, max - min));
+        const value: T = min + (try input.uintLessThan(T, max - min));
+        std.debug.assert(value < max);
+        return value;
+    }
+
+    /// Asserts that `max >= min`.
+    pub fn uintInRangeInclusive(input: *Input, comptime T: type, min: T, max: T) Error!T {
+        const value: T = min + (try input.uintLessThan(T, (max - min) +| 1));
+        std.debug.assert(value <= max);
+        return value;
     }
 
     pub fn choose(input: *Input, comptime T: type, comptime I: type, choices: []const T) Error!T {
@@ -64,6 +81,11 @@ pub const Input = extern struct {
 
     pub fn enumValue(input: *Input, comptime T: type, comptime I: type) Error!T {
         return input.choose(T, I, std.enums.values(T));
+    }
+
+    pub fn floatFromBits(input: *Input, comptime T: type) Error!T {
+        const Int = std.meta.Int(.unsigned, @typeInfo(T).float.bits);
+        return @bitCast(try input.int(Int));
     }
 };
 

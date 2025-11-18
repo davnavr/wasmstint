@@ -808,7 +808,7 @@ fn buildFuzzers(
 
     const FuzzTarget = enum {
         validation,
-        // execution,
+        execution,
     };
 
     const FuzzRunner = enum {
