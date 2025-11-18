@@ -138,8 +138,8 @@ pub fn main() !u8 {
     var input = ffi.Input.init(input_src.contents());
 
     // Generate the WASM module
-    const configuration = ffi.Configuration.fromTarget(target);
-    var wasm_buffer: ffi.ModuleBuffer = undefined;
+    const configuration = ffi.wasm_smith.Configuration.fromTarget(target);
+    var wasm_buffer: ffi.wasm_smith.ModuleBuffer = undefined;
     wasm_buffer.generate(&input, &configuration) catch |e| return switch (e) {
         error.BadInput => {
             std.debug.print("failed to generate WASM module\n", .{});

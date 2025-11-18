@@ -4,10 +4,11 @@
 
 inline fn testOne(
     wasm: []const u8,
+    input: *ffi.Input,
     scratch: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
 ) anyerror!void {
-    return target.testOne(wasm, scratch, allocator);
+    return target.testOne(wasm, input, scratch, allocator);
 }
 
 const Status = enum(c_int) {
@@ -37,8 +38,8 @@ pub export fn LLVMFuzzerTestOneInput(data_ptr: [*]const u8, data_size: usize) St
 
     var input = ffi.Input.init(data);
 
-    const configuration = ffi.Configuration.fromTarget(target);
-    var wasm_buffer: ffi.ModuleBuffer = undefined;
+    const configuration = ffi.wasm_smith.Configuration.fromTarget(target);
+    var wasm_buffer: ffi.wasm_smith.ModuleBuffer = undefined;
     wasm_buffer.generate(&input, &configuration) catch |e| return switch (e) {
         error.BadInput => {
             std.debug.print("failed to generate WASM module\n", .{});
