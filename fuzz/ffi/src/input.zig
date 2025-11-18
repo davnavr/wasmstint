@@ -90,7 +90,7 @@ pub const Input = extern struct {
 };
 
 test {
-    const original = "helloworld\x34\x12\x00\x01\x02\x03\x04\x05\x07\x08";
+    const original = "helloworld\x34\x12\x00\x01\x02\x03\x04\x05\x07\x08\x00";
     var input = Input.init(original);
     try std.testing.expectEqual(original[0..5], input.take(5));
     try std.testing.expectEqual(original[5..10], input.takeArray(5));
@@ -103,6 +103,7 @@ test {
     try std.testing.expectEqual(3, input.uintInRangeExclusive(u8, 2, 6));
     try std.testing.expectEqual(5, input.uintInRangeExclusive(u8, 2, 6));
     try std.testing.expectEqual(2, input.uintInRangeExclusive(u8, 2, 6));
+    try std.testing.expectEqual(42, input.uintInRangeInclusive(u8, 42, 42));
 }
 
 const std = @import("std");

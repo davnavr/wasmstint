@@ -50,16 +50,9 @@ pub fn testOne(
         return error.ValidationOfCodeEntriesWasNotFinished;
     }
 
-    const max_memory_size = try input.uintInRangeInclusive(
-        usize,
-        wasm_page_size,
-        max_memory_size_in_bytes,
-    );
-
     var import_provider = ImportProvider{
         .arena = &arena,
         .input = input,
-        .max_memory_size = max_memory_size,
     };
     defer import_provider.deinit();
 
@@ -85,10 +78,14 @@ pub fn testOne(
 
     while (module_allocating.nextMemoryType()) |ty| {
         const min_in_bytes = ty.limits.min * wasm_page_size;
+        if (min_in_bytes > max_memory_size_in_bytes) {
+            return error.OutOfMemory;
+        }
+
         const chosen_max = try input.uintInRangeInclusive(
             usize,
             min_in_bytes,
-            @min(ty.limits.max * wasm_page_size, max_memory_size),
+            @min(ty.limits.max * wasm_page_size, max_memory_size_in_bytes),
         );
         wasmstint.runtime.paged_memory.allocate(
             &module_allocating,
@@ -101,6 +98,10 @@ pub fn testOne(
     }
 
     while (module_allocating.nextTableType()) |ty| {
+        if (ty.limits.min > max_table_elems) {
+            return error.OutOfMemory;
+        }
+
         wasmstint.runtime.table_allocator.allocateForModule(
             &module_allocating,
             arena.allocator(),
@@ -210,7 +211,6 @@ fn generateExternAddr(input: *ffi.Input) !wasmstint.runtime.ExternAddr {
 const ImportProvider = struct {
     arena: *std.heap.ArenaAllocator,
     input: *ffi.Input,
-    max_memory_size: usize,
     allocated_mems: std.ArrayList(*wasmstint.runtime.MemInst) = .empty,
     err: ?error{ OutOfMemory, BadInput } = null,
 
@@ -251,9 +251,15 @@ const ImportProvider = struct {
                         return null;
                     };
 
+                    const min_size = mem_type.limits.min * wasm_page_size;
+                    if (min_size > max_memory_size_in_bytes) {
+                        provider.err = error.OutOfMemory;
+                        return null;
+                    }
+
                     const max_size = provider.input.uintInRangeInclusive(
                         usize,
-                        wasm_page_size,
+                        min_size,
                         max_memory_size_in_bytes,
                     ) catch |e| {
                         provider.err = e;
@@ -262,11 +268,7 @@ const ImportProvider = struct {
 
                     mem.* = wasmstint.runtime.paged_memory.map(
                         mem_type,
-                        provider.input.uintInRangeInclusive(
-                            usize,
-                            wasm_page_size,
-                            max_size,
-                        ) catch |e| {
+                        provider.input.uintInRangeInclusive(usize, min_size, max_size) catch |e| {
                             provider.err = e;
                             return null;
                         },
@@ -287,6 +289,11 @@ const ImportProvider = struct {
                 .table = wasmstint.runtime.TableAddr{
                     .elem_type = table_type.elem_type,
                     .table = table: {
+                        if (table_type.limits.min > max_table_elems) {
+                            provider.err = error.OutOfMemory;
+                            return null;
+                        }
+
                         const max_elems = @min(max_table_elems, table_type.limits.max);
                         const table = allocator.create(wasmstint.runtime.TableInst) catch |e| {
                             provider.err = e;
@@ -295,7 +302,11 @@ const ImportProvider = struct {
                         table.* = wasmstint.runtime.table_allocator.allocate(
                             table_type,
                             allocator,
-                            provider.input.uintInRangeInclusive(usize, 0, max_elems) catch |e| {
+                            provider.input.uintInRangeInclusive(
+                                usize,
+                                table_type.limits.min,
+                                max_elems,
+                            ) catch |e| {
                                 provider.err = e;
                                 return null;
                             },
