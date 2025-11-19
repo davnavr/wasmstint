@@ -872,6 +872,15 @@ fn buildFuzzers(
         &.{ "afl-clang-lto", "-g", "-Wall", "-fsanitize=fuzzer", "-lwasmstint_fuzz_ffi", "-v" },
     );
     afl_clang_lto.disable_zig_progress = true;
+    { // Unfortunately, filtering by file seems to be broken
+        afl_clang_lto.addFileInput(b.path("fuzz/denylist.txt"));
+        afl_clang_lto.setEnvironmentVariable(
+            "AFL_LLVM_DENYLIST",
+            // TODO(zig): allow environment variable of lazy path
+            std.fs.realpathAlloc(b.allocator, "./fuzz/denylist.txt") catch @panic("oom"),
+        );
+    }
+
     afl_clang_lto.step.max_rss = ByteSize.mib(268).bytes; // arbitrary amount
 
     afl_clang_lto.addArg("-o");
