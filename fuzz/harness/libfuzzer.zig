@@ -45,27 +45,30 @@ pub export fn LLVMFuzzerTestOneInput(data_ptr: [*]const u8, data_size: usize) St
     testOne(wasm_buffer.bytes(), &input, &scratch, allocator) catch |e| switch (e) {
         error.SkipZigTest, error.BadInput => return Status.reject,
         error.OutOfMemory => {},
-        else => {
-            var stderr_buffer: [512]u8 align(16) = undefined;
-            const stderr, const color = std.debug.lockStderrWriter(&stderr_buffer);
-            defer std.debug.unlockStderrWriter();
-
-            color.setColor(stderr, .bright_red) catch {};
-            stderr.writeAll("error: ") catch {};
-            color.setColor(stderr, .reset) catch {};
-            stderr.print("{t}\n", .{e}) catch {};
-            if (@errorReturnTrace()) |trace| {
-                std.debug.writeStackTrace(trace, stderr, color) catch {};
-            } else {
-                stderr.writeAll("(stack trace unavailable)\n") catch {};
-            }
-
-            // LLVM docs state that `exit()`ing shouldn't be done.
-            std.process.abort();
-        },
+        else => abortOnError(e),
     };
 
     return Status.accept;
+}
+
+fn abortOnError(e: anyerror) noreturn {
+    @branchHint(.cold);
+    var stderr_buffer: [512]u8 align(16) = undefined;
+    const stderr, const color = std.debug.lockStderrWriter(&stderr_buffer);
+    defer std.debug.unlockStderrWriter();
+
+    color.setColor(stderr, .bright_red) catch {};
+    stderr.writeAll("error: ") catch {};
+    color.setColor(stderr, .reset) catch {};
+    stderr.print("{t}\n", .{e}) catch {};
+    if (@errorReturnTrace()) |trace| {
+        std.debug.writeStackTrace(trace, stderr, color) catch {};
+    } else {
+        stderr.writeAll("(stack trace unavailable)\n") catch {};
+    }
+
+    // LLVM docs state that `exit()`ing shouldn't be done.
+    std.process.abort();
 }
 
 const std = @import("std");
