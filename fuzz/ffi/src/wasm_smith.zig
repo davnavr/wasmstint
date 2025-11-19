@@ -82,54 +82,29 @@ pub const ModuleBuffer = extern struct {
         input: *Input,
         config: *const Configuration,
     ) Input.Error!void {
-        if (!api().generateModule(input, config, module)) {
+        const generateModule = @extern(
+            *const fn (
+                input: *Input,
+                config: *const Configuration,
+                buffer: *ModuleBuffer,
+            ) callconv(.c) bool,
+            .{ .is_dll_import = true, .name = "wasmstint_fuzz_generate_module" },
+        );
+
+        if (!generateModule(input, config, module)) {
             return error.BadInput;
         }
     }
 
     pub fn deinit(module: *ModuleBuffer) void {
-        api().freeModule(module);
+        const freeModule = @extern(
+            *const fn (buffer: *ModuleBuffer) callconv(.c) void,
+            .{ .is_dll_import = true, .name = "wasmstint_fuzz_free_module" },
+        );
+
+        freeModule(module);
     }
 };
-
-const signatures = struct {
-    const GenerateModule = *const fn (
-        input: *Input,
-        config: *const Configuration,
-        buffer: *ModuleBuffer,
-    ) callconv(.c) bool;
-
-    const FreeModule = *const fn (buffer: *ModuleBuffer) callconv(.c) void;
-};
-
-const Api = struct {
-    generateModule: signatures.GenerateModule,
-    freeModule: signatures.FreeModule,
-};
-
-fn api() *const Api {
-    const global = struct {
-        var state: Api = undefined;
-
-        fn init() void {
-            state = Api{
-                .generateModule = @extern(
-                    signatures.GenerateModule,
-                    .{ .is_dll_import = true, .name = "wasmstint_fuzz_generate_module" },
-                ),
-                .freeModule = @extern(
-                    signatures.FreeModule,
-                    .{ .is_dll_import = true, .name = "wasmstint_fuzz_free_module" },
-                ),
-            };
-        }
-
-        var once = std.once(init);
-    };
-
-    global.once.call();
-    return &global.state;
-}
 
 const std = @import("std");
 const ByteSlice = @import("ffi.zig").ByteSlice;

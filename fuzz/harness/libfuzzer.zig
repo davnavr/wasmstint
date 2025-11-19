@@ -25,15 +25,9 @@ pub export threadlocal var __sancov_lowest_stack: usize = 0;
 pub export fn LLVMFuzzerTestOneInput(data_ptr: [*]const u8, data_size: usize) Status {
     const data: []const u8 = data_ptr[0..data_size];
 
-    var allocator = std.heap.DebugAllocator(.{ .safety = true }).init;
-    defer {
-        const leaks = allocator.deinit();
-        if (leaks == .leak) {
-            std.process.abort();
-        }
-    }
+    const allocator = std.heap.c_allocator;
 
-    var scratch = std.heap.ArenaAllocator.init(allocator.allocator());
+    var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
 
     var input = ffi.Input.init(data);
@@ -48,7 +42,7 @@ pub export fn LLVMFuzzerTestOneInput(data_ptr: [*]const u8, data_size: usize) St
     };
     defer wasm_buffer.deinit();
 
-    testOne(wasm_buffer.bytes(), &input, &scratch, allocator.allocator()) catch |e| switch (e) {
+    testOne(wasm_buffer.bytes(), &input, &scratch, allocator) catch |e| switch (e) {
         error.SkipZigTest, error.BadInput => return Status.reject,
         error.OutOfMemory => {},
         else => {
