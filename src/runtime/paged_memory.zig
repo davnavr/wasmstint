@@ -50,7 +50,10 @@ pub fn map(
         };
     }
 
-    const capacity = std.mem.alignBackward(u33, @intCast(initial_capacity), MemInst.page_size);
+    const capacity: u33 = @min(
+        std.mem.alignBackward(u33, @intCast(initial_capacity), MemInst.page_size),
+        reserve,
+    );
     std.debug.assert(min_bytes <= capacity);
     std.debug.assert(capacity <= reserve);
     if (builtin.mode == .Debug) {
