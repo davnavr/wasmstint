@@ -118,17 +118,16 @@ pub fn testOne(
 
     var module_allocated = module_allocating.finish() catch unreachable;
     var interp: wasmstint.Interpreter = undefined;
+    const initial_state = try interp.init(
+        allocator,
+        .{ .stack_reserve = try input.uintInRangeInclusive(u32, 0, max_interpreter_stack) },
+    );
     defer interp.deinit(allocator);
     {
-        const start = try interp.init(
-            allocator,
-            .{ .stack_reserve = try input.uintInRangeInclusive(u32, 0, max_interpreter_stack) },
-        );
-
         var instantiate_fuel = wasmstint.Interpreter.Fuel{
             .remaining = try input.uintInRangeInclusive(u64, 1, max_max_fuel),
         };
-        const instantiate_state = try start.awaiting_host.instantiateModule(
+        const instantiate_state = try initial_state.awaiting_host.instantiateModule(
             arena.allocator(),
             &module_allocated,
             &instantiate_fuel,
