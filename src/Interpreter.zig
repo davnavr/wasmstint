@@ -310,24 +310,21 @@ pub const State = union(Tag) {
             ).topSlice(result_count);
         }
 
+        /// Asserts that a host function is currently being called.
+        pub fn hostSignature(state: *const AwaitingHost) *const Module.FuncType {
+            return state.inner.currentFrame().?.signature;
+        }
+
         /// Copies the parameters passed to the host function to a list.
         ///
         /// Asserts that a host function is currently being called.
         pub fn copyParamsTo(state: *const AwaitingHost, output: []TaggedValue) void {
-            copyValues(
-                state.inner.currentFrame().?.signature.parameters(),
-                state.params(),
-                output,
-            );
+            copyValues(state.hostSignature().parameters(), state.params(), output);
         }
 
         /// Copies the values returned from the most recent function call.
         pub fn copyResultsTo(state: *const AwaitingHost, output: []TaggedValue) void {
-            copyValues(
-                state.inner.interpreter().current_state.awaiting_host.result_types,
-                state.results(),
-                output,
-            );
+            copyValues(state.resultTypes(), state.results(), output);
         }
 
         /// Copies the parameters passed to the host function to a new allocation.
@@ -337,7 +334,7 @@ pub const State = union(Tag) {
         ) Allocator.Error![]TaggedValue {
             const dst = try allocator.alloc(
                 TaggedValue,
-                state.inner.interpreter().currentFrame().?.signature.param_count,
+                state.hostSignature().param_count,
             );
 
             state.copyParamsTo(dst);
@@ -420,11 +417,7 @@ pub const State = union(Tag) {
             state: *const AwaitingHost,
             comptime T: type,
         ) SignatureMismatchError!T {
-            return valuesTyped(
-                T,
-                state.inner.currentFrame().?.signature.parameters(),
-                state.params(),
-            );
+            return valuesTyped(T, state.hostSignature().parameters(), state.params());
         }
 
         pub const CallError = Allocator.Error || SignatureMismatchError || error{
@@ -604,7 +597,7 @@ pub const State = union(Tag) {
             defer coz_begin.end();
 
             const interp: *Interpreter = state.inner.interpreter();
-            const popped_signature = state.inner.currentFrame().?.signature;
+            const popped_signature = state.hostSignature();
 
             if (result_values.len != popped_signature.result_count) {
                 return error.SignatureMismatch; // wrong # of results

@@ -397,7 +397,7 @@ fn mainLoop(
         _ = scratch.reset(.retain_capacity);
         state = next: switch (state) {
             .awaiting_host => |*host| if (host.currentHostFunction() != null) {
-                const result_types = host.resultTypes();
+                const result_types = host.hostSignature().results();
                 const results = try scratch.allocator().alloc(
                     wasmstint.Interpreter.TaggedValue,
                     result_types.len,
