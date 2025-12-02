@@ -358,12 +358,15 @@ pub fn pushFrameWithinCapacity(
 
 /// Allocates space to ensure a future call to `CallStack.pushWithinCapacity` succeeds.
 ///
+/// Returns a pointer to the new `Top` of the stack, which is different only if a reallocation
+/// occurred.
+///
 /// Potentially invalidates pointers to the stack (when `Allocator.resize` is called).
 ///
 /// Allocates space for a new stack frame.
 pub fn reserveFrame(
     stack: *Stack,
-    top: Top,
+    top: *Top,
     alloca: Allocator,
     comptime params: ParameterAllocation,
     callee: FuncAddr,
@@ -400,12 +403,16 @@ pub fn reserveFrame(
 
         alloca.free(old_allocation);
         stack.allocated = new_allocation;
+
+        // needs to point into new allocation
+        top.ptr = new_allocation.ptr + old_len;
+        stack.assertPtrInBounds(top.ptr);
     }
 }
 
 pub fn pushFrame(
     stack: *Stack,
-    top: Top,
+    top: *Top,
     alloca: Allocator,
     instantiate_flag: *bool,
     comptime params: ParameterAllocation,
@@ -413,7 +420,7 @@ pub fn pushFrame(
 ) PushFrameError!PushedFrame {
     alloc_needed: {
         return stack.pushFrameWithinCapacity(
-            top,
+            top.*,
             instantiate_flag,
             params,
             callee,
@@ -429,7 +436,7 @@ pub fn pushFrame(
     try stack.reserveFrame(top, alloca, params, callee);
 
     return stack.pushFrameWithinCapacity(
-        top,
+        top.*,
         instantiate_flag,
         params,
         callee,

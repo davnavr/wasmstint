@@ -495,7 +495,7 @@ pub const State = union(Tag) {
             // std.debug.print("HOST WANTS TO CALL {f}\n", .{callee});
 
             const new_frame = try interp.stack.pushFrame(
-                interp.stack_top,
+                &interp.stack_top,
                 alloca,
                 &interp.dummy_instantiate_flag,
                 .allocate,
@@ -547,7 +547,7 @@ pub const State = union(Tag) {
                 const signature = start.signature();
                 std.debug.assert(signature.param_count == 0);
                 std.debug.assert(signature.result_count == 0);
-                try interp.stack.reserveFrame(interp.stack_top, alloca, .preallocated, start);
+                try interp.stack.reserveFrame(&interp.stack_top, alloca, .preallocated, start);
             }
 
             errdefer unreachable;
@@ -763,7 +763,7 @@ pub const State = union(Tag) {
 
             const interp = state.inner.interpreter();
             _ = try interp.stack.reserveFrame(
-                interp.stack_top,
+                &interp.stack_top,
                 alloca,
                 .preallocated,
                 interp.current_state.call_stack_exhaustion.callee,
