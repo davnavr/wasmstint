@@ -105,7 +105,7 @@ fn abortOnError(e: anyerror) noreturn {
     abort();
 }
 
-fn panic(msg: []const u8, first_trace_addr: ?usize) noreturn {
+fn panicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {
     @branchHint(.cold);
 
     var stderr_buffer: [128]u8 align(16) = undefined;
@@ -118,10 +118,10 @@ fn panic(msg: []const u8, first_trace_addr: ?usize) noreturn {
         stderr.writeAll("panic") catch break :abort;
         color.setColor(stderr, .reset) catch break :abort;
         if (first_trace_addr) |addr| {
-            try stderr.print(
+            stderr.print(
                 " @ {[addr]X:0>[width]}",
                 .{ .addr = addr, .width = @sizeOf(usize) * 2 },
-            );
+            ) catch break :abort;
         }
         stderr.print(" : {s}\n", .{msg}) catch break :abort;
         dumpStackTrace(@errorReturnTrace(), stderr, color) catch break :abort;
@@ -129,6 +129,8 @@ fn panic(msg: []const u8, first_trace_addr: ?usize) noreturn {
 
     abort();
 }
+
+pub const panic = std.debug.FullPanic(panicHandler);
 
 const std = @import("std");
 /// LLVM docs state that `exit()`ing shouldn't be done.
