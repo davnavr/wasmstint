@@ -211,6 +211,9 @@ pub const TableInst = extern struct {
         idx: u32,
         end_idx: u32,
     ) void {
+        std.debug.assert(table.len <= table.capacity);
+        std.debug.assert(table.capacity <= table.limit);
+
         const stride = table.stride.toBytes();
         std.debug.assert(elem.len == stride);
         std.debug.assert(idx <= end_idx);
@@ -244,7 +247,7 @@ pub const TableInst = extern struct {
             .ptr => if (dst_bytes.len % fat_size != 0) {
                 @as(
                     **anyopaque,
-                    @alignCast(@ptrCast(dst_bytes[dst_bytes.len - stride ..])),
+                    @ptrCast(@alignCast(dst_bytes[dst_bytes.len - stride ..])),
                 ).* = src_fat_buf[0];
             },
         }

@@ -69,6 +69,7 @@ pub fn grow(
         // Try multiplying by 1.5
         old_capacity +| (old_capacity / 2),
     );
+    const new_capacity_bytes = std.math.mul(usize, new_capacity, stride_bytes) catch return;
 
     const old_allocation: []align(TableInst.buffer_align) u8 =
         table.base.ptr[0 .. old_capacity * stride_bytes];
@@ -77,9 +78,11 @@ pub fn grow(
     const resized_in_place = allocator.rawResize(
         old_allocation,
         .fromByteUnits(stride_bytes),
-        new_capacity,
+        new_capacity_bytes,
         @returnAddress(),
     );
+
+    // Fill new elements with the provided initialization value
     if (resized_in_place) {
         table.capacity = new_capacity;
         table.fillWithinCapacity(elem_bytes, table.len, request.new_len);
@@ -91,7 +94,7 @@ pub fn grow(
             allocator.rawRemap(
                 old_allocation,
                 .fromByteUnits(stride_bytes),
-                new_capacity,
+                new_capacity_bytes,
                 @returnAddress(),
             ) orelse return,
         );
