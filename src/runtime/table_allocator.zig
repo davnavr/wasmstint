@@ -31,7 +31,7 @@ pub fn allocate(
     @memset(allocation[0..allocation_size], 0);
 
     return TableInst{
-        .base = TableInst.Base{ .ptr = @alignCast(@ptrCast(allocation)) },
+        .base = TableInst.Base{ .ptr = @ptrCast(@alignCast(allocation)) },
         .stride = stride,
         .len = @intCast(table_type.limits.min),
         .capacity = actual_capacity,
@@ -73,7 +73,7 @@ pub fn grow(
     const old_allocation: []align(TableInst.buffer_align) u8 =
         table.base.ptr[0 .. old_capacity * stride_bytes];
 
-    const elem_bytes = std.mem.asBytes(&request.elem)[0..stride_bytes];
+    const elem_bytes = std.mem.asBytes(request.elem)[0..stride_bytes];
     const resized_in_place = allocator.rawResize(
         old_allocation,
         .fromByteUnits(stride_bytes),
