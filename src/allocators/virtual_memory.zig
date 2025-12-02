@@ -231,6 +231,8 @@ pub const mman = struct {
                 @tagName(builtin.os.tag) ++ " does not support mmap with MAP_ANONYMOUS");
         }
 
+        std.debug.assert(length > 0);
+
         _ = flags;
 
         // see `PageAllocator.map`
@@ -276,6 +278,7 @@ pub const mman = struct {
         pages: []align(page_size_min) u8,
         prot: Prot,
     ) ProtectError!void {
+        std.debug.assert(pages.len > 0);
         return posix.mprotect(pages, @as(u32, @bitCast(prot))) catch |e| switch (e) {
             error.OutOfMemory, error.Unexpected => |err| err,
             error.AccessDenied => unreachable, // `mprotect` on mapped file
@@ -285,6 +288,8 @@ pub const mman = struct {
     pub const UnmapError = posix.UnexpectedError || Oom;
 
     pub fn unmap(pages: []align(page_size_min) u8) UnmapError!void {
+        std.debug.assert(pages.len > 0);
+
         // Zig wrapper `std.posix.munmap` doesn't allow freeing in the middle of existing mapping.
         switch (posix.errno(posix.system.munmap(pages.ptr, pages.len))) {
             .SUCCESS => {},

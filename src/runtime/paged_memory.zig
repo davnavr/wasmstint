@@ -102,7 +102,7 @@ pub fn map(
 
         // This recreates windows commit behavior
         // TODO: Linux has mremap so only other Unix targets are required to do this
-        if (!single_syscall) {
+        if (!single_syscall and capacity > 0) {
             virtual_memory.mman.protect(pages[0..capacity], .{ .WRITE = true }) catch
                 return Oom.OutOfMemory;
         }
@@ -151,7 +151,10 @@ pub fn free(mem: *MemInst) void {
         virtual_memory.nt.free(mem.base, &freed_size, .RELEASE) catch {};
         std.debug.assert(freed_size == mem.limit);
     } else {
-        virtual_memory.mman.unmap(@alignCast(mem.base[0..mem.limit])) catch {};
+        const pages: []align(page_size_min) u8 = @alignCast(mem.base[0..mem.limit]);
+        if (pages.len > 0) {
+            virtual_memory.mman.unmap(pages) catch {};
+        }
     }
 
     mem.* = undefined;
