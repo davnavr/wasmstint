@@ -128,7 +128,7 @@ pub fn testOne(
             .remaining = try input.uintInRangeInclusive(u64, 1, max_max_fuel),
         };
         const instantiate_state = try initial_state.awaiting_host.instantiateModule(
-            arena.allocator(),
+            allocator,
             &module_allocated,
             &instantiate_fuel,
         );
