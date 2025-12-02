@@ -879,7 +879,8 @@ fn buildFuzzers(
         afl_clang_lto.setEnvironmentVariable(
             "AFL_LLVM_DENYLIST",
             // TODO(zig): allow environment variable of lazy path
-            std.fs.realpathAlloc(b.allocator, "./fuzz/denylist.txt") catch @panic("oom"),
+            // At least paths seem to be relative to the build script
+            "./fuzz/denylist.txt",
         );
     }
 
