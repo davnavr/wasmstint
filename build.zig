@@ -821,6 +821,8 @@ fn buildFuzzers(
         return;
     };
 
+    const fuzz_target_name: []const u8 = b.fmt("fuzz-{t}", .{fuzz_target});
+
     const fuzz_runner = b.option(
         FuzzRunner,
         "fuzz-runner",
@@ -851,7 +853,7 @@ fn buildFuzzers(
     target_module.addImport("ffi", ffi_module);
 
     const libfuzzer_harness_lib = b.addLibrary(.{
-        .name = b.fmt("fuzz-{t}-libfuzzer", .{fuzz_target}),
+        .name = b.fmt("{s}-libfuzzer", .{fuzz_target_name}),
         .root_module = b.createModule(.{
             .root_source_file = b.path("fuzz/harness/libfuzzer.zig"),
             .target = options.project.target,
@@ -884,7 +886,8 @@ fn buildFuzzers(
     afl_clang_lto.step.max_rss = ByteSize.mib(268).bytes; // arbitrary amount
 
     afl_clang_lto.addArg("-o");
-    const afl_exe = afl_clang_lto.addOutputFileArg("fuzz-validation");
+    const afl_output_exe: []const u8 = b.fmt("{s}-afl", .{fuzz_target_name});
+    const afl_exe = afl_clang_lto.addOutputFileArg(afl_output_exe);
 
     afl_clang_lto.addArtifactArg(libfuzzer_harness_lib);
 
@@ -894,7 +897,7 @@ fn buildFuzzers(
     }
 
     const standalone_exe = b.addExecutable(.{
-        .name = b.fmt("fuzz-{t}-standalone", .{fuzz_target}),
+        .name = b.fmt("{s}-standalone", .{fuzz_target_name}),
         .root_module = b.createModule(.{
             .root_source_file = b.path("fuzz/harness/main.zig"),
             .target = options.project.target,
@@ -910,7 +913,7 @@ fn buildFuzzers(
 
     const runner_step: *Step.Run = switch (fuzz_runner) {
         .afl => afl: {
-            const run_afl = Step.Run.create(b, "fuzz-validation");
+            const run_afl = Step.Run.create(b, afl_output_exe);
             run_afl.addFileArg(afl_exe);
             break :afl run_afl;
         },
