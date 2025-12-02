@@ -167,6 +167,7 @@ pub inline fn readNextOpcodeHandler(
         @branchHint(.unlikely);
         return handlers.outOfFuelHandler;
     } else {
+        fuel.remaining -= 1;
         const next_opcode = reader.readByte();
 
         // std.debug.print(
