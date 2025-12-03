@@ -41,7 +41,7 @@ pub const SideTable = packed struct(usize) {
         const current_frame: *const Stack.Frame = stack.currentFrame().?;
         const code = current_frame.function.expanded().wasm.code();
         const wasm_base_ptr = @intFromPtr(current_frame.function.expanded().wasm
-            .module.header().module.inner.wasm.ptr);
+            .module().header().module.inner.wasm.ptr);
 
         // std.debug.print("SIDE TABLE PTR = {*} + {}\n", .{ table.next, branch });
         const target: *const Module.Code.SideTableEntry = &table.next[branch];

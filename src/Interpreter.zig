@@ -217,7 +217,7 @@ pub const State = union(Tag) {
             const handler: *const handlers.OpcodeHandler = i.readNextOpcodeHandler(
                 fuel,
                 locals,
-                wasm_callee.module,
+                wasm_callee.module(),
                 interp,
             );
 
@@ -227,7 +227,7 @@ pub const State = union(Tag) {
                 fuel,
                 frame.wasm.stp,
                 locals,
-                wasm_callee.module,
+                wasm_callee.module(),
                 interp,
                 i.end,
             );
@@ -577,7 +577,7 @@ pub const State = union(Tag) {
         }
 
         /// Returns the current host function being called, or `null` if the call stack is empty.
-        pub fn currentHostFunction(state: *const AwaitingHost) ?runtime.FuncAddr.Expanded.Host {
+        pub fn currentHostFunction(state: *const AwaitingHost) ?*const runtime.FuncAddr.Host {
             return if (state.inner.currentFrame()) |stack_frame|
                 stack_frame.function.expanded().host
             else

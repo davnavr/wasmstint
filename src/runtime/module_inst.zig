@@ -30,6 +30,11 @@ pub const ModuleInst = packed struct(usize) {
             const info = &module.inner.raw;
 
             var size = allocators.ReservationAllocator(.@"16"){ .bytes = @sizeOf(Header) };
+            try size.reserveAligned(
+                FuncAddr.Wasm.Block,
+                .fromByteUnits(@sizeOf(FuncAddr.Wasm.Block)),
+                Header.funcBlockCount(module),
+            );
             try size.reserve(FuncAddr, info.func_import_count);
             try size.reserve(*TableInst, info.table_count);
             try size.reserve(TableInst, info.table_count - info.table_import_count);
@@ -69,6 +74,8 @@ pub const ModuleInst = packed struct(usize) {
         // /// *shared* memories currently being the sole exception.
         // acquired_flag: std.atomic.Value(bool) = .{ .raw = false },
         func_imports: [*]const FuncAddr,
+        // TODO: Use a hashmap, since only functions in element segments & exports can be turned into FuncAddr
+        func_blocks: [*]align(@sizeOf(FuncAddr.Wasm.Block)) const FuncAddr.Wasm.Block,
         mems: [*]const *MemInst, // TODO: Could use comptime config to have specialized [1]MemInst (same for TableInst)
         tables: [*]const *TableInst,
         globals: [*]const *anyopaque,
@@ -85,18 +92,54 @@ pub const ModuleInst = packed struct(usize) {
             return ModuleInst{ .inner = @alignCast(inst) };
         }
 
+        pub inline fn funcBlockCount(module: Module) u32 {
+            return std.math.divCeil(
+                u32,
+                module.inner.raw.code_count,
+                FuncAddr.Wasm.Block.funcs_per_block,
+            ) catch unreachable;
+        }
+
+        fn funcBlocks(
+            inst: *const Header,
+        ) []align(@sizeOf(FuncAddr.Wasm.Block)) const FuncAddr.Wasm.Block {
+            return inst.func_blocks[0..funcBlockCount(inst.module)];
+        }
+
+        /// Asserts that `idx` refers to a valid function within this module.
         pub fn funcAddr(inst: *const Header, idx: Module.FuncIdx) FuncAddr {
-            const i: usize = @intFromEnum(idx);
+            const i: u32 = @intFromEnum(idx);
+            const import_count = inst.module.inner.raw.func_import_count;
             std.debug.assert(i < inst.module.funcCount());
-            return if (i < inst.module.inner.raw.func_import_count)
-                inst.func_imports[i]
-            else
-                FuncAddr.init(.{
-                    .wasm = .{
-                        .module = inst.moduleInst(),
-                        .idx = idx,
-                    },
-                });
+            if (i < import_count) {
+                return inst.func_imports[i];
+            } else {
+                const rounded_idx: u32 =
+                    @divFloor(i - import_count, FuncAddr.Wasm.Block.funcs_per_block);
+
+                const block: *align(@sizeOf(FuncAddr.Wasm.Block)) const FuncAddr.Wasm.Block =
+                    &inst.funcBlocks()[rounded_idx];
+
+                const index_bits: FuncAddr.Wasm.IdxBits =
+                    @intCast((i - import_count) % FuncAddr.Wasm.Block.funcs_per_block);
+
+                std.debug.assert(i == block.starting_idx + index_bits);
+
+                const wasm = FuncAddr.Wasm{
+                    .idx_bits = index_bits,
+                    .block_addr = @intCast(@shrExact(
+                        @intFromPtr(block),
+                        comptime @bitSizeOf(FuncAddr.Wasm.IdxBits) + 1,
+                    )),
+                };
+
+                if (builtin.mode == .Debug) {
+                    std.debug.assert(@intFromPtr(wasm.module().inner) == @intFromPtr(inst));
+                    std.debug.assert(wasm.funcIdx() == idx);
+                }
+
+                return FuncAddr.init(.{ .wasm = wasm });
+            }
         }
 
         pub fn startFuncAddr(inst: *const Header) FuncAddr.Nullable {
@@ -301,6 +344,7 @@ pub const ModuleInst = packed struct(usize) {
 };
 
 const std = @import("std");
+const builtin = @import("builtin");
 const allocators = @import("allocators");
 const Module = @import("../Module.zig");
 const MemInst = @import("memory.zig").MemInst;

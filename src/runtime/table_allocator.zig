@@ -19,20 +19,11 @@ pub fn allocate(
 
     // Cast always succeeds since `limits.max` is always a `u32`.
     const actual_capacity: u32 = @intCast(@min(initial_capacity, table_type.limits.max));
-    const stride = TableStride.ofType(table_type.elem_type);
-    const stride_bytes = stride.toBytes();
-    const allocation_size = std.math.mul(u32, stride_bytes, actual_capacity) catch
-        return error.OutOfMemory;
-    const allocation = allocator.rawAlloc(
-        allocation_size,
-        .fromByteUnits(stride_bytes),
-        @returnAddress(),
-    ) orelse return error.OutOfMemory;
-    @memset(allocation[0..allocation_size], 0);
+    const allocation = try allocator.alloc(?*anyopaque, actual_capacity);
+    @memset(allocation[0..actual_capacity], null);
 
     return TableInst{
-        .base = TableInst.Base{ .ptr = @ptrCast(@alignCast(allocation)) },
-        .stride = stride,
+        .base = TableInst.Base{ .ptr = allocation.ptr },
         .len = @intCast(table_type.limits.min),
         .capacity = actual_capacity,
         .limit = @intCast(table_type.limits.max),
@@ -54,7 +45,6 @@ pub fn grow(
 ) void {
     const table = request.table.table;
     const old_capacity = table.capacity;
-    const stride_bytes = table.stride.toBytes();
     std.debug.assert(request.new_len <= table.limit);
     std.debug.assert(old_capacity < request.new_len);
     std.debug.assert(request.old_len <= table.len);
@@ -72,39 +62,26 @@ pub fn grow(
         ),
         table.limit,
     );
-    const new_capacity_bytes = std.math.mul(usize, new_capacity, stride_bytes) catch return;
 
-    const old_allocation: []align(TableInst.buffer_align) u8 =
-        table.base.ptr[0 .. old_capacity * stride_bytes];
+    const old_allocation: []?*anyopaque = table.base.ptr[0..old_capacity];
 
-    const elem_bytes = std.mem.asBytes(request.elem)[0..stride_bytes];
-    const resized_in_place = allocator.rawResize(
-        old_allocation,
-        .fromByteUnits(stride_bytes),
-        new_capacity_bytes,
-        @returnAddress(),
-    );
+    const elem = request.elem.ptr;
+    const resized_in_place = allocator.resize(old_allocation, new_capacity);
 
     // Fill new elements with the provided initialization value
     if (resized_in_place) {
         table.capacity = new_capacity;
-        table.fillWithinCapacity(elem_bytes, table.len, request.new_len);
+        table.fillWithinCapacity(elem, table.len, request.new_len);
     } else {
         // Fill the unused parts so the allocator actually copies useful stuff
-        table.fillWithinCapacity(elem_bytes, table.len, old_capacity);
+        table.fillWithinCapacity(elem, table.len, old_capacity);
 
-        const new_allocation: [*]align(TableInst.buffer_align) u8 = @alignCast(
-            allocator.rawRemap(
-                old_allocation,
-                .fromByteUnits(stride_bytes),
-                new_capacity_bytes,
-                @returnAddress(),
-            ) orelse return,
-        );
+        const new_allocation: []?*anyopaque =
+            allocator.remap(old_allocation, new_capacity) orelse return;
 
-        table.base = .{ .ptr = new_allocation };
+        table.base = .{ .ptr = new_allocation.ptr };
         table.capacity = new_capacity;
-        table.fillWithinCapacity(elem_bytes, old_capacity, request.new_len);
+        table.fillWithinCapacity(elem, old_capacity, request.new_len);
     }
 
     request.elem.* = .{ .i32 = @bitCast(request.old_len) };
@@ -117,5 +94,4 @@ const Allocator = std.mem.Allocator;
 const TableType = @import("../Module.zig").TableType;
 const ModuleAllocating = @import("ModuleAllocating.zig");
 const TableInst = @import("table.zig").TableInst;
-const TableStride = @import("table.zig").TableStride;
 const Interpreter = @import("../Interpreter.zig");

@@ -194,7 +194,7 @@ inline fn dispatchNextOpcode(
     if (builtin.mode == .Debug) {
         const current_frame: *const Stack.Frame = interp.stack.currentFrame().?;
         const wasm_func = current_frame.function.expanded().wasm;
-        std.debug.assert(@intFromPtr(module.inner) == @intFromPtr(wasm_func.module.inner));
+        std.debug.assert(@intFromPtr(module.inner) == @intFromPtr(wasm_func.module().inner));
 
         const vals_base: [*]align(@sizeOf(Value)) const Value = current_frame.valueStackBase();
         if (@intFromPtr(vals_base) > @intFromPtr(sp.ptr)) {
@@ -418,7 +418,7 @@ fn returnFromWasm(
     const popped = interp.stack.popFrame(old_sp, .from_stack_top);
     if (builtin.mode == .Debug) {
         std.debug.assert( // module mismatch
-            @intFromPtr(popped.info.callee.expanded().wasm.module.inner) ==
+            @intFromPtr(popped.info.callee.expanded().wasm.module().inner) ==
                 @intFromPtr(old_module.inner),
         );
         std.debug.assert(@intFromPtr(popped.info.wasm.eip) == @intFromPtr(old_eip));
@@ -440,7 +440,7 @@ fn returnFromWasm(
                     fuel,
                     frame.wasm.stp,
                     new_locals,
-                    wasm.module,
+                    wasm.module(),
                     interp,
                 );
             },
@@ -547,7 +547,7 @@ inline fn invokeWithinWasm(
                 fuel,
                 new_frame.frame.wasm.stp,
                 Locals{ .ptr = new_locals.ptr },
-                wasm.module,
+                wasm.module(),
                 interp,
             );
         },
@@ -560,7 +560,7 @@ inline fn invokeWithinWasm(
             return Transition.awaitingHost(
                 new_frame.top(),
                 interp,
-                &host.func.signature,
+                &host.signature,
                 .calling_host,
                 saved_token,
             );
@@ -1738,7 +1738,10 @@ const opcode_handlers = struct {
             const wasm_callee = current_frame.function.expanded().wasm;
             std.debug.assert(wasm_callee.code().isValidationFinished());
 
-            break :invalid Trap.init(.lazy_validation_failure, .{ .function = wasm_callee.idx });
+            break :invalid Trap.init(
+                .lazy_validation_failure,
+                .{ .function = wasm_callee.funcIdx() },
+            );
         } else Trap.init(.unreachable_code_reached, {});
 
         return Transition.trap(unreachable_ip, eip, sp, stp, interp, info);
@@ -2200,13 +2203,11 @@ const opcode_handlers = struct {
 
         vals.pushArray(1).* = .{switch (global_addr.global_type.val_type) {
             .v128 => unreachable, // TODO
-            .externref => .{
-                .externref = Value.ExternRef{
-                    .addr = @as(
-                        *const runtime.ExternAddr,
-                        @ptrCast(@alignCast(@constCast(global_addr.value))),
-                    ).*,
-                },
+            .externref => Value{
+                .externref = @as(
+                    *const runtime.ExternAddr,
+                    @ptrCast(@alignCast(@constCast(global_addr.value))),
+                ).*,
             },
             inline else => |val_type| @unionInit(
                 Value,
@@ -2245,7 +2246,7 @@ const opcode_handlers = struct {
                 @as(
                     *runtime.ExternAddr,
                     @ptrCast(@alignCast(global_addr.value)),
-                ).* = popped.externref.addr;
+                ).* = popped.externref;
             },
             inline else => |val_type| {
                 @as(
@@ -2276,24 +2277,19 @@ const opcode_handlers = struct {
 
         const table_idx = instr.readIdx(Module.TableIdx);
         const table = module.header().tableAddr(table_idx).table;
-        const stride = table.stride.toBytes();
 
         const operand: *align(@sizeOf(Value)) Value = &vals.topArray(1)[0];
         const idx: u32 = @bitCast(operand.i32);
 
         operand.* = undefined;
-        const dst: []align(@sizeOf(Value)) u8 = std.mem.asBytes(operand);
-        const src: []align(@sizeOf(*anyopaque)) u8 = table.elementSlice(idx) catch {
+        operand.ptr = (table.elementAt(idx) catch {
             const info = Trap.init(
                 .table_access_out_of_bounds,
                 .init(table_idx, .{ .@"table.get" = .{ .index = idx, .maximum = table.len } }),
             );
 
             return Transition.trap(table_get_ip, eip, vals.top, stp, interp, info);
-        };
-
-        @memcpy(dst[0..stride], src);
-        @memset(dst[stride..], 0); // fill `ExternRef` padding
+        }).*;
 
         std.debug.assert(vals.remaining == 1);
         return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
@@ -2319,9 +2315,8 @@ const opcode_handlers = struct {
 
         const operands = vals.popArray(2);
         vals.assertRemainingCountIs(0);
-        const ref: *align(@sizeOf(Value)) const Value = &operands[1];
         const idx: u32 = @bitCast(operands[0].i32);
-        const dst: []align(@sizeOf(*anyopaque)) u8 = table.elementSlice(idx) catch {
+        const dst: *?*anyopaque = table.elementAt(idx) catch {
             const info = Trap.init(
                 .table_access_out_of_bounds,
                 .init(table_idx, .{ .@"table.set" = .{ .index = idx, .maximum = table.len } }),
@@ -2329,7 +2324,8 @@ const opcode_handlers = struct {
             return Transition.trap(table_set_ip, eip, vals.top, stp, interp, info);
         };
 
-        @memcpy(dst, std.mem.asBytes(ref)[0..table.stride.toBytes()]);
+        dst.* = undefined;
+        dst.* = operands[1].ptr;
 
         operands.* = undefined;
         return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
@@ -2646,8 +2642,7 @@ const opcode_handlers = struct {
         var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
 
         const top: *align(@sizeOf(Value)) Value = &vals.topArray(1)[0];
-        // Better codegen than `std.mem.allEqual` producing 16 `cmpb` on x86_64
-        const is_null = @reduce(.Or, top.i64x2) == 0;
+        const is_null = top.ptr == null;
         // std.debug.print(
         //     "> ref.is_null [{f}] -> {}\n",
         //     .{ top.bytesFormatter(), is_null },
@@ -2942,11 +2937,7 @@ const opcode_handlers = struct {
             const old_size: u32 = table.len;
             table.len = new_size;
 
-            table.fillWithinCapacity(
-                std.mem.asBytes(result_or_elem)[0..table.stride.toBytes()],
-                old_size,
-                new_size,
-            );
+            table.fillWithinCapacity(result_or_elem.ptr, old_size, new_size);
 
             break :result @bitCast(old_size);
         } else return Transition.interrupted(instr, vals.top, stp, interp, .{
@@ -3003,10 +2994,10 @@ const opcode_handlers = struct {
         const operands = vals.popArray(3);
         vals.assertRemainingCountIs(0);
         const n: u32 = @bitCast(operands[2].i32);
-        const dupe: *align(@sizeOf(Value)) const Value = &operands[1];
+        const elem: ?*anyopaque = operands[1].ptr;
         const d: u32 = @bitCast(operands[0].i32);
 
-        table.fill(n, std.mem.asBytes(dupe)[0..table.stride.toBytes()], d) catch {
+        table.fill(n, elem, d) catch {
             const info = Trap.init(.table_access_out_of_bounds, .init(table_idx, .@"table.fill"));
             return Transition.trap(table_fill_ip, eip, sp, stp, interp, info);
         };

@@ -128,12 +128,7 @@ pub const PrintFunction = enum(u8) {
     }
 
     pub fn addr(func: PrintFunction) wasmstint.runtime.FuncAddr {
-        return wasmstint.runtime.FuncAddr.init(.{
-            .host = .{
-                .func = @constCast(func.hostFunc()),
-                .data = null,
-            },
-        });
+        return wasmstint.runtime.FuncAddr.init(.{ .host = func.hostFunc() });
     }
 };
 

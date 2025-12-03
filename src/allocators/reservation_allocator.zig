@@ -36,19 +36,29 @@ pub fn ReservationAllocator(
             ) catch return Oom.OutOfMemory;
         }
 
-        /// Asserts at compile time that the alignment of `T` does not exceed `max_alignment`.
-        pub fn reserve(reservation: *Self, comptime T: type, count: usize) Oom!void {
+        pub fn reserveAligned(
+            reservation: *Self,
+            comptime T: type,
+            /// Must not exceed `max_alignment`.
+            comptime alignment: std.mem.Alignment,
+            count: usize,
+        ) Oom!void {
             comptime {
-                if (@alignOf(T) > max_align_bytes) @compileError(
+                if (alignment.compare(.gt, max_alignment)) @compileError(
                     std.fmt.comptimePrint(
-                        @typeName(T) ++ " has an alignment of {} bytes, exceeding the maximum of {}",
-                        .{ @alignOf(T), max_align_bytes },
+                        "alignment of {d} bytes for {s} cannot exceed maximum alignment of {d}",
+                        .{ alignment.toByteUnits(), @typeName(T), max_align_bytes },
                     ),
                 );
             }
 
-            try reservation.alignUpTo(.fromByteUnits(@alignOf(T)));
+            try reservation.alignUpTo(alignment);
             try reservation.reserveUnaligned(T, count);
+        }
+
+        /// Asserts at compile time that the alignment of `T` does not exceed `max_alignment`.
+        pub fn reserve(reservation: *Self, comptime T: type, count: usize) Oom!void {
+            try reservation.reserveAligned(T, .fromByteUnits(@alignOf(T)), count);
         }
 
         /// Don't forget to call `backing_allocator.free()` on the returned buffer to deallocate

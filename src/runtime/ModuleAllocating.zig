@@ -37,6 +37,20 @@ pub fn begin(
     ) catch unreachable)[0];
     std.debug.assert(@intFromPtr(header) == @intFromPtr(arena.buffer.ptr));
 
+    const module_inst_uninit = ModuleInst{ .inner = header };
+    const func_blocks = arena.allocator().alignedAlloc(
+        value.FuncAddr.Wasm.Block,
+        .fromByteUnits(@sizeOf(value.FuncAddr.Wasm.Block)),
+        ModuleInst.Header.funcBlockCount(module),
+    ) catch unreachable;
+    for (func_blocks, 0..) |*block, i| {
+        block.* = value.FuncAddr.Wasm.Block{
+            .module = module_inst_uninit,
+            .starting_idx = module.inner.raw.func_import_count +
+                (@as(u32, @intCast(i)) * value.FuncAddr.Wasm.Block.funcs_per_block),
+        };
+    }
+
     const func_imports = arena.allocator().alloc(
         value.FuncAddr,
         module.inner.raw.func_import_count,
@@ -174,6 +188,7 @@ pub fn begin(
         .buffer_len = arena.buffer.len,
         .module = module,
         .func_imports = func_imports.ptr,
+        .func_blocks = func_blocks.ptr,
         .mems = mems.ptr,
         .tables = tables.ptr,
         .globals = globals.ptr,
@@ -182,7 +197,7 @@ pub fn begin(
     };
 
     return ModuleAllocating{
-        .requiring_allocation = ModuleInst{ .inner = header },
+        .requiring_allocation = module_inst_uninit,
         .mem_idx = @intCast(module.inner.raw.mem_import_count),
         .table_idx = @intCast(module.inner.raw.table_import_count),
     };
@@ -212,10 +227,8 @@ pub fn noTable(request: *ModuleAllocating) LimitsError!void {
         return error.LimitsMismatch;
     }
 
-    const stride = TableStride.ofType(table_type.elem_type);
     request.nextTable().* = TableInst{
-        .base = TableInst.Base{ .ptr = @ptrFromInt(stride.toBytes()) },
-        .stride = stride,
+        .base = TableInst.Base{ .ptr = &[0]?*anyopaque{} },
         .len = 0,
         .capacity = 0,
         .limit = @intCast(table_type.limits.max),
@@ -287,5 +300,4 @@ const ModuleDeallocation = @import("ModuleDeallocation.zig");
 const value = @import("value.zig");
 const MemInst = @import("memory.zig").MemInst;
 const TableInst = @import("table.zig").TableInst;
-const TableStride = @import("table.zig").TableStride;
 const coz = @import("coz");

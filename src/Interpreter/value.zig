@@ -5,20 +5,10 @@ pub const Value = extern union {
     f32: f32,
     i64: i64,
     f64: f64,
-    externref: ExternRef,
+    ptr: ?*anyopaque,
+    externref: runtime.ExternAddr,
     funcref: runtime.FuncAddr.Nullable,
     i64x2: @Vector(2, i64),
-
-    pub const ExternRef = extern struct {
-        addr: runtime.ExternAddr,
-        padding: Padding = .zero,
-
-        const Padding = enum(usize) { zero = 0 };
-
-        comptime {
-            std.debug.assert(@sizeOf(ExternRef) == @sizeOf([2]usize));
-        }
-    };
 
     pub const Tag = enum {
         i32,
@@ -42,7 +32,7 @@ pub const Value = extern union {
     pub fn tagged(value: *const Value, ty: Module.ValType) Tagged {
         return switch (ty) {
             .v128 => unreachable, // Not implemented
-            .externref => .{ .externref = value.externref.addr },
+            .externref => .{ .externref = value.externref },
             inline else => |tag| @unionInit(Tagged, @tagName(tag), @field(value, @tagName(tag))),
         };
     }
@@ -73,8 +63,7 @@ pub const TaggedValue = union(enum) {
     comptime {
         std.debug.assert(@sizeOf(TaggedValue) == switch (@sizeOf(*anyopaque)) {
             // 32 if v128 support is added
-            4 => 12,
-            8 => 24,
+            8 => 16,
             else => unreachable,
         });
     }
@@ -87,7 +76,7 @@ pub const TaggedValue = union(enum) {
 
     pub fn untagged(tagged: *const TaggedValue) Value {
         return switch (@as(std.meta.Tag(TaggedValue), tagged.*)) {
-            .externref => .{ .externref = .{ .addr = tagged.externref } },
+            .externref => .{ .externref = tagged.externref },
             inline else => |tag| @unionInit(
                 Value,
                 @tagName(tag),

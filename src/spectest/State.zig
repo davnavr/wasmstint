@@ -614,7 +614,7 @@ fn runToCompletion(
         interp = next: switch (interp) {
             .awaiting_host => |*host| if (host.currentHostFunction()) |callee| {
                 const print_func_idx = @divExact(
-                    @intFromPtr(callee.func) - @intFromPtr(&Imports.PrintFunction.functions),
+                    @intFromPtr(callee) - @intFromPtr(&Imports.PrintFunction.functions),
                     @sizeOf(wasmstint.runtime.FuncAddr.Host),
                 );
 
