@@ -76,6 +76,10 @@ pub const FuncAddr = extern struct {
         pub const Host = struct {
             func: *FuncAddr.Host,
             data: ?*anyopaque,
+
+            pub fn format(func: *const Expanded.Host, writer: *Writer) Writer.Error!void {
+                try (Expanded{ .host = func.* }).format(writer);
+            }
         };
 
         pub const Wasm = struct {
@@ -84,6 +88,10 @@ pub const FuncAddr = extern struct {
 
             pub inline fn code(wasm: *const Wasm) *Module.Code {
                 return wasm.idx.code(wasm.module.header().module).?;
+            }
+
+            pub fn format(func: *const Wasm, writer: *Writer) Writer.Error!void {
+                try (Expanded{ .wasm = func.* }).format(writer);
             }
         };
 
