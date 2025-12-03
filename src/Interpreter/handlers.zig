@@ -494,8 +494,8 @@ inline fn invokeWithinWasm(
 
     const saved_token = updateWasmFrameState(current_frame, old_instr, old_stp);
     // std.debug.print(
-    //     "WASM {f} WANTS TO CALL {f} (current depth = {}, args @ {*})\n",
-    //     .{ current_frame.function, callee, interp.call_depth, args },
+    //     "WASM {f} WANTS TO CALL {f} (call_depth = {}, args @ {*}, fuel = {})\n",
+    //     .{ current_frame.function, callee, interp.stack.call_depth, args, fuel.remaining },
     // );
 
     const args_top = Stack.Top{ .ptr = args.ptr + args.len };

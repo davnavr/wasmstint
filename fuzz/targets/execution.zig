@@ -1,7 +1,7 @@
 const max_memory_size_in_bytes = wasm_page_size * 4096;
 const max_table_elems = 1_000_000;
 const max_interpreter_stack = 200_000;
-const max_max_fuel = 3_000_000;
+const max_max_fuel = 500_000;
 
 pub fn testOne(
     wasm_module: []const u8,
