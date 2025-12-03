@@ -64,10 +64,13 @@ pub fn grow(
         return; // resize already occurred
     }
 
-    const new_capacity: u32 = @max(
-        request.new_len,
-        // Try multiplying by 1.5
-        old_capacity +| (old_capacity / 2),
+    const new_capacity: u32 = @min(
+        @max(
+            request.new_len,
+            // Try multiplying by 1.5
+            old_capacity +| (old_capacity / 2),
+        ),
+        table.limit,
     );
     const new_capacity_bytes = std.math.mul(usize, new_capacity, stride_bytes) catch return;
 
