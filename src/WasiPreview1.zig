@@ -71,12 +71,8 @@ inode_hash_seed: types.INode.HashSeed,
 const WasiPreview1 = @This();
 
 pub fn function(state: *WasiPreview1, api: Api) wasmstint.runtime.FuncAddr {
-    return .init(.{
-        .host = .{
-            .func = @constCast(api.hostFunc()),
-            .data = @ptrCast(state),
-        },
-    });
+    _ = state;
+    return .init(.{ .host = @constCast(api.hostFunc()) });
 }
 
 pub const Char = @import("WasiPreview1/char.zig").Char;
@@ -1659,12 +1655,10 @@ pub fn dispatch(
     defer coz_begin.end();
 
     const callee = state.currentHostFunction().?;
-
     // TODO: Parameter to indicate if it safe to assume a WASI function is being called?
-    std.debug.assert(@intFromPtr(callee.data) == @intFromPtr(wasi));
 
-    const api = Api.fromHostFunc(callee.func);
-    std.debug.assert(@intFromPtr(api.hostFunc()) == @intFromPtr(callee.func));
+    const api = Api.fromHostFunc(callee);
+    std.debug.assert(@intFromPtr(api.hostFunc()) == @intFromPtr(callee));
     switch (api) {
         .proc_exit => {
             // rval - The exit code returned by the process.
