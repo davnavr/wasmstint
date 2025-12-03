@@ -493,7 +493,6 @@ inline fn invokeWithinWasm(
     const current_frame = interp.stack.frameAt(interp.stack.current_frame).?;
 
     const saved_token = updateWasmFrameState(current_frame, old_instr, old_stp);
-
     // std.debug.print(
     //     "WASM {f} WANTS TO CALL {f} (current depth = {}, args @ {*})\n",
     //     .{ current_frame.function, callee, interp.call_depth, args },
@@ -523,8 +522,8 @@ inline fn invokeWithinWasm(
         error.ValidationNeeded => @panic("TODO: awaiting_validation"),
     };
 
-    // std.debug.print(
-    //     "CALLING {f} @ {*} (was called by {f})\n",
+    // std.log.debug(
+    //     "CALLING {f} @ {*} called by {f}",
     //     .{ callee, new_frame.frame, current_frame.function },
     // );
 
@@ -554,9 +553,9 @@ inline fn invokeWithinWasm(
         },
         .host => |host| {
             // std.debug.print("GOING TO AWAIT HOST TRANSITION\n", .{});
-            // std.debug.print(
-            //     "old_vals = {*}, new_vals = {*}, args = {*}\n",
-            //     .{ old_vals.stack.ptr, new_vals.stack.ptr, args.ptr },
+            // std.log.debug(
+            //     "new_frame.top() = {*}, args = {*}",
+            //     .{ new_frame.top().ptr, args.ptr },
             // );
             return Transition.awaitingHost(
                 new_frame.top(),

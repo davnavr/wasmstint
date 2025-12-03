@@ -406,6 +406,10 @@ fn mainLoop(
                     dst.* = try generateTaggedValue(input, result_ty);
                 }
 
+                std.debug.print("host {f} returning {f}\n", .{
+                    host.currentHostFunction().?,
+                    wasmstint.Interpreter.TaggedValue.sliceFormatter(results),
+                });
                 break :next host.returnFromHost(results, fuel) catch unreachable;
             } else {
                 return host.allocResults(scratch.allocator());

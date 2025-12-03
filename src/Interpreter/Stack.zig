@@ -478,7 +478,9 @@ pub fn popFrame(
     const results: []align(@sizeOf(Value)) Value = popped.localValues(stack)
         .ptr[0..signature.result_count];
     stack.assertSliceInBounds(results);
-    std.debug.assert(@intFromPtr(results.ptr + results.len) <= @intFromPtr(top.ptr));
+    std.debug.assert(
+        copy_results == .manually or @intFromPtr(results.ptr + results.len) <= @intFromPtr(top.ptr),
+    );
 
     std.debug.assert(@intFromPtr(popped.valueStackBase()) <= @intFromPtr(top.ptr));
     const values_height: u16 = @intCast(top.ptr - popped.valueStackBase());
