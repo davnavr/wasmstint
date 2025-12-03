@@ -235,15 +235,8 @@ pub const mman = struct {
 
         _ = flags;
 
-        // see `PageAllocator.map`
-        const hint = @atomicLoad(
-            @TypeOf(std.heap.next_mmap_addr_hint),
-            &std.heap.next_mmap_addr_hint,
-            .unordered,
-        );
-
         const pages = posix.mmap(
-            hint,
+            null,
             length,
             @as(u32, @bitCast(prot)),
             posix.MAP{ .TYPE = .PRIVATE, .ANONYMOUS = true },
@@ -257,16 +250,6 @@ pub const mman = struct {
             error.SystemFdQuotaExceeded => unreachable,
             else => return Oom.OutOfMemory,
         };
-
-        // see `PageAllocator.map`
-        _ = @cmpxchgWeak(
-            @TypeOf(std.heap.next_mmap_addr_hint),
-            &std.heap.next_mmap_addr_hint,
-            hint,
-            @alignCast(@constCast(pages.ptr[pages.len..pages.len].ptr)),
-            .monotonic,
-            .monotonic,
-        );
 
         return pages;
     }
