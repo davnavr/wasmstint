@@ -230,16 +230,13 @@ const ImportProvider = struct {
         return switch (desc) {
             .func => |func_type| .{
                 .func = wasmstint.runtime.FuncAddr.init(.{
-                    .host = .{
-                        .func = func: {
-                            const func = allocator.create(wasmstint.runtime.FuncAddr.Host) catch |e| {
-                                provider.err = e;
-                                return null;
-                            };
-                            func.* = .{ .signature = func_type.* };
-                            break :func func;
-                        },
-                        .data = null,
+                    .host = func: {
+                        const func = allocator.create(wasmstint.runtime.FuncAddr.Host) catch |e| {
+                            provider.err = e;
+                            return null;
+                        };
+                        func.* = .{ .signature = func_type.* };
+                        break :func func;
                     },
                 }),
             },
