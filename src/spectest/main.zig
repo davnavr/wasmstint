@@ -147,6 +147,7 @@ pub fn main() u8 {
 
     var imports: Imports = undefined;
     imports.init(rng.random(), &arena);
+    defer imports.deinit();
 
     var state: State = undefined;
     State.init(

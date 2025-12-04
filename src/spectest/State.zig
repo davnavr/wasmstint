@@ -98,12 +98,7 @@ pub fn processCommand(
         .action => |*act| {
             var fuel = state.starting_fuel;
             switch (try state.processActionCommand(act, output, &fuel, scratch)) {
-                .invoke => |invoke_state| _ = state.runToCompletion(
-                    invoke_state,
-                    &fuel,
-                    output,
-                    &state.module_arena,
-                ),
+                .invoke => |invoke_state| _ = state.runToCompletion(invoke_state, &fuel, output),
                 .get => {},
             }
         },
@@ -163,28 +158,83 @@ fn openModuleContents(
     };
 }
 
-fn finishModuleAllocation(
-    max_memory_size: usize,
-    module: *wasmstint.runtime.ModuleAllocating,
+fn allocateModuleDefinitions(
+    state: *State,
+    module: wasmstint.Module,
     arena: *ArenaAllocator,
+) wasmstint.runtime.ModuleAlloc.Definitions {
+    const defined_table_types = module.tableDefinedTypes();
+    const table_insts = arena.allocator().alloc(
+        *wasmstint.runtime.TableInst,
+        defined_table_types.len,
+    ) catch @panic("oom");
+    for (
+        state.module_arena.allocator().alloc(
+            wasmstint.runtime.TableInst.Allocated,
+            defined_table_types.len,
+        ) catch @panic("oom"),
+        table_insts,
+        module.tableDefinedTypes(),
+    ) |*table, *inst, *table_type| {
+        const max: u32 = @intCast(table_type.limits.max);
+        table.* = wasmstint.runtime.TableInst.Allocated.allocateFromType(
+            state.module_arena.allocator(),
+            table_type,
+            null,
+            @min(max, 65536), // 1 MiB, 16 bytes per funcref
+            max,
+        ) catch @panic("oom");
+        inst.* = &table.table;
+    }
+
+    const defined_mem_types = module.memDefinedTypes();
+    const mem_insts = arena.allocator().alloc(
+        *wasmstint.runtime.MemInst,
+        defined_mem_types.len,
+    ) catch @panic("oom");
+    for (
+        state.module_arena.allocator().alloc(
+            wasmstint.runtime.MemInst.Mapped,
+            defined_mem_types.len,
+        ) catch @panic("oom"),
+        mem_insts,
+        module.memDefinedTypes(),
+    ) |*mem, *inst, *mem_type| {
+        mem.* = wasmstint.runtime.MemInst.Mapped.allocateFromType(
+            mem_type,
+            mem_type.limits.min * wasmstint.runtime.MemInst.page_size,
+            state.max_memory_size,
+        ) catch @panic("oom");
+        inst.* = &mem.memory;
+    }
+
+    return .{
+        .tables = table_insts,
+        .memories = mem_insts,
+    };
+}
+
+fn allocateModule(
+    state: *State,
+    module: wasmstint.Module,
+    output: Output,
+    scratch: *ArenaAllocator,
 ) Error!wasmstint.runtime.ModuleAlloc {
-    while (module.nextMemoryType()) |ty| {
-        wasmstint.runtime.paged_memory.allocate(
-            module,
-            ty.limits.min * wasmstint.runtime.MemInst.page_size,
-            max_memory_size,
-        ) catch @panic("bad mem");
-    }
-
-    while (module.nextTableType()) |_| {
-        wasmstint.runtime.table_allocator.allocateForModule(
-            module,
-            arena.allocator(),
-            65536, // 1 MiB, 16 bytes per funcref
-        ) catch @panic("bad table");
-    }
-
-    return module.finish() catch @panic("bad alloc");
+    var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
+    var definitions = state.allocateModuleDefinitions(module, scratch);
+    return wasmstint.runtime.ModuleAlloc.allocateWithDefinitions(
+        module,
+        state.module_arena.allocator(),
+        state.imports.provider(),
+        &import_error,
+        definitions,
+    ) catch |e| switch (e) {
+        error.OutOfMemory => @panic("oom module alloc"),
+        error.ImportFailure => {
+            definitions.deinit();
+            return failFmt(output, "{f}", .{import_error});
+        },
+    };
 }
 
 fn processModuleCommand(
@@ -272,22 +322,9 @@ fn processModuleCommand(
 
     std.debug.assert(validation_finished);
 
-    var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
-    var module_allocating = wasmstint.runtime.ModuleAllocating.begin(
-        parsed_module,
-        state.imports.provider(),
-        state.module_arena.allocator(),
-        &import_error,
-    ) catch |e| switch (e) {
-        error.OutOfMemory => @panic("oom"),
-        error.ImportFailure => return failFmt(output, "{f}", .{import_error}),
-    };
-
-    var module_alloc = try finishModuleAllocation(
-        state.max_memory_size,
-        &module_allocating,
-        &state.module_arena,
-    );
+    var module_alloc = try state.allocateModule(parsed_module, output, alloca);
+    errdefer module_alloc.deinit(state.module_arena.allocator());
+    _ = alloca.reset(.retain_capacity);
 
     var fuel = state.starting_fuel;
     var interp = state.interpreter.reset();
@@ -358,7 +395,7 @@ fn processRegisterCommand(
     }
 
     output.print(
-        "registered module {f} exports under {f}\n",
+        "registered {f} exports under {f}\n",
         .{ fmtModuleName(command.name), command.as },
     );
 }
@@ -575,7 +612,7 @@ fn expectResultValues(
     output: Output,
     scratch: *ArenaAllocator,
 ) Error![]const Interpreter.TaggedValue {
-    const result_state = switch (state.runToCompletion(interp, fuel, output, &state.module_arena)) {
+    const result_state = switch (state.runToCompletion(interp, fuel, output)) {
         .awaiting_validation => unreachable,
         .call_stack_exhaustion => return state.failCallStackExhausted(output),
         .trapped => |trap| return failInterpreterTrap(trap.trap(), output),
@@ -606,8 +643,6 @@ fn runToCompletion(
     interpreter_state: Interpreter.State,
     fuel: *Interpreter.Fuel,
     output: Output,
-    /// Used to allocate tables.
-    store_arena: *ArenaAllocator,
 ) Interpreter.State {
     var interp = interpreter_state;
     for (0..123456) |_| {
@@ -660,24 +695,13 @@ fn runToCompletion(
             .interrupted => |*interrupt| {
                 switch (interrupt.cause().*) {
                     .out_of_fuel => return interp,
-                    .memory_grow => |*grow| {
-                        wasmstint.runtime.paged_memory.grow(grow);
-                        output.print(
-                            "- handling memory.grow from {[old]} to {[new]}, " ++
-                                "now {[current]} <= {[maximum]} ({[status]s}), was {[result]} pages\n",
-                            .{
-                                .old = grow.old_size,
-                                .new = grow.new_size,
-                                .current = grow.memory.size,
-                                .maximum = grow.memory.limit,
-                                .status = if (grow.memory.size == grow.new_size) "success" else "failure",
-                                .result = grow.result.i32,
-                            },
-                        );
-                    },
-                    .table_grow => |*grow| wasmstint.runtime.table_allocator.grow(
-                        grow,
-                        store_arena.allocator(),
+                    .memory_grow => |*grow| output.print(
+                        "- handling memory.grow from {[old]} to {[new]}\n",
+                        .{ .old = grow.old_size, .new = grow.new_size },
+                    ),
+                    .table_grow => |*grow| output.print(
+                        "- handling table.grow from {[old]} to {[new]}\n",
+                        .{ .old = grow.old_len, .new = grow.new_len },
                     ),
                 }
 
@@ -945,13 +969,12 @@ const TrapMessage = union(enum) {
 fn expectTrap(
     state: *State,
     interp: Interpreter.State,
-    store_arena: *ArenaAllocator,
     fuel: *Interpreter.Fuel,
     expected: Name,
     scratch: *ArenaAllocator,
     output: Output,
 ) Error![]const u8 {
-    const result_state = state.runToCompletion(interp, fuel, output, store_arena);
+    const result_state = state.runToCompletion(interp, fuel, output);
     const trap: *const Interpreter.Trap = switch (result_state) {
         .awaiting_validation => unreachable,
         .trapped => |trapped| trapped.trap(),
@@ -1043,7 +1066,6 @@ fn processAssertTrap(
 
     const message = try state.expectTrap(
         finished_action.invoke,
-        &state.module_arena,
         &fuel,
         command.text,
         scratch,
@@ -1070,7 +1092,7 @@ fn processAssertExhaustion(
         return failFmt(output, "cannot check '{t}' for resource exhaustion", .{finished_action});
     }
 
-    switch (state.runToCompletion(finished_action.invoke, &fuel, output, &state.module_arena)) {
+    switch (state.runToCompletion(finished_action.invoke, &fuel, output)) {
         .awaiting_validation => unreachable,
         .call_stack_exhaustion => {},
         .trapped => |trap| return failInterpreterTrap(trap.trap(), output),
@@ -1335,23 +1357,10 @@ fn processAssertUninstantiable(
 
     std.debug.assert(validation_finished);
 
-    var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
-    var module_allocating = wasmstint.runtime.ModuleAllocating.begin(
-        module,
-        state.imports.provider(),
-        arena.allocator(),
-        &import_error,
-    ) catch |e| switch (e) {
-        error.OutOfMemory => @panic("oom"),
-        error.ImportFailure => return failFmt(output, "{f}", .{import_error}),
-    };
-
-    // Dangling allocations (pages for WASM memory)
-    var module_alloc = try finishModuleAllocation(
-        state.max_memory_size,
-        &module_allocating,
-        arena,
-    );
+    var module_alloc = try state.allocateModule(module, output, &scratch);
+    // Storing of funcrefs means module can't be unconditionally freed
+    errdefer module_alloc.deinit(arena.allocator());
+    _ = scratch.reset(.retain_capacity);
 
     var fuel = state.starting_fuel;
     const instantiating = state.interpreter.reset().awaiting_host.instantiateModule(
@@ -1362,7 +1371,6 @@ fn processAssertUninstantiable(
 
     const message = try state.expectTrap(
         instantiating,
-        arena,
         &fuel,
         command.text,
         &scratch,
@@ -1432,14 +1440,18 @@ fn processAssertUnlinkable(
     std.debug.assert(validation_finished);
 
     var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
-    _ = wasmstint.runtime.ModuleAllocating.begin(
+    _ = scratch.reset(.retain_capacity);
+    var definitions = state.allocateModuleDefinitions(module, &scratch);
+    var module_alloc = wasmstint.runtime.ModuleAlloc.allocateWithDefinitions(
         module,
-        state.imports.provider(),
         arena.allocator(),
+        state.imports.provider(),
         &import_error,
+        definitions,
     ) catch |e| switch (e) {
         error.OutOfMemory => @panic("oom"),
         error.ImportFailure => {
+            defer definitions.deinit();
             const expected_message = switch (import_error.reason) {
                 .none_provided => "unknown import",
                 .type_mismatch, .wrong_desc => "incompatible import type",
@@ -1453,8 +1465,11 @@ fn processAssertUnlinkable(
                 "could not match expected error {f} with \"{f}\"",
                 .{ command.text, import_error },
             );
+
+            comptime unreachable;
         },
     };
+    module_alloc.deinit(arena.allocator());
 
     return failFmt(output, "expected linker error for module \"{f}\"", .{fmt_filename});
 }

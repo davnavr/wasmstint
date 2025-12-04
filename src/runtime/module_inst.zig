@@ -37,9 +37,7 @@ pub const ModuleInst = packed struct(usize) {
             );
             try size.reserve(FuncAddr, info.func_import_count);
             try size.reserve(*TableInst, info.table_count);
-            try size.reserve(TableInst, info.table_count - info.table_import_count);
             try size.reserve(*MemInst, info.mem_count);
-            try size.reserve(MemInst, info.mem_count - info.mem_import_count);
             try size.reserve(*anyopaque, info.global_count);
 
             // More efficient packing of global values is possible
@@ -55,10 +53,11 @@ pub const ModuleInst = packed struct(usize) {
             //         inline else => |ty| try size.reserve(GlobalAddr.Pointee(ty), 1),
             //     }
             // }
-            try size.reserve(FuncAddr, module.globalInitializers().len);
 
             try size.reserve(u32, std.math.divCeil(u32, info.datas_count, 32) catch unreachable);
             try size.reserve(u32, std.math.divCeil(u32, info.elems_count, 32) catch unreachable);
+
+            try size.reserve(u64, module.globalInitializers().len);
 
             shape.* = .{ .size = size };
         }
@@ -329,17 +328,30 @@ pub const ModuleInst = packed struct(usize) {
         };
     }
 
+    /// Frees the allocation backing the `ModuleInst`, and deinitializes its defined memories
+    /// and tables.
+    ///
     /// Callers must ensure that there are no dangling references to this module's functions,
     /// memories, globals, and tables.
     ///
     /// Additionally, callers are responsible for freeing any imported functions, memories, globals
     /// used by this module.
-    pub fn deinit(inst: *ModuleInst) ModuleDeallocation {
-        return .{
-            .inst = inst,
-            .mems = inst.header().definedMemInsts(),
-            .tables = inst.header().definedTableInsts(),
-        };
+    pub fn deinit(inst: *ModuleInst, allocator: std.mem.Allocator) void {
+        for (inst.inner.definedMemInsts()) |mem| {
+            mem.free();
+        }
+
+        for (inst.inner.definedTableInsts()) |table| {
+            table.free();
+        }
+
+        const buffer: []align(std.atomic.cache_line) u8 = @as(
+            [*]align(std.atomic.cache_line) u8,
+            @ptrCast(@constCast(inst.inner)),
+        )[0..inst.inner.buffer_len];
+
+        allocator.free(buffer);
+        inst.* = undefined;
     }
 };
 
@@ -353,4 +365,3 @@ const FuncAddr = @import("value.zig").FuncAddr;
 const TableAddr = @import("value.zig").TableAddr;
 const GlobalAddr = @import("value.zig").GlobalAddr;
 const ExternVal = @import("value.zig").ExternVal;
-const ModuleDeallocation = @import("ModuleDeallocation.zig");

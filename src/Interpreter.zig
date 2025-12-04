@@ -77,8 +77,10 @@ pub const InterruptionCause = union(enum) {
     table_grow: TableGrow,
 
     pub const MemoryGrow = struct {
+        /// It is a violation of the WebAssembly semantics to modify the contents of the memory
+        /// during a `memory.grow`, or to change the size to a value different from the
+        /// `new_size`.
         memory: *runtime.MemInst,
-        /// Modifying this value is a violation of WebAssembly semantics.
         old_size: usize,
         /// Invariant that `new_size >= memory.size`.
         new_size: usize,
@@ -91,6 +93,9 @@ pub const InterruptionCause = union(enum) {
     };
 
     pub const TableGrow = struct {
+        /// It is a violation of the WebAssembly semantics to modify the contents of the table
+        /// during a `table.grow`, or to change the length to a value different from the
+        /// `new_len`.
         table: runtime.TableAddr,
         /// Also used as the result where an `i32` to indicate the old size is written.
         elem: *align(@sizeOf(Value)) Value,
@@ -784,10 +789,34 @@ pub const State = union(Tag) {
             return &state.inner.interpreter().current_state.interrupted.cause;
         }
 
+        // TODO: API to allow host to prevent growth
+
         /// Resumes execution of WASM bytecode after being interrupted.
         pub fn resumeExecution(state: *Interrupted, fuel: *Fuel) State {
             var coz_begin = coz.begin("wasmstint.Interpreter.Interrupted.resumeExecution");
             defer coz_begin.end();
+
+            switch (state.cause().*) {
+                .out_of_fuel => {},
+                .memory_grow => |*grow| grow.result.* = .{
+                    .i32 = value: {
+                        const old_size: u32 = @intCast(grow.old_size);
+                        std.debug.assert(grow.memory.size == old_size);
+                        grow.memory.grow(grow.new_size) catch break :value -1;
+                        break :value @bitCast(@divExact(old_size, runtime.MemInst.page_size));
+                    },
+                },
+                .table_grow => |*grow| grow.elem.* = .{
+                    .i32 = value: {
+                        const init_elem = grow.elem.ptr;
+                        const old_len = grow.old_len;
+                        std.debug.assert(grow.table.table.len == old_len);
+                        grow.table.table.grow(init_elem, grow.new_len) catch break :value -1;
+                        break :value @bitCast(old_len);
+                    },
+                },
+            }
+
             return state.inner.enterMainLoop(fuel);
         }
     };

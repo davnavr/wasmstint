@@ -206,6 +206,10 @@ pub inline fn tableImportTypes(module: Module) []const TableType {
     return module.tableTypes()[0..module.inner.raw.table_import_count];
 }
 
+pub inline fn tableDefinedTypes(module: Module) []const TableType {
+    return module.tableTypes()[module.inner.raw.table_import_count..];
+}
+
 pub inline fn memTypes(module: Module) []const MemType {
     return module.inner.raw.mem_types[0..module.inner.raw.mem_count];
 }
@@ -216,6 +220,10 @@ pub inline fn memImportNames(module: Module) []const ImportName {
 
 pub inline fn memImportTypes(module: Module) []const MemType {
     return module.memTypes()[0..module.inner.raw.mem_import_count];
+}
+
+pub inline fn memDefinedTypes(module: Module) []const MemType {
+    return module.memTypes()[module.inner.raw.mem_import_count..];
 }
 
 pub fn globalTypes(module: Module) []const GlobalType {

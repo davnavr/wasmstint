@@ -3,9 +3,12 @@ pub const TableInst = extern struct {
     /// The current size, in elements.
     len: u32,
     /// Indicates the amount that the tables's size, in elements, can grow without reallocating.
+    ///
+    /// Elements in the range `base[len..capacity]` are `undefined`.
     capacity: u32,
     /// The maximum size, in elements.
     limit: u32,
+    vtable: *const VTable,
 
     pub const Base = packed union {
         func_ref: [*]FuncAddr.Nullable,
@@ -18,6 +21,100 @@ pub const TableInst = extern struct {
     };
 
     pub const OobError = error{TableAccessOutOfBounds};
+
+    fn checkInvariants(table: *const TableInst) void {
+        std.debug.assert(table.len <= table.capacity);
+        std.debug.assert(table.len <= table.limit);
+    }
+
+    pub const VTable = struct {
+        /// Implements the logic for performing a resize when there is no more capacity remaining.
+        ///
+        /// After a successful resize, `table.len == new_len`, and the elements in the newly
+        /// allocated range are set to `init_elem`.
+        grow: *const fn (
+            table: *TableInst,
+            init_elem: ?*anyopaque,
+            /// Must be `> table.len`, `> table.capacity` and `<= table.limit`.
+            new_len: u32,
+        ) Oom!void,
+        free: *const fn (*TableInst) void,
+    };
+
+    pub fn grow(table: *TableInst, init_elem: ?*anyopaque, new_len: u32) Oom!void {
+        table.checkInvariants();
+        if (table.limit < new_len) {
+            return Oom.OutOfMemory;
+        } else if (new_len <= table.len) {
+            return;
+        }
+
+        const old_len = table.len;
+        if (new_len <= table.capacity) {
+            @memset(table.base.ptr[table.len..new_len], init_elem);
+            table.len = new_len;
+        } else {
+            try table.vtable.grow(table, init_elem, new_len);
+        }
+        table.checkInvariants();
+        std.debug.assert(table.len == new_len);
+        if (builtin.mode == .Debug) {
+            const expected = @intFromPtr(init_elem);
+            for (table.elements()[old_len..new_len], old_len..) |*e, i| {
+                const actual = @intFromPtr(e.*);
+                if (actual != expected) {
+                    std.debug.panic(
+                        "expected element {X:0>8} at index {d} (0x{X}), got {X:0>8}",
+                        .{ expected, i, @intFromPtr(e), actual },
+                    );
+                }
+            }
+        }
+    }
+
+    pub fn free(table: *TableInst) void {
+        table.checkInvariants();
+        table.vtable.free(table);
+        table.* = undefined;
+    }
+
+    pub const Allocated = @import("table/Allocated.zig");
+
+    /// Creates a `TableInst` from a static buffer.
+    pub fn fromStaticBuffer(
+        buffer: []?*anyopaque,
+        init_elem: ?*anyopaque,
+        /// The initial size of the table.
+        size: usize,
+    ) TableInst {
+        std.debug.assert(size <= buffer.len);
+        @memset(buffer[0..size], init_elem);
+        return TableInst{
+            .base = buffer.ptr,
+            .len = size,
+            .capacity = buffer.len,
+            .limit = buffer.len,
+            .vtable = &VTable{
+                .grow = noGrow,
+                .free = emptyFree,
+            },
+        };
+    }
+
+    pub fn noGrow(_: *TableInst, new_len: usize) Oom!void {
+        _ = new_len;
+        return error.OutOfMemory;
+    }
+
+    fn emptyFree(table: *TableInst) void {
+        std.debug.assert(table.len == 0);
+        std.debug.assert(table.capacity == 0);
+    }
+
+    pub fn limits(table: *const TableInst) Module.Limits {
+        table.checkInvariants();
+        return .{ .min = table.len, .max = table.limit };
+    }
 
     /// Implements the [`table.init`] instruction, which is also used in module instantiation.
     ///
@@ -35,6 +132,8 @@ pub const TableInst = extern struct {
         const table_inst = table_addr.table;
         const src_elems = module_inst.elemSegment(src);
         const actual_len = len orelse src_elems.len;
+
+        table_inst.checkInvariants();
 
         const src_end_idx = std.math.add(usize, src_idx, actual_len) catch
             return error.TableAccessOutOfBounds;
@@ -120,6 +219,7 @@ pub const TableInst = extern struct {
     }
 
     pub fn elements(table: *const TableInst) []?*anyopaque {
+        table.checkInvariants();
         return table.base.ptr[0..table.len];
     }
 
@@ -142,6 +242,8 @@ pub const TableInst = extern struct {
         src_idx: u32,
         dst_idx: u32,
     ) OobError!void {
+        dst.checkInvariants();
+        src.checkInvariants();
         // TODO: Assert that table types are compatible
 
         const src_end_idx = std.math.add(usize, src_idx, len) catch
@@ -168,27 +270,32 @@ pub const TableInst = extern struct {
         idx: u32,
         end_idx: u32,
     ) void {
-        std.debug.assert(table.len <= table.capacity);
-        std.debug.assert(table.capacity <= table.limit);
+        table.checkInvariants();
         std.debug.assert(idx <= end_idx);
         std.debug.assert(end_idx <= table.capacity);
+        std.debug.assert(end_idx <= table.limit);
 
         @memset(table.base.ptr[idx..end_idx], elem);
     }
 
     /// Returns an error if the range of elements to fill is out of bounds.
     pub fn fill(table: *const TableInst, len: u32, elem: ?*anyopaque, idx: u32) OobError!void {
+        table.checkInvariants();
+
         const end_idx = std.math.add(u32, idx, len) catch
             return error.TableAccessOutOfBounds;
 
-        if (end_idx > table.len)
+        if (end_idx > table.len) {
             return error.TableAccessOutOfBounds;
+        }
 
         return table.fillWithinCapacity(elem, idx, end_idx);
     }
 };
 
 const std = @import("std");
+const builtin = @import("builtin");
+const Oom = std.mem.Allocator.Error;
 const FuncAddr = @import("value.zig").FuncAddr;
 const ExternAddr = @import("value.zig").ExternAddr;
 const Module = @import("../Module.zig");

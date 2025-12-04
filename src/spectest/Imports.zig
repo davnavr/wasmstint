@@ -6,8 +6,8 @@ const Imports = @This();
 
 lookup_buffer: [2048]u8 align(16),
 lookup: std.StringHashMapUnmanaged(wasmstint.runtime.ExternVal),
-memory: wasmstint.runtime.MemInst,
-table: wasmstint.runtime.TableInst,
+memory: wasmstint.runtime.MemInst.Mapped,
+table: wasmstint.runtime.TableInst.Allocated,
 /// Imports provided by registered modules.
 registered: Registered,
 registered_context: RegisteredContext,
@@ -162,13 +162,8 @@ pub fn init(
     rng: std.Random,
     arena: *std.heap.ArenaAllocator,
 ) void {
-    imports.* = Imports{
-        .lookup_buffer = undefined,
-        .lookup = std.StringHashMapUnmanaged(wasmstint.runtime.ExternVal).empty,
-        .memory = undefined,
-        .table = undefined,
-        .registered = .empty,
-        .registered_context = .{ .seed = rng.int(u32) },
+    const mem_type = wasmstint.Module.MemType{
+        .limits = .{ .min = 1, .max = 2 },
     };
 
     const table_type = wasmstint.Module.TableType{
@@ -176,22 +171,25 @@ pub fn init(
         .limits = .{ .min = 10, .max = 20 },
     };
 
-    imports.table = wasmstint.runtime.table_allocator.allocate(
-        &table_type,
-        arena.allocator(),
-        rng.intRangeAtMost(u32, table_type.limits.min, table_type.limits.max),
-    ) catch @panic("oom");
-
-    const mem_type = wasmstint.Module.MemType{
-        .limits = .{ .min = 1, .max = 2 },
+    imports.* = Imports{
+        .lookup_buffer = undefined,
+        .lookup = std.StringHashMapUnmanaged(wasmstint.runtime.ExternVal).empty,
+        .memory = wasmstint.runtime.MemInst.Mapped.allocateFromType(
+            &mem_type,
+            rng.intRangeAtMost(usize, mem_type.limits.min, mem_type.limits.max) *
+                wasmstint.runtime.MemInst.page_size,
+            mem_type.limits.max * wasmstint.runtime.MemInst.page_size,
+        ) catch @panic("oom memory inst"),
+        .table = wasmstint.runtime.TableInst.Allocated.allocateFromType(
+            arena.allocator(),
+            &table_type,
+            null,
+            rng.intRangeAtMost(u32, table_type.limits.min, table_type.limits.max),
+            table_type.limits.max,
+        ) catch @panic("oom table"),
+        .registered = .empty,
+        .registered_context = .{ .seed = rng.int(u32) },
     };
-
-    imports.memory = wasmstint.runtime.paged_memory.map(
-        &mem_type,
-        rng.intRangeAtMost(usize, mem_type.limits.min, mem_type.limits.max) *
-            wasmstint.runtime.MemInst.page_size,
-        mem_type.limits.max * wasmstint.runtime.MemInst.page_size,
-    ) catch @panic("oom");
 
     var lookup_buffer = std.heap.FixedBufferAllocator.init(&imports.lookup_buffer);
     imports.lookup.ensureTotalCapacity(
@@ -213,10 +211,10 @@ pub fn init(
         );
     }
 
-    imports.lookup.putAssumeCapacityNoClobber("memory", .{ .mem = &imports.memory });
+    imports.lookup.putAssumeCapacityNoClobber("memory", .{ .mem = &imports.memory.memory });
     imports.lookup.putAssumeCapacityNoClobber(
         "table",
-        .{ .table = .{ .elem_type = .funcref, .table = &imports.table } },
+        .{ .table = .{ .elem_type = .funcref, .table = &imports.table.table } },
     );
 }
 
@@ -240,6 +238,12 @@ fn resolve(
         host.lookup.get(name.bytes())
     else
         host.registered.getContext(Name.init(module, name), host.registered_context);
+}
+
+pub fn deinit(imports: *Imports) void {
+    // All other allocations are managed in an arena, so only memory needs freeing.
+    imports.memory.memory.free();
+    imports.* = undefined;
 }
 
 const std = @import("std");

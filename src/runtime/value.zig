@@ -105,7 +105,18 @@ pub const FuncAddr = packed struct(usize) {
 
         /// Never refers to a function import.
         pub fn funcIdx(wasm: Wasm) Module.FuncIdx {
-            return @enumFromInt(wasm.block().starting_idx + wasm.idx_bits);
+            if (builtin.mode == .Debug) {
+                std.debug.assert( // corrupted module pointer
+                    @intFromPtr(wasm.module().inner) % std.atomic.cache_line == 0,
+                );
+            }
+
+            return @enumFromInt(
+                @as(
+                    @typeInfo(Module.FuncIdx).@"enum".tag_type,
+                    @intCast(wasm.block().starting_idx),
+                ) + wasm.idx_bits,
+            );
         }
 
         pub inline fn code(wasm: Wasm) *Module.Code {
@@ -113,7 +124,8 @@ pub const FuncAddr = packed struct(usize) {
         }
 
         pub fn signature(wasm: Wasm) *const Module.FuncType {
-            return wasm.module().header().module.funcTypes()[@intFromEnum(wasm.funcIdx())];
+            const idx = @intFromEnum(wasm.funcIdx());
+            return wasm.module().header().module.funcTypes()[idx];
         }
 
         pub fn format(func: Wasm, writer: *Writer) Writer.Error!void {
@@ -298,6 +310,7 @@ pub const ExternAddr = packed union {
 };
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Writer = std.Io.Writer;
 const Module = @import("../Module.zig");
 const ModuleInst = @import("module_inst.zig").ModuleInst;
