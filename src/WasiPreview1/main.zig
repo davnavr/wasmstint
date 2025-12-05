@@ -661,42 +661,61 @@ fn realMain() Error!i32 {
     defer wasi.deinit();
 
     std.debug.assert(preopens.len == 0); // `wasi` now responsible for closing preopen handles
-    // _ = scratch.reset(.retain_capacity);
+    _ = scratch.reset(.retain_capacity);
+
+    const defined_mem_types = parsed_module.memDefinedTypes();
+    const defined_memories = arena.allocator().alloc(
+        wasmstint.runtime.MemInst.Mapped,
+        defined_mem_types.len,
+    ) catch oom("defined memories list");
+    const defined_memories_buf = scratch.allocator().alloc(
+        *wasmstint.runtime.MemInst,
+        defined_memories.len,
+    ) catch oom("defined memories buf");
+    for (defined_memories, defined_memories_buf, defined_mem_types) |*mem, *inst, *mem_type| {
+        mem.* = wasmstint.runtime.MemInst.Mapped.allocateFromType(
+            mem_type,
+            mem_type.limits.min * wasmstint.runtime.MemInst.page_size,
+            arguments.@"max-memory-size",
+        ) catch oom("memory inst");
+        inst.* = &mem.memory;
+    }
+
+    const defined_table_types = parsed_module.tableDefinedTypes();
+    const defined_tables = arena.allocator().alloc(
+        wasmstint.runtime.TableInst.Allocated,
+        defined_table_types.len,
+    ) catch oom("defined tables list");
+    const defined_tables_buf = scratch.allocator().alloc(
+        *wasmstint.runtime.TableInst,
+        defined_tables.len,
+    ) catch oom("defined tables buf");
+    for (defined_tables, defined_tables_buf, defined_table_types) |*table, *inst, *table_type| {
+        table.* = wasmstint.runtime.TableInst.Allocated.allocateFromType(
+            arena.allocator(),
+            table_type,
+            null,
+            @intCast(table_type.limits.min),
+            @intCast(arguments.@"max-memory-size" / 8),
+        ) catch oom("table inst");
+        inst.* = &table.table;
+    }
 
     var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
-    var module_allocating = wasmstint.runtime.ModuleAllocating.begin(
+    var module_alloc = wasmstint.runtime.ModuleAlloc.allocateWithDefinitions(
         parsed_module,
-        wasi.importProvider(),
         arena.allocator(),
+        wasi.importProvider(),
         &import_error,
+        .{
+            .tables = defined_tables_buf,
+            .memories = defined_memories_buf,
+        },
     ) catch |e| switch (e) {
         error.OutOfMemory => oom("WASM module allocation"),
         error.ImportFailure => return fail.format(error.GenericError, "{f}", .{import_error}),
     };
-
-    while (module_allocating.nextMemoryType()) |ty| {
-        wasmstint.runtime.paged_memory.allocate(
-            &module_allocating,
-            ty.limits.min * wasmstint.runtime.MemInst.page_size,
-            arguments.@"max-memory-size",
-        ) catch |e| switch (e) {
-            error.LimitsMismatch => unreachable, // bad mem
-            error.OutOfMemory => oom("WASM linear memory"),
-        };
-    }
-
-    while (module_allocating.nextTableType()) |_| {
-        wasmstint.runtime.table_allocator.allocateForModule(
-            &module_allocating,
-            arena.allocator(),
-            arguments.@"max-memory-size" / 16,
-        ) catch |e| switch (e) {
-            error.LimitsMismatch => unreachable, // bad table
-            error.OutOfMemory => oom("WASM table"),
-        };
-    }
-
-    var module_allocated = module_allocating.finish() catch unreachable;
+    _ = scratch.reset(.retain_capacity);
 
     var interp_allocator = allocators.PageAllocation.init(
         .{},
@@ -715,14 +734,13 @@ fn realMain() Error!i32 {
         var instantiate_fuel = max_fuel;
         const instantiate_state = start.awaiting_host.instantiateModule(
             arena.allocator(),
-            &module_allocated,
+            &module_alloc,
             &instantiate_fuel,
         ) catch oom("WASM module instantiation");
 
         const init_result = try mainLoop(
             instantiate_state,
             .{ .limited = &instantiate_fuel },
-            arena.allocator(),
             &wasi,
             null,
         );
@@ -733,7 +751,7 @@ fn realMain() Error!i32 {
         }
     }
 
-    const module = module_allocated.assumeInstantiated();
+    const module = module_alloc.assumeInstantiated();
     const fmt_entrypoint = std.unicode.fmtUtf8(arguments.invoke);
     const exports: struct {
         memory: *wasmstint.runtime.MemInst,
@@ -838,7 +856,6 @@ fn realMain() Error!i32 {
             };
         },
         .unlimited,
-        arena.allocator(),
         &wasi,
         exports.memory,
     );
@@ -860,7 +877,6 @@ const FuelChecking = union(enum) {
 fn mainLoop(
     initial_state: wasmstint.Interpreter.State,
     fuel_checking: FuelChecking,
-    table_allocator: std.mem.Allocator,
     wasi: *WasiPreview1,
     memory: ?*wasmstint.runtime.MemInst,
 ) Error!?i32 {
@@ -903,11 +919,7 @@ fn mainLoop(
                         },
                         .unlimited => {},
                     },
-                    .memory_grow => |*grow| wasmstint.runtime.paged_memory.grow(grow),
-                    .table_grow => |*grow| wasmstint.runtime.table_allocator.grow(
-                        grow,
-                        table_allocator,
-                    ),
+                    .memory_grow, .table_grow => {},
                 }
 
                 break :next interrupt.resumeExecution(fuel);

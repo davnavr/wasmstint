@@ -51,7 +51,13 @@ pub fn allocateFromType(
     std.debug.assert(table_type.limits.min <= maximum);
     // TODO: If non-nullable reference support is added, need to check `init_elem != null`
 
-    return allocate(allocator, init_elem, @intCast(table_type.limits.min), initial_capacity, maximum);
+    return allocate(
+        allocator,
+        init_elem,
+        @intCast(table_type.limits.min),
+        initial_capacity,
+        if (maximum <= table_type.limits.max) maximum else @intCast(table_type.limits.max),
+    );
 }
 
 const vtable = TableInst.VTable{
