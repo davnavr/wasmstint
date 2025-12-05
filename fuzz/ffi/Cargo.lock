@@ -24,6 +24,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "812e12b5285cc515a9c72a5c1d3b6d46a19dac5acfef5265968c166106e31dd3"
 
 [[package]]
+name = "bumpalo"
+version = "3.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46c5e41b57b8bba42a04676d81cb89e9ee8e859a1a66f80a5a72e1cb76b34d43"
+
+[[package]]
 name = "derive_arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -69,6 +75,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
+name = "libm"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -85,6 +97,12 @@ checksum = "a338cc41d27e6cc6dce6cefc13a0729dfbb81c262b1f519331575dd80ef3067f"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "spin"
+version = "0.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
 
 [[package]]
 name = "syn"
@@ -110,7 +128,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06d642d8c5ecc083aafe9ceb32809276a304547a3a6eeecceb5d8152598bc71f"
 dependencies = [
  "leb128fmt",
- "wasmparser",
+ "wasmparser 0.240.0",
 ]
 
 [[package]]
@@ -123,6 +141,52 @@ dependencies = [
  "arbitrary",
  "flagset",
  "wasm-encoder",
+]
+
+[[package]]
+name = "wasmi"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cd396d92add4cedfa5d8678f892f852bbdfc8672e263ef1e142f9d3745c9887"
+dependencies = [
+ "spin",
+ "wasmi_collections",
+ "wasmi_core",
+ "wasmi_ir",
+ "wasmparser 0.228.0",
+]
+
+[[package]]
+name = "wasmi_collections"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3dfe4d1b405f42cd89c2bbdd2311981aeaaa0a3888ad579293d8afad627390ff"
+
+[[package]]
+name = "wasmi_core"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7b04f4a809c7d8f6a765cd098ad9970e4132a99d4d6017fcf2f48929737582f"
+dependencies = [
+ "libm",
+]
+
+[[package]]
+name = "wasmi_ir"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ff8dd9e28940551ac56fc11f66094535a987a84460f2d3f2b628da8842dde0a"
+dependencies = [
+ "wasmi_core",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.228.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4abf1132c1fdf747d56bbc1bb52152400c70f336870f968b85e89ea422198ae3"
+dependencies = [
+ "bitflags",
 ]
 
 [[package]]
@@ -140,5 +204,7 @@ name = "wasmstint-fuzz-ffi"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
+ "bumpalo",
  "wasm-smith",
+ "wasmi",
 ]

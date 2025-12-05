@@ -10,7 +10,7 @@
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
-// pub mod wasmi_diff;
+pub mod wasmi_diff;
 
 // Could try to use Zig `SmpAllocator` as the global allocator here, but how does that work when the
 // Rust side is a shared object?
@@ -127,7 +127,7 @@ struct Input<'a, 'b> {
 impl Drop for Input<'_, '_> {
     fn drop(&mut self) {
         let input = NonNull::<[u8]>::from(
-            std::mem::replace(&mut self.u, arbitrary::Unstructured::new(&mut [])).take_rest(),
+            std::mem::replace(&mut self.u, arbitrary::Unstructured::new(&[])).take_rest(),
         );
         *self.ffi = InputSlice {
             len: input.len(),
