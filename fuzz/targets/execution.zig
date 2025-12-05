@@ -1,7 +1,7 @@
 const max_memory_size_in_bytes = wasm_page_size * 4096;
 const max_table_elems = 1_000_000;
 const max_interpreter_stack = 200_000;
-const max_max_fuel = 500_000;
+const max_max_fuel = 125_000;
 
 pub fn testOne(
     wasm_module: []const u8,
@@ -53,16 +53,98 @@ pub fn testOne(
     var import_provider = ImportProvider{
         .arena = &arena,
         .input = input,
+        .memories = try std.ArrayList(wasmstint.runtime.MemInst.Mapped).initCapacity(
+            arena.allocator(),
+            parsed_module.memImportTypes().len,
+        ),
+        .tables = try std.ArrayList(wasmstint.runtime.TableInst.Allocated).initCapacity(
+            arena.allocator(),
+            parsed_module.tableImportTypes().len,
+        ),
     };
     defer import_provider.deinit();
 
-    var module_allocating = allocate: {
+    var module_alloc = allocate: {
+        _ = scratch.reset(.retain_capacity);
+        const defined_table_types = parsed_module.tableDefinedTypes();
+        const defined_tables = try arena.allocator().alloc(
+            wasmstint.runtime.TableInst.Allocated,
+            defined_table_types.len,
+        );
+        const defined_table_insts = try scratch.allocator().alloc(
+            *wasmstint.runtime.TableInst,
+            defined_table_types.len,
+        );
+        for (
+            defined_table_types,
+            defined_tables,
+            defined_table_insts,
+        ) |*table_type, *table, *table_inst| {
+            if (table_type.limits.min > max_table_elems) {
+                return error.OutOfMemory;
+            }
+
+            const min_elems: u32 = @intCast(table_type.limits.min);
+            const chosen_max = try input.uintInRangeInclusive(
+                u32,
+                min_elems,
+                @min(table_type.limits.max, max_table_elems),
+            );
+            table.* = try wasmstint.runtime.TableInst.Allocated.allocateFromType(
+                arena.allocator(),
+                table_type,
+                null,
+                try input.uintInRangeInclusive(u32, min_elems, chosen_max),
+                chosen_max,
+            );
+            table_inst.* = &table.table;
+        }
+
+        const defined_memory_types = parsed_module.memDefinedTypes();
+        const defined_memories = try arena.allocator().alloc(
+            wasmstint.runtime.MemInst.Mapped,
+            defined_memory_types.len,
+        );
+        const defined_memory_insts = try scratch.allocator().alloc(
+            *wasmstint.runtime.MemInst,
+            defined_memory_types.len,
+        );
+        for (
+            defined_memory_types,
+            defined_memories,
+            defined_memory_insts,
+        ) |*mem_type, *mem, *mem_inst| {
+            const min_bytes = mem_type.limits.min * wasm_page_size;
+            if (min_bytes > max_memory_size_in_bytes) {
+                return error.OutOfMemory;
+            }
+
+            const chosen_max = try input.uintInRangeInclusive(
+                usize,
+                min_bytes,
+                @min(mem_type.limits.max * wasm_page_size, max_memory_size_in_bytes),
+            );
+            mem.* = try wasmstint.runtime.MemInst.Mapped.allocateFromType(
+                mem_type,
+                try input.uintInRangeInclusive(usize, min_bytes, chosen_max),
+                chosen_max,
+            );
+            mem_inst.* = &mem.memory;
+        }
+
+        var definitions = wasmstint.runtime.ModuleAlloc.Definitions{
+            .tables = defined_table_insts,
+            .memories = defined_memory_insts,
+        };
+        errdefer definitions.deinit();
+
         var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
-        break :allocate wasmstint.runtime.ModuleAllocating.begin(
+        break :allocate wasmstint.runtime.ModuleAlloc.allocateWithDefinitions(
             parsed_module,
-            import_provider.importProvider(),
             arena.allocator(),
+            import_provider.importProvider(),
             &import_error,
+            definitions,
         ) catch |e| switch (e) {
             error.OutOfMemory => |oom| return oom,
             error.ImportFailure => |err| if (import_provider.err) |actual| {
@@ -74,49 +156,6 @@ pub fn testOne(
         };
     };
 
-    // TODO: Error during module allocation causes memory leak
-
-    while (module_allocating.nextMemoryType()) |ty| {
-        const min_in_bytes = ty.limits.min * wasm_page_size;
-        if (min_in_bytes > max_memory_size_in_bytes) {
-            return error.OutOfMemory;
-        }
-
-        const chosen_max = try input.uintInRangeInclusive(
-            usize,
-            min_in_bytes,
-            @min(ty.limits.max * wasm_page_size, max_memory_size_in_bytes),
-        );
-        wasmstint.runtime.paged_memory.allocate(
-            &module_allocating,
-            try input.uintInRangeInclusive(usize, min_in_bytes, chosen_max),
-            chosen_max,
-        ) catch |e| switch (e) {
-            error.LimitsMismatch => unreachable, // bad mem
-            error.OutOfMemory => |oom| return oom, // mem
-        };
-    }
-
-    while (module_allocating.nextTableType()) |ty| {
-        if (ty.limits.min > max_table_elems) {
-            return error.OutOfMemory;
-        }
-
-        wasmstint.runtime.table_allocator.allocateForModule(
-            &module_allocating,
-            arena.allocator(),
-            try input.uintInRangeInclusive(
-                usize,
-                ty.limits.min,
-                @min(ty.limits.max, max_table_elems),
-            ),
-        ) catch |e| switch (e) {
-            error.LimitsMismatch => unreachable, // bad table
-            error.OutOfMemory => |oom| return oom, // table
-        };
-    }
-
-    var module_allocated = module_allocating.finish() catch unreachable;
     var interp: wasmstint.Interpreter = undefined;
     const initial_state = try interp.init(
         allocator,
@@ -129,14 +168,13 @@ pub fn testOne(
         };
         const instantiate_state = try initial_state.awaiting_host.instantiateModule(
             allocator,
-            &module_allocated,
+            &module_alloc,
             &instantiate_fuel,
         );
 
         const start_results = mainLoop(
             instantiate_state,
             scratch,
-            arena.allocator(),
             &instantiate_fuel,
             input,
         ) catch |e| switch (e) {
@@ -149,7 +187,7 @@ pub fn testOne(
         std.debug.assert(start_results.len == 0);
     }
 
-    const module = module_allocated.assumeInstantiated();
+    const module = module_alloc.assumeInstantiated();
     const exports = module.exports();
     for (0..exports.len) |i| {
         _ = scratch.reset(.retain_capacity);
@@ -174,13 +212,7 @@ pub fn testOne(
                 var fuel = wasmstint.Interpreter.Fuel{
                     .remaining = try input.uintInRangeInclusive(u64, 1, max_max_fuel),
                 };
-                const results = mainLoop(
-                    interp.reset(),
-                    scratch,
-                    arena.allocator(),
-                    &fuel,
-                    input,
-                ) catch |err| {
+                const results = mainLoop(interp.reset(), scratch, &fuel, input) catch |err| {
                     std.debug.print("function did not return: {t}\n", .{err});
                     continue;
                 };
@@ -210,7 +242,8 @@ fn generateExternAddr(input: *ffi.Input) !wasmstint.runtime.ExternAddr {
 const ImportProvider = struct {
     arena: *std.heap.ArenaAllocator,
     input: *ffi.Input,
-    allocated_mems: std.ArrayList(*wasmstint.runtime.MemInst) = .empty,
+    memories: std.ArrayList(wasmstint.runtime.MemInst.Mapped),
+    tables: std.ArrayList(wasmstint.runtime.TableInst.Allocated),
     err: ?error{ OutOfMemory, BadInput } = null,
 
     fn resolve(
@@ -242,11 +275,6 @@ const ImportProvider = struct {
             },
             .mem => |mem_type| .{
                 .mem = mem: {
-                    const mem = allocator.create(wasmstint.runtime.MemInst) catch |e| {
-                        provider.err = e;
-                        return null;
-                    };
-
                     const min_size = mem_type.limits.min * wasm_page_size;
                     if (min_size > max_memory_size_in_bytes) {
                         provider.err = error.OutOfMemory;
@@ -256,64 +284,72 @@ const ImportProvider = struct {
                     const max_size = provider.input.uintInRangeInclusive(
                         usize,
                         min_size,
-                        max_memory_size_in_bytes,
+                        @min(mem_type.limits.max * wasm_page_size, max_memory_size_in_bytes),
                     ) catch |e| {
                         provider.err = e;
                         return null;
                     };
-
-                    mem.* = wasmstint.runtime.paged_memory.map(
+                    //const mem = provider.memories.addOneAssumeCapacity();
+                    //errdefer provider.memories.pop().?;
+                    const provided_mem = wasmstint.runtime.MemInst.Mapped.allocateFromType(
                         mem_type,
                         provider.input.uintInRangeInclusive(usize, min_size, max_size) catch |e| {
                             provider.err = e;
                             return null;
                         },
                         max_size,
-                    ) catch {
-                        provider.err = error.OutOfMemory;
-                        return null;
-                    };
-                    provider.allocated_mems.append(allocator, mem) catch |e| {
+                    ) catch |e| {
                         provider.err = e;
                         return null;
                     };
 
-                    break :mem mem;
+                    const mem = provider.memories.addOneAssumeCapacity();
+                    mem.* = provided_mem;
+                    break :mem &mem.memory;
                 },
             },
             .table => |table_type| .{
                 .table = wasmstint.runtime.TableAddr{
                     .elem_type = table_type.elem_type,
                     .table = table: {
-                        if (table_type.limits.min > max_table_elems) {
+                        const limit_min: u32 = @intCast(table_type.limits.min);
+                        if (limit_min > max_table_elems) {
                             provider.err = error.OutOfMemory;
                             return null;
                         }
 
-                        const max_elems = @min(max_table_elems, table_type.limits.max);
-                        const table = allocator.create(wasmstint.runtime.TableInst) catch |e| {
+                        const max_elems = provider.input.uintInRangeInclusive(
+                            u32,
+                            limit_min,
+                            @min(max_memory_size_in_bytes, table_type.limits.max),
+                        ) catch |e| {
                             provider.err = e;
                             return null;
                         };
-                        table.* = wasmstint.runtime.table_allocator.allocate(
-                            table_type,
-                            allocator,
-                            provider.input.uintInRangeInclusive(
-                                usize,
-                                table_type.limits.min,
+                        //const table = provider.tables.addOneAssumeCapacity();
+                        //errdefer provider.tables.pop().?;
+                        const provided_table =
+                            wasmstint.runtime.TableInst.Allocated.allocateFromType(
+                                allocator,
+                                table_type,
+                                null,
+                                provider.input.uintInRangeInclusive(
+                                    u32,
+                                    limit_min,
+                                    max_elems,
+                                ) catch |e| {
+                                    provider.err = e;
+                                    return null;
+                                },
                                 max_elems,
                             ) catch |e| {
                                 provider.err = e;
                                 return null;
-                            },
-                        ) catch |e| switch (e) {
-                            error.LimitsMismatch => unreachable, // bad table
-                            error.OutOfMemory => |oom| {
-                                provider.err = oom;
-                                return null;
-                            },
-                        };
-                        break :table table;
+                            };
+
+                        const table = provider.tables.addOneAssumeCapacity();
+                        table.* = provided_table;
+                        break :table &table.table;
                     },
                 },
             },
@@ -359,8 +395,11 @@ const ImportProvider = struct {
     }
 
     fn deinit(provider: *ImportProvider) void {
-        for (provider.allocated_mems.items) |mem| {
-            wasmstint.runtime.paged_memory.free(mem);
+        for (provider.memories.items) |*mem| {
+            mem.memory.free();
+        }
+        for (provider.tables.items) |*table| {
+            table.table.free();
         }
         provider.* = undefined;
     }
@@ -385,7 +424,6 @@ fn generateTaggedValue(
 fn mainLoop(
     initial_state: wasmstint.Interpreter.State,
     scratch: *std.heap.ArenaAllocator,
-    allocator: std.mem.Allocator,
     fuel: *wasmstint.Interpreter.Fuel,
     input: *ffi.Input,
 ) ![]const wasmstint.Interpreter.TaggedValue {
@@ -416,11 +454,7 @@ fn mainLoop(
             .interrupted => |*interrupt| {
                 switch (interrupt.cause().*) {
                     .out_of_fuel => return error.OutOfFuel,
-                    .memory_grow => |*grow| wasmstint.runtime.paged_memory.grow(grow),
-                    .table_grow => |*grow| wasmstint.runtime.table_allocator.grow(
-                        grow,
-                        allocator,
-                    ),
+                    .memory_grow, .table_grow => {},
                 }
 
                 break :next interrupt.resumeExecution(fuel);

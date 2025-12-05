@@ -25,6 +25,9 @@ pub const TableInst = extern struct {
     fn checkInvariants(table: *const TableInst) void {
         std.debug.assert(table.len <= table.capacity);
         std.debug.assert(table.len <= table.limit);
+        if (builtin.mode == .Debug) {
+            std.debug.assert(@intFromPtr(table.base.ptr) % @alignOf(?*anyopaque) == 0);
+        }
     }
 
     pub const VTable = struct {
