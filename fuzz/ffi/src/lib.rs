@@ -76,6 +76,8 @@ pub struct Configuration<'a> {
     pub available_imports: ByteSlice<'a>,
     pub exports: ByteSlice<'a>,
     pub module_shape: ByteSlice<'a>,
+    pub max_max_memory_bytes: u128,
+    pub max_max_table_elements: u64,
     pub allowed_instructions_mask: u32,
     pub memory_offset_choices: MemoryOffsetChoices,
     pub allow_start_export: Flag,
@@ -89,6 +91,7 @@ pub struct Configuration<'a> {
     pub custom_page_sizes_enabled: Flag,
     pub generate_custom_sections: Flag,
     pub memory64_enabled: Flag,
+    pub memory_max_size_required: Flag,
     pub multi_value_enabled: Flag,
     pub reference_types_enabled: Flag,
     pub relaxed_simd_enabled: Flag,
@@ -141,6 +144,8 @@ fn generate_module(
     config: &Configuration,
 ) -> arbitrary::Result<Vec<u8>> {
     const MAX_MAXIMUM: usize = 1000;
+    const MAX_MAX_MEMORY32_BYTES: u64 = u32::MAX as u64 + 1;
+    const MAX_MAX_MEMORY64_BYTES: u128 = u64::MAX as u128 + 1;
 
     // Slightly different from `<wasm_smith::Config as arbitrary::Arbitrary>::arbitrary()`
     let config = wasm_smith::Config {
@@ -213,11 +218,15 @@ fn generate_module(
 
             u.int_in_range(0..=max_max_memory)
         }?,
-        max_memory32_bytes: u.int_in_range(0..=u32::MAX as u64 + 1)?,
-        max_memory64_bytes: u.int_in_range(0..=u64::MAX as u128 + 1)?,
+        max_memory32_bytes: u.int_in_range(
+            0..=MAX_MAX_MEMORY32_BYTES
+                .min(u64::try_from(config.max_max_memory_bytes).unwrap_or(MAX_MAX_MEMORY32_BYTES)),
+        )?,
+        max_memory64_bytes: u
+            .int_in_range(0..=MAX_MAX_MEMORY64_BYTES.min(config.max_max_memory_bytes))?,
         max_modules: 0,
         max_nesting_depth: u.int_in_range(0..=10)?,
-        max_table_elements: u.int_in_range(0..=1_000_000)?,
+        max_table_elements: u.int_in_range(0..=config.max_max_table_elements)?,
         max_tables: u.int_in_range(0..=100)?,
         max_tags: u.int_in_range(0..=MAX_MAXIMUM)?,
         max_type_size: 1000,
@@ -229,7 +238,7 @@ fn generate_module(
             config.memory_offset_choices.b,
             config.memory_offset_choices.c,
         ),
-        memory_max_size_required: false,
+        memory_max_size_required: config.memory_max_size_required.try_to_bool(u)?,
         min_data_segments: 0,
         min_element_segments: 0,
         min_elements: 0,

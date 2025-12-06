@@ -1,7 +1,7 @@
-const max_memory_size_in_bytes = wasm_page_size * 4096;
-const max_table_elems = 1_000_000;
 const max_interpreter_stack = 200_000;
 const max_max_fuel = 125_000;
+
+pub const wasm_smith_config = ffi.wasm_smith.Configuration{};
 
 pub fn testOne(
     wasm_module: []const u8,
@@ -80,7 +80,7 @@ pub fn testOne(
             defined_tables,
             defined_table_insts,
         ) |*table_type, *table, *table_inst| {
-            if (table_type.limits.min > max_table_elems) {
+            if (table_type.limits.min > wasm_smith_config.max_max_table_elements) {
                 return error.OutOfMemory;
             }
 
@@ -88,7 +88,7 @@ pub fn testOne(
             const chosen_max = try input.uintInRangeInclusive(
                 u32,
                 min_elems,
-                @min(table_type.limits.max, max_table_elems),
+                @min(table_type.limits.max, wasm_smith_config.max_max_table_elements),
             );
             table.* = try wasmstint.runtime.TableInst.Allocated.allocateFromType(
                 arena.allocator(),
@@ -115,14 +115,14 @@ pub fn testOne(
             defined_memory_insts,
         ) |*mem_type, *mem, *mem_inst| {
             const min_bytes = mem_type.limits.min * wasm_page_size;
-            if (min_bytes > max_memory_size_in_bytes) {
+            if (min_bytes > wasm_smith_config.max_max_memory_bytes) {
                 return error.OutOfMemory;
             }
 
             const chosen_max = try input.uintInRangeInclusive(
                 usize,
                 min_bytes,
-                @min(mem_type.limits.max * wasm_page_size, max_memory_size_in_bytes),
+                @min(mem_type.limits.max * wasm_page_size, wasm_smith_config.max_max_memory_bytes),
             );
             mem.* = try wasmstint.runtime.MemInst.Mapped.allocateFromType(
                 mem_type,
@@ -276,7 +276,7 @@ const ImportProvider = struct {
             .mem => |mem_type| .{
                 .mem = mem: {
                     const min_size = mem_type.limits.min * wasm_page_size;
-                    if (min_size > max_memory_size_in_bytes) {
+                    if (min_size > wasm_smith_config.max_max_memory_bytes) {
                         provider.err = error.OutOfMemory;
                         return null;
                     }
@@ -284,7 +284,7 @@ const ImportProvider = struct {
                     const max_size = provider.input.uintInRangeInclusive(
                         usize,
                         min_size,
-                        @min(mem_type.limits.max * wasm_page_size, max_memory_size_in_bytes),
+                        @min(mem_type.limits.max * wasm_page_size, wasm_smith_config.max_max_memory_bytes),
                     ) catch |e| {
                         provider.err = e;
                         return null;
@@ -313,7 +313,7 @@ const ImportProvider = struct {
                     .elem_type = table_type.elem_type,
                     .table = table: {
                         const limit_min: u32 = @intCast(table_type.limits.min);
-                        if (limit_min > max_table_elems) {
+                        if (limit_min > wasm_smith_config.max_max_table_elements) {
                             provider.err = error.OutOfMemory;
                             return null;
                         }
@@ -321,7 +321,7 @@ const ImportProvider = struct {
                         const max_elems = provider.input.uintInRangeInclusive(
                             u32,
                             limit_min,
-                            @min(max_memory_size_in_bytes, table_type.limits.max),
+                            @min(wasm_smith_config.max_max_table_elements, table_type.limits.max),
                         ) catch |e| {
                             provider.err = e;
                             return null;
