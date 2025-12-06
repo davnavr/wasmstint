@@ -809,6 +809,7 @@ fn buildFuzzers(
     const FuzzTarget = enum {
         validation,
         execution,
+        wasmi_diff,
     };
 
     const FuzzRunner = enum {

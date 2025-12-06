@@ -305,7 +305,7 @@ pub const ModuleInst = packed struct(usize) {
             val: ExternVal,
 
             pub fn format(self: *const Export, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-                try writer.writeAll("(export ");
+                try writer.print("(export {f} ", .{self.name});
                 try self.val.format(writer);
                 try writer.writeByte(')');
             }

@@ -75,7 +75,7 @@ impl FuncArities {
 }
 
 #[derive(Clone, Copy)]
-#[repr(u16)]
+#[repr(C, u16)]
 pub enum FuncRef {
     Null = 0,
     Ref(FuncId) = 1,
@@ -121,11 +121,14 @@ impl ExternRef {
 }
 
 /// An action for the host to take.
-#[repr(u64)]
+#[repr(u16)]
 pub enum Action {
     /// The number of arguments and results is implied by the [`FuncId`], by indexing into
     /// [`Execution.func_export_arities`].
-    Call(CallAction) = 0,
+    Call {
+        func: FuncId,
+        action: CallAction,
+    } = 0,
     HashMemory {
         memory: MemoryId,
         hash: u64,
@@ -136,7 +139,6 @@ pub enum Action {
 
 #[repr(C)]
 pub struct CallAction {
-    func: FuncId,
     /// Only set when [`results_ptr`] is not null.
     trap: Trap,
     args_ptr: NonNull<ArgumentVal>,
@@ -144,7 +146,7 @@ pub struct CallAction {
 }
 
 #[derive(Clone, Copy)]
-#[repr(u64)]
+#[repr(C, u64)]
 pub enum ArgumentVal {
     I32(i32) = 0,
     I64(i64) = 1,
@@ -169,8 +171,8 @@ impl ArgumentVal {
                 let bound: u16 = u16::try_from(func_imports.len()).unwrap_or(u16::MAX);
                 let chosen = u.int_in_range(0u32..=u32::from(bound) + 1)?;
                 Self::FuncRef(match u16::try_from(chosen) {
-                    Ok(i) => FuncRef::Ref(FuncId(i)),
-                    Err(_) => FuncRef::Null,
+                    Ok(i) if i < bound => FuncRef::Ref(FuncId(i)),
+                    _ => FuncRef::Null,
                 })
             }
             wasmi::ValType::ExternRef => {
@@ -193,7 +195,7 @@ impl ArgumentVal {
 }
 
 #[derive(Clone, Copy)]
-#[repr(u64)]
+#[repr(C, u32)]
 pub enum ResultFuncRef {
     Null = 0,
     NonNull(FuncArities) = 1,
@@ -209,7 +211,7 @@ impl ResultFuncRef {
 }
 
 #[derive(Clone, Copy)]
-#[repr(u64)]
+#[repr(C, u64)]
 pub enum ResultVal {
     I32(i32) = 0,
     I64(i64) = 1,
@@ -294,6 +296,12 @@ impl<'a> Context<'a, '_, '_, '_> {
     #[inline]
     fn arena(&self) -> &'a bumpalo::Bump {
         self.arena
+    }
+
+    fn record_host_calls(&mut self) {
+        let host_calls: &[HostCall] = self.arena.alloc_slice_fill_iter(self.host_calls.drain(..));
+        self.execution.host_calls_len = host_calls.len();
+        self.execution.host_calls_ptr = non_null_slice_to_ptr(NonNull::from(host_calls));
     }
 }
 
@@ -418,10 +426,25 @@ fn instantiate_wasmi_module<'a, 'rt>(
             }
             wasmi::ExternType::Func(func_type) => {
                 let func = create_func_import(store, func_imports.len(), func_type.clone());
+                provided_imports.push(wasmi::Extern::Func(func));
                 func_import_arities.push(FuncArities::from_wasmi_func_type(func_type));
                 func_imports.push(func);
             }
-            _ => todo!(),
+            wasmi::ExternType::Memory(mem_type) => {
+                provided_imports.push(wasmi::Extern::Memory(
+                    wasmi::Memory::new(&mut *store, *mem_type).unwrap(),
+                ));
+            }
+            wasmi::ExternType::Table(table_type) => {
+                provided_imports.push(wasmi::Extern::Table(
+                    wasmi::Table::new(
+                        &mut *store,
+                        *table_type,
+                        wasmi::Val::default(table_type.element()),
+                    )
+                    .unwrap(),
+                ));
+            }
         }
     }
 
@@ -461,8 +484,12 @@ fn perform_host_action<'a>(
             store.data().arena(),
         );
 
-        let vals_buf = scratch.alloc_slice_fill_clone(param_count.into(), &wasmi::Val::I32(0));
-        let (args_buf, results_buf) = vals_buf.split_at_mut(param_count.into());
+        let result_count = u16::try_from(func_type.results().len()).unwrap();
+        let vals_buf = scratch.alloc_slice_fill_clone(
+            usize::from(param_count) + usize::from(result_count),
+            &wasmi::Val::I32(0),
+        );
+        let (args_buf, results_buf) = vals_buf.split_at_mut(usize::from(param_count));
         for (arg_dst, arg_type) in args_buf.iter_mut().zip(func_type.params()) {
             let ctx = store.data_mut();
             let generated = ArgumentVal::generate(ctx.u, ctx.func_imports, *arg_type)?;
@@ -472,41 +499,36 @@ fn perform_host_action<'a>(
 
         let generated_args = generated_args.into_bump_slice();
         let args_ptr = non_null_slice_to_ptr(NonNull::from(generated_args));
-        Action::Call(match func.call(&mut *store, args_buf, results_buf) {
-            Ok(()) => {
-                let result_count = u16::try_from(func_type.results().len()).unwrap();
-                let mut converted_results =
-                    bumpalo::collections::Vec::<'a, ResultVal>::with_capacity_in(
-                        result_count.into(),
-                        store.data().arena(),
-                    );
-                for result in results_buf.iter() {
-                    converted_results.push(ResultVal::from_wasmi_val(
-                        result,
-                        wasmi::AsContext::as_context(store),
-                    ));
-                }
+        Action::Call {
+            func: id,
+            action: match func.call(&mut *store, args_buf, results_buf) {
+                Ok(()) => {
+                    let converted_results: &'a [ResultVal] = store
+                        .data()
+                        .arena
+                        .alloc_slice_fill_iter(results_buf.iter().map(|result| {
+                            ResultVal::from_wasmi_val(result, wasmi::AsContext::as_context(store))
+                        }));
 
-                CallAction {
-                    func: id,
-                    trap: Trap::Invalid,
-                    args_ptr,
-                    results_ptr: converted_results.as_ptr(),
+                    CallAction {
+                        trap: Trap::Invalid,
+                        args_ptr,
+                        results_ptr: converted_results.as_ptr(),
+                    }
                 }
-            }
-            Err(e) => match e.kind() {
-                wasmi::errors::ErrorKind::TrapCode(trap) => CallAction {
-                    func: id,
-                    trap: Trap::from_wasmi_trap(*trap),
-                    args_ptr,
-                    results_ptr: std::ptr::null(),
+                Err(e) => match e.kind() {
+                    wasmi::errors::ErrorKind::TrapCode(trap) => CallAction {
+                        trap: Trap::from_wasmi_trap(*trap),
+                        args_ptr,
+                        results_ptr: std::ptr::null(),
+                    },
+                    wasmi::errors::ErrorKind::Host(e) => {
+                        return Err(e.downcast_ref::<HostError<arbitrary::Error>>().unwrap().0);
+                    }
+                    _ => panic!("unexpected error during call action: {e}"),
                 },
-                wasmi::errors::ErrorKind::Host(e) => {
-                    return Err(e.downcast_ref::<HostError<arbitrary::Error>>().unwrap().0);
-                }
-                _ => panic!("unexpected error during call action: {e}"),
             },
-        })
+        }
     } else {
         let max_mem_id = u16::try_from(store.data().mem_exports.len()).unwrap();
         if max_mem_id == 0 {
@@ -632,9 +654,18 @@ unsafe fn execute(
             Ok(init) => init,
             Err(e) => match e.kind() {
                 wasmi::errors::ErrorKind::TrapCode(trap) => {
-                    let execution = store.into_data().execution;
-                    execution.trap = Trap::from_wasmi_trap(*trap);
-                    break 'exec execution;
+                    let mut ctx = store.into_data();
+                    ctx.execution.trap = Trap::from_wasmi_trap(*trap);
+                    ctx.record_host_calls();
+                    break 'exec ctx.execution;
+                }
+                wasmi::errors::ErrorKind::Instantiation(
+                    wasmi::errors::InstantiationError::ElementSegmentDoesNotFit { .. },
+                ) => {
+                    let mut ctx = store.into_data();
+                    ctx.execution.trap = Trap::TableOutOfBounds;
+                    ctx.record_host_calls();
+                    break 'exec ctx.execution;
                 }
                 wasmi::errors::ErrorKind::Host(e) => {
                     return Err(e.downcast_ref::<HostError<arbitrary::Error>>().unwrap().0);
@@ -657,9 +688,7 @@ unsafe fn execute(
         {
             let ctx = store.data_mut();
 
-            let host_calls: &[HostCall] = ctx.arena.alloc_slice_fill_iter(ctx.host_calls.drain(..));
-            ctx.execution.host_calls_len = host_calls.len();
-            ctx.execution.host_calls_ptr = non_null_slice_to_ptr(NonNull::from(host_calls));
+            ctx.record_host_calls();
 
             let actions: &[Action] = ctx.arena.alloc_slice_fill_iter(ctx.actions.drain(..));
             ctx.execution.actions_len = u32::try_from(actions.len()).unwrap();
@@ -675,9 +704,10 @@ unsafe fn execute(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn wasmstint_fuzz_wasmi_diff<'wasm>(
+pub extern "C" fn wasmstint_fuzz_wasmi_diff(
     input: &mut crate::InputSlice,
-    buffer: &'wasm crate::ModuleBuffer,
+    wasm_ptr: NonNull<u8>,
+    wasm_len: usize,
     fuel: u64,
     out: &mut std::mem::MaybeUninit<NonNull<Execution>>,
     hasher: HasherCallback,
@@ -689,8 +719,8 @@ pub extern "C" fn wasmstint_fuzz_wasmi_diff<'wasm>(
         ffi: input,
     };
 
-    let wasm_bytes = NonNull::<[u8]>::slice_from_raw_parts(buffer.base, buffer.len);
-    let wasm_bytes: &'wasm [u8] = unsafe { wasm_bytes.as_ref() };
+    let wasm_bytes = NonNull::<[u8]>::slice_from_raw_parts(wasm_ptr, wasm_len);
+    let wasm_bytes: &[u8] = unsafe { wasm_bytes.as_ref() };
 
     match unsafe { execute(wasm_bytes, &mut input.u, fuel, hasher) } {
         Ok(exec) => {
