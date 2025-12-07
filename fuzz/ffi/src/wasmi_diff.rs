@@ -547,37 +547,35 @@ fn perform_host_action<'a>(
 
 fn collect_exports<'a, 'rt>(
     store: &mut wasmi::Store<Context<'a, 'rt, '_, '_>>,
-    module: &wasmi::Module,
-    inst: &wasmi::Instance,
     alloca: &'rt bumpalo::Bump,
+    inst: &wasmi::Instance,
+    scratch: &mut bumpalo::Bump,
 ) {
-    let exports_iter = module.exports();
+    scratch.reset();
+    // `wasmi` does not specify a consistent ordering for exports, so both the Zig and Rust
+    // sides must sort the names lexicographically.
+    let mut sorted_exports =
+        bumpalo::collections::Vec::from_iter_in(inst.exports(&*store), scratch);
+    // No stable sort needed, WASM spec ensures all exports have unique names.
+    sorted_exports.sort_unstable_by_key(|val| val.name());
+
     let mut func_exports = bumpalo::collections::Vec::<'rt, wasmi::Func>::new_in(alloca);
     let mut func_export_arities =
         bumpalo::collections::Vec::<'a, FuncArities>::new_in(store.data().arena());
     let mut mem_exports = bumpalo::collections::Vec::<'rt, wasmi::Memory>::new_in(alloca);
-    for def in exports_iter {
-        match def.ty() {
-            wasmi::ExternType::Func(func_type) => {
-                func_export_arities.push(FuncArities::from_wasmi_func_type(func_type));
-                func_exports.push(
-                    inst.get_export(&mut *store, def.name())
-                        .unwrap()
-                        .into_func()
-                        .unwrap(),
-                );
+
+    for val in sorted_exports.drain(..) {
+        match val.into_extern() {
+            wasmi::Extern::Func(func) => {
+                let pushed = FuncArities::from_wasmi_func_type(&func.ty(&*store));
+                func_export_arities.push(pushed);
+                func_exports.push(func);
             }
-            wasmi::ExternType::Memory(_) => {
-                mem_exports.push(
-                    inst.get_export(&mut *store, def.name())
-                        .unwrap()
-                        .into_memory()
-                        .unwrap(),
-                );
-            }
+            wasmi::Extern::Memory(mem) => mem_exports.push(mem),
             _ => continue,
         }
     }
+    std::mem::drop(sorted_exports);
 
     let func_export_arities: &'a [FuncArities] = store
         .data()
@@ -674,7 +672,7 @@ unsafe fn execute(
             },
         };
 
-        collect_exports(&mut store, &module, &inst, &alloca);
+        collect_exports(&mut store, &alloca, &inst, &mut scratch);
 
         while store.data_mut().u.arbitrary::<bool>() == Ok(true) {
             match perform_host_action(&mut store, hasher, &mut scratch) {

@@ -489,8 +489,39 @@ const Exports = struct {
         module: wasmstint.runtime.ModuleInst,
         arena: *std.heap.ArenaAllocator,
         execution: Execution,
+        scratch: *std.heap.ArenaAllocator,
     ) error{OutOfMemory}!Exports {
-        const exports = module.exports();
+        const exports = exports: {
+            const wasm_exports = module.exports();
+            _ = scratch.reset(.retain_capacity);
+            const exports_buf = try scratch.allocator().alloc(
+                wasmstint.runtime.ModuleInst.ExportVals.Export,
+                wasm_exports.len,
+            );
+            for (0.., exports_buf) |i, *dst| {
+                dst.* = wasm_exports.at(i);
+            }
+
+            const ExportSorter = struct {
+                fn lessThan(
+                    _: @This(),
+                    a: wasmstint.runtime.ModuleInst.ExportVals.Export,
+                    b: wasmstint.runtime.ModuleInst.ExportVals.Export,
+                ) bool {
+                    return std.mem.lessThan(u8, a.name.bytes(), b.name.bytes());
+                }
+            };
+
+            std.sort.pdq(
+                wasmstint.runtime.ModuleInst.ExportVals.Export,
+                exports_buf,
+                ExportSorter{},
+                ExportSorter.lessThan,
+            );
+
+            break :exports exports_buf;
+        };
+
         var mem_exports = try std.ArrayList(*const wasmstint.runtime.MemInst).initCapacity(
             arena.allocator(),
             @min(exports.len, module.header().module.memTypes().len),
@@ -499,8 +530,7 @@ const Exports = struct {
             arena.allocator(),
             execution.inner.func_export_count,
         );
-        for (0..exports.len) |i| {
-            const exp = exports.at(i);
+        for (exports) |*exp| {
             switch (exp.val) {
                 .func => |func_export| {
                     std.debug.print(
@@ -824,7 +854,7 @@ pub fn testOne(
     }
 
     const module = module_alloc.assumeInstantiated();
-    const exports = try Exports.resolve(module, &arena, execution);
+    const exports = try Exports.resolve(module, &arena, execution, scratch);
 
     for (0.., execution.actions()) |action_num, *action| {
         switch (action.payload()) {
