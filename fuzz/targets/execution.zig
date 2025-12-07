@@ -1,5 +1,5 @@
 const max_interpreter_stack = 200_000;
-const max_max_fuel = 125_000;
+const max_fuel = 400_000;
 
 pub const wasm_smith_config = ffi.wasm_smith.Configuration{};
 
@@ -162,20 +162,19 @@ pub fn testOne(
         .{ .stack_reserve = try input.uintInRangeInclusive(u32, 0, max_interpreter_stack) },
     );
     defer interp.deinit(allocator);
+
+    var fuel = wasmstint.Interpreter.Fuel{ .remaining = max_fuel };
     {
-        var instantiate_fuel = wasmstint.Interpreter.Fuel{
-            .remaining = try input.uintInRangeInclusive(u64, 1, max_max_fuel),
-        };
         const instantiate_state = try initial_state.awaiting_host.instantiateModule(
             allocator,
             &module_alloc,
-            &instantiate_fuel,
+            &fuel,
         );
 
         const start_results = mainLoop(
             instantiate_state,
             scratch,
-            &instantiate_fuel,
+            &fuel,
             input,
         ) catch |e| switch (e) {
             error.OutOfMemory, error.OutOfFuel, error.BadInput, error.Trapped => {
@@ -208,11 +207,17 @@ pub fn testOne(
                     "parameters {f}\n",
                     .{wasmstint.Interpreter.TaggedValue.sliceFormatter(params)},
                 );
-
-                var fuel = wasmstint.Interpreter.Fuel{
-                    .remaining = try input.uintInRangeInclusive(u64, 1, max_max_fuel),
-                };
-                const results = mainLoop(interp.reset(), scratch, &fuel, input) catch |err| {
+                const results = mainLoop(
+                    try interp.reset().awaiting_host.beginCall(
+                        allocator,
+                        func,
+                        params,
+                        &fuel,
+                    ),
+                    scratch,
+                    &fuel,
+                    input,
+                ) catch |err| {
                     std.debug.print("function did not return: {t}\n", .{err});
                     continue;
                 };
