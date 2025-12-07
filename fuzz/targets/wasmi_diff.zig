@@ -524,7 +524,7 @@ const Exports = struct {
 
         var mem_exports = try std.ArrayList(*const wasmstint.runtime.MemInst).initCapacity(
             arena.allocator(),
-            @min(exports.len, module.header().module.memTypes().len),
+            exports.len,
         );
         var func_exports = try std.ArrayList(wasmstint.runtime.FuncAddr).initCapacity(
             arena.allocator(),
