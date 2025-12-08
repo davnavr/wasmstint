@@ -549,7 +549,8 @@ pub const FrameSize = packed struct(u64) {
         callee: FuncAddr,
         comptime params: ParameterAllocation,
     ) error{ValidationNeeded}!FrameSize {
-        const param_count = callee.signature().param_count;
+        const signature = callee.signature();
+        const param_count = signature.param_count;
         const allocated_param_count = switch (params) {
             .allocate => param_count,
             .preallocated => 0,
@@ -569,7 +570,7 @@ pub const FrameSize = packed struct(u64) {
 
         const allocated_local_count = allocated_param_count + local_count;
         const value_stack_size = switch (callee.expanded()) {
-            .host => 0,
+            .host => signature.result_count -| param_count, // ensure enough space for results
             .wasm => |wasm| wasm.code().inner.max_values,
         };
 
