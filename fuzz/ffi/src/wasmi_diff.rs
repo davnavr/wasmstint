@@ -303,6 +303,12 @@ impl<'a> Context<'a, '_, '_, '_> {
         self.execution.host_calls_len = host_calls.len();
         self.execution.host_calls_ptr = non_null_slice_to_ptr(NonNull::from(host_calls));
     }
+
+    fn trap(mut self, trap: Trap) -> &'a mut Execution {
+        self.execution.trap = trap;
+        self.record_host_calls();
+        self.execution
+    }
 }
 
 pub type HasherCallback = unsafe extern "C" fn(data_ptr: NonNull<u8>, data_len: usize) -> u64;
@@ -652,23 +658,26 @@ unsafe fn execute(
             Ok(init) => init,
             Err(e) => match e.kind() {
                 wasmi::errors::ErrorKind::TrapCode(trap) => {
-                    let mut ctx = store.into_data();
-                    ctx.execution.trap = Trap::from_wasmi_trap(*trap);
-                    ctx.record_host_calls();
-                    break 'exec ctx.execution;
+                    break 'exec store.into_data().trap(Trap::from_wasmi_trap(*trap));
                 }
                 wasmi::errors::ErrorKind::Instantiation(
                     wasmi::errors::InstantiationError::ElementSegmentDoesNotFit { .. },
+                )
+                | wasmi::errors::ErrorKind::Table(
+                    wasmi::errors::TableError::InitOutOfBounds
+                    | wasmi::errors::TableError::FillOutOfBounds
+                    | wasmi::errors::TableError::SetOutOfBounds
+                    | wasmi::errors::TableError::CopyOutOfBounds,
                 ) => {
-                    let mut ctx = store.into_data();
-                    ctx.execution.trap = Trap::TableOutOfBounds;
-                    ctx.record_host_calls();
-                    break 'exec ctx.execution;
+                    break 'exec store.into_data().trap(Trap::TableOutOfBounds);
+                }
+                wasmi::errors::ErrorKind::Memory(wasmi::errors::MemoryError::OutOfBoundsAccess) => {
+                    break 'exec store.into_data().trap(Trap::MemoryOutOfBounds);
                 }
                 wasmi::errors::ErrorKind::Host(e) => {
                     return Err(e.downcast_ref::<HostError<arbitrary::Error>>().unwrap().0);
                 }
-                _ => panic!("unexpected error during instantation: {e}"),
+                unexpected => panic!("unexpected error during instantation: {unexpected:?}"),
             },
         };
 
