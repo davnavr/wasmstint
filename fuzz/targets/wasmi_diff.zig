@@ -55,8 +55,10 @@ const Execution = struct {
     }
 
     fn funcExportArities(exec: Execution) []const FuncArities {
-        std.debug.assert(exec.inner.actions_ptr != null);
-        return exec.inner.func_export_arities_ptr[0..exec.inner.func_export_count];
+        return if (exec.inner.actions_ptr != null)
+            exec.inner.func_export_arities_ptr[0..exec.inner.func_export_count]
+        else
+            @panic("function exports unavailable");
     }
 
     fn globalImportVals(exec: Execution) []const ArgumentVal {
@@ -206,7 +208,10 @@ const Execution = struct {
 
     fn memory_hasher(data_ptr: [*]const u8, data_len: usize) callconv(.c) u64 {
         const data = data_ptr[0..data_len];
-        std.debug.assert(data.len % wasmstint.runtime.MemInst.page_size == 0);
+        if (data.len % wasmstint.runtime.MemInst.page_size != 0) {
+            @panic("length of memory must be multiple of page size");
+        }
+
         return std.hash.XxHash3.hash(
             8327219780915383169, // "chosen by fair dice roll."
             data,
@@ -229,28 +234,27 @@ const Execution = struct {
     };
 
     fn ValTagged(comptime T: type) type {
-        return @Type(.{
-            .@"union" = .{
-                .decls = &.{},
-                .layout = .auto,
-                .tag_type = ValTag,
-                .fields = fields: {
-                    const Payload = @FieldType(T, "payload");
-                    const tag_fields = @typeInfo(ValTag).@"enum".fields;
-                    var fields: [tag_fields.len]std.builtin.Type.UnionField = undefined;
-                    for (tag_fields, &fields) |tag, *f| {
-                        const FieldType = @FieldType(Payload, tag.name);
-                        f.* = .{
-                            .name = tag.name,
-                            .type = FieldType,
-                            .alignment = @alignOf(FieldType),
-                        };
-                    }
-
-                    break :fields &fields;
-                },
+        const Payload = @FieldType(T, "payload");
+        const tag_fields = @typeInfo(ValTag).@"enum".fields;
+        return @Union(
+            .auto,
+            ValTag,
+            names: {
+                var names: [tag_fields.len][]const u8 = undefined;
+                for (tag_fields, &names) |tag, *n| {
+                    n.* = tag.name;
+                }
+                break :names &names;
             },
-        });
+            types: {
+                var types: [tag_fields.len]type = undefined;
+                for (tag_fields, &types) |tag, *t| {
+                    t.* = @FieldType(Payload, tag.name);
+                }
+                break :types &types;
+            },
+            &(.{std.builtin.Type.UnionField.Attributes{}} ** tag_fields.len),
+        );
     }
 
     fn valTagged(comptime T: type) (fn (*const T) ValTagged(T)) {
@@ -804,12 +808,15 @@ pub fn testOne(
                 std.debug.print("start function did not return: {t}\n", .{err});
                 return error.BadInput;
             },
-            error.OutOfMemory => |oom| return oom,
+            error.OutOfMemory, error.SignatureMismatch => |other| return other,
         };
 
         switch (start_results) {
             .values => |values| {
-                std.debug.assert(values.len == 0);
+                if (values.len != 0) {
+                    @panic("start function must not return any values");
+                }
+
                 if (execution.trap()) |trap| {
                     _ = trap.toWasmstintTrapCode() catch |e| {
                         std.debug.print(
@@ -862,8 +869,27 @@ pub fn testOne(
                 const target = exports.functions[call_action.func.n];
                 const target_arities = call_action.func.arities(execution);
                 const target_signature = target.signature();
-                std.debug.assert(target_arities.param_count == target_signature.param_count);
-                std.debug.assert(target_arities.result_count == target_signature.result_count);
+                if (target_arities.param_count != target_signature.param_count) {
+                    std.debug.panic(
+                        "expected {[expected]d} params for action #{[num]}, got {[actual]f}",
+                        .{
+                            .num = action_num,
+                            .expected = target_arities.param_count,
+                            .actual = target_signature,
+                        },
+                    );
+                }
+
+                if (target_arities.result_count != target_signature.result_count) {
+                    std.debug.panic(
+                        "expected {[expected]d} results for action #{[num]}, got {[actual]f}",
+                        .{
+                            .num = action_num,
+                            .expected = target_arities.result_count,
+                            .actual = target_signature,
+                        },
+                    );
+                }
 
                 const provided_args = call_action.action.args_ptr[0..target_arities.param_count];
                 const expected_results = call_action.results(execution);
@@ -900,7 +926,7 @@ pub fn testOne(
                         );
                         return error.BadInput;
                     },
-                    error.OutOfMemory => |oom| return oom,
+                    error.OutOfMemory, error.SignatureMismatch => |other| return other,
                 };
 
                 switch (call_result) {
@@ -1027,7 +1053,6 @@ fn mainLoop(
                 const host_signature = awaiting.hostSignature();
                 const param_types = host_signature.parameters();
                 const result_types = host_signature.results();
-
                 const vals_buf = try scratch.allocator().alloc(
                     wasmstint.Interpreter.TaggedValue,
                     param_types.len + result_types.len,
@@ -1035,11 +1060,18 @@ fn mainLoop(
                 const actual_args = vals_buf[0..param_types.len];
                 awaiting.copyParamsTo(actual_args);
                 const results_buf = vals_buf[param_types.len..][0..result_types.len];
-
                 const actual_host_id = Execution.HostFuncId{
-                    .n = @intCast(host_func - host_functions.ptr),
+                    // TODO(Zig): fix bad pointer arithmetic?
+                    // .n = @intCast(host_func - host_functions.ptr),
+                    .n = @intCast(@as([*]const wasmstint.runtime.FuncAddr.Host, host_func[0..1].ptr) - host_functions.ptr),
                 };
-                std.debug.assert(actual_host_id.n <= host_functions.len);
+
+                if (actual_host_id.n >= host_functions.len) {
+                    std.debug.panic(
+                        "expected {d} host function calls, but got {d}: {f}",
+                        .{ host_functions.len, actual_host_id.n, host_func },
+                    );
+                }
 
                 const host_call = host.nextCall(exec);
                 const host_call_arities = host_call.record.func.arities(exec);
@@ -1090,11 +1122,11 @@ fn mainLoop(
                     awaiting.currentHostFunction().?,
                     wasmstint.Interpreter.TaggedValue.sliceFormatter(results_buf),
                 });
-                break :next awaiting.returnFromHost(results_buf, fuel) catch unreachable;
+                break :next try awaiting.returnFromHost(results_buf, fuel);
             } else {
                 return .{ .values = try awaiting.allocResults(scratch.allocator()) };
             },
-            .awaiting_validation => unreachable,
+            .awaiting_validation => @panic("code validation should be finished"),
             .call_stack_exhaustion => return error.OutOfMemory,
             .interrupted => |*interrupt| {
                 switch (interrupt.cause().*) {
@@ -1242,7 +1274,7 @@ const ImportProvider = struct {
                         }
 
                         switch (global_type.val_type) {
-                            .v128 => unreachable,
+                            .v128 => @panic("v128 globals not supported"),
                             inline else => |val_type| {
                                 const Val = wasmstint.runtime.GlobalAddr.Pointee(val_type);
                                 const val = allocator.create(Val) catch |e| {

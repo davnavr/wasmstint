@@ -1,3 +1,7 @@
+pub const std_options = std.Options{
+    .log_level = .debug,
+};
+
 const Arguments = cli_args.CliArgs(.{
     .description = "Standalone fuzz test case executor.",
     .flags = &[_]cli_args.Flag{
