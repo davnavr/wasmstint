@@ -169,39 +169,35 @@ pub const nt = struct {
 pub const mman = struct {
     pub const has_mmap_anonymous = posix.MAP != void and @hasField(posix.MAP, "ANONYMOUS");
 
-    pub const Prot = @Type(.{
-        .@"struct" = std.builtin.Type.Struct{
-            .layout = .@"packed",
-            .backing_integer = u32,
-            .decls = &.{},
-            .is_tuple = false,
-            .fields = fields: {
+    pub const Prot = prot: {
+        const attributes = std.builtin.Type.StructField.Attributes{
+            .default_value_ptr = @ptrCast(&false),
+        };
+        break :prot @Struct(
+            .@"packed",
+            u32,
+            names: {
                 @setEvalBranchQuota(5000);
-                var fields: [32]std.builtin.Type.StructField = undefined;
-                for (0.., &fields) |i, *f| {
-                    f.* = .{
-                        .name = std.fmt.comptimePrint("_{d}", .{i}),
-                        .type = bool,
-                        .default_value_ptr = @ptrCast(&false),
-                        .is_comptime = false,
-                        .alignment = 0,
-                    };
+                var names: [32][]const u8 = undefined;
+                for (0.., &names) |i, *n| {
+                    n.* = std.fmt.comptimePrint("_{d}", .{i});
                 }
 
-                const src_decls = @typeInfo(posix.PROT).@"struct".decls;
-                for (src_decls) |d| {
+                for (@typeInfo(posix.PROT).@"struct".decls) |d| {
                     const value: u32 = @field(posix.PROT, d.name);
                     if (@popCount(value) != 1) {
                         continue;
                     }
 
-                    fields[@ctz(value)].name = d.name;
+                    names[@ctz(value)] = d.name;
                 }
 
-                break :fields &fields;
+                break :names &names;
             },
-        },
-    });
+            &(.{bool} ** 32),
+            &(.{attributes} ** 32),
+        );
+    };
 
     comptime {
         if (posix.PROT != void) {

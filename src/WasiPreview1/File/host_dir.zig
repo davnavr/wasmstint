@@ -385,25 +385,18 @@ const SetOpenFlagsError = error{ InvalidArgument, NotSupported, Unimplemented };
 
 fn SetOpenFlags(comptime Args: type) type {
     const args_fields = @typeInfo(Args).@"struct".fields;
-    return @Type(.{
-        .@"fn" = std.builtin.Type.Fn{
-            .calling_convention = .auto,
-            .is_generic = false,
-            .is_var_args = false,
-            .return_type = SetOpenFlagsError!OsOpenFlags,
-            .params = params: {
-                var params: [args_fields.len]std.builtin.Type.Fn.Param = undefined;
-                for (args_fields, &params) |src, *dst| {
-                    dst.* = std.builtin.Type.Fn.Param{
-                        .is_generic = false,
-                        .is_noalias = false,
-                        .type = src.type,
-                    };
-                }
-                break :params &params;
-            },
+    return @Fn(
+        param_types: {
+            var param_types: [args_fields.len]type = undefined;
+            for (args_fields, &param_types) |src, *dst| {
+                dst.* = src.type;
+            }
+            break :param_types &param_types;
         },
-    });
+        &(.{std.builtin.Type.Fn.Param.Attributes{}} ** args_fields.len),
+        SetOpenFlagsError!OsOpenFlags,
+        .{},
+    );
 }
 
 /// Uses the Linux [`openat2`] syscall to safely access a path within `dir`.
@@ -472,7 +465,7 @@ fn accessSubPathLinux(
             @sizeOf(OpenHow),
         );
 
-        switch (std.os.linux.E.init(result)) {
+        switch (std.os.linux.errno(result)) {
             .SUCCESS => break @intCast(result),
             .INTR => continue,
             .NOSYS => {

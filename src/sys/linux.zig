@@ -5,21 +5,27 @@
 pub const Fd = system.fd_t;
 pub const Errno = std.os.linux.E;
 
-pub const DT = @Type(.{
-    .@"enum" = .{
-        .tag_type = u8,
-        .is_exhaustive = false,
-        .decls = &.{},
-        .fields = fields: {
-            const src_decls = @typeInfo(std.os.linux.DT).@"struct".decls;
-            var fields: [src_decls.len]std.builtin.Type.EnumField = undefined;
-            for (src_decls, &fields) |src, *dst| {
-                dst.* = .{ .name = src.name, .value = @field(std.os.linux.DT, src.name) };
+pub const DT = dt: {
+    const src_decls = @typeInfo(std.os.linux.DT).@"struct".decls;
+    break :dt @Enum(
+        u8,
+        .nonexhaustive,
+        names: {
+            var names: [src_decls.len][]const u8 = undefined;
+            for (src_decls, &names) |src, *n| {
+                n.* = src.name;
             }
-            break :fields &fields;
+            break :names &names;
         },
-    },
-});
+        values: {
+            var values: [src_decls.len]u8 = undefined;
+            for (src_decls, &values) |src, *v| {
+                v.* = @field(std.os.linux.DT, src.name);
+            }
+            break :values &values;
+        },
+    );
+};
 
 const statx_available = builtin.os.isAtLeast(.linux, .{ .major = 4, .minor = 11, .patch = 0 });
 
@@ -124,7 +130,7 @@ pub fn statx(
     buf.* = undefined;
     const result = system.statx(dir, path, @bitCast(flags), @bitCast(mask), buf);
     const requested_mask = @as(u32, @bitCast(mask));
-    switch (Errno.init(result)) {
+    switch (std.os.linux.errno(result)) {
         .SUCCESS => if (buf.mask & requested_mask != requested_mask) {
             return error.MissingRequestedFields;
         },

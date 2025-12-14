@@ -171,20 +171,30 @@ pub const Code = extern struct {
     }
 };
 
-const Val = @Type(std.builtin.Type{
-    .@"enum" = std.builtin.Type.Enum{
-        .tag_type = u8,
-        .fields = fields: {
-            const val_type_fields = @typeInfo(ValType).@"enum".fields;
-            var fields: [val_type_fields.len + 1]std.builtin.Type.EnumField = undefined;
-            fields[0] = .{ .name = "unknown", .value = 0 };
-            @memcpy(fields[1..], val_type_fields);
-            break :fields &fields;
+const Val = val: {
+    const val_type_fields = @typeInfo(ValType).@"enum".fields;
+    const field_count = val_type_fields.len + 1;
+    break :val @Enum(
+        u8,
+        .exhaustive,
+        names: {
+            var names: [field_count][]const u8 = undefined;
+            names[0] = "unknown";
+            for (names[1..], val_type_fields) |*n, f| {
+                n.* = f.name;
+            }
+            break :names &names;
         },
-        .decls = &[0]std.builtin.Type.Declaration{},
-        .is_exhaustive = true,
-    },
-});
+        values: {
+            var values: [field_count]u8 = undefined;
+            values[0] = 0;
+            for (values[1..], val_type_fields) |*v, f| {
+                v.* = f.value;
+            }
+            break :values &values;
+        },
+    );
+};
 
 fn isNumVal(val: Val) bool {
     return switch (val) {

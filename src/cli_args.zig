@@ -564,29 +564,33 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
 
         const flags: []const Flag = app_info.flags ++ .{Flag.help};
 
-        pub const State = @Type(.{
-            .@"struct" = Type.Struct{
-                .layout = .auto,
-                .decls = &.{},
-                .is_tuple = false,
-                .fields = fields: {
-                    var fields: [flags.len]Type.StructField = undefined;
-                    for (&fields, flags) |*struct_field, f| {
-                        struct_field.* = .{
-                            .name = f.info.long,
-                            .type = f.namespace.State,
-                            .default_value_ptr = @as(
-                                *const anyopaque,
-                                @ptrCast(&f.namespace.initial_state),
-                            ),
-                            .is_comptime = false,
-                            .alignment = @alignOf(f.namespace.State),
-                        };
+        pub const State = state: {
+            break :state @Struct(
+                .auto,
+                null,
+                names: {
+                    var names: [flags.len][]const u8 = undefined;
+                    for (&names, flags) |*n, f| {
+                        n.* = f.info.long;
                     }
-                    break :fields &fields;
+                    break :names &names;
                 },
-            },
-        });
+                types: {
+                    var types: [flags.len]type = undefined;
+                    for (&types, flags) |*t, f| {
+                        t.* = f.namespace.State;
+                    }
+                    break :types &types;
+                },
+                attributes: {
+                    var attributes: [flags.len]std.builtin.Type.StructField.Attributes = undefined;
+                    for (&attributes, flags) |*a, f| {
+                        a.* = .{ .default_value_ptr = @ptrCast(&f.namespace.initial_state) };
+                    }
+                    break :attributes &attributes;
+                },
+            );
+        };
 
         const non_void_flag_result_count = count: {
             var count = 0;
@@ -598,49 +602,44 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             break :count count;
         };
 
-        pub const Parsed = @Type(.{
-            .@"struct" = Type.Struct{
-                .layout = .auto,
-                .decls = &.{},
-                .is_tuple = false,
-                .fields = fields: {
-                    var fields: [non_void_flag_result_count]Type.StructField = undefined;
-                    var fields_idx = 0;
-                    for (&fields) |*struct_field| {
-                        const f = flags[fields_idx];
-                        if (f.namespace.Result == void) {
-                            @compileError(f.info.long ++ " has invalid result");
-                        }
+        pub const Parsed = parsed: {
+            var names: [non_void_flag_result_count][]const u8 = undefined;
+            var types: [non_void_flag_result_count]type = undefined;
+            var flags_idx = 0;
+            for (&names, &types) |*n, *t| {
+                const f = flags[flags_idx];
+                if (f.namespace.Result == void) {
+                    @compileError(f.info.long ++ " has invalid result");
+                }
 
-                        struct_field.* = .{
-                            .name = f.info.long,
-                            .type = f.namespace.Result,
-                            .default_value_ptr = null,
-                            .is_comptime = false,
-                            .alignment = @alignOf(f.namespace.Result),
-                        };
-                        fields_idx += 1;
-                    }
-                    std.debug.assert(fields.len == fields_idx);
-                    break :fields &fields;
-                },
-            },
-        });
+                n.* = f.info.long;
+                t.* = f.namespace.Result;
+                flags_idx += 1;
+            }
+            break :parsed @Struct(
+                .auto,
+                null,
+                &names,
+                &types,
+                &(.{std.builtin.Type.StructField.Attributes{}} ** non_void_flag_result_count),
+            );
+        };
 
-        pub const FlagEnum = @Type(.{
-            .@"enum" = Type.Enum{
-                .tag_type = std.math.IntFittingRange(0, flags.len - 1),
-                .decls = &.{},
-                .is_exhaustive = true,
-                .fields = fields: {
-                    var cases: [flags.len]Type.EnumField = undefined;
-                    for (0.., flags, &cases) |i, f, *enum_field| {
-                        enum_field.* = .{ .name = f.info.long, .value = i };
-                    }
-                    break :fields &cases;
-                },
-            },
-        });
+        pub const FlagEnum = flag_enum: {
+            const TagInt = std.math.IntFittingRange(0, flags.len - 1);
+            var names: [flags.len][]const u8 = undefined;
+            var values: [flags.len]TagInt = undefined;
+            for (0.., flags, &names, &values) |i, f, *n, *v| {
+                n.* = f.info.long;
+                v.* = i;
+            }
+            break :flag_enum @Enum(
+                TagInt,
+                .exhaustive,
+                &names,
+                &values,
+            );
+        };
 
         const FlagLookup = std.hash_map.StringHashMapUnmanaged(FlagEnum);
 

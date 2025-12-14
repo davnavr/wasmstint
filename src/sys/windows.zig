@@ -79,33 +79,29 @@ pub const share_access_default = ShareAccess.init(
 );
 
 /// `CreateDisposition` parameter in `NtCreateFile()`.
-pub const CreateDisposition = @Type(std.builtin.Type{
-    .@"enum" = std.builtin.Type.Enum{
-        .tag_type = std.os.windows.ULONG,
-        .decls = &.{},
-        .is_exhaustive = true,
-        .fields = fields: {
-            const options = [_][:0]const u8{
-                "FILE_SUPERSEDE",
-                "FILE_CREATE",
-                "FILE_OPEN",
-                "FILE_OPEN_IF",
-                "FILE_OVERWRITE",
-                "FILE_OVERWRITE_IF",
-            };
+pub const CreateDisposition = disp: {
+    const options = [_][]const u8{
+        "FILE_SUPERSEDE",
+        "FILE_CREATE",
+        "FILE_OPEN",
+        "FILE_OPEN_IF",
+        "FILE_OVERWRITE",
+        "FILE_OVERWRITE_IF",
+    };
 
-            var fields: [options.len]std.builtin.Type.EnumField = undefined;
-            for (options, &fields) |name, *dst| {
-                dst.* = std.builtin.Type.EnumField{
-                    .name = name,
-                    .value = @field(std.os.windows, name),
-                };
+    break :disp @Enum(
+        std.os.windows.ULONG,
+        .exhaustive,
+        &options,
+        values: {
+            var values: [options.len]std.os.windows.ULONG = undefined;
+            for (&options, &values) |name, *v| {
+                v.* = @field(std.os.windows, name);
             }
-
-            break :fields &fields;
+            break :values &values;
         },
-    },
-});
+    );
+};
 
 /// `CreateOptions` parameter in `NtCreateFile()`.
 pub const CreateOptions = Mask(enum {

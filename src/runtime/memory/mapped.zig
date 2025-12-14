@@ -159,8 +159,9 @@ fn free(mem: *MemInst) void {
     const inst: *Mapped = @ptrCast(mem);
     inst.checkInvariants();
     if (builtin.os.tag == .windows) {
-        const freed_size: windows.SIZE_T = 0;
-        virtual_memory.nt.free(mem.base, &freed_size, .RELEASE) catch |e| unexpectedError(e);
+        var freed_size: windows.SIZE_T = 0;
+        virtual_memory.nt.free(@alignCast(mem.base), &freed_size, .RELEASE) catch |e|
+            unexpectedError(e);
         std.debug.assert(freed_size == mem.limit);
     } else {
         const pages: []align(page_size_min) u8 = @alignCast(mem.base[0..mem.limit]);

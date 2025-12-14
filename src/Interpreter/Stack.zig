@@ -48,18 +48,15 @@ fn ChangePointee(
 ) type {
     std.debug.assert(@typeInfo(Self).pointer.size == .one);
     std.debug.assert(@typeInfo(Self).pointer.alignment >= alignment);
-    return @Type(.{
-        .pointer = std.builtin.Type.Pointer{
-            .size = size,
-            .is_const = @typeInfo(Self).pointer.is_const,
-            .is_volatile = false,
-            .address_space = .generic,
-            .alignment = alignment,
-            .child = Pointee,
-            .is_allowzero = false,
-            .sentinel_ptr = null,
+    return @Pointer(
+        size,
+        .{
+            .@"const" = @typeInfo(Self).pointer.is_const,
+            .@"align" = alignment,
         },
-    });
+        Pointee,
+        null,
+    );
 }
 
 pub fn currentFrame(stack: *const Stack) ?*const Frame {

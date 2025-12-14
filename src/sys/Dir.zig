@@ -363,7 +363,7 @@ pub const Iterator = struct {
                 iter.buffer.len,
             );
 
-            return switch (std.os.linux.E.init(result)) {
+            return switch (std.os.linux.errno(result)) {
                 .SUCCESS => if (result == 0) null else {
                     iter.remaining = iter.buffer[0..result];
                     const peeked_entry: *const LinuxEntry = @ptrCast(iter.remaining);

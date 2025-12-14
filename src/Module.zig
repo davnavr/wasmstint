@@ -455,27 +455,28 @@ pub const Export = packed struct(u64) {
     // /// Numeric identifier referring to an `Export`.
     // pub const Id = enum(u32) { _ };
 
-    pub const DescIdx = @Type(.{
-        .@"union" = .{
-            .layout = .auto,
-            .fields = fields: {
-                const src_fields = @typeInfo(Desc).@"union".fields;
-                var dst_fields: [src_fields.len]std.builtin.Type.UnionField = undefined;
-                for (src_fields, &dst_fields) |src, *dst| {
-                    const src_inner_type = @FieldType(src.type, "idx");
-                    dst.* = .{
-                        .name = src.name,
-                        .type = src_inner_type,
-                        // For some reason, src.alignment > 0
-                        .alignment = @alignOf(src_inner_type),
-                    };
+    pub const DescIdx = t: {
+        const src_fields = @typeInfo(Desc).@"union".fields;
+        break :t @Union(
+            .auto,
+            std.meta.FieldEnum(Desc),
+            names: {
+                var names: [src_fields.len][]const u8 = undefined;
+                for (src_fields, &names) |src, *dst| {
+                    dst.* = src.name;
                 }
-                break :fields &dst_fields;
+                break :names &names;
             },
-            .tag_type = std.meta.FieldEnum(Desc),
-            .decls = &.{},
-        },
-    });
+            types: {
+                var field_types: [src_fields.len]type = undefined;
+                for (src_fields, &field_types) |src, *dst| {
+                    dst.* = @FieldType(src.type, "idx");
+                }
+                break :types &field_types;
+            },
+            &(.{std.builtin.Type.UnionField.Attributes{}} ** src_fields.len),
+        );
+    };
 
     pub fn descIdx(self: Export) DescIdx {
         return switch (self.desc_tag) {
@@ -1016,49 +1017,51 @@ const Sections = struct {
     const id_fields = @typeInfo(Id).@"enum".fields;
 
     const Order: type = order: {
-        var fields: [id_fields.len + 1]Type.EnumField = undefined;
-
-        fields[0] = .{ .name = "any", .value = 0 };
-        for (id_fields, 1..) |f, i| {
-            fields[i] = .{ .name = f.name, .value = i };
-        }
-
-        break :order @Type(.{
-            .@"enum" = Type.Enum{
-                .tag_type = std.math.IntFittingRange(0, fields.len),
-                .is_exhaustive = true,
-                .decls = &[0]Type.Declaration{},
-                .fields = &fields,
+        const field_count = id_fields.len + 1;
+        const OrderInt = std.math.IntFittingRange(0, field_count);
+        break :order @Enum(
+            OrderInt,
+            .exhaustive,
+            names: {
+                var names: [field_count][]const u8 = undefined;
+                names[0] = "any";
+                for (id_fields, names[1..]) |f, *n| {
+                    n.* = f.name;
+                }
+                break :names &names;
             },
-        });
+            values: {
+                var values: [field_count]OrderInt = undefined;
+                for (&values, 1..) |*v, i| {
+                    v.* = @intCast(i);
+                }
+                break :values &values;
+            },
+        );
     };
 
     fn Struct(comptime FieldType: type, comptime default: ?FieldType) type {
-        return @Type(.{
-            .@"struct" = Type.Struct{
-                .layout = .auto,
-                .decls = &[0]Type.Declaration{},
-                .is_tuple = false,
-                .fields = fields: {
-                    var fields: [id_fields.len - 1]Type.StructField = undefined;
-                    for (id_fields[0..fields.len], &fields) |f, *dst| {
-                        std.debug.assert(!std.mem.eql(u8, f.name, "custom"));
-                        dst.* = Type.StructField{
-                            .name = f.name,
-                            .type = FieldType,
-                            .default_value_ptr = if (default) |default_val|
-                                @ptrCast(@as(*const FieldType, &default_val))
-                            else
-                                null,
-                            .is_comptime = false,
-                            .alignment = @alignOf(FieldType),
-                        };
-                    }
-
-                    break :fields &fields;
-                },
+        const field_count = id_fields.len - 1;
+        const attributes = std.builtin.Type.StructField.Attributes{
+            .default_value_ptr = if (default) |default_val|
+                @ptrCast(@as(*const FieldType, &default_val))
+            else
+                null,
+        };
+        return @Struct(
+            .auto,
+            null,
+            names: {
+                var names: [field_count][]const u8 = undefined;
+                for (id_fields[0..field_count], &names) |f, *n| {
+                    std.debug.assert(!std.mem.eql(u8, f.name, "custom"));
+                    n.* = f.name;
+                }
+                break :names &names;
             },
-        });
+            &(.{FieldType} ** field_count),
+            &(.{attributes} ** field_count),
+        );
     }
 
     fn parse(

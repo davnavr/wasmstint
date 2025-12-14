@@ -905,7 +905,7 @@ fn buildFuzzers(
             .target = options.project.target,
             .optimize = options.project.optimize,
         }),
-        .max_rss = ByteSize.mib(268).bytes, // arbitrary amount
+        .max_rss = ByteSize.mib(373).bytes,
         .use_llvm = options.project.use_llvm.interpreter,
     });
     standalone_exe.root_module.addImport("target", target_module);
