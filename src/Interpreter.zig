@@ -555,7 +555,7 @@ pub const State = union(Tag) {
                 module,
                 &instantiation_error,
                 try interp.stack.allocateScratchSpace(
-                    interp.stack_top,
+                    &interp.stack_top,
                     alloca,
                     module.requiring_instantiation.inner.module.inner.raw.init_max_stack,
                 ),

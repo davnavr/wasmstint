@@ -43,7 +43,7 @@ fn assertSliceInBounds(stack: Stack, slice: []align(@sizeOf(Value)) const Value)
 /// The returned buffer is invalidated on any method call that modifies the stack.
 pub fn allocateScratchSpace(
     stack: *Stack,
-    top: Top,
+    top: *Top,
     allocator: Allocator,
     capacity: u32,
 ) Allocator.Error![]align(@sizeOf(Value)) Value {
@@ -86,6 +86,8 @@ pub fn allocateScratchSpace(
         const old_allocation = stack.allocated;
         @memcpy(new_allocation[0..old_allocation.len], old_allocation);
         allocator.free(old_allocation);
+        stack.allocated = new_allocation;
+        top.* = .{ .ptr = new_allocation[top_idx..].ptr };
         return new_allocation[top_idx..(top_idx + capacity)];
     }
 }
