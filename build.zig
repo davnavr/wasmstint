@@ -1004,7 +1004,7 @@ fn buildWasiSamplePrograms(
 
         // Can't add to "check" step, since it would require building the WASM.
         const run_test = b.addRunArtifact(invoke_test);
-        run_test.step.max_rss = ByteSize.mib(16).bytes;
+        run_test.step.max_rss = ByteSize.mib(18).bytes;
         test_step.dependOn(&run_test.step);
     }
 }

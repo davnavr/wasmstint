@@ -2122,8 +2122,15 @@ pub fn rawValidate(
                         );
                     }
 
-                    // TODO: Modify max stack based on element segment
                     try val_stack.popManyExpecting(&ctrl_stack, &[_]ValType{.i32} ** 3, diag);
+                    val_stack.max = @max(
+                        val_stack.max,
+                        std.math.add(
+                            u16,
+                            @intCast(val_stack.buf.items.len),
+                            elem_segment.header.elem_max_stack,
+                        ) catch return error.WasmImplementationLimit, // out of stack space
+                    );
                 },
                 .@"elem.drop" => _ = try readElemIdx(&reader, module, diag),
                 .@"table.copy" => {
