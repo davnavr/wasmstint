@@ -1313,7 +1313,7 @@ fn processAssertUninstantiable(
     var parse_diagnostics = std.Io.Writer.Allocating.initCapacity(arena.allocator(), 128) catch
         @panic("oom");
     const module = wasmstint.Module.parse(
-        arena.allocator(),
+        state.module_arena.allocator(),
         &wasm,
         &scratch,
         .{
@@ -1337,7 +1337,7 @@ fn processAssertUninstantiable(
 
     parse_diagnostics.clearRetainingCapacity();
     const validation_finished = module.finishCodeValidation(
-        arena.allocator(),
+        state.module_arena.allocator(),
         &scratch,
         .init(&parse_diagnostics.writer),
     ) catch |e| switch (e) {
