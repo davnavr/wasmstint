@@ -59,7 +59,7 @@ pub const Configuration = extern struct {
     threads_enabled: Flag = .disabled,
     allow_invalid_funcs: Flag = .disabled,
     wide_arithmetic_enabled: Flag = .disabled,
-    extended_const_enabled: Flag = .disabled,
+    extended_const_enabled: Flag = .randomized,
     multi_memory_enabled: Flag = .disabled,
 
     pub fn fromTarget(comptime Container: type) Configuration {
