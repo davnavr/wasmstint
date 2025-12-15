@@ -2103,14 +2103,16 @@ pub fn rawValidate(
                     // Spectests require first checking the table index
                     const elem_idx = try reader.readUleb128(u32, diag, "elemidx in table.init");
                     const table_type = try readTableIdx(&reader, module, diag);
-                    const elem_type = if (elem_idx < module.elementSegments().len)
-                        module.elementSegments()[elem_idx].elementType()
-                    else
+                    const elem_segment = if (elem_idx < module.elementSegments().len)
+                        module.elementSegments()[elem_idx]
+                    else {
                         return diag.print(
                             .validation,
                             "unknown element segment {} in table.init",
                             .{elem_idx},
                         );
+                    };
+                    const elem_type = elem_segment.elementType();
 
                     if (elem_type != table_type) {
                         return diag.print(
@@ -2120,6 +2122,7 @@ pub fn rawValidate(
                         );
                     }
 
+                    // TODO: Modify max stack based on element segment
                     try val_stack.popManyExpecting(&ctrl_stack, &[_]ValType{.i32} ** 3, diag);
                 },
                 .@"elem.drop" => _ = try readElemIdx(&reader, module, diag),

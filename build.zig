@@ -603,7 +603,11 @@ fn buildWastTest(
     var wast2json = b.addRunArtifact(wabt.wast2json);
     wast2json.step.max_rss = ByteSize.mib(19).bytes;
     wast2json.addFileArg(wast_path);
-    wast2json.addArgs(&.{"--output"});
+    wast2json.addArgs(&.{
+        "--disable-simd",
+        "--enable-extended-const",
+        "--output",
+    });
     const output_json = wast2json.addOutputFileArg(b.fmt("{s}.json", .{name[0 .. name.len - 5]}));
 
     const run_test = b.addRunArtifact(interpreter.exe);

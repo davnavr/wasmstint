@@ -40,6 +40,56 @@ fn assertSliceInBounds(stack: Stack, slice: []align(@sizeOf(Value)) const Value)
     );
 }
 
+/// The returned buffer is invalidated on any method call that modifies the stack.
+pub fn allocateScratchSpace(
+    stack: *Stack,
+    top: Top,
+    allocator: Allocator,
+    capacity: u32,
+) Allocator.Error![]align(@sizeOf(Value)) Value {
+    stack.assertPtrInBounds(top.ptr);
+    if (stack.currentFrame()) |frame| {
+        const base = frame.valueStackBase();
+        std.debug.assert(@intFromPtr(base) <= @intFromPtr(top.ptr));
+    }
+
+    const top_idx: u32 = @intCast(top.ptr - stack.allocated.ptr);
+    const unallocated = stack.allocated[top_idx..];
+    if (builtin.mode == .Debug) {
+        std.debug.assert(@intFromPtr(&stack.allocated.ptr[top_idx]) == @intFromPtr(top.ptr));
+        std.debug.assert(@intFromPtr(unallocated.ptr) == @intFromPtr(top.ptr));
+    }
+
+    const new_capacity = std.math.add(u32, top_idx, capacity) catch return error.OutOfMemory;
+    if (capacity <= unallocated.len or resize: {
+        std.debug.assert(stack.allocated.len < new_capacity);
+        const resized = allocator.resize(stack.allocated, new_capacity);
+        if (resized) {
+            stack.allocated.len = new_capacity;
+        }
+
+        break :resize resized;
+    }) {
+        const space = unallocated[0..capacity];
+        @memset(space, undefined);
+        return space;
+    } else {
+        std.debug.assert(stack.allocated.len < new_capacity);
+        const new_allocation = try allocator.alignedAlloc(
+            Value,
+            std.mem.Alignment.fromByteUnits(@sizeOf(Value)),
+            new_capacity,
+        );
+
+        errdefer comptime unreachable;
+
+        const old_allocation = stack.allocated;
+        @memcpy(new_allocation[0..old_allocation.len], old_allocation);
+        allocator.free(old_allocation);
+        return new_allocation[top_idx..(top_idx + capacity)];
+    }
+}
+
 fn ChangePointee(
     comptime Self: type,
     comptime size: std.builtin.Type.Pointer.Size,
@@ -183,6 +233,10 @@ pub const Values = struct {
             dst.* = @field(src, @tagName(ty));
         }
         return typed;
+    }
+
+    pub fn unallocated(values: *const Values) []align(@sizeOf(Value)) Value {
+        return values.top.ptr[0..(values.max_height - values.remaining)];
     }
 
     /// Returns a slice where pushed values can be written to. The `Value` at index `0` is the

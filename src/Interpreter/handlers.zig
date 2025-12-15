@@ -2823,10 +2823,20 @@ const opcode_handlers = struct {
     ) callconv(ohcc) Transition {
         const table_init_ip = ip - 2;
         var instr = Instr.init(ip, eip);
-        var vals = Stack.Values.init(sp, &interp.stack, 3, 3);
 
         const elem_idx = instr.readIdx(Module.ElemIdx);
         const table_idx = instr.readIdx(Module.TableIdx);
+
+        var vals = Stack.Values.init(
+            sp,
+            &interp.stack,
+            3,
+            @max(
+                3,
+                module.header().module.elementSegments()[@intFromEnum(elem_idx)]
+                    .header.elem_max_stack,
+            ),
+        );
 
         const operands = vals.popArray(3);
         vals.assertRemainingCountIs(0);
@@ -2840,9 +2850,26 @@ const opcode_handlers = struct {
         //     .{ n, src_idx, d, module.inner.tableAddr(table_idx).table.len },
         // );
 
-        runtime.TableInst.init(table_idx, module, elem_idx, n, src_idx, d) catch {
-            const info = Trap.init(.table_access_out_of_bounds, .init(table_idx, .@"table.init"));
-            return Transition.trap(table_init_ip, eip, sp, stp, interp, info);
+        runtime.TableInst.init(
+            table_idx,
+            module,
+            elem_idx,
+            n,
+            src_idx,
+            d,
+            vals.unallocated(),
+        ) catch |e| switch (e) {
+            error.TableAccessOutOfBounds => return Transition.trap(
+                table_init_ip,
+                eip,
+                sp,
+                stp,
+                interp,
+                Trap.init(
+                    .table_access_out_of_bounds,
+                    .init(table_idx, .@"table.init"),
+                ),
+            ),
         };
 
         return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);

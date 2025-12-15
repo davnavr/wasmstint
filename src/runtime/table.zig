@@ -119,7 +119,14 @@ pub const TableInst = extern struct {
         return .{ .min = table.len, .max = table.limit };
     }
 
+    pub const InitError = OobError || error{
+        // InsufficientFuel,
+        };
+
     /// Implements the [`table.init`] instruction, which is also used in module instantiation.
+    ///
+    /// UNIMPLEMENTED: If the value in `fuel` is too low, `InitError.InsufficientFuel` is returned and no
+    /// elements are written.
     ///
     /// [`table.init`]: https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-init
     pub fn init(
@@ -129,6 +136,9 @@ pub const TableInst = extern struct {
         len: ?u32,
         src_idx: u32,
         dst_idx: u32,
+        // /// Limits the number of elements that can be written.
+        // fuel: *u64,
+        const_eval_buf: []align(@sizeOf(InterpreterValue)) InterpreterValue,
     ) OobError!void {
         const module_inst = module.header();
         const table_addr = module_inst.tableAddr(table);
@@ -153,14 +163,23 @@ pub const TableInst = extern struct {
 
         std.debug.assert(src_elems.elementType() == table_addr.elem_type);
 
-        if (actual_len == 0) return;
+        if (actual_len == 0) {
+            return;
+        }
 
+        // if (fuel.* < src_elems.header.instruction_count) {
+        //     return error.InsufficientFuel; // wrong, changes depending on len
+        // }
+
+        errdefer comptime unreachable;
+
+        // TODO: Fuel check for initializer expressions in `table.init`
         switch (table_addr.elem_type) {
             .funcref => {
                 const dst_elems: []FuncAddr.Nullable = table_inst.base
                     .func_ref[0..table_inst.len][dst_idx..dst_end_idx];
 
-                switch (src_elems.tag) {
+                switch (src_elems.header.tag) {
                     .func_indices => {
                         const src_indices = src_elems.contents.func_indices[src_idx..src_end_idx];
                         for (src_indices, dst_elems) |i, *dst| {
@@ -170,55 +189,37 @@ pub const TableInst = extern struct {
                     .func_expressions => {
                         const src_exprs = src_elems.contents.expressions[src_idx..src_end_idx];
                         for (src_exprs, dst_elems) |*src_expr, *dst| {
-                            dst.* = switch (src_expr.tag) {
-                                .@"ref.null" => FuncAddr.Nullable.null,
-                                .@"ref.func" => @bitCast(
-                                    module_inst.funcAddr(src_expr.inner.@"ref.func".get()),
-                                ),
-                                .@"global.get" => get: {
-                                    const global = module_inst.globalAddr(
-                                        src_expr.inner.@"global.get".get(),
-                                    );
-
-                                    std.debug.assert(global.global_type.val_type == .funcref);
-
-                                    break :get @as(
-                                        *const FuncAddr.Nullable,
-                                        @ptrCast(@alignCast(global.value)),
-                                    ).*;
-                                },
-                            };
+                            dst.* = const_eval.calculate(
+                                src_expr.bytes(module_inst.module),
+                                module,
+                                .funcref,
+                                const_eval_buf,
+                            );
                         }
                     },
                     .extern_expressions => unreachable,
                 }
             },
             .externref => {
+                std.debug.assert(src_elems.header.tag == .extern_expressions);
+
                 const dst_elems: []ExternAddr = table_inst.base
                     .extern_ref[0..table_inst.len][dst_idx..dst_end_idx];
 
                 const src_exprs = src_elems.contents.expressions[src_idx..src_end_idx];
                 for (src_exprs, dst_elems) |*src_expr, *dst| {
-                    dst.* = switch (src_expr.tag) {
-                        .@"ref.null" => ExternAddr.null,
-                        .@"global.get" => get: {
-                            const global = module_inst.globalAddr(
-                                src_expr.inner.@"global.get".get(),
-                            );
-
-                            std.debug.assert(global.global_type.val_type == .externref);
-
-                            break :get @as(
-                                *const ExternAddr,
-                                @ptrCast(@alignCast(global.value)),
-                            ).*;
-                        },
-                        .@"ref.func" => unreachable,
-                    };
+                    dst.* = const_eval.calculate(
+                        src_expr.bytes(module_inst.module),
+                        module,
+                        .externref,
+                        const_eval_buf,
+                    );
                 }
             },
             else => unreachable,
         }
+
+        // fuel.* -= src_elems.header.instruction_count;
     }
 
     pub fn elements(table: *const TableInst) []?*anyopaque {
@@ -298,8 +299,10 @@ pub const TableInst = extern struct {
 
 const std = @import("std");
 const builtin = @import("builtin");
+const const_eval = @import("../Interpreter/const_eval.zig");
 const Oom = std.mem.Allocator.Error;
 const FuncAddr = @import("value.zig").FuncAddr;
 const ExternAddr = @import("value.zig").ExternAddr;
 const Module = @import("../Module.zig");
 const ModuleInst = @import("module_inst.zig").ModuleInst;
+const InterpreterValue = @import("../Interpreter/value.zig").Value;

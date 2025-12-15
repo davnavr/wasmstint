@@ -551,7 +551,15 @@ pub const State = union(Tag) {
             errdefer unreachable;
 
             var instantiation_error: instantiation.SetupError = undefined;
-            instantiation.setupModule(module, &instantiation_error) catch {
+            instantiation.setupModule(
+                module,
+                &instantiation_error,
+                try interp.stack.allocateScratchSpace(
+                    interp.stack_top,
+                    alloca,
+                    module.requiring_instantiation.inner.module.inner.raw.init_max_stack,
+                ),
+            ) catch {
                 const trap = switch (instantiation_error) {
                     inline else => |info, tag| Trap.init(@field(Trap.Code, @tagName(tag)), info),
                 };
