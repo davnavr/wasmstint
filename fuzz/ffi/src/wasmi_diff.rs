@@ -627,7 +627,7 @@ unsafe fn execute(
         // Should match the features supported by `wasmstint`.
         config.wasm_multi_memory(false);
         config.wasm_tail_call(false);
-        config.wasm_extended_const(false);
+        config.wasm_extended_const(true);
         //config.wasm_simd(false); // enabled by feature flag in `wasmi`
         //config.wasm_relaxed_simd(false);
         config.consume_fuel(true);
