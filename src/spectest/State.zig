@@ -946,7 +946,7 @@ const TrapMessage = union(enum) {
                             .{ tag, access.index, access.maximum },
                         );
                     },
-                    inline .call_indirect => |_, tag| try writer.print(
+                    inline .call_indirect, .return_call_indirect => |_, tag| try writer.print(
                         "{t} undefined element",
                         .{tag},
                     ),

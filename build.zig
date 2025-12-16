@@ -606,6 +606,7 @@ fn buildWastTest(
     wast2json.addArgs(&.{
         "--disable-simd",
         "--enable-extended-const",
+        "--enable-tail-call",
         "--output",
     });
     const output_json = wast2json.addOutputFileArg(b.fmt("{s}.json", .{name[0 .. name.len - 5]}));

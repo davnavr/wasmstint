@@ -14,6 +14,9 @@ pub const ByteOpcode = enum(u8) {
     @"return" = 0x0F,
     call = 0x10,
     call_indirect = 0x11,
+    // Introduced in [tail call proposal](https://github.com/WebAssembly/tail-call/)
+    return_call = 0x12,
+    return_call_indirect = 0x13,
 
     drop = 0x1A,
     select = 0x1B,

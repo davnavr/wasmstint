@@ -25,7 +25,7 @@ const Arguments = cli_args.CliArgs(.{
             },
             "AMOUNT",
             u64,
-        ).withDefault(3_000_000),
+        ).withDefault(8_000_000),
 
         cli_args.Flag.integerSizeSuffix(
             .{

@@ -1081,6 +1081,35 @@ fn validateStoreInstr(
     try readMemArg(reader, natural_alignment, module, diag);
 }
 
+fn validateTailCallSignature(
+    func_type: *const Module.FuncType,
+    callee_signature: *const Module.FuncType,
+    diag: Diagnostics,
+    opcode: opcodes.ByteOpcode,
+) Reader.ValidationError!void {
+    if (callee_signature.result_count != func_type.result_count) {
+        return diag.print(
+            .validation,
+            "type mismatch: {[opcode]t} expected {[expected]d} results, but got {[actual]d}",
+            .{
+                .opcode = opcode,
+                .expected = func_type.result_count,
+                .actual = callee_signature.result_count,
+            },
+        );
+    }
+
+    for (callee_signature.results(), func_type.results()) |expected, actual| {
+        if (!expected.eql(actual)) {
+            return diag.print(
+                .validation,
+                "type mismatch: {[opcode]t} expected {[expected]t}, but got {[actual]t}",
+                .{ .opcode = opcode, .expected = expected, .actual = actual },
+            );
+        }
+    }
+}
+
 pub fn rawValidate(
     allocator: Allocator,
     module: Module,
@@ -1519,6 +1548,60 @@ pub fn rawValidate(
                 try val_stack.popExpecting(&ctrl_stack, .i32, diag);
                 try val_stack.popManyExpecting(&ctrl_stack, callee_signature.parameters(), diag);
                 try val_stack.pushMany(scratch, callee_signature.results());
+            },
+            // Introduced in [tail call proposal](https://github.com/WebAssembly/tail-call/)
+            .return_call => {
+                const callee = try reader.readIdx(
+                    Module.FuncIdx,
+                    module.funcTypes().len,
+                    diag,
+                    &.{ "function", "in return_call" },
+                );
+                const callee_signature = module.funcTypes()[@intFromEnum(callee)];
+
+                try validateTailCallSignature(func_type, callee_signature, diag, .return_call);
+                try val_stack.popManyExpecting(&ctrl_stack, callee_signature.parameters(), diag);
+                markUnreachable(&val_stack, &ctrl_stack);
+            },
+            .return_call_indirect => {
+                const module_types = module.types();
+                const type_idx = try reader.readIdx(
+                    Module.TypeIdx,
+                    module_types.len,
+                    diag,
+                    &.{ "type", "in return_call_indirect" },
+                );
+
+                const callee_signature: *const Module.FuncType =
+                    &module_types[@intFromEnum(type_idx)];
+
+                const table_types = module.tableTypes();
+                const table_idx = try reader.readIdx(
+                    Module.TableIdx,
+                    table_types.len,
+                    diag,
+                    &.{ "table", "in return_call_indirect" },
+                );
+                const table_type: *const Module.TableType = &table_types[@intFromEnum(table_idx)];
+
+                if (table_type.elem_type != .funcref) {
+                    return diag.print(
+                        .validation,
+                        "type mismatch: return_call_indirect expects funcref, but type of table " ++
+                            "{} is {f}",
+                        .{ @intFromEnum(table_idx), table_type },
+                    );
+                }
+
+                try val_stack.popExpecting(&ctrl_stack, .i32, diag);
+                try validateTailCallSignature(
+                    func_type,
+                    callee_signature,
+                    diag,
+                    .return_call_indirect,
+                );
+                try val_stack.popManyExpecting(&ctrl_stack, callee_signature.parameters(), diag);
+                markUnreachable(&val_stack, &ctrl_stack);
             },
 
             .drop => _ = try val_stack.popAny(&ctrl_stack, diag),

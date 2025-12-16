@@ -411,14 +411,12 @@ pub fn pushFrameWithinCapacity(
 
 /// Allocates space to ensure a future call to `CallStack.pushWithinCapacity` succeeds.
 ///
-/// Returns a pointer to the new `Top` of the stack, which is different only if a reallocation
-/// occurred.
-///
 /// Potentially invalidates pointers to the stack (when `Allocator.resize` is called).
 ///
 /// Allocates space for a new stack frame.
 pub fn reserveFrame(
     stack: *Stack,
+    /// If a reallocation occurred, this is updated to point to the new top of the stack.
     top: *Top,
     alloca: Allocator,
     comptime params: ParameterAllocation,
@@ -582,6 +580,124 @@ pub fn popFrame(
             .wasm = .{ .eip = popped_wasm.eip },
         },
     };
+}
+
+/// Used to perform tail-calls.
+pub fn replaceFrameWithinCapacity(
+    stack: *Stack,
+    /// Refers to the top of the stack before the new frame is pushed.
+    ///
+    /// Below `top` are the arguments to pass to the function.
+    top: Top,
+    callee: FuncAddr,
+) PushFrameError!PushedFrame {
+    const frame_to_replace = stack.frameAt(stack.current_frame).?;
+    const new_signature = callee.signature();
+    std.debug.assert(
+        @intFromPtr(frame_to_replace.valueStackBase()) <=
+            @intFromPtr(top.ptr - new_signature.param_count),
+    );
+
+    const args_src: []align(@sizeOf(Value)) const Value =
+        (top.ptr - new_signature.param_count)[0..new_signature.param_count];
+    const args_dst: []align(@sizeOf(Value)) Value =
+        frame_to_replace.localValues(stack).ptr[0..args_src.len];
+
+    const new_frame_info = try Stack.FrameSize.calculate(callee, .preallocated);
+    if (new_frame_info.allocated_size > (stack.allocated.ptr + stack.allocated.len) - top.ptr) {
+        return error.OutOfMemory;
+    }
+
+    errdefer comptime unreachable;
+
+    const prev_frame_offset = frame_to_replace.prev_frame;
+    const expected_checksum = frame_to_replace.checksum;
+    const instantiate_flag = frame_to_replace.instantiate_flag;
+    if (builtin.mode == .Debug) {
+        if (stack.frameAt(prev_frame_offset)) |prev_frame| {
+            const actual_checksum = prev_frame.calculateChecksum(
+                stack,
+                Top{ .ptr = args_dst.ptr },
+            );
+            if (expected_checksum != actual_checksum) {
+                std.debug.panic(
+                    "frame checksum mismatch for {f}:\nexpected: {X}\nactual: {X}",
+                    .{ prev_frame.function, expected_checksum, actual_checksum },
+                );
+            }
+        }
+    }
+
+    // Unlike a normal call, arguments have to be copied because the stack contains both WASM values
+    // and call stack frames.
+    @memmove(args_dst, args_src);
+
+    const new_frame_offset: Frame.Offset =
+        @enumFromInt((args_dst.ptr[new_frame_info.total_local_count..]) - stack.allocated.ptr);
+
+    std.debug.assert(new_frame_offset != .none);
+
+    const new_frame_slice: []align(@sizeOf(Value)) Value =
+        args_dst.ptr[args_dst.len..][0..new_frame_info.allocated_size];
+    stack.assertSliceInBounds(new_frame_slice);
+
+    // Unsafe to use `frame_to_replace` beyond this point.
+    @memset(new_frame_slice, undefined);
+
+    const new_frame: *Frame = @ptrCast(
+        new_frame_slice[new_frame_info.allocated_local_count..][0..Frame.size_in_values],
+    );
+    new_frame.* = Frame{
+        .checksum = expected_checksum,
+        .function = callee,
+        .signature = new_signature,
+        .instantiate_flag = instantiate_flag,
+        .local_count = .{ .total = new_frame_info.total_local_count },
+        .prev_frame = prev_frame_offset,
+        .wasm = undefined,
+    };
+
+    std.debug.assert( // new frame offset mismatch
+        @intFromPtr(new_frame) == @intFromPtr(&stack.allocated[@intFromEnum(new_frame_offset)]),
+    );
+
+    const new_frame_locals = new_frame.localValues(stack);
+    std.debug.assert( // args and locals base address mismatch
+        @intFromPtr(new_frame_locals.ptr) == @intFromPtr(args_dst.ptr),
+    );
+
+    const new_values =
+        new_frame_slice[(new_frame_info.allocated_local_count + Frame.size_in_values)..];
+    stack.assertSliceInBounds(new_values);
+    std.debug.assert(@intFromPtr(new_values.ptr) == @intFromPtr(new_frame.valueStackBase()));
+
+    switch (callee.expanded()) {
+        .host => {},
+        .wasm => |wasm| {
+            const code = wasm.code();
+            if (builtin.mode == .Debug and !code.isValidationFinished()) {
+                unreachable; // validation check occurred above
+            }
+
+            std.debug.assert(new_values.len == code.inner.max_values);
+            @memset(new_values, undefined);
+
+            new_frame.wasm = .{
+                .ip = code.inner.instructions_start,
+                .eip = code.inner.instructions_end,
+                .stp = code.inner.side_table_ptr,
+            };
+
+            const new_frame_declared_locals: []align(@sizeOf(Value)) Value =
+                new_frame_locals[new_signature.param_count..];
+
+            // Zero the local variables that aren't parameters
+            @memset(new_frame_declared_locals, std.mem.zeroes(Value));
+        },
+    }
+
+    stack.current_frame = new_frame_offset;
+    return PushedFrame{ .offset = new_frame_offset, .frame = new_frame };
 }
 
 pub const ParameterAllocation = enum {

@@ -71,6 +71,7 @@ pub const TableAccessOutOfBounds = struct {
     pub const Cause = union(enum) {
         @"table.init",
         call_indirect,
+        return_call_indirect,
         @"table.copy",
         @"table.fill",
         @"table.get": Access,

@@ -95,5 +95,8 @@
         "proposals/extended-const/data",
         "proposals/extended-const/elem",
         "proposals/extended-const/global",
+
+        "proposals/tail-call/return_call",
+        "proposals/tail-call/return_call_indirect",
     },
 }
