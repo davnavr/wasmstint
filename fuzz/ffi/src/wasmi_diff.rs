@@ -784,7 +784,7 @@ unsafe fn execute(
         let mut config = wasmi::Config::default();
         // Should match the features supported by `wasmstint`.
         config.wasm_multi_memory(false);
-        config.wasm_tail_call(false);
+        config.wasm_tail_call(true);
         config.wasm_extended_const(true);
         //config.wasm_simd(false); // enabled by feature flag in `wasmi`
         //config.wasm_relaxed_simd(false);
