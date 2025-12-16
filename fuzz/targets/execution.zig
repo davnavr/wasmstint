@@ -459,7 +459,34 @@ fn mainLoop(
             .interrupted => |*interrupt| {
                 switch (interrupt.cause().*) {
                     .out_of_fuel => return error.OutOfFuel,
-                    .memory_grow, .table_grow => {},
+                    .memory_grow => |grow_request| {
+                        const accepted = try input.boolean();
+                        std.debug.print(
+                            "memory.grow from {[old]d} to {[new]d} {[status]s}\n",
+                            .{
+                                .old = grow_request.old_size,
+                                .new = grow_request.new_size,
+                                .status = if (accepted) "accepted" else "denied",
+                            },
+                        );
+                        if (accepted) {
+                            try grow_request.grow();
+                        }
+                    },
+                    .table_grow => |grow_request| {
+                        const accepted = try input.boolean();
+                        std.debug.print(
+                            "table.grow from {[old]d} to {[new]d} {[status]s}\n",
+                            .{
+                                .old = grow_request.old_len,
+                                .new = grow_request.new_len,
+                                .status = if (accepted) "accepted" else "denied",
+                            },
+                        );
+                        if (accepted) {
+                            try grow_request.grow();
+                        }
+                    },
                 }
 
                 break :next interrupt.resumeExecution(fuel);

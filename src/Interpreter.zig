@@ -86,9 +86,16 @@ pub const InterruptionCause = union(enum) {
         new_size: usize,
         result: *align(@sizeOf(Value)) Value,
 
+        pub fn grow(request: *const MemoryGrow) Allocator.Error!void {
+            std.debug.assert( // wrong size in `memory.grow`
+                request.memory.size == request.old_size or request.memory.size == request.new_size,
+            );
+            try request.memory.grow(request.new_size);
+        }
+
         /// The amount to increase the size of the memory by, in bytes.
-        pub fn delta(grow: *const MemoryGrow) usize {
-            return grow.new_size - grow.memory.size;
+        pub fn delta(request: *const MemoryGrow) usize {
+            return request.new_size - request.old_size;
         }
     };
 
@@ -100,8 +107,16 @@ pub const InterruptionCause = union(enum) {
         /// Also used as the result where an `i32` to indicate the old size is written.
         elem: *align(@sizeOf(Value)) Value,
         old_len: u32,
-        /// Invariant that `new_size >= table.len`.
+        /// Invariant that `new_len >= table.len`.
         new_len: u32,
+
+        pub fn grow(request: *const TableGrow) Allocator.Error!void {
+            std.debug.assert( // wrong size in `table.grow`
+                request.table.table.len == request.old_len or
+                    request.table.table.len == request.new_len,
+            );
+            try request.table.table.grow(request.elem.ptr, request.new_len);
+        }
     };
 };
 
@@ -797,9 +812,10 @@ pub const State = union(Tag) {
             return &state.inner.interpreter().current_state.interrupted.cause;
         }
 
-        // TODO: API to allow host to prevent growth
-
         /// Resumes execution of WASM bytecode after being interrupted.
+        ///
+        /// If the `cause()` is `.memory_grow` or `.table_grow`, by default this will simply yield
+        /// `-1`, indicating to the WASM program that the growth failed.
         pub fn resumeExecution(state: *Interrupted, fuel: *Fuel) State {
             var coz_begin = coz.begin("wasmstint.Interpreter.Interrupted.resumeExecution");
             defer coz_begin.end();
@@ -807,20 +823,24 @@ pub const State = union(Tag) {
             switch (state.cause().*) {
                 .out_of_fuel => {},
                 .memory_grow => |*grow| grow.result.* = .{
-                    .i32 = value: {
-                        const old_size: u32 = @intCast(grow.old_size);
-                        std.debug.assert(grow.memory.size == old_size);
-                        grow.memory.grow(grow.new_size) catch break :value -1;
-                        break :value @bitCast(@divExact(old_size, runtime.MemInst.page_size));
+                    .i32 = if (grow.memory.size == grow.old_size)
+                        -1
+                    else success: {
+                        std.debug.assert(grow.memory.size == grow.new_size);
+                        break :success @intCast(
+                            @divExact(
+                                @as(u32, @intCast(grow.old_size)),
+                                runtime.MemInst.page_size,
+                            ),
+                        );
                     },
                 },
                 .table_grow => |*grow| grow.elem.* = .{
-                    .i32 = value: {
-                        const init_elem = grow.elem.ptr;
-                        const old_len = grow.old_len;
-                        std.debug.assert(grow.table.table.len == old_len);
-                        grow.table.table.grow(init_elem, grow.new_len) catch break :value -1;
-                        break :value @bitCast(old_len);
+                    .i32 = if (grow.table.table.len == grow.old_len)
+                        -1
+                    else success: {
+                        std.debug.assert(grow.table.table.len == grow.new_len);
+                        break :success @bitCast(grow.old_len);
                     },
                 },
             }

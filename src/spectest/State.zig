@@ -695,14 +695,26 @@ fn runToCompletion(
             .interrupted => |*interrupt| {
                 switch (interrupt.cause().*) {
                     .out_of_fuel => return interp,
-                    .memory_grow => |*grow| output.print(
-                        "- handling memory.grow from {[old]} to {[new]}\n",
-                        .{ .old = grow.old_size, .new = grow.new_size },
-                    ),
-                    .table_grow => |*grow| output.print(
-                        "- handling table.grow from {[old]} to {[new]}\n",
-                        .{ .old = grow.old_len, .new = grow.new_len },
-                    ),
+                    .memory_grow => |*grow| {
+                        const result = result: {
+                            grow.grow() catch break :result "failure";
+                            break :result "success";
+                        };
+                        output.print(
+                            "- handling memory.grow from {[old]} to {[new]} -> {[result]s}\n",
+                            .{ .old = grow.old_size, .new = grow.new_size, .result = result },
+                        );
+                    },
+                    .table_grow => |*grow| {
+                        const result = result: {
+                            grow.grow() catch break :result "failure";
+                            break :result "success";
+                        };
+                        output.print(
+                            "- handling table.grow from {[old]} to {[new]} -> {[result]s}\n\n",
+                            .{ .old = grow.old_len, .new = grow.new_len, .result = result },
+                        );
+                    },
                 }
 
                 break :next interrupt.resumeExecution(fuel);

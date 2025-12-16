@@ -919,7 +919,7 @@ fn mainLoop(
                         },
                         .unlimited => {},
                     },
-                    .memory_grow, .table_grow => {},
+                    inline .memory_grow, .table_grow => |grow_request| grow_request.grow() catch {},
                 }
 
                 break :next interrupt.resumeExecution(fuel);
