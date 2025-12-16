@@ -669,6 +669,16 @@ pub fn testOne(
     var execution = try Execution.run(wasm_module, input, max_fuel);
     defer execution.deinit();
 
+    if (execution.trap()) |wasmi_trap| {
+        _ = wasmi_trap.toWasmstintTrapCode() catch |e| {
+            std.debug.print("cannot instantiate: wasmi trapped {t}\n", .{e});
+            return switch (e) {
+                error.OutOfFuel => error.BadInput, // wasmi fuel consumption is deterministic
+                error.StackOverflow => {},
+            };
+        };
+    }
+
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
@@ -906,11 +916,7 @@ pub fn testOne(
                 std.debug.print("start function trapped: {t}\n", .{trap_code});
                 if (execution.trap()) |wasmi_trap| {
                     const expected_trap = wasmi_trap.toWasmstintTrapCode() catch |e| {
-                        std.debug.print(
-                            "wasmstint trapped during module instantiation, but wasmi failed: {t}",
-                            .{e},
-                        );
-                        return error.BadInput;
+                        std.debug.panic("unexpected wasmi trap during instantiation: {t}", .{e});
                     };
 
                     if (expected_trap != trap_code) {
@@ -975,8 +981,12 @@ pub fn testOne(
                     .values => {},
                     .trapped => |wasmi_trap| {
                         _ = wasmi_trap.toWasmstintTrapCode() catch |e| {
-                            std.debug.print("execution diverges: wasmi trapped {t}", .{e});
-                            return;
+                            std.debug.print("execution diverges: wasmi trapped {t}\n", .{e});
+                            return switch (e) {
+                                // wasmi fuel consumption is deterministic
+                                error.OutOfFuel => error.BadInput,
+                                error.StackOverflow => {},
+                            };
                         };
                     },
                 }
