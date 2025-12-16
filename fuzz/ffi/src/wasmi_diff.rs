@@ -29,6 +29,12 @@ pub struct Execution {
     /// Contains [`host_calls_len`] entries.
     pub host_calls_ptr: NonNull<HostCall>,
 
+    pub memory_growths_len: usize,
+    pub memory_growths_ptr: NonNull<Growth>,
+
+    pub table_growths_len: usize,
+    pub table_growths_ptr: NonNull<Growth>,
+
     pub arena: NonNull<bumpalo::Bump>,
 }
 
@@ -279,17 +285,35 @@ trap! {
     OutOfFuel = 9,
 }
 
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct Limits {
+    pub max_memory_bytes: usize,
+    pub max_table_elements: usize,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct Growth {
+    pub current: usize,
+    pub desired: usize,
+    pub allowed: bool,
+}
+
 struct Context<'a, 'rt, 'u, 'b> {
     u: &'u mut arbitrary::Unstructured<'b>,
     func_imports: &'rt [wasmi::Func],
     func_exports: &'rt [wasmi::Func],
     mem_exports: &'rt [wasmi::Memory],
     arena: &'a bumpalo::Bump,
-    host_calls: bumpalo::collections::Vec<'rt, HostCall>,
+    host_calls: Vec<HostCall>,
+    memory_growths: Vec<Growth>,
+    table_growths: Vec<Growth>,
     actions: bumpalo::collections::Vec<'rt, Action>,
     func_export_arities: &'a [FuncArities],
     func_import_arities: &'a [FuncArities],
     execution: &'a mut Execution,
+    limits: Limits,
 }
 
 impl<'a> Context<'a, '_, '_, '_> {
@@ -298,16 +322,105 @@ impl<'a> Context<'a, '_, '_, '_> {
         self.arena
     }
 
-    fn record_host_calls(&mut self) {
-        let host_calls: &[HostCall] = self.arena.alloc_slice_fill_iter(self.host_calls.drain(..));
-        self.execution.host_calls_len = host_calls.len();
-        self.execution.host_calls_ptr = non_null_slice_to_ptr(NonNull::from(host_calls));
+    fn record_execution_state(&mut self) {
+        {
+            let host_calls: &'a [HostCall] =
+                self.arena.alloc_slice_fill_iter(self.host_calls.drain(..));
+            self.execution.host_calls_len = host_calls.len();
+            self.execution.host_calls_ptr = non_null_slice_to_ptr(NonNull::from(host_calls));
+        }
+        {
+            let memory_growths: &'a [Growth] = self.arena.alloc_slice_copy(&self.memory_growths);
+            self.execution.memory_growths_len = memory_growths.len();
+            self.execution.memory_growths_ptr =
+                non_null_slice_to_ptr(NonNull::from(memory_growths));
+        }
+        {
+            let table_growths: &'a [Growth] = self.arena.alloc_slice_copy(&self.table_growths);
+            self.execution.table_growths_len = table_growths.len();
+            self.execution.table_growths_ptr = non_null_slice_to_ptr(NonNull::from(table_growths));
+        }
     }
 
     fn trap(mut self, trap: Trap) -> &'a mut Execution {
         self.execution.trap = trap;
-        self.record_host_calls();
+        self.record_execution_state();
         self.execution
+    }
+}
+
+impl Growth {
+    fn from_request(
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+        bound: usize,
+        allow: bool,
+    ) -> Self {
+        let maximum = maximum.unwrap_or(bound).min(bound);
+        Self {
+            current,
+            desired,
+            allowed: (desired > maximum) && allow,
+        }
+    }
+}
+
+impl wasmi::ResourceLimiter for Context<'_, '_, '_, '_> {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> Result<bool, wasmi_core::LimiterError> {
+        let grow = Growth::from_request(
+            current,
+            desired,
+            maximum,
+            self.limits.max_memory_bytes,
+            self.u.arbitrary::<bool>().unwrap_or(false),
+        );
+        self.memory_growths.push(grow);
+        Ok(grow.allowed)
+    }
+
+    fn memory_grow_failed(&mut self, _error: &wasmi_core::LimiterError) {
+        let len = self.memory_growths.len();
+        self.memory_growths[len - 1].allowed = false;
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> Result<bool, wasmi_core::LimiterError> {
+        let grow = Growth::from_request(
+            current,
+            desired,
+            maximum,
+            self.limits.max_table_elements,
+            self.u.arbitrary::<bool>().unwrap_or(false),
+        );
+        self.table_growths.push(grow);
+        Ok(grow.allowed)
+    }
+
+    fn table_grow_failed(&mut self, _error: &wasmi_core::LimiterError) {
+        let len = self.table_growths.len();
+        self.table_growths[len - 1].allowed = false;
+    }
+
+    fn instances(&self) -> usize {
+        1
+    }
+
+    fn memories(&self) -> usize {
+        100
+    }
+
+    fn tables(&self) -> usize {
+        100
     }
 }
 
@@ -421,37 +534,74 @@ fn instantiate_wasmi_module<'a, 'rt>(
     let mut global_import_values =
         bumpalo::collections::Vec::<'a, ArgumentVal>::new_in(store.data().arena());
 
+    let max_memory_bytes = u32::try_from(store.data().limits.max_memory_bytes).unwrap();
+    let max_table_elems = u32::try_from(store.data().limits.max_table_elements).unwrap();
     for import in imports_iter {
-        match import.ty() {
-            wasmi::ExternType::Global(global_type) => {
-                provided_imports.push(wasmi::Extern::Global(create_global_import(
-                    store,
-                    global_type,
-                    &mut global_import_values,
-                )?));
-            }
+        provided_imports.push(match import.ty() {
+            wasmi::ExternType::Global(global_type) => wasmi::Extern::Global(create_global_import(
+                store,
+                global_type,
+                &mut global_import_values,
+            )?),
             wasmi::ExternType::Func(func_type) => {
                 let func = create_func_import(store, func_imports.len(), func_type.clone());
-                provided_imports.push(wasmi::Extern::Func(func));
                 func_import_arities.push(FuncArities::from_wasmi_func_type(func_type));
                 func_imports.push(func);
+                wasmi::Extern::Func(func)
             }
             wasmi::ExternType::Memory(mem_type) => {
-                provided_imports.push(wasmi::Extern::Memory(
-                    wasmi::Memory::new(&mut *store, *mem_type).unwrap(),
-                ));
+                if mem_type.minimum() > u64::from(max_memory_bytes) {
+                    return Err(arbitrary::Error::IncorrectFormat);
+                }
+
+                wasmi::Extern::Memory(
+                    match wasmi::Memory::new(
+                        &mut *store,
+                        wasmi::MemoryType::new(
+                            mem_type.minimum().try_into().unwrap(),
+                            Some(
+                                mem_type
+                                    .maximum()
+                                    .unwrap_or(max_memory_bytes.into())
+                                    .min(max_memory_bytes.into())
+                                    .try_into()
+                                    .unwrap(),
+                            ),
+                        ),
+                    ) {
+                        Ok(memory) => memory,
+                        Err(err) => return Ok(Err(err)),
+                    },
+                )
             }
             wasmi::ExternType::Table(table_type) => {
-                provided_imports.push(wasmi::Extern::Table(
-                    wasmi::Table::new(
-                        &mut *store,
-                        *table_type,
-                        wasmi::Val::default(table_type.element()),
-                    )
-                    .unwrap(),
-                ));
+                if table_type.minimum() > u64::from(max_table_elems) {
+                    return Err(arbitrary::Error::IncorrectFormat);
+                }
+
+                let table_type = wasmi::TableType::new(
+                    table_type.element(),
+                    table_type.minimum().try_into().unwrap(),
+                    Some(
+                        table_type
+                            .maximum()
+                            .unwrap_or(max_table_elems.into())
+                            .min(max_table_elems.into())
+                            .try_into()
+                            .unwrap(),
+                    ),
+                );
+
+                let init_elem = wasmi::Val::default(table_type.element());
+
+                wasmi::Extern::Table(
+                    match wasmi::Table::new(&mut *store, table_type, init_elem) {
+                        Ok(table) => table,
+                        Err(err) => return Ok(Err(err)),
+                    },
+                )
             }
-        }
+        });
     }
 
     let ctx = store.data_mut();
@@ -600,6 +750,7 @@ unsafe fn execute(
     u: &mut arbitrary::Unstructured,
     fuel: u64,
     hasher: HasherCallback,
+    limits: Limits,
 ) -> arbitrary::Result<NonNull<Execution>> {
     // Just use a normal box, since a `Bump` can't be allocated in itself.
     let arena = Box::new(bumpalo::Bump::new());
@@ -619,6 +770,13 @@ unsafe fn execute(
 
         host_calls_len: 0,
         host_calls_ptr: NonNull::<HostCall>::dangling(),
+
+        memory_growths_len: 0,
+        memory_growths_ptr: NonNull::<Growth>::dangling(),
+
+        table_growths_len: 0,
+        table_growths_ptr: NonNull::<Growth>::dangling(),
+
         arena: NonNull::from(&*arena),
     });
 
@@ -641,7 +799,7 @@ unsafe fn execute(
             &engine,
             Context {
                 u,
-                host_calls: bumpalo::collections::Vec::<'_, HostCall>::new_in(&alloca),
+                host_calls: Vec::<HostCall>::new(),
                 actions: bumpalo::collections::Vec::<'_, Action>::new_in(&alloca),
                 arena: &arena,
                 func_imports: &[],
@@ -649,36 +807,56 @@ unsafe fn execute(
                 func_exports: &[],
                 func_export_arities: &[],
                 mem_exports: &[],
+                memory_growths: Vec::new(),
+                table_growths: Vec::new(),
                 execution,
+                limits,
             },
         );
         store.set_fuel(fuel).unwrap();
+        store.limiter(|a| a);
 
         let inst = match instantiate_wasmi_module(&mut store, &alloca, &module, &mut scratch)? {
             Ok(init) => init,
-            Err(e) => match e.kind() {
-                wasmi::errors::ErrorKind::TrapCode(trap) => {
-                    break 'exec store.into_data().trap(Trap::from_wasmi_trap(*trap));
+            Err(e) => {
+                use wasmi::errors::{ErrorKind, InstantiationError, MemoryError, TableError};
+                match e.kind() {
+                    ErrorKind::TrapCode(trap) => {
+                        break 'exec store.into_data().trap(Trap::from_wasmi_trap(*trap));
+                    }
+                    ErrorKind::Instantiation(InstantiationError::ElementSegmentDoesNotFit {
+                        ..
+                    })
+                    | ErrorKind::Table(
+                        TableError::InitOutOfBounds
+                        | TableError::FillOutOfBounds
+                        | TableError::SetOutOfBounds
+                        | TableError::CopyOutOfBounds,
+                    ) => {
+                        break 'exec store.into_data().trap(Trap::TableOutOfBounds);
+                    }
+                    ErrorKind::Memory(MemoryError::OutOfBoundsAccess) => {
+                        break 'exec store.into_data().trap(Trap::MemoryOutOfBounds);
+                    }
+                    ErrorKind::Host(e) => {
+                        return Err(e.downcast_ref::<HostError<arbitrary::Error>>().unwrap().0);
+                    }
+                    ErrorKind::Table(TableError::ResourceLimiterDeniedAllocation)
+                    | ErrorKind::Memory(MemoryError::ResourceLimiterDeniedAllocation)
+                    | ErrorKind::Instantiation(
+                        InstantiationError::FailedToInstantiateMemory(
+                            MemoryError::ResourceLimiterDeniedAllocation,
+                        )
+                        | InstantiationError::FailedToInstantiateTable(
+                            TableError::ResourceLimiterDeniedAllocation,
+                        ),
+                    ) => {
+                        // make fuzz target reject this input
+                        return Err(arbitrary::Error::IncorrectFormat);
+                    }
+                    unexpected => panic!("unexpected error during instantation: {unexpected:?}"),
                 }
-                wasmi::errors::ErrorKind::Instantiation(
-                    wasmi::errors::InstantiationError::ElementSegmentDoesNotFit { .. },
-                )
-                | wasmi::errors::ErrorKind::Table(
-                    wasmi::errors::TableError::InitOutOfBounds
-                    | wasmi::errors::TableError::FillOutOfBounds
-                    | wasmi::errors::TableError::SetOutOfBounds
-                    | wasmi::errors::TableError::CopyOutOfBounds,
-                ) => {
-                    break 'exec store.into_data().trap(Trap::TableOutOfBounds);
-                }
-                wasmi::errors::ErrorKind::Memory(wasmi::errors::MemoryError::OutOfBoundsAccess) => {
-                    break 'exec store.into_data().trap(Trap::MemoryOutOfBounds);
-                }
-                wasmi::errors::ErrorKind::Host(e) => {
-                    return Err(e.downcast_ref::<HostError<arbitrary::Error>>().unwrap().0);
-                }
-                unexpected => panic!("unexpected error during instantation: {unexpected:?}"),
-            },
+            }
         };
 
         collect_exports(&mut store, &alloca, &inst, &mut scratch);
@@ -695,7 +873,7 @@ unsafe fn execute(
         {
             let ctx = store.data_mut();
 
-            ctx.record_host_calls();
+            ctx.record_execution_state();
 
             let actions: &[Action] = ctx.arena.alloc_slice_fill_iter(ctx.actions.drain(..));
             ctx.execution.actions_len = u32::try_from(actions.len()).unwrap();
@@ -718,6 +896,7 @@ pub extern "C" fn wasmstint_fuzz_wasmi_diff(
     fuel: u64,
     out: &mut std::mem::MaybeUninit<NonNull<Execution>>,
     hasher: HasherCallback,
+    limits: &Limits,
 ) -> bool {
     let mut input = crate::Input {
         u: arbitrary::Unstructured::new(unsafe {
@@ -729,7 +908,7 @@ pub extern "C" fn wasmstint_fuzz_wasmi_diff(
     let wasm_bytes = NonNull::<[u8]>::slice_from_raw_parts(wasm_ptr, wasm_len);
     let wasm_bytes: &[u8] = unsafe { wasm_bytes.as_ref() };
 
-    match unsafe { execute(wasm_bytes, &mut input.u, fuel, hasher) } {
+    match unsafe { execute(wasm_bytes, &mut input.u, fuel, hasher, *limits) } {
         Ok(exec) => {
             out.write(exec);
             true

@@ -30,6 +30,13 @@ const Execution = struct {
 
         host_calls_len: usize,
         host_calls_ptr: [*]const HostCall,
+
+        memory_growths_len: usize,
+        memory_growths_ptr: [*]const Growth,
+
+        table_growths_len: usize,
+        table_growths_ptr: [*]const Growth,
+
         // Hidden fields...
     };
 
@@ -64,6 +71,20 @@ const Execution = struct {
     fn globalImportVals(exec: Execution) []const ArgumentVal {
         return exec.inner.global_import_values_ptr[0..exec.inner.global_import_count];
     }
+
+    fn memoryGrowths(exec: Execution) []const Growth {
+        return exec.inner.memory_growths_ptr[0..exec.inner.memory_growths_len];
+    }
+
+    fn tableGrowths(exec: Execution) []const Growth {
+        return exec.inner.table_growths_ptr[0..exec.inner.table_growths_len];
+    }
+
+    const Growth = extern struct {
+        current: usize,
+        desired: usize,
+        allowed: bool,
+    };
 
     const Trap = enum(u8) {
         unreachable_code_reached = 0,
@@ -434,6 +455,11 @@ const Execution = struct {
         input: *ffi.Input,
         fuel: u64,
     ) !Execution {
+        const Limits = extern struct {
+            max_memory_bytes: usize = wasm_smith_config.max_max_memory_bytes,
+            max_table_elements: usize = wasm_smith_config.max_max_table_elements,
+        };
+
         const diff = @extern(
             *const fn (
                 input: *ffi.Input,
@@ -442,12 +468,22 @@ const Execution = struct {
                 fuel: u64,
                 out: **const Inner,
                 hasher: *const fn ([*]const u8, usize) callconv(.c) u64,
+                limits: *const Limits,
             ) callconv(.c) bool,
             .{ .is_dll_import = true, .name = "wasmstint_fuzz_wasmi_diff" },
         );
 
+        const limits = Limits{};
         var exec: *const Inner = undefined;
-        return if (diff(input, wasm_module.ptr, wasm_module.len, fuel, &exec, memory_hasher))
+        return if (diff(
+            input,
+            wasm_module.ptr,
+            wasm_module.len,
+            fuel,
+            &exec,
+            memory_hasher,
+            &limits,
+        ))
             Execution{ .inner = exec }
         else
             error.BadInput;
@@ -465,23 +501,55 @@ const Execution = struct {
 };
 
 const HostState = struct {
-    call_count: usize,
+    call_count: usize = 0,
+    memory_grow_count: usize = 0,
+    table_grow_count: usize = 0,
 
-    const Call = struct {
-        number: usize,
-        record: *const Execution.HostCall,
-    };
+    fn Record(comptime T: type) type {
+        return struct { number: usize, record: *const T };
+    }
 
-    fn nextCall(state: *HostState, exec: Execution) Call {
-        const host_calls = exec.hostCalls();
-        const number = state.call_count;
-        if (number >= host_calls.len) {
-            std.debug.panic("too many host calls, expected {d}", .{host_calls.len});
+    fn nextFromSlice(
+        counter: *usize,
+        comptime T: type,
+        slice: []const T,
+        comptime desc: []const u8,
+    ) Record(T) {
+        const number = counter.*;
+        if (number >= slice.len) {
+            std.debug.panic("too many " ++ desc ++ ", expected {d}", .{slice.len});
         }
 
-        const call = &host_calls[number];
-        state.call_count += 1;
+        const call = &slice[number];
+        counter.* += 1;
         return .{ .number = number, .record = call };
+    }
+
+    fn nextCall(state: *HostState, exec: Execution) Record(Execution.HostCall) {
+        return nextFromSlice(
+            &state.call_count,
+            Execution.HostCall,
+            exec.hostCalls(),
+            "host calls",
+        );
+    }
+
+    fn nextMemoryGrowth(state: *HostState, exec: Execution) Record(Execution.Growth) {
+        return nextFromSlice(
+            &state.memory_grow_count,
+            Execution.Growth,
+            exec.memoryGrowths(),
+            "memory growths",
+        );
+    }
+
+    fn nextTableGrowth(state: *HostState, exec: Execution) Record(Execution.Growth) {
+        return nextFromSlice(
+            &state.table_grow_count,
+            Execution.Growth,
+            exec.tableGrowths(),
+            "table growths",
+        );
     }
 };
 
@@ -781,7 +849,7 @@ pub fn testOne(
         );
     }
 
-    var host_state = HostState{ .call_count = 0 };
+    var host_state = HostState{};
     var interp: wasmstint.Interpreter = undefined;
     var fuel = wasmstint.Interpreter.Fuel{ .remaining = max_fuel };
     const initial_state = try interp.init(
@@ -1063,7 +1131,12 @@ fn mainLoop(
                 const actual_host_id = Execution.HostFuncId{
                     // TODO(Zig): fix bad pointer arithmetic?
                     // .n = @intCast(host_func - host_functions.ptr),
-                    .n = @intCast(@as([*]const wasmstint.runtime.FuncAddr.Host, host_func[0..1].ptr) - host_functions.ptr),
+                    .n = @intCast(
+                        @as(
+                            [*]const wasmstint.runtime.FuncAddr.Host,
+                            host_func[0..1].ptr,
+                        ) - host_functions.ptr,
+                    ),
                 };
 
                 if (actual_host_id.n >= host_functions.len) {
@@ -1131,8 +1204,72 @@ fn mainLoop(
             .interrupted => |*interrupt| {
                 switch (interrupt.cause().*) {
                     .out_of_fuel => return error.OutOfFuel,
-                    // TODO: need way to know if grow fails, could get out of sync w/ wasmi
-                    .memory_grow, .table_grow => {},
+                    .memory_grow => |memory_grow| {
+                        std.debug.print(
+                            "memory.grow #{d}  from {d} to {d}\n",
+                            .{ host.memory_grow_count, memory_grow.old_size, memory_grow.new_size },
+                        );
+                        const actual = host.nextMemoryGrowth(exec);
+                        if (actual.record.current != memory_grow.old_size) {
+                            std.debug.panic(
+                                "expected old size to be {[expected]d} bytes, got {[actual]d}",
+                                .{
+                                    .expected = actual.record.current,
+                                    .actual = memory_grow.old_size,
+                                },
+                            );
+                        } else if (actual.record.desired != memory_grow.new_size) {
+                            std.debug.panic(
+                                "expected new size to be {[expected]d} bytes, got {[actual]d}",
+                                .{
+                                    .expected = actual.record.desired,
+                                    .actual = memory_grow.new_size,
+                                },
+                            );
+                        }
+
+                        std.debug.print(
+                            "memory.grow #{d} was {s}\n",
+                            .{ actual.number, if (actual.record.allowed) "allowed" else "blocked" },
+                        );
+
+                        if (actual.record.allowed) {
+                            try memory_grow.grow();
+                        }
+                    },
+                    .table_grow => |table_grow| {
+                        std.debug.print(
+                            "table.grow #{d} from {d} to {d}\n",
+                            .{ host.table_grow_count, table_grow.old_len, table_grow.new_len },
+                        );
+                        const actual = host.nextTableGrowth(exec);
+                        if (actual.record.current != table_grow.old_len) {
+                            std.debug.panic(
+                                "expected old length to be {[expected]d} elements, got {[actual]d}",
+                                .{
+                                    .expected = actual.record.current,
+                                    .actual = table_grow.old_len,
+                                },
+                            );
+                        } else if (actual.record.desired != table_grow.new_len) {
+                            std.debug.panic(
+                                "expected new length to be {[expected]d} elements, got {[actual]d}",
+                                .{
+                                    .expected = actual.record.desired,
+                                    .actual = table_grow.new_len,
+                                },
+                            );
+                        }
+
+                        std.debug.print(
+                            "table.grow #{d} was {s}\n",
+                            .{ actual.number, if (actual.record.allowed) "allowed" else "blocked" },
+                        );
+
+                        if (actual.record.allowed) {
+                            try table_grow.grow();
+                        }
+                    },
                 }
 
                 break :next interrupt.resumeExecution(fuel);

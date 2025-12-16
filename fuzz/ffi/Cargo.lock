@@ -207,4 +207,5 @@ dependencies = [
  "bumpalo",
  "wasm-smith",
  "wasmi",
+ "wasmi_core",
 ]
