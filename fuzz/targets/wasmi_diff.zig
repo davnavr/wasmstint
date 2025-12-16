@@ -971,6 +971,16 @@ pub fn testOne(
                     },
                 );
 
+                switch (expected_results) {
+                    .values => {},
+                    .trapped => |wasmi_trap| {
+                        _ = wasmi_trap.toWasmstintTrapCode() catch |e| {
+                            std.debug.print("execution diverges: wasmi trapped {t}", .{e});
+                            return;
+                        };
+                    },
+                }
+
                 const args_buf = try scratch.allocator().alloc(
                     wasmstint.Interpreter.TaggedValue,
                     target_signature.param_count,
@@ -1052,8 +1062,7 @@ pub fn testOne(
                                 .{actual_trap},
                             ),
                             .trapped => |wasmi_trap| wasmi_trap.toWasmstintTrapCode() catch |e| {
-                                std.debug.print("wasmstint trapped, but wasmi failed: {t}", .{e});
-                                return error.BadInput;
+                                std.debug.panic("unexpected wasmi trap {t}", .{e});
                             },
                         };
 
