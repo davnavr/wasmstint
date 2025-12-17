@@ -8,6 +8,7 @@ const Allocated = @This();
 /// Asserts that `size <= capacity`.
 pub fn allocate(
     allocator: Allocator,
+    elem_type: Module.ValType,
     /// The value all elements are initially set to.
     init_elem: ?*anyopaque,
     len: u32,
@@ -17,6 +18,8 @@ pub fn allocate(
 ) Oom!Allocated {
     std.debug.assert(len <= capacity);
     std.debug.assert(capacity <= maximum);
+    std.debug.assert(elem_type.isRefType());
+    // TODO: If non-nullable reference support is added, need to check `init_elem != null`
 
     const elements = try allocator.alloc(?*anyopaque, capacity);
     @memset(elements[0..len], init_elem);
@@ -25,6 +28,7 @@ pub fn allocate(
         .allocator = allocator,
         .table = TableInst{
             .base = .{ .ptr = elements.ptr },
+            .elem_type = elem_type,
             .len = len,
             .capacity = capacity,
             .limit = maximum,
@@ -41,7 +45,7 @@ pub fn allocate(
 /// in the `MemType`.
 pub fn allocateFromType(
     allocator: Allocator,
-    table_type: *const TableType,
+    table_type: *const Module.TableType,
     init_elem: ?*anyopaque,
     initial_capacity: u32,
     /// Allows a smaller limit than the one specified in the `table_type`.
@@ -49,10 +53,10 @@ pub fn allocateFromType(
 ) Oom!Allocated {
     std.debug.assert(table_type.limits.min <= initial_capacity);
     std.debug.assert(table_type.limits.min <= maximum);
-    // TODO: If non-nullable reference support is added, need to check `init_elem != null`
 
     return allocate(
         allocator,
+        table_type.elem_type,
         init_elem,
         @intCast(table_type.limits.min),
         initial_capacity,
@@ -106,6 +110,6 @@ fn free(inst: *TableInst) void {
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const TableType = @import("../../Module.zig").TableType;
+const Module = @import("../../Module.zig");
 const Oom = Allocator.Error;
 const TableInst = @import("../table.zig").TableInst;

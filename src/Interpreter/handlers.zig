@@ -2094,9 +2094,8 @@ const opcode_handlers = struct {
             &saved_sp.poppedValues()[expected_signature.param_count];
         const elem_index: u32 = @bitCast(elem_index_val.i32);
 
-        const table_addr = current_module.tableAddr(table_idx);
-        std.debug.assert(table_addr.elem_type == .funcref);
-        const table = table_addr.table;
+        const table = current_module.tableAddr(table_idx);
+        std.debug.assert(table.elem_type == .funcref);
 
         // std.debug.print(
         //     " > call_indirect (i32.const {} (; @ {X} ;)) ;; table.size = {}, call depth = {}\n",
@@ -2187,9 +2186,8 @@ const opcode_handlers = struct {
             &saved_sp.poppedValues()[expected_signature.param_count];
         const elem_index: u32 = @bitCast(elem_index_val.i32);
 
-        const table_addr = current_module.tableAddr(table_idx);
-        std.debug.assert(table_addr.elem_type == .funcref);
-        const table = table_addr.table;
+        const table = current_module.tableAddr(table_idx);
+        std.debug.assert(table.elem_type == .funcref);
 
         if (table.len <= elem_index) {
             const info = Trap.init(
@@ -2459,7 +2457,7 @@ const opcode_handlers = struct {
         var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
 
         const table_idx = instr.readIdx(Module.TableIdx);
-        const table = module.header().tableAddr(table_idx).table;
+        const table = module.header().tableAddr(table_idx);
 
         const operand: *align(@sizeOf(Value)) Value = &vals.topArray(1)[0];
         const idx: u32 = @bitCast(operand.i32);
@@ -2494,7 +2492,7 @@ const opcode_handlers = struct {
         var vals = Stack.Values.init(sp, &interp.stack, 2, 2);
 
         const table_idx = instr.readIdx(Module.TableIdx);
-        const table = module.header().tableAddr(table_idx).table;
+        const table = module.header().tableAddr(table_idx);
 
         const operands = vals.popArray(2);
         vals.assertRemainingCountIs(0);
@@ -3102,11 +3100,11 @@ const opcode_handlers = struct {
         const d: u32 = @bitCast(operands[0].i32);
         @memset(operands, undefined);
 
-        dst_table.table.copy(src_table.table, n, src_addr, d) catch {
+        dst_table.copy(src_table, n, src_addr, d) catch {
             const info = Trap.init(
                 .table_access_out_of_bounds,
                 .init(
-                    if (dst_table.table.len < src_table.table.len) dst_idx else src_idx,
+                    if (dst_table.len < src_table.len) dst_idx else src_idx,
                     .@"table.copy",
                 ),
             );
@@ -3131,8 +3129,7 @@ const opcode_handlers = struct {
         var vals = Stack.Values.init(sp, &interp.stack, 2, 2);
 
         const table_idx = instr.readIdx(Module.TableIdx);
-        const table_addr = module.header().tableAddr(table_idx);
-        const table = table_addr.table;
+        const table = module.header().tableAddr(table_idx);
 
         const delta: u32 = @bitCast(vals.popTyped(&.{.i32})[0]);
         const result_or_elem: *align(@sizeOf(Value)) Value = &vals.topArray(1)[0];
@@ -3152,7 +3149,7 @@ const opcode_handlers = struct {
             break :result @bitCast(old_size);
         } else return Transition.interrupted(instr, vals.top, stp, interp, .{
             .table_grow = .{
-                .table = table_addr,
+                .table = table,
                 .elem = result_or_elem,
                 .old_len = table.len,
                 .new_len = table.len + delta,
@@ -3179,7 +3176,7 @@ const opcode_handlers = struct {
         var vals = Stack.Values.init(sp, &interp.stack, 0, 1);
 
         const table_idx = instr.readIdx(Module.TableIdx);
-        vals.pushTyped(&.{.i32}, .{@bitCast(module.header().tableAddr(table_idx).table.len)});
+        vals.pushTyped(&.{.i32}, .{@bitCast(module.header().tableAddr(table_idx).len)});
         return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
@@ -3199,7 +3196,7 @@ const opcode_handlers = struct {
         var vals = Stack.Values.init(sp, &interp.stack, 3, 3);
 
         const table_idx = instr.readIdx(Module.TableIdx);
-        const table = module.header().tableAddr(table_idx).table;
+        const table = module.header().tableAddr(table_idx);
 
         const operands = vals.popArray(3);
         vals.assertRemainingCountIs(0);

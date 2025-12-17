@@ -156,12 +156,9 @@ pub const ModuleInst = packed struct(usize) {
             return inst.tableInsts()[inst.module.inner.raw.table_import_count..];
         }
 
-        pub fn tableAddr(inst: *const Header, idx: Module.TableIdx) TableAddr {
-            const i: usize = @intFromEnum(idx);
-            return TableAddr{
-                .elem_type = inst.module.tableTypes()[i].elem_type,
-                .table = inst.tableInsts()[i],
-            };
+        /// Internal API.
+        pub fn tableAddr(inst: *const Header, idx: Module.TableIdx) *TableInst {
+            return inst.tableInsts()[@intFromEnum(idx)];
         }
 
         pub inline fn memInsts(inst: *const Header) []const *MemInst {
@@ -173,8 +170,6 @@ pub const ModuleInst = packed struct(usize) {
         }
 
         /// Internal API.
-        ///
-        /// TODO: Add a note here about how some `wasm32-wasip1` applications don't export memory.
         pub fn memAddr(inst: *const Header, idx: Module.MemIdx) *MemInst {
             return inst.memInsts()[@intFromEnum(idx)];
         }
@@ -362,6 +357,5 @@ const Module = @import("../Module.zig");
 const MemInst = @import("memory.zig").MemInst;
 const TableInst = @import("table.zig").TableInst;
 const FuncAddr = @import("value.zig").FuncAddr;
-const TableAddr = @import("value.zig").TableAddr;
 const GlobalAddr = @import("value.zig").GlobalAddr;
 const ExternVal = @import("value.zig").ExternVal;

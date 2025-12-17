@@ -103,7 +103,7 @@ pub const InterruptionCause = union(enum) {
         /// It is a violation of the WebAssembly semantics to modify the contents of the table
         /// during a `table.grow`, or to change the length to a value different from the
         /// `new_len`.
-        table: runtime.TableAddr,
+        table: *runtime.TableInst,
         /// Also used as the result where an `i32` to indicate the old size is written.
         elem: *align(@sizeOf(Value)) Value,
         old_len: u32,
@@ -112,10 +112,9 @@ pub const InterruptionCause = union(enum) {
 
         pub fn grow(request: *const TableGrow) Allocator.Error!void {
             std.debug.assert( // wrong size in `table.grow`
-                request.table.table.len == request.old_len or
-                    request.table.table.len == request.new_len,
+                request.table.len == request.old_len or request.table.len == request.new_len,
             );
-            try request.table.table.grow(request.elem.ptr, request.new_len);
+            try request.table.grow(request.elem.ptr, request.new_len);
         }
     };
 };
@@ -836,10 +835,10 @@ pub const State = union(Tag) {
                     },
                 },
                 .table_grow => |*grow| grow.elem.* = .{
-                    .i32 = if (grow.table.table.len == grow.old_len)
+                    .i32 = if (grow.table.len == grow.old_len)
                         -1
                     else success: {
-                        std.debug.assert(grow.table.table.len == grow.new_len);
+                        std.debug.assert(grow.table.len == grow.new_len);
                         break :success @bitCast(grow.old_len);
                     },
                 },

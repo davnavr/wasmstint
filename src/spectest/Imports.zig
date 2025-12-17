@@ -212,10 +212,7 @@ pub fn init(
     }
 
     imports.lookup.putAssumeCapacityNoClobber("memory", .{ .mem = &imports.memory.memory });
-    imports.lookup.putAssumeCapacityNoClobber(
-        "table",
-        .{ .table = .{ .elem_type = .funcref, .table = &imports.table.table } },
-    );
+    imports.lookup.putAssumeCapacityNoClobber("table", .{ .table = &imports.table.table });
 }
 
 pub fn provider(host: *Imports) wasmstint.runtime.ImportProvider {

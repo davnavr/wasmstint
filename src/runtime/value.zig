@@ -1,19 +1,3 @@
-pub const TableAddr = extern struct {
-    elem_type: Module.ValType,
-    table: *@import("table.zig").TableInst,
-
-    pub fn tableType(addr: *const TableAddr) Module.TableType {
-        return .{
-            .elem_type = addr.elem_type,
-            .limits = .{ .min = addr.table.len, .max = addr.table.limit },
-        };
-    }
-
-    pub fn format(addr: *const TableAddr, writer: *Writer) Writer.Error!void {
-        try writer.print("(table {f})", .{addr.tableType()});
-    }
-};
-
 pub const GlobalAddr = extern struct {
     global_type: Module.GlobalType, // *const GlobalType if it becomes too big
     value: *anyopaque, // TODO: Have it be a pointer to struct containing both value and its size? Need to allow global.get/set to know the operand size
@@ -239,7 +223,7 @@ pub const FuncAddr = packed struct(usize) {
 pub const ExternVal = union(enum) {
     func: FuncAddr,
     mem: *@import("memory.zig").MemInst,
-    table: TableAddr,
+    table: *@import("table.zig").TableInst,
     global: GlobalAddr,
 
     // @sizeOf(ExternVal) ~= @sizeOf([3]usize), but this is fine as it is not expected to be stored in slices
@@ -248,7 +232,7 @@ pub const ExternVal = union(enum) {
         switch (val.*) {
             .func => |*func| try func.format(writer),
             .mem => |mem| try mem.format(writer),
-            .table => |*table| try table.format(writer),
+            .table => |table| try table.format(writer),
             .global => |*global| try global.format(writer),
         }
     }

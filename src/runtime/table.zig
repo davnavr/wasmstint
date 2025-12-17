@@ -1,5 +1,6 @@
 pub const TableInst = extern struct {
     base: Base,
+    elem_type: Module.ValType,
     /// The current size, in elements.
     len: u32,
     /// Indicates the amount that the tables's size, in elements, can grow without reallocating.
@@ -9,6 +10,20 @@ pub const TableInst = extern struct {
     /// The maximum size, in elements.
     limit: u32,
     vtable: *const VTable,
+
+    pub fn tableType(table: *const TableInst) Module.TableType {
+        return .{
+            .elem_type = table.elem_type,
+            .limits = .{ .min = table.len, .max = table.limit },
+        };
+    }
+
+    pub fn format(table: *const TableInst, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print(
+            "(table {f} (;@{X};))",
+            .{ table.tableType(), @intFromPtr(table.base.ptr) },
+        );
+    }
 
     pub const Base = packed union {
         func_ref: [*]FuncAddr.Nullable,
@@ -141,8 +156,7 @@ pub const TableInst = extern struct {
         const_eval_buf: []align(@sizeOf(InterpreterValue)) InterpreterValue,
     ) OobError!void {
         const module_inst = module.header();
-        const table_addr = module_inst.tableAddr(table);
-        const table_inst = table_addr.table;
+        const table_inst = module_inst.tableAddr(table);
         const src_elems = module_inst.elemSegment(src);
         const actual_len = len orelse src_elems.len;
 
@@ -161,7 +175,7 @@ pub const TableInst = extern struct {
             return error.TableAccessOutOfBounds;
         }
 
-        std.debug.assert(src_elems.elementType() == table_addr.elem_type);
+        std.debug.assert(src_elems.elementType() == table_inst.elem_type);
 
         if (actual_len == 0) {
             return;
@@ -174,7 +188,7 @@ pub const TableInst = extern struct {
         errdefer comptime unreachable;
 
         // TODO: Fuel check for initializer expressions in `table.init`
-        switch (table_addr.elem_type) {
+        switch (table_inst.elem_type) {
             .funcref => {
                 const dst_elems: []FuncAddr.Nullable = table_inst.base
                     .func_ref[0..table_inst.len][dst_idx..dst_end_idx];
@@ -236,7 +250,7 @@ pub const TableInst = extern struct {
 
     /// Implements the [`table.copy`] instruction.
     ///
-    /// (Currently does not) Asserts that the `src` and `dst` tables have the same element types.
+    /// Asserts that the `src` and `dst` tables have the same element types.
     ///
     /// [`table.copy`]: https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-copy
     pub fn copy(
@@ -248,7 +262,7 @@ pub const TableInst = extern struct {
     ) OobError!void {
         dst.checkInvariants();
         src.checkInvariants();
-        // TODO: Assert that table types are compatible
+        std.debug.assert(src.elem_type == dst.elem_type);
 
         const src_end_idx = std.math.add(usize, src_idx, len) catch
             return error.TableAccessOutOfBounds;

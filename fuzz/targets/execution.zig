@@ -301,34 +301,31 @@ const ImportProvider = struct {
                 },
             },
             .table => |table_type| .{
-                .table = wasmstint.runtime.TableAddr{
-                    .elem_type = table_type.elem_type,
-                    .table = table: {
-                        const limit_min: u32 = @intCast(table_type.limits.min);
-                        if (limit_min > wasm_smith_config.max_max_table_elements) {
-                            return error.OutOfMemory; // table min length too large
-                        }
+                .table = table: {
+                    const limit_min: u32 = @intCast(table_type.limits.min);
+                    if (limit_min > wasm_smith_config.max_max_table_elements) {
+                        return error.OutOfMemory; // table min length too large
+                    }
 
-                        const max_elems = try provider.input.uintInRangeInclusive(
-                            u32,
-                            limit_min,
-                            @min(wasm_smith_config.max_max_table_elements, table_type.limits.max),
+                    const max_elems = try provider.input.uintInRangeInclusive(
+                        u32,
+                        limit_min,
+                        @min(wasm_smith_config.max_max_table_elements, table_type.limits.max),
+                    );
+                    //const table = provider.tables.addOneAssumeCapacity();
+                    //errdefer provider.tables.pop().?;
+                    const provided_table =
+                        try wasmstint.runtime.TableInst.Allocated.allocateFromType(
+                            allocator,
+                            table_type,
+                            null,
+                            try provider.input.uintInRangeInclusive(u32, limit_min, max_elems),
+                            max_elems,
                         );
-                        //const table = provider.tables.addOneAssumeCapacity();
-                        //errdefer provider.tables.pop().?;
-                        const provided_table =
-                            try wasmstint.runtime.TableInst.Allocated.allocateFromType(
-                                allocator,
-                                table_type,
-                                null,
-                                try provider.input.uintInRangeInclusive(u32, limit_min, max_elems),
-                                max_elems,
-                            );
 
-                        const table = provider.tables.addOneAssumeCapacity();
-                        table.* = provided_table;
-                        break :table &table.table;
-                    },
+                    const table = provider.tables.addOneAssumeCapacity();
+                    table.* = provided_table;
+                    break :table &table.table;
                 },
             },
             .global => |global_type| .{

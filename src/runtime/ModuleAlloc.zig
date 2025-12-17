@@ -120,13 +120,13 @@ pub fn allocateWithDefinitions(
         module.tableImportNames(),
         module.tableImportTypes(),
     ) |*import, name, *table_type| {
-        import.* = (try import_provider.resolveTyped(
+        import.* = try import_provider.resolveTyped(
             name.module_name(module),
             name.desc_name(module),
             .table,
             table_type,
             import_failure,
-        )).table;
+        );
     }
 
     for (
