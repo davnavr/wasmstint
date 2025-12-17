@@ -138,7 +138,7 @@ fn resolveImport(
     module: Module.Name,
     name: Module.Name,
     desc: wasmstint.runtime.ImportProvider.Desc,
-) ?wasmstint.runtime.ExternVal {
+) error{}!?wasmstint.runtime.ExternVal {
     _ = desc;
     const state: *WasiPreview1 = @ptrCast(@alignCast(ctx));
     return if (std.mem.eql(u8, module_name.bytes(), module.bytes())) .{

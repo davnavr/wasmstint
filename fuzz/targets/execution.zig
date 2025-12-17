@@ -147,11 +147,12 @@ pub fn testOne(
             definitions,
         ) catch |e| switch (e) {
             error.OutOfMemory => |oom| return oom,
-            error.ImportFailure => |err| if (import_provider.err) |actual| {
-                return actual;
-            } else {
+            error.ImportFailure => |err| {
                 std.debug.print("{f}", .{import_error});
-                return err;
+                return switch (import_error.reason) {
+                    .error_returned => |captured| @as(ImportProvider.Error, @errorCast(captured)),
+                    else => err,
+                };
             },
         };
     };
@@ -232,7 +233,7 @@ pub fn testOne(
     }
 }
 
-fn generateExternAddr(input: *ffi.Input) !wasmstint.runtime.ExternAddr {
+fn generateExternAddr(input: *ffi.Input) ffi.Input.Error!wasmstint.runtime.ExternAddr {
     const Bits = packed struct(u32) {
         high: u4,
         low: u28,
@@ -249,30 +250,23 @@ const ImportProvider = struct {
     input: *ffi.Input,
     memories: std.ArrayList(wasmstint.runtime.MemInst.Mapped),
     tables: std.ArrayList(wasmstint.runtime.TableInst.Allocated),
-    err: ?error{ OutOfMemory, BadInput } = null,
+
+    const Error = error{ OutOfMemory, BadInput };
 
     fn resolve(
         ctx: *anyopaque,
         module: wasmstint.Module.Name,
         name: wasmstint.Module.Name,
         desc: wasmstint.runtime.ImportProvider.Desc,
-    ) ?wasmstint.runtime.ExternVal {
+    ) Error!?wasmstint.runtime.ExternVal {
         const provider: *ImportProvider = @ptrCast(@alignCast(ctx));
-        if (provider.err != null) {
-            return null;
-        }
-
         const allocator = provider.arena.allocator();
         std.debug.print("resolving (import {f} {f} {f})\n", .{ module, name, desc });
-        // TODO: Allow returning anyerror from ImportProvider
         return switch (desc) {
             .func => |func_type| .{
                 .func = wasmstint.runtime.FuncAddr.init(.{
                     .host = func: {
-                        const func = allocator.create(wasmstint.runtime.FuncAddr.Host) catch |e| {
-                            provider.err = e;
-                            return null;
-                        };
+                        const func = try allocator.create(wasmstint.runtime.FuncAddr.Host);
                         func.* = .{ .signature = func_type.* };
                         break :func func;
                     },
@@ -282,31 +276,24 @@ const ImportProvider = struct {
                 .mem = mem: {
                     const min_size = mem_type.limits.min * wasm_page_size;
                     if (min_size > wasm_smith_config.max_max_memory_bytes) {
-                        provider.err = error.OutOfMemory;
-                        return null;
+                        return error.OutOfMemory; // memory min size too large
                     }
 
-                    const max_size = provider.input.uintInRangeInclusive(
+                    const max_size = try provider.input.uintInRangeInclusive(
                         usize,
                         min_size,
-                        @min(mem_type.limits.max * wasm_page_size, wasm_smith_config.max_max_memory_bytes),
-                    ) catch |e| {
-                        provider.err = e;
-                        return null;
-                    };
+                        @min(
+                            mem_type.limits.max * wasm_page_size,
+                            wasm_smith_config.max_max_memory_bytes,
+                        ),
+                    );
                     //const mem = provider.memories.addOneAssumeCapacity();
                     //errdefer provider.memories.pop().?;
-                    const provided_mem = wasmstint.runtime.MemInst.Mapped.allocateFromType(
+                    const provided_mem = try wasmstint.runtime.MemInst.Mapped.allocateFromType(
                         mem_type,
-                        provider.input.uintInRangeInclusive(usize, min_size, max_size) catch |e| {
-                            provider.err = e;
-                            return null;
-                        },
+                        try provider.input.uintInRangeInclusive(usize, min_size, max_size),
                         max_size,
-                    ) catch |e| {
-                        provider.err = e;
-                        return null;
-                    };
+                    );
 
                     const mem = provider.memories.addOneAssumeCapacity();
                     mem.* = provided_mem;
@@ -319,38 +306,24 @@ const ImportProvider = struct {
                     .table = table: {
                         const limit_min: u32 = @intCast(table_type.limits.min);
                         if (limit_min > wasm_smith_config.max_max_table_elements) {
-                            provider.err = error.OutOfMemory;
-                            return null;
+                            return error.OutOfMemory; // table min length too large
                         }
 
-                        const max_elems = provider.input.uintInRangeInclusive(
+                        const max_elems = try provider.input.uintInRangeInclusive(
                             u32,
                             limit_min,
                             @min(wasm_smith_config.max_max_table_elements, table_type.limits.max),
-                        ) catch |e| {
-                            provider.err = e;
-                            return null;
-                        };
+                        );
                         //const table = provider.tables.addOneAssumeCapacity();
                         //errdefer provider.tables.pop().?;
                         const provided_table =
-                            wasmstint.runtime.TableInst.Allocated.allocateFromType(
+                            try wasmstint.runtime.TableInst.Allocated.allocateFromType(
                                 allocator,
                                 table_type,
                                 null,
-                                provider.input.uintInRangeInclusive(
-                                    u32,
-                                    limit_min,
-                                    max_elems,
-                                ) catch |e| {
-                                    provider.err = e;
-                                    return null;
-                                },
+                                try provider.input.uintInRangeInclusive(u32, limit_min, max_elems),
                                 max_elems,
-                            ) catch |e| {
-                                provider.err = e;
-                                return null;
-                            };
+                            );
 
                         const table = provider.tables.addOneAssumeCapacity();
                         table.* = provided_table;
@@ -365,24 +338,12 @@ const ImportProvider = struct {
                         .v128 => unreachable,
                         inline else => |val_type| val: {
                             const Val = wasmstint.runtime.GlobalAddr.Pointee(val_type);
-                            const val = allocator.create(Val) catch |e| {
-                                provider.err = e;
-                                return null;
-                            };
+                            const val = try allocator.create(Val);
 
                             val.* = switch (val_type) {
-                                .i32, .i64 => provider.input.int(Val) catch |e| {
-                                    provider.err = e;
-                                    return null;
-                                },
-                                .f32, .f64 => provider.input.floatFromBits(Val) catch |e| {
-                                    provider.err = e;
-                                    return null;
-                                },
-                                .externref => generateExternAddr(provider.input) catch |e| {
-                                    provider.err = e;
-                                    return null;
-                                },
+                                .i32, .i64 => try provider.input.int(Val),
+                                .f32, .f64 => try provider.input.floatFromBits(Val),
+                                .externref => try generateExternAddr(provider.input),
                                 .funcref => Val.null,
                                 else => unreachable,
                             };

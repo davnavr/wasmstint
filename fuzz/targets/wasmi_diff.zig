@@ -827,11 +827,12 @@ pub fn testOne(
             definitions,
         ) catch |e| switch (e) {
             error.OutOfMemory => |oom| return oom,
-            error.ImportFailure => |err| if (import_provider.err) |actual| {
-                return actual;
-            } else {
+            error.ImportFailure => |err| {
                 std.debug.print("{f}", .{import_error});
-                return err;
+                return switch (import_error.reason) {
+                    .error_returned => |captured| @as(ImportProvider.Error, @errorCast(captured)),
+                    else => err,
+                };
             },
         };
     };
@@ -1307,22 +1308,18 @@ const ImportProvider = struct {
     functions: std.ArrayList(wasmstint.runtime.FuncAddr.Host),
     memories: std.ArrayList(wasmstint.runtime.MemInst.Mapped),
     tables: std.ArrayList(wasmstint.runtime.TableInst.Allocated),
-    err: ?error{ OutOfMemory, BadInput } = null,
+
+    const Error = error{ OutOfMemory, BadInput };
 
     fn resolve(
         ctx: *anyopaque,
         module: wasmstint.Module.Name,
         name: wasmstint.Module.Name,
         desc: wasmstint.runtime.ImportProvider.Desc,
-    ) ?wasmstint.runtime.ExternVal {
+    ) Error!?wasmstint.runtime.ExternVal {
         const provider: *ImportProvider = @ptrCast(@alignCast(ctx));
-        if (provider.err != null) {
-            return null;
-        }
-
         const allocator = provider.arena.allocator();
         std.debug.print("resolving (import {f} {f} {f})\n", .{ module, name, desc });
-        // TODO: Allow returning anyerror from ImportProvider
         return switch (desc) {
             .func => |func_type| .{
                 .func = wasmstint.runtime.FuncAddr.init(.{
@@ -1337,8 +1334,7 @@ const ImportProvider = struct {
                 .mem = mem: {
                     const min_size = mem_type.limits.min * wasmstint.runtime.MemInst.page_size;
                     if (min_size > wasm_smith_config.max_max_memory_bytes) {
-                        provider.err = error.OutOfMemory;
-                        return null;
+                        return error.OutOfMemory; // memory min size too large
                     }
 
                     const max_size = @min(
@@ -1347,17 +1343,11 @@ const ImportProvider = struct {
                     );
                     //const mem = provider.memories.addOneAssumeCapacity();
                     //errdefer provider.memories.pop().?;
-                    const provided_mem = wasmstint.runtime.MemInst.Mapped.allocateFromType(
+                    const provided_mem = try wasmstint.runtime.MemInst.Mapped.allocateFromType(
                         mem_type,
-                        provider.input.uintInRangeInclusive(usize, min_size, max_size) catch |e| {
-                            provider.err = e;
-                            return null;
-                        },
+                        try provider.input.uintInRangeInclusive(usize, min_size, max_size),
                         max_size,
-                    ) catch |e| {
-                        provider.err = e;
-                        return null;
-                    };
+                    );
 
                     const mem = provider.memories.addOneAssumeCapacity();
                     mem.* = provided_mem;
@@ -1370,8 +1360,7 @@ const ImportProvider = struct {
                     .table = table: {
                         const limit_min: u32 = @intCast(table_type.limits.min);
                         if (limit_min > wasm_smith_config.max_max_table_elements) {
-                            provider.err = error.OutOfMemory;
-                            return null;
+                            return error.OutOfMemory; // table min length too large
                         }
 
                         const max_elems = @min(
@@ -1381,23 +1370,17 @@ const ImportProvider = struct {
                         //const table = provider.tables.addOneAssumeCapacity();
                         //errdefer provider.tables.pop().?;
                         const provided_table =
-                            wasmstint.runtime.TableInst.Allocated.allocateFromType(
+                            try wasmstint.runtime.TableInst.Allocated.allocateFromType(
                                 allocator,
                                 table_type,
                                 null,
-                                provider.input.uintInRangeInclusive(
+                                try provider.input.uintInRangeInclusive(
                                     u32,
                                     limit_min,
                                     max_elems,
-                                ) catch |e| {
-                                    provider.err = e;
-                                    return null;
-                                },
+                                ),
                                 max_elems,
-                            ) catch |e| {
-                                provider.err = e;
-                                return null;
-                            };
+                            );
 
                         const table = provider.tables.addOneAssumeCapacity();
                         table.* = provided_table;
@@ -1433,10 +1416,7 @@ const ImportProvider = struct {
                             .v128 => @panic("v128 globals not supported"),
                             inline else => |val_type| {
                                 const Val = wasmstint.runtime.GlobalAddr.Pointee(val_type);
-                                const val = allocator.create(Val) catch |e| {
-                                    provider.err = e;
-                                    return null;
-                                };
+                                const val = try allocator.create(Val);
 
                                 val.* = @field(
                                     value.toWasmstintValue(provider.functions.items),

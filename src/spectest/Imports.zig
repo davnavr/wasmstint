@@ -230,7 +230,7 @@ fn resolve(
     module: wasmstint.Module.Name,
     name: wasmstint.Module.Name,
     desc: wasmstint.runtime.ImportProvider.Desc,
-) ?wasmstint.runtime.ExternVal {
+) error{}!?wasmstint.runtime.ExternVal {
     const host: *const Imports = @ptrCast(@alignCast(ctx));
     _ = desc;
 

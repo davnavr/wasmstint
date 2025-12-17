@@ -1467,6 +1467,10 @@ fn processAssertUnlinkable(
             const expected_message = switch (import_error.reason) {
                 .none_provided => "unknown import",
                 .type_mismatch, .wrong_desc => "incompatible import type",
+                .error_returned => |err| std.debug.panic(
+                    "import provider cannot return errors: {t}",
+                    .{err},
+                ),
             };
 
             if (std.mem.eql(u8, expected_message, command.text.bytes())) {
