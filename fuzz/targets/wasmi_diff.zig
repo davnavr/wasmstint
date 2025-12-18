@@ -296,15 +296,21 @@ const Execution = struct {
         return struct {
             fn format(val: *const T, w: *Writer) Writer.Error!void {
                 switch (valTagged(T)(val)) {
-                    .i32 => |i| try w.print("(i32.const 0x{X:0>8} (;{d};))", .{ i, i }),
-                    .i64 => |i| try w.print("(i64.const 0x{X:0>16} (;{d};))", .{ i, i }),
+                    .i32 => |i| try w.print(
+                        "(i32.const 0x{X:0>8} (;{d};))",
+                        .{ @as(u32, @bitCast(i)), i },
+                    ),
+                    .i64 => |i| try w.print(
+                        "(i64.const 0x{X:0>16} (;{d};))",
+                        .{ @as(u64, @bitCast(i)), i },
+                    ),
                     .f32 => |f| try w.print(
-                        "(f32.const 0x{X:0>8} (;{d};))",
-                        .{ @as(u32, @bitCast(f)), f },
+                        "(f32.const {d} (;0x{X:0>8};)",
+                        .{ f, @as(u32, @bitCast(f)) },
                     ),
                     .f64 => |f| try w.print(
-                        "(f64.const 0x{X:0>16} (;{d};))",
-                        .{ @as(u64, @bitCast(f)), f },
+                        "(f64.const {d} (;0x{X:0>16};))",
+                        .{ f, @as(u64, @bitCast(f)) },
                     ),
                     inline .funcref, .externref => |r| try r.format(w),
                 }
