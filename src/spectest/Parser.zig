@@ -11,6 +11,7 @@ diagnostics: json.Diagnostics,
 state: State,
 command_lookup: std.StringHashMapUnmanaged(Command.Type.LookupKey),
 value_lookup: std.StringHashMapUnmanaged(Command.ValueLookupKey),
+lane_type_lookup: std.StringHashMapUnmanaged(Command.LaneType),
 
 const State = enum { more, finished };
 
@@ -109,6 +110,7 @@ pub fn init(
         .scanner = json.Scanner.initCompleteInput(arena.allocator(), input.bytes),
         .command_lookup = try initEnumStringLookup(arena, Command.Type.LookupKey),
         .value_lookup = try initEnumStringLookup(arena, Command.ValueLookupKey),
+        .lane_type_lookup = try initEnumStringLookup(arena, Command.LaneType),
         .diagnostics = .{},
         .state = .more,
     };
@@ -211,11 +213,30 @@ pub const Command = struct {
         f64: u64,
         funcref, // ?u32
         externref: ?u31,
+        v128: V128,
 
         pub const Vec = []const Const;
     };
 
     const ValueLookupKey = @typeInfo(Const).@"union".tag_type.?;
+
+    const LaneType = enum {
+        i8,
+        i16,
+        i32,
+        f32,
+        i64,
+        f64,
+
+        fn size(ty: LaneType) u4 {
+            return switch (ty) {
+                .i8 => 1,
+                .i16 => 2,
+                .i32, .f32 => 4,
+                .i64, .f64 => 8,
+            };
+        }
+    };
 
     fn parseValueVec(
         parser: *Parser,
@@ -240,63 +261,101 @@ pub const Command = struct {
             try parser.expectNextTokenStringEql(&scratch, "type");
             _ = scratch.reset(.retain_capacity);
             const type_string = try parser.expectNextTokenString(&scratch);
-            _ = scratch.reset(.retain_capacity);
-
             const type_tag = parser.value_lookup.get(type_string) orelse
                 return error.MalformedJson; // bad value type
-
-            // Would parse "lane_type" here if V128 support was added
-
-            try parser.expectNextTokenStringEql(&scratch, "value");
             _ = scratch.reset(.retain_capacity);
 
-            // V128 support would require an array of strings instead
-            const value_string = try parser.expectNextTokenString(&scratch);
+            const value: T = if (type_tag == .v128) v128: {
+                try parser.expectNextTokenStringEql(&scratch, "lane_type");
+                _ = scratch.reset(.retain_capacity);
 
-            const value: T = value: switch (type_tag) {
-                .i32 => .{
-                    .i32 = std.fmt.parseInt(u32, value_string, 10) catch
-                        return error.MalformedJson, // bad i32
-                },
-                .f32 => {
-                    if (T == Expected) {
-                        if (Expected.Nan.fromString(value_string)) |nan| {
-                            break :value .{ .f32_nan = nan };
+                const lane_type_string = try parser.expectNextTokenString(&scratch);
+                const lane_type_tag = parser.lane_type_lookup.get(lane_type_string) orelse
+                    return error.MalformedJson; // bad lane type
+
+                switch (lane_type_tag) {
+                    inline else => |tag| {
+                        try parser.expectNextTokenStringEql(&scratch, "value");
+                        _ = scratch.reset(.retain_capacity);
+
+                        const lane_type = comptime @field(LaneType, @tagName(tag));
+                        const lane_count = comptime @divExact(@as(u5, 16), lane_type.size());
+                        const lane_size = comptime 8 * @as(u16, lane_type.size());
+                        const LaneInt = std.meta.Int(.signed, lane_size);
+
+                        try parser.expectNextToken(.array_begin);
+                        var lanes: [lane_count]LaneInt = undefined;
+                        for (&lanes) |*lane_value| {
+                            const value_string = try parser.expectNextTokenString(&scratch);
+                            _ = scratch.reset(.retain_capacity);
+                            lane_value.* = @bitCast(
+                                std.fmt.parseInt(
+                                    std.meta.Int(.unsigned, lane_size),
+                                    value_string,
+                                    10,
+                                ) catch return error.MalformedJson, // bad lane value
+                            );
                         }
-                    }
+                        try parser.expectNextToken(.array_end);
 
-                    break :value .{
-                        .f32 = std.fmt.parseInt(u32, value_string, 10) catch
-                            return error.MalformedJson, // bad f32
-                    };
-                },
-                .i64 => .{
-                    .i64 = std.fmt.parseInt(u64, value_string, 10) catch
-                        return error.MalformedJson, // bad i64
-                },
-                .f64 => {
-                    if (T == Expected) {
-                        if (Expected.Nan.fromString(value_string)) |nan| {
-                            break :value .{ .f64_nan = nan };
+                        const interp = comptime V128.Interpretation.fromLaneType(LaneInt);
+                        break :v128 if (T == Const)
+                            T{ .v128 = V128.init(interp, lanes) }
+                        else
+                            @unionInit(T, interp.fieldName(), lanes);
+                    },
+                }
+            } else value: {
+                try parser.expectNextTokenStringEql(&scratch, "value");
+                _ = scratch.reset(.retain_capacity);
+
+                const value_string = try parser.expectNextTokenString(&scratch);
+                switch (type_tag) {
+                    .i32 => break :value T{
+                        .i32 = std.fmt.parseInt(u32, value_string, 10) catch
+                            return error.MalformedJson, // bad i32
+                    },
+                    .f32 => {
+                        if (T == Expected) {
+                            if (Expected.Nan.fromString(value_string)) |nan| {
+                                break :value .{ .f32_nan = nan };
+                            }
                         }
-                    }
 
-                    break :value .{
-                        .f64 = std.fmt.parseInt(u64, value_string, 10) catch
-                            return error.MalformedJson, // bad f64
-                    };
-                },
-                .externref => .{
-                    .externref = if (std.mem.eql(u8, "null", value_string))
-                        null
+                        break :value .{
+                            .f32 = std.fmt.parseInt(u32, value_string, 10) catch
+                                return error.MalformedJson, // bad f32
+                        };
+                    },
+                    .i64 => break :value T{
+                        .i64 = std.fmt.parseInt(u64, value_string, 10) catch
+                            return error.MalformedJson, // bad i64
+                    },
+                    .f64 => {
+                        if (T == Expected) {
+                            if (Expected.Nan.fromString(value_string)) |nan| {
+                                break :value .{ .f64_nan = nan };
+                            }
+                        }
+
+                        break :value .{
+                            .f64 = std.fmt.parseInt(u64, value_string, 10) catch
+                                return error.MalformedJson, // bad f64
+                        };
+                    },
+                    .externref => break :value T{
+                        .externref = if (std.mem.eql(u8, "null", value_string))
+                            null
+                        else
+                            std.fmt.parseInt(u31, value_string, 10) catch
+                                return error.MalformedJson, // bad externref number
+                    },
+                    .funcref => if (std.mem.eql(u8, "null", value_string))
+                        break :value T.funcref
                     else
-                        std.fmt.parseInt(u31, value_string, 10) catch
-                            return error.MalformedJson, // bad externref number
-                },
-                .funcref => if (std.mem.eql(u8, "null", value_string))
-                    .funcref
-                else
-                    return error.MalformedJson, // only null funcref is allowed
+                        return error.MalformedJson, // only null funcref is allowed
+                    .v128 => unreachable,
+                }
             };
 
             try parser.expectNextToken(.object_end);
@@ -382,6 +441,12 @@ pub const Command = struct {
         f64_nan: Nan,
         funcref, // ?u32
         externref: ?u31,
+        i8x16: @Vector(16, i8),
+        i16x8: @Vector(8, i16),
+        i32x4: @Vector(4, i32),
+        f32x4: @Vector(4, f32),
+        i64x2: @Vector(2, i64),
+        f64x2: @Vector(2, f64),
 
         pub const Vec = []const Expected;
 
@@ -572,5 +637,7 @@ const std = @import("std");
 const Oom = std.mem.Allocator.Error;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const json = std.json;
-const Name = @import("wasmstint").Module.Name;
+const wasmstint = @import("wasmstint");
+const Name = wasmstint.Module.Name;
+const V128 = wasmstint.V128;
 const coz = @import("coz");

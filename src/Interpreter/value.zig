@@ -8,7 +8,7 @@ pub const Value = extern union {
     ptr: ?*anyopaque,
     externref: runtime.ExternAddr,
     funcref: runtime.FuncAddr.Nullable,
-    i64x2: @Vector(2, i64),
+    v128: V128,
 
     pub const Tag = enum {
         i32,
@@ -59,13 +59,11 @@ pub const TaggedValue = union(enum) {
     f64: f64,
     externref: runtime.ExternAddr,
     funcref: runtime.FuncAddr.Nullable,
+    v128: V128,
 
     comptime {
-        std.debug.assert(@sizeOf(TaggedValue) == switch (@sizeOf(*anyopaque)) {
-            // 32 if v128 support is added
-            8 => 16,
-            else => unreachable,
-        });
+        // Size would be `16` if SIMD is not supported
+        std.debug.assert(@sizeOf(TaggedValue) == 32);
     }
 
     pub fn valueType(tagged: *const TaggedValue) Module.ValType {
@@ -166,7 +164,7 @@ pub const TaggedValue = union(enum) {
                     }
                     try writer.writeByte(')');
                 },
-                inline .funcref, .externref => |*ref| try ref.format(writer),
+                inline .funcref, .externref, .v128 => |*v| try v.format(writer),
             }
         }
     };
@@ -200,4 +198,5 @@ pub const TaggedValue = union(enum) {
 const std = @import("std");
 const Writer = std.Io.Writer;
 const Module = @import("../Module.zig");
+const V128 = @import("../v128.zig").V128;
 const runtime = @import("../runtime.zig");

@@ -533,6 +533,26 @@ fn expectTypedValue(
         @field(value, @tagName(tag));
 }
 
+fn resultVectorMatches(
+    comptime lane_interpretation: V128.Interpretation,
+    expected: @FieldType(V128, lane_interpretation.fieldName()),
+    actual: V128,
+    index: usize,
+    output: Output,
+) Error!void {
+    const expected_v = V128.init(lane_interpretation, expected);
+    const comparison = expected_v.u8x16 != actual.u8x16;
+    if (@as(u16, @bitCast(comparison)) != 0) return failFmt(
+        output,
+        "expected {f}, got {f} at position {d}",
+        .{
+            expected_v.formatter(lane_interpretation),
+            actual.formatter(lane_interpretation),
+            index,
+        },
+    );
+}
+
 fn resultValueMatches(
     actual: *const Interpreter.TaggedValue,
     expected: *const Parser.Command.Expected,
@@ -601,6 +621,13 @@ fn resultValueMatches(
                 );
             }
         },
+        inline .i8x16, .i16x8, .i32x4, .i64x2, .f32x4, .f64x2 => |v| try resultVectorMatches(
+            @field(V128.Interpretation, @typeName(@typeInfo(@TypeOf(v)).vector.child)),
+            v,
+            try expectTypedValue(actual, .v128, index, output),
+            index,
+            output,
+        ),
     }
 }
 
@@ -753,7 +780,7 @@ fn allocateFunctionArguments(
 
     for (dst_values, arguments) |*dst, *src| {
         dst.* = switch (src.*) {
-            inline .i32, .i64, .f32, .f64 => |c, tag| @unionInit(
+            inline .i32, .i64, .f32, .f64, .v128 => |c, tag| @unionInit(
                 Interpreter.TaggedValue,
                 @tagName(tag),
                 @bitCast(c),
@@ -1499,6 +1526,7 @@ const wasmstint = @import("wasmstint");
 const ModuleInst = wasmstint.runtime.ModuleInst;
 const Interpreter = wasmstint.Interpreter;
 const Name = wasmstint.Module.Name;
+const V128 = wasmstint.V128;
 const Parser = @import("Parser.zig");
 const Imports = @import("Imports.zig");
 const coz = @import("coz");
