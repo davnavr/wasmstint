@@ -604,8 +604,8 @@ fn buildWastTest(
     wast2json.step.max_rss = ByteSize.mib(19).bytes;
     wast2json.addFileArg(wast_path);
     wast2json.addArgs(&.{
-        "--disable-simd",
         "--enable-extended-const",
+        // "--disable-simd",
         "--enable-tail-call",
         "--output",
     });
