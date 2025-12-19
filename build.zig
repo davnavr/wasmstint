@@ -630,18 +630,29 @@ fn buildSpecificationTests(
     const spectest_dep = b.lazyDependency("spectest", .{}) orelse return;
     const wabt = buildWabtTools(b, wabt_dep);
 
-    const test_names: []const []const u8 = &@import("tests/testsuite.zon").names;
+    const test_groups = @import("tests/testsuite.zon");
+    const test_group_names = comptime std.meta.fieldNames(@TypeOf(test_groups));
 
-    const test_spec_step = b.step("test-spec", "Run specification tests");
+    const test_spec_all_step = b.step("test-spec", "Run all specification tests");
 
-    for (test_names) |name| {
-        const wast_name = b.fmt("{s}.wast", .{name});
-        test_spec_step.dependOn(
-            buildWastTest(b, interpreter, spectest_dep.path(wast_name), wabt, wast_name),
+    inline for (test_group_names) |group_name| {
+        const group: []const []const u8 = &@field(test_groups, group_name);
+        const test_spec_group_step = b.step(
+            "test-spec-" ++ group_name,
+            "Run " ++ group_name ++ " specification tests",
         );
+
+        for (group) |name| {
+            const wast_name = b.fmt("{s}.wast", .{name});
+            test_spec_group_step.dependOn(
+                buildWastTest(b, interpreter, spectest_dep.path(wast_name), wabt, wast_name),
+            );
+        }
+
+        test_spec_all_step.dependOn(test_spec_group_step);
     }
 
-    top_steps.@"test".dependOn(test_spec_step);
+    top_steps.@"test".dependOn(test_spec_all_step);
 
     const test_fuzzed_step = b.step("test-fuzzed", "Run test cases discovered by fuzzing");
     const fuzzed_test_names = [_][]const u8{ "validation.wast", "wasmi_diff.wast" };

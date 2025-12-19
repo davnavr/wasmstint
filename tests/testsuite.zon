@@ -1,5 +1,5 @@
 .{
-    .names = .{
+    .base = .{
         "address",
         "align",
         "binary-leb128",
@@ -90,12 +90,17 @@
         "utf8-import-field",
         "utf8-import-module",
         "utf8-invalid-encoding",
-
-        // Proposals
         "proposals/extended-const/data",
         "proposals/extended-const/elem",
         "proposals/extended-const/global",
+    },
 
+    .@"tail-call" = .{
+        "proposals/tail-call/return_call",
+        "proposals/tail-call/return_call_indirect",
+    },
+
+    .simd = .{
         "simd_address",
         "simd_align",
         "simd_bit_shift",
@@ -153,8 +158,5 @@
         "simd_store64_lane",
         "simd_store8_lane",
         "simd_store",
-
-        "proposals/tail-call/return_call",
-        "proposals/tail-call/return_call_indirect",
     },
 }
