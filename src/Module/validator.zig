@@ -1098,7 +1098,7 @@ fn validateLoadInstr(
     try readMemArg(reader, natural_alignment, module, diag);
 }
 
-fn validateLoadStoreLaneInstr(
+fn validateLoadLaneInstr(
     reader: *Reader,
     val_stack: *ValStack,
     ctrl_stack: *const CtrlStack,
@@ -1124,6 +1124,19 @@ fn validateStoreInstr(
 ) Error!void {
     try val_stack.popManyExpecting(ctrl_stack, &[_]ValType{ .i32, stored }, diag);
     try readMemArg(reader, natural_alignment, module, diag);
+}
+
+fn validateStoreLaneInstr(
+    reader: *Reader,
+    val_stack: *ValStack,
+    ctrl_stack: *const CtrlStack,
+    comptime lane_size: V128.LaneIdxSize,
+    module: Module,
+    diag: Diagnostics,
+) Error!void {
+    try val_stack.popManyExpecting(ctrl_stack, &.{ .v128, .i32 }, diag);
+    try readMemArg(reader, .@"16", module, diag);
+    try reader.readSimdLane(lane_size, diag);
 }
 
 fn validateTailCallSignature(
@@ -2518,7 +2531,7 @@ pub fn rawValidate(
                 => {
                     try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .i32, diag);
                 },
-                .@"v128.load8_lane", .@"v128.store8_lane" => try validateLoadStoreLaneInstr(
+                .@"v128.load8_lane" => try validateLoadLaneInstr(
                     &reader,
                     &val_stack,
                     &ctrl_stack,
@@ -2527,7 +2540,7 @@ pub fn rawValidate(
                     scratch,
                     diag,
                 ),
-                .@"v128.load16_lane", .@"v128.store16_lane" => try validateLoadStoreLaneInstr(
+                .@"v128.load16_lane" => try validateLoadLaneInstr(
                     &reader,
                     &val_stack,
                     &ctrl_stack,
@@ -2536,7 +2549,7 @@ pub fn rawValidate(
                     scratch,
                     diag,
                 ),
-                .@"v128.load32_lane", .@"v128.store32_lane" => try validateLoadStoreLaneInstr(
+                .@"v128.load32_lane" => try validateLoadLaneInstr(
                     &reader,
                     &val_stack,
                     &ctrl_stack,
@@ -2545,13 +2558,45 @@ pub fn rawValidate(
                     scratch,
                     diag,
                 ),
-                .@"v128.load64_lane", .@"v128.store64_lane" => try validateLoadStoreLaneInstr(
+                .@"v128.load64_lane" => try validateLoadLaneInstr(
                     &reader,
                     &val_stack,
                     &ctrl_stack,
                     .@"2",
                     module,
                     scratch,
+                    diag,
+                ),
+                .@"v128.store8_lane" => try validateStoreLaneInstr(
+                    &reader,
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"16",
+                    module,
+                    diag,
+                ),
+                .@"v128.store16_lane" => try validateStoreLaneInstr(
+                    &reader,
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"8",
+                    module,
+                    diag,
+                ),
+                .@"v128.store32_lane" => try validateStoreLaneInstr(
+                    &reader,
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"4",
+                    module,
+                    diag,
+                ),
+                .@"v128.store64_lane" => try validateStoreLaneInstr(
+                    &reader,
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"2",
+                    module,
                     diag,
                 ),
                 .@"v128.load32_zero", .@"v128.load64_zero" => {
