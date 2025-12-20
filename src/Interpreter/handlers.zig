@@ -659,7 +659,8 @@ pub const MemArg = struct {
     offset: u32,
 
     pub fn read(i: *Instr, module: runtime.ModuleInst) MemArg {
-        // TODO: Spec probably only allows reading single byte here!
+        // Before multi-memory, spec probably only allows reading single byte here!
+
         // align, maximum is 16 bytes (1 << 4)
         _ = @as(u3, @intCast(i.readByte()));
         const mem_idx = Module.MemIdx.default;
@@ -671,7 +672,7 @@ pub const MemArg = struct {
     }
 
     pub fn trap(
-        mem_arg: MemArg,
+        mem_arg: *const MemArg,
         address: usize,
         size: std.mem.Alignment,
     ) Trap {

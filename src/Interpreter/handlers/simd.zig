@@ -1,6 +1,80 @@
 //! Implementation of instructions introduced in the
 //! [fixed-width SIMD proposal](https://github.com/WebAssembly/simd).
 
+/// Calculates a poitner to the first byte of the instruction based on a pointer to the first byte
+/// after it's opcode.
+///
+/// NOTE: Might have to move this to `../handlers.zig` in case other prefixed opcodes use LEB128.
+fn calculateTrapIp(base_ip: Ip, comptime opcode: FDPrefixOpcode) Ip {
+    var ip = base_ip - 1;
+    var decoded: u32 = ip[0];
+    for (0..4) |_| {
+        ip -= 1;
+        if (decoded == @intFromEnum(opcode)) {
+            @branchHint(.likely); // Initial SIMD proposal only introduces opcodes <= 0x7F
+            break;
+        }
+
+        decoded <<= 7;
+        decoded |= (0x7F & ip[0]);
+    } else unreachable;
+
+    std.debug.assert(ip[0] == 0xFD);
+    return ip;
+}
+
+test calculateTrapIp {
+    {
+        const bytes = [_:0x0B]u8{ 0xAA, 0xFD, 0x6B, 0xAA };
+        try std.testing.expectEqual(&bytes[1], &calculateTrapIp(bytes[3..], .@"i8x16.shl")[0]);
+    }
+    {
+        // WASM spec seems to allow over-long instruction opcodes
+        const bytes = [_:0x0B]u8{ 0xAA, 0xFD, 0xEB, 0x00, 0xAA };
+        try std.testing.expectEqual(&bytes[1], &calculateTrapIp(bytes[4..], .@"i8x16.shl")[0]);
+    }
+    {
+        const bytes = [_:0x0B]u8{ 0xAA, 0xFD, 0x0C, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0xAA };
+        try std.testing.expectEqual(&bytes[1], &calculateTrapIp(bytes[3..], .@"v128.const")[0]);
+    }
+}
+
+pub fn @"v128.load"(
+    ip: Ip,
+    sp: Sp,
+    fuel: *Fuel,
+    stp: Stp,
+    locals: Locals,
+    module: runtime.ModuleInst,
+    interp: *Interpreter,
+    eip: Eip,
+) callconv(ohcc) Transition {
+    var instr = Instr.init(ip, eip);
+    var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
+
+    const mem_arg = MemArg.read(&instr, module);
+    const base_addr: u32 = @bitCast(vals.popTyped(&.{.i32}).@"0");
+    vals.assertRemainingCountIs(0);
+
+    const trap_info = mem_arg.trap(base_addr, .@"16");
+    const effective_addr = std.math.add(u32, base_addr, mem_arg.offset) catch {
+        return Transition.trap(calculateTrapIp(ip, .@"v128.load"), eip, sp, stp, interp, trap_info);
+    };
+
+    const end_addr = std.math.add(u32, effective_addr, 15) catch {
+        return Transition.trap(calculateTrapIp(ip, .@"v128.load"), eip, sp, stp, interp, trap_info);
+    };
+
+    if (mem_arg.mem.size <= end_addr) {
+        return Transition.trap(calculateTrapIp(ip, .@"v128.load"), eip, sp, stp, interp, trap_info);
+    }
+
+    const accessed_bytes = mem_arg.mem.bytes()[effective_addr..][0..16];
+    vals.pushTyped(&.{.v128}, .{V128.init(.u8, accessed_bytes.*)});
+
+    return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
+}
+
 pub fn @"v128.const"(
     ip: Ip,
     sp: Sp,
@@ -48,44 +122,6 @@ pub fn @"v128.const"(
 //         );
 //     }.vBinOpHandler;
 // }
-
-/// Calculates a poitner to the first byte of the instruction based on a pointer to the first byte
-/// after it's opcode.
-///
-/// NOTE: Might have to move this to `../handlers.zig` in case other prefixed opcodes use LEB128.
-fn calculateTrapIp(base_ip: Ip, comptime opcode: FDPrefixOpcode) Ip {
-    var ip = base_ip - 1;
-    var decoded: u32 = ip[0];
-    for (0..4) |_| {
-        ip -= 1;
-        if (decoded == @intFromEnum(opcode)) {
-            @branchHint(.likely); // Initial SIMD proposal only introduces opcodes <= 0x7F
-            break;
-        }
-
-        decoded <<= 7;
-        decoded |= (0x7F & ip[0]);
-    } else unreachable;
-
-    std.debug.assert(ip[0] == 0xFD);
-    return ip;
-}
-
-test calculateTrapIp {
-    {
-        const bytes = [_:0x0B]u8{ 0xAA, 0xFD, 0x6B, 0xAA };
-        try std.testing.expectEqual(&bytes[1], &calculateTrapIp(bytes[3..], .@"i8x16.shl")[0]);
-    }
-    {
-        // WASM spec seems to allow over-long instruction opcodes
-        const bytes = [_:0x0B]u8{ 0xAA, 0xFD, 0xEB, 0x00, 0xAA };
-        try std.testing.expectEqual(&bytes[1], &calculateTrapIp(bytes[4..], .@"i8x16.shl")[0]);
-    }
-    {
-        const bytes = [_:0x0B]u8{ 0xAA, 0xFD, 0x0C, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0xAA };
-        try std.testing.expectEqual(&bytes[1], &calculateTrapIp(bytes[3..], .@"v128.const")[0]);
-    }
-}
 
 /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vshiftop
 fn defineShiftOp(
@@ -199,6 +235,7 @@ const Stack = @import("../Stack.zig");
 const Locals = handlers.Locals;
 const Fuel = Interpreter.Fuel;
 const Transition = handlers.Transition;
+const MemArg = handlers.MemArg;
 const Value = @import("../value.zig").Value;
 const V128 = @import("../../v128.zig").V128;
 const opcodes = @import("../../opcodes.zig");
