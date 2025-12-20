@@ -88,8 +88,7 @@ pub const V128 = extern union {
         }
 
         pub fn fieldName(i: Interpretation) []const u8 {
-            return switch (i.signed()) {
-                .u8, .u16, .u32, .u64 => unreachable,
+            return switch (i) {
                 inline else => |int| std.fmt.comptimePrint("{t}x{}", .{ int, int.laneCount() }),
             };
         }

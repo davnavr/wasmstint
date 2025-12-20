@@ -1,10 +1,10 @@
 //! Contains the implementations for the handlers of each WebAssembly opcode.
 
-const Ip = Module.Code.Ip;
-const Eip = *const Module.Code.End;
+pub const Ip = Module.Code.Ip;
+pub const Eip = *const Module.Code.End;
 /// The value Stack Pointer.
-const Sp = Stack.Top;
-const Stp = SideTable.Ptr;
+pub const Sp = Stack.Top;
+pub const Stp = SideTable.Ptr;
 
 const DispatchBackend = enum {
     auto,
@@ -33,7 +33,7 @@ const dispatch_backend: DispatchBackend = switch (builtin.zig_backend) {
 };
 
 /// Opcode handler calling convention.
-const ohcc: CallingConvention = switch (dispatch_backend) {
+pub const ohcc: CallingConvention = switch (dispatch_backend) {
     .x86_64_sysv_inline => .{ .x86_64_sysv = .{} },
     .x86_64_win_inline => .{ .x86_64_win = .{} },
     .auto => switch (CallingConvention.c) {
@@ -74,7 +74,7 @@ pub const OpcodeHandler = fn (
 ///
 /// This function is marked `inline` due to the same limitations, and because a tail call is used to
 /// jump to the next opcode handler.
-inline fn handlerTailCall(
+pub inline fn handlerTailCall(
     handler: *const OpcodeHandler,
     ip: Ip,
     sp: Sp,
@@ -181,7 +181,7 @@ inline fn handlerTailCall(
 }
 
 /// `inline` since a tail call is used to jump to the next opcode handler.
-inline fn dispatchNextOpcode(
+pub inline fn dispatchNextOpcode(
     instr: Instr,
     sp: Stack.Top,
     fuel: *Fuel,
@@ -258,7 +258,7 @@ inline fn dispatchNextOpcode(
 //     }.wrapped;
 // }
 
-inline fn transition(
+pub inline fn transition(
     interp: *Interpreter,
     update_wasm_frame_token: Transition.UpdateWasmFrameToken,
     new_state: @FieldType(Interpreter, "current_state"),
@@ -272,7 +272,7 @@ inline fn transition(
 }
 
 /// Asserts that `frame` corresponds to a WASM function.
-fn updateWasmFrameState(
+pub fn updateWasmFrameState(
     frame: *Stack.Frame,
     instr: Instr,
     stp: Stp,
@@ -300,7 +300,7 @@ pub const Transition = packed struct {
         wrote_ip_and_stp_to_the_current_stack_frame,
     };
 
-    fn trap(
+    pub fn trap(
         trap_ip: Ip,
         eip: Eip,
         sp: Sp,
@@ -653,12 +653,12 @@ inline fn performTailCall(
     }
 }
 
-const MemArg = struct {
+pub const MemArg = struct {
     mem: *const runtime.MemInst,
     idx: Module.MemIdx,
     offset: u32,
 
-    fn read(i: *Instr, module: runtime.ModuleInst) MemArg {
+    pub fn read(i: *Instr, module: runtime.ModuleInst) MemArg {
         // TODO: Spec probably only allows reading single byte here!
         // align, maximum is 16 bytes (1 << 4)
         _ = @as(u3, @intCast(i.readByte()));
@@ -670,7 +670,7 @@ const MemArg = struct {
         };
     }
 
-    fn trap(
+    pub fn trap(
         mem_arg: MemArg,
         address: usize,
         size: std.mem.Alignment,
@@ -690,12 +690,12 @@ const MemArg = struct {
     }
 };
 
-fn nopBeforeMemoryAccess(vals: *Stack.Values, interp: *Interpreter) void {
+pub fn nopBeforeMemoryAccess(vals: *Stack.Values, interp: *Interpreter) void {
     _ = vals;
     _ = interp;
 }
 
-fn linearMemoryAccessor(
+pub fn linearMemoryAccessor(
     /// How many bytes are read to and written from linear memory.
     ///
     /// Must be a positive power of two.
@@ -792,7 +792,7 @@ fn linearMemoryAccessor(
     }.accessLinearMemory;
 }
 
-fn linearMemoryHandlers(comptime field: Value.Tag, comptime prefix_len: u2) type {
+pub fn linearMemoryHandlers(comptime field: Value.Tag, comptime prefix_len: u2) type {
     return struct {
         comptime {
             std.debug.assert(builtin.cpu.arch.endian() == .little);
@@ -1680,6 +1680,10 @@ fn dispatchTableLength(comptime Opcode: type, comptime length_override: ?usize) 
 
 fn dispatchTable(
     comptime Opcode: type,
+    /// Namespace containing the opcode handler functions.
+    ///
+    /// Opcode handler functions should be marked `pub`.
+    comptime handlers: type,
     comptime invalid: OpcodeHandler,
     comptime length_override: ?usize,
 ) [dispatchTableLength(Opcode, length_override)]*const OpcodeHandler {
@@ -1687,18 +1691,19 @@ fn dispatchTable(
         dispatchTableLength(Opcode, length_override);
 
     for (@typeInfo(Opcode).@"enum".fields) |op| {
-        if (@hasDecl(opcode_handlers, op.name)) {
-            table[op.value] = @as(
-                *const OpcodeHandler,
-                @field(opcode_handlers, op.name),
-            );
+        if (@hasDecl(handlers, op.name)) {
+            table[op.value] = @as(*const OpcodeHandler, @field(handlers, op.name));
         }
     }
 
     return table;
 }
 
-fn prefixDispatchTable(comptime prefix: opcodes.ByteOpcode, comptime Opcode: type) type {
+fn prefixDispatchTable(
+    comptime prefix: opcodes.ByteOpcode,
+    comptime Opcode: type,
+    comptime handlers: type,
+) type {
     return struct {
         fn panicInvalidInstruction(
             ip: Ip,
@@ -1728,7 +1733,7 @@ fn prefixDispatchTable(comptime prefix: opcodes.ByteOpcode, comptime Opcode: typ
             .ReleaseFast, .ReleaseSmall => undefined,
         };
 
-        const entries = dispatchTable(Opcode, invalid, null);
+        const entries = dispatchTable(Opcode, handlers, invalid, null);
 
         pub fn handler(
             ip: Ip,
@@ -1747,7 +1752,10 @@ fn prefixDispatchTable(comptime prefix: opcodes.ByteOpcode, comptime Opcode: typ
     };
 }
 
-const fc_prefixed_dispatch = prefixDispatchTable(.@"0xFC", opcodes.FCPrefixOpcode);
+const simd_handlers = @import("handlers/simd.zig");
+
+const fc_prefixed_dispatch = prefixDispatchTable(.@"0xFC", opcodes.FCPrefixOpcode, opcode_handlers);
+const fd_prefixed_dispatch = prefixDispatchTable(.@"0xFD", opcodes.FDPrefixOpcode, simd_handlers);
 
 pub fn outOfFuelHandler(
     ip: Ip,
@@ -2854,6 +2862,7 @@ const opcode_handlers = struct {
     }
 
     pub const @"0xFC" = fc_prefixed_dispatch.handler;
+    pub const @"0xFD" = fd_prefixed_dispatch.handler;
     pub const @"i32.trunc_sat_f32_s" = i32_opcode_handlers.trunc_sat_f32_s;
     pub const @"i32.trunc_sat_f32_u" = i32_opcode_handlers.trunc_sat_f32_u;
     pub const @"i32.trunc_sat_f64_s" = i32_opcode_handlers.trunc_sat_f64_s;
@@ -3217,6 +3226,7 @@ const opcode_handlers = struct {
 /// If the handler is not appearing in this table, make sure it is public first.
 pub const byte_dispatch_table = dispatchTable(
     opcodes.ByteOpcode,
+    opcode_handlers,
     opcode_handlers.invalid,
     256,
 );
