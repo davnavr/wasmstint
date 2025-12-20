@@ -946,6 +946,7 @@ fn narrowingLinearMemoryStore(
 /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-binop
 fn defineBinOp(
     comptime value_field: Value.Tag,
+    // TODO: Use `calculateTrapIp`
     comptime prefix_len: u2,
     /// Function that takes two operands as an input and returns the result of the operation.
     ///
@@ -965,7 +966,7 @@ fn defineBinOp(
             interp: *Interpreter,
             eip: Eip,
         ) callconv(ohcc) Transition {
-            const trap_ip: Ip = ip - (1 - prefix_len);
+            const trap_ip: Ip = ip - 1 - prefix_len;
             var vals = Stack.Values.init(sp, &interp.stack, 2, 2);
 
             const operands = vals.popTyped(&(.{value_field} ** 2));
@@ -3246,3 +3247,7 @@ const Value = @import("value.zig").Value;
 const Trap = @import("Trap.zig");
 const Version = @import("version.zig").Version;
 const runtime = @import("../runtime.zig");
+
+test {
+    _ = simd_handlers;
+}

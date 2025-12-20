@@ -228,6 +228,8 @@ pub const Values = struct {
     /// Pops values using `popArray` and copies them to a tuple.
     ///
     /// Since values are copied, so pushing values won't invalidate the popped values.
+    ///
+    /// The type at `types.len - 1` is the type of the value that is popped first.
     pub fn popTyped(values: *Values, comptime types: []const Value.Tag) TypedValues(types) {
         const popped = values.popArray(types.len);
         var typed: TypedValues(types) = undefined;

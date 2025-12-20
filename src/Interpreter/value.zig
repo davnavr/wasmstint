@@ -17,6 +17,7 @@ pub const Value = extern union {
         f64,
         externref,
         funcref,
+        v128,
 
         pub fn Type(comptime tag: Tag) type {
             return @FieldType(Value, @tagName(tag));
@@ -31,7 +32,6 @@ pub const Value = extern union {
 
     pub fn tagged(value: *const Value, ty: Module.ValType) Tagged {
         return switch (ty) {
-            .v128 => unreachable, // Not implemented
             .externref => .{ .externref = value.externref },
             inline else => |tag| @unionInit(Tagged, @tagName(tag), @field(value, @tagName(tag))),
         };
@@ -99,6 +99,7 @@ pub const TaggedValue = union(enum) {
             runtime.ExternAddr => .{ .externref = value },
             runtime.FuncAddr.Nullable => .{ .funcref = value },
             runtime.FuncAddr => .{ .funcref = @bitCast(value) },
+            V128 => .{ .v128 = value },
             else => switch (@typeInfo(T)) {
                 .int => @compileError("unsupported integer value type " ++ @typeName(T)),
                 .float => @compileError("unsupported float value type " ++ @typeName(T)),

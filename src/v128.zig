@@ -92,13 +92,18 @@ pub const V128 = extern union {
                 inline else => |int| std.fmt.comptimePrint("{t}x{}", .{ int, int.laneCount() }),
             };
         }
+
+        pub fn Type(comptime interpretation: Interpretation) type {
+            return @FieldType(V128, interpretation.fieldName());
+        }
     };
 
-    pub fn init(
-        comptime interpretation: Interpretation,
-        lanes: @FieldType(V128, interpretation.fieldName()),
-    ) V128 {
+    pub fn init(comptime interpretation: Interpretation, lanes: interpretation.Type()) V128 {
         return @unionInit(V128, interpretation.fieldName(), lanes);
+    }
+
+    pub fn interpret(v: V128, comptime interpretation: Interpretation) (interpretation.Type()) {
+        return @field(v, interpretation.fieldName());
     }
 
     const Formatter = struct {

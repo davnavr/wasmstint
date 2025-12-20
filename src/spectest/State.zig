@@ -535,7 +535,7 @@ fn expectTypedValue(
 
 fn resultVectorMatches(
     comptime lane_interpretation: V128.Interpretation,
-    expected: @FieldType(V128, lane_interpretation.fieldName()),
+    expected: lane_interpretation.Type(),
     actual: V128,
     index: usize,
     output: Output,
