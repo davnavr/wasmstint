@@ -5,11 +5,12 @@
 /// after it's opcode.
 ///
 /// NOTE: Might have to move this to `../handlers.zig` in case other prefixed opcodes use LEB128.
-fn calculateTrapIp(base_ip: Ip, comptime opcode: FDPrefixOpcode) Ip {
+fn calculateTrapIp(base_ip: Ip, opcode: FDPrefixOpcode) Ip {
     var ip = base_ip - 1;
     var decoded: u32 = ip[0];
     for (0..4) |_| {
         ip -= 1;
+        std.debug.assert(decoded <= @intFromEnum(opcode));
         if (decoded == @intFromEnum(opcode)) {
             @branchHint(.likely); // Initial SIMD proposal only introduces opcodes <= 0x7F
             break;
@@ -71,6 +72,43 @@ pub fn @"v128.load"(
 
     const accessed_bytes = mem_arg.mem.bytes()[effective_addr..][0..16];
     vals.pushTyped(&.{.v128}, .{V128.init(.u8, accessed_bytes.*)});
+
+    return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
+}
+
+pub fn @"v128.store"(
+    ip: Ip,
+    sp: Sp,
+    fuel: *Fuel,
+    stp: Stp,
+    locals: Locals,
+    module: runtime.ModuleInst,
+    interp: *Interpreter,
+    eip: Eip,
+) callconv(ohcc) Transition {
+    var instr = Instr.init(ip, eip);
+    var vals = Stack.Values.init(sp, &interp.stack, 2, 2);
+
+    const mem_arg = MemArg.read(&instr, module);
+    const popped = vals.popArray(2);
+    vals.assertRemainingCountIs(0);
+    const base_addr: u32 = @bitCast(popped[0].i32);
+    const to_store: *const V128 = &popped[1].v128;
+
+    const trap_info = mem_arg.trap(base_addr, .@"16");
+    const effective_addr = std.math.add(u32, base_addr, mem_arg.offset) catch {
+        return Transition.trap(calculateTrapIp(ip, .@"v128.store"), eip, sp, stp, interp, trap_info);
+    };
+
+    const end_addr = std.math.add(u32, effective_addr, 15) catch {
+        return Transition.trap(calculateTrapIp(ip, .@"v128.store"), eip, sp, stp, interp, trap_info);
+    };
+
+    if (mem_arg.mem.size <= end_addr) {
+        return Transition.trap(calculateTrapIp(ip, .@"v128.store"), eip, sp, stp, interp, trap_info);
+    }
+
+    mem_arg.mem.bytes()[effective_addr..][0..16].* = to_store.u8x16;
 
     return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
 }
