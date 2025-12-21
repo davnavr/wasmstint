@@ -2549,6 +2549,14 @@ pub fn rawValidate(
                 .@"f64x2.abs",
                 .@"f64x2.neg",
                 .@"f64x2.sqrt",
+                .@"i32x4.trunc_sat_f32x4_s",
+                .@"i32x4.trunc_sat_f32x4_u",
+                .@"f32x4.convert_i32x4_s",
+                .@"f32x4.convert_i32x4_u",
+                .@"i32x4.trunc_sat_f64x2_s_zero",
+                .@"i32x4.trunc_sat_f64x2_u_zero",
+                .@"f64x2.convert_low_i32x4_s",
+                .@"f64x2.convert_low_i32x4_u",
                 => {
                     try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .v128, diag);
                 },
@@ -2652,14 +2660,6 @@ pub fn rawValidate(
                 .@"i64x2.shl",
                 .@"i64x2.shr_s",
                 .@"i64x2.shr_u",
-                .@"i32x4.trunc_sat_f32x4_s",
-                .@"i32x4.trunc_sat_f32x4_u",
-                .@"f32x4.convert_i32x4_s",
-                .@"f32x4.convert_i32x4_u",
-                .@"i32x4.trunc_sat_f64x2_s_zero",
-                .@"i32x4.trunc_sat_f64x2_u_zero",
-                .@"f64x2.convert_low_i32x4_s",
-                .@"f64x2.convert_low_i32x4_u",
                 => {
                     try val_stack.popExpecting(&ctrl_stack, .i32, diag);
                     try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .v128, diag);
