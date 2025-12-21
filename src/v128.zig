@@ -150,6 +150,54 @@ pub const V128 = extern union {
     pub fn format(vector: V128, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try (vector.formatter(.u8)).format(writer);
     }
+
+    /// Bitwise NOT.
+    ///
+    /// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#bitwise-logic
+    /// - https://webassembly.github.io/spec/core/exec/numerics.html#op-inot
+    pub fn not(v: V128) V128 {
+        return V128{ .u8x16 = ~v.u8x16 };
+    }
+
+    /// Bitwise AND.
+    ///
+    /// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#bitwise-logic
+    /// - https://webassembly.github.io/spec/core/exec/numerics.html#op-iand
+    pub fn @"and"(c_1: V128, c_2: V128) V128 {
+        return V128{ .u8x16 = c_1.u8x16 & c_2.u8x16 };
+    }
+
+    /// Bitwise AND of `c_1` with bitwise NOT of `c_2`.
+    ///
+    /// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#bitwise-and-not
+    /// - https://webassembly.github.io/spec/core/exec/numerics.html#op-iandnot
+    pub fn andnot(c_1: V128, c_2: V128) V128 {
+        return V128{ .u8x16 = c_1.u8x16 & (~c_2.u8x16) };
+    }
+
+    /// Bitwise OR.
+    ///
+    /// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#bitwise-logic
+    /// - https://webassembly.github.io/spec/core/exec/numerics.html#op-ior
+    pub fn @"or"(c_1: V128, c_2: V128) V128 {
+        return V128{ .u8x16 = c_1.u8x16 | c_2.u8x16 };
+    }
+
+    /// Bitwise OR.
+    ///
+    /// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#bitwise-logic
+    /// - https://webassembly.github.io/spec/core/exec/numerics.html#op-ixor
+    pub fn xor(c_1: V128, c_2: V128) V128 {
+        return V128{ .u8x16 = c_1.u8x16 ^ c_2.u8x16 };
+    }
+
+    /// For every bit in `mask`, selects the corresponding bit from `a` when `0`, or `b` when `0`.
+    ///
+    /// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#bitwise-select
+    /// - https://webassembly.github.io/spec/core/exec/numerics.html#op-ibitselect
+    pub fn bitselect(a: V128, b: V128, mask: V128) V128 {
+        return V128.@"or"(V128.@"and"(a, mask), V128.@"and"(b, mask.not()));
+    }
 };
 
 const std = @import("std");

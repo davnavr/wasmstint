@@ -132,8 +132,81 @@ pub fn @"v128.const"(
     return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
 }
 
+pub fn @"v128.not"(
+    ip: Ip,
+    sp: Sp,
+    fuel: *Fuel,
+    stp: Stp,
+    locals: Locals,
+    module: runtime.ModuleInst,
+    interp: *Interpreter,
+    eip: Eip,
+) callconv(ohcc) Transition {
+    var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
+
+    const c_1 = vals.popTyped(&(.{.v128}))[0];
+    vals.assertRemainingCountIs(0);
+    vals.pushTyped(&.{.v128}, .{c_1.not()});
+
+    const instr = Instr.init(ip, eip);
+    return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
+}
+
+/// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vvbinop
+fn defineBitwiseBinOp(comptime op: fn (c_1: V128, c_2: V128) V128) OpcodeHandler {
+    return struct {
+        fn vvBinOp(
+            ip: Ip,
+            sp: Sp,
+            fuel: *Fuel,
+            stp: Stp,
+            locals: Locals,
+            module: runtime.ModuleInst,
+            interp: *Interpreter,
+            eip: Eip,
+        ) callconv(ohcc) Transition {
+            var vals = Stack.Values.init(sp, &interp.stack, 2, 2);
+
+            const operands = vals.popTyped(&(.{.v128} ** 2));
+            vals.assertRemainingCountIs(0);
+            const c_2 = operands[1];
+            const c_1 = operands[0];
+            const result = @call(.always_inline, op, .{ c_1, c_2 });
+            vals.pushTyped(&.{.v128}, .{result});
+
+            const instr = Instr.init(ip, eip);
+            return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
+        }
+    }.vvBinOp;
+}
+
+pub const @"v128.and" = defineBitwiseBinOp(V128.@"and");
+pub const @"v128.andnot" = defineBitwiseBinOp(V128.andnot);
+pub const @"v128.or" = defineBitwiseBinOp(V128.@"or");
+pub const @"v128.xor" = defineBitwiseBinOp(V128.xor);
+
+pub fn @"v128.bitselect"(
+    ip: Ip,
+    sp: Sp,
+    fuel: *Fuel,
+    stp: Stp,
+    locals: Locals,
+    module: runtime.ModuleInst,
+    interp: *Interpreter,
+    eip: Eip,
+) callconv(ohcc) Transition {
+    var vals = Stack.Values.init(sp, &interp.stack, 3, 3);
+
+    const operands = vals.popTyped(&(.{.v128} ** 3));
+    vals.assertRemainingCountIs(0);
+    vals.pushTyped(&.{.v128}, .{@call(.always_inline, V128.bitselect, operands)});
+
+    const instr = Instr.init(ip, eip);
+    return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
+}
+
 // /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vbinop
-// pub fn defineBinOp(
+// fn defineBinOp(
 //     comptime opcode: FDPrefixOpcode,
 //     comptime interpretation: V128.Interpretation,
 //     /// Function that takes two operands as an input and returns the result of the operation.
