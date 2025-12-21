@@ -205,6 +205,26 @@ pub fn @"v128.bitselect"(
     return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
 }
 
+pub fn @"v128.any_true"(
+    ip: Ip,
+    sp: Sp,
+    fuel: *Fuel,
+    stp: Stp,
+    locals: Locals,
+    module: runtime.ModuleInst,
+    interp: *Interpreter,
+    eip: Eip,
+) callconv(ohcc) Transition {
+    var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
+
+    const result = vals.popTyped(&(.{.v128}))[0].anyTrue();
+    vals.assertRemainingCountIs(0);
+    vals.pushTyped(&.{.i32}, .{@intFromBool(result)});
+
+    const instr = Instr.init(ip, eip);
+    return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
+}
+
 // /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vbinop
 // fn defineBinOp(
 //     comptime opcode: FDPrefixOpcode,
@@ -267,15 +287,18 @@ fn defineShiftOp(
 
 fn integerOpcodeHandlers(comptime Signed: type) type {
     return struct {
-        const lane_size = @typeInfo(SignedInt).int.bits;
         const SignedInt = @typeInfo(Signed).vector.child;
-        const UnsignedInt = std.meta.Int(.unsigned, lane_size);
+
         const interpretation = V128.Interpretation.fromLaneType(SignedInt);
+        const lane_width = interpretation.laneWidth();
         const lane_count = interpretation.laneCount();
+
+        const UnsignedInt = std.meta.Int(.unsigned, lane_width.toBits());
         const Unsigned = @Vector(lane_count, UnsignedInt);
 
         comptime {
             std.debug.assert(@typeInfo(SignedInt).int.signedness == .signed);
+            std.debug.assert(@typeInfo(SignedInt).int.bits == lane_width.toBits());
             std.debug.assert(@typeInfo(Signed).vector.len == lane_count);
         }
 
@@ -283,7 +306,7 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
             const ShiftInt = std.math.Log2Int(UnsignedInt);
 
             inline fn bitShiftAmt(y: i32) @Vector(lane_count, ShiftInt) {
-                return @splat(@intCast(@mod(y, lane_size)));
+                return @splat(@intCast(@mod(y, lane_width.toBits())));
             }
 
             fn shl(a: Signed, y: i32) Signed {
@@ -304,6 +327,47 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
         //     return @field(FDPrefixOpcode, interpretation.fieldName() ++ "." ++ name);
         // }
 
+        pub fn all_true(
+            ip: Ip,
+            sp: Sp,
+            fuel: *Fuel,
+            stp: Stp,
+            locals: Locals,
+            module: runtime.ModuleInst,
+            interp: *Interpreter,
+            eip: Eip,
+        ) callconv(ohcc) Transition {
+            var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
+
+            const result = V128.allTrue(vals.popTyped(&(.{.v128}))[0], lane_width);
+            vals.assertRemainingCountIs(0);
+            vals.pushTyped(&.{.i32}, .{@intFromBool(result)});
+
+            const instr = Instr.init(ip, eip);
+            return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
+        }
+
+        pub fn bitmask(
+            ip: Ip,
+            sp: Sp,
+            fuel: *Fuel,
+            stp: Stp,
+            locals: Locals,
+            module: runtime.ModuleInst,
+            interp: *Interpreter,
+            eip: Eip,
+        ) callconv(ohcc) Transition {
+            var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
+
+            const result = V128.bitmask(vals.popTyped(&(.{.v128}))[0], lane_width);
+            const result_int: std.meta.Int(.unsigned, lane_width.count()) = @bitCast(result);
+            vals.assertRemainingCountIs(0);
+            vals.pushTyped(&.{.i32}, .{@bitCast(@as(u32, result_int))});
+
+            const instr = Instr.init(ip, eip);
+            return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
+        }
+
         pub const shl = defineShiftOp(interpretation, operators.shl);
         pub const shr_s = defineShiftOp(interpretation, operators.shr_s);
         pub const shr_u = defineShiftOp(interpretation, operators.shr_u);
@@ -315,18 +379,26 @@ const i16x8_opcode_handlers = integerOpcodeHandlers(@Vector(8, i16));
 const i32x4_opcode_handlers = integerOpcodeHandlers(@Vector(4, i32));
 const i64x2_opcode_handlers = integerOpcodeHandlers(@Vector(2, i64));
 
+pub const @"i8x16.all_true" = i8x16_opcode_handlers.all_true;
+pub const @"i8x16.bitmask" = i8x16_opcode_handlers.bitmask;
 pub const @"i8x16.shl" = i8x16_opcode_handlers.shl;
 pub const @"i8x16.shr_s" = i8x16_opcode_handlers.shr_s;
 pub const @"i8x16.shr_u" = i8x16_opcode_handlers.shr_u;
 
+pub const @"i16x8.all_true" = i16x8_opcode_handlers.all_true;
+pub const @"i16x8.bitmask" = i16x8_opcode_handlers.bitmask;
 pub const @"i16x8.shl" = i16x8_opcode_handlers.shl;
 pub const @"i16x8.shr_s" = i16x8_opcode_handlers.shr_s;
 pub const @"i16x8.shr_u" = i16x8_opcode_handlers.shr_u;
 
+pub const @"i32x4.all_true" = i32x4_opcode_handlers.all_true;
+pub const @"i32x4.bitmask" = i32x4_opcode_handlers.bitmask;
 pub const @"i32x4.shl" = i32x4_opcode_handlers.shl;
 pub const @"i32x4.shr_s" = i32x4_opcode_handlers.shr_s;
 pub const @"i32x4.shr_u" = i32x4_opcode_handlers.shr_u;
 
+pub const @"i64x2.all_true" = i64x2_opcode_handlers.all_true;
+pub const @"i64x2.bitmask" = i64x2_opcode_handlers.bitmask;
 pub const @"i64x2.shl" = i64x2_opcode_handlers.shl;
 pub const @"i64x2.shr_s" = i64x2_opcode_handlers.shr_s;
 pub const @"i64x2.shr_u" = i64x2_opcode_handlers.shr_u;

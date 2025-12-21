@@ -36,6 +36,46 @@ pub const V128 = extern union {
         return std.meta.Int(.unsigned, @intFromEnum(size));
     }
 
+    pub const LaneWidth = enum(u2) {
+        x8 = 0,
+        x16,
+        x32,
+        x64,
+
+        pub fn toBytes(width: LaneWidth) u4 {
+            return @shlExact(@as(u4, 1), @intFromEnum(width));
+        }
+
+        pub fn toBits(width: LaneWidth) u7 {
+            return @as(u7, width.toBytes()) * 8;
+        }
+
+        /// The number of lanes in a `V128`.
+        pub fn count(width: LaneWidth) u5 {
+            return @divExact(@as(u5, 16), width.toBytes());
+        }
+
+        pub fn integerInterpretation(
+            width: LaneWidth,
+            comptime signedness: std.builtin.Signedness,
+        ) Interpretation {
+            const signedness_char = comptime switch (signedness) {
+                .unsigned => 'u',
+                .signed => 'i',
+            };
+
+            switch (width) {
+                inline else => |chosen| {
+                    const chosen_name = @tagName(chosen);
+                    var name: [chosen_name.len]u8 = undefined;
+                    @memcpy(&name, chosen_name);
+                    name[0] = signedness_char;
+                    return @field(Interpretation, &name);
+                },
+            }
+        }
+    };
+
     pub const Interpretation = enum {
         i8,
         u8,
@@ -48,13 +88,17 @@ pub const V128 = extern union {
         u64,
         f64,
 
-        pub fn laneCount(i: Interpretation) u5 {
+        pub fn laneWidth(i: Interpretation) LaneWidth {
             return switch (i) {
-                .i8, .u8 => 16,
-                .i16, .u16 => 8,
-                .i32, .u32, .f32 => 4,
-                .i64, .u64, .f64 => 2,
+                .i8, .u8 => .x8,
+                .i16, .u16 => .x16,
+                .i32, .u32, .f32 => .x32,
+                .i64, .u64, .f64 => .x64,
             };
+        }
+
+        pub fn laneCount(i: Interpretation) u5 {
+            return i.laneWidth().count();
         }
 
         pub fn fromLaneType(comptime T: type) Interpretation {
@@ -93,6 +137,7 @@ pub const V128 = extern union {
             };
         }
 
+        // TODO: Rename to VectorType?
         pub fn Type(comptime interpretation: Interpretation) type {
             return @FieldType(V128, interpretation.fieldName());
         }
@@ -197,6 +242,34 @@ pub const V128 = extern union {
     /// - https://webassembly.github.io/spec/core/exec/numerics.html#op-ibitselect
     pub fn bitselect(a: V128, b: V128, mask: V128) V128 {
         return V128.@"or"(V128.@"and"(a, mask), V128.@"and"(b, mask.not()));
+    }
+
+    /// Returns `true` if any bit in `v` is `1`.
+    ///
+    /// Implements the `v128.any_true` instruction.
+    ///
+    /// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#any-bit-true
+    /// - https://webassembly.github.io/spec/core/exec/instructions.html#exec-vvtestop
+    pub fn anyTrue(v: V128) bool {
+        return @as(u128, @bitCast(v)) != 0;
+    }
+
+    /// Returns `true` if all lanes in `v` are non-zero.
+    ///
+    /// - https://webassembly.github.io/spec/core/exec/instructions.html#exec-vtestop
+    /// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#all-lanes-true
+    pub fn allTrue(v: V128, comptime lane_width: LaneWidth) bool {
+        const interpretation = comptime lane_width.integerInterpretation(.unsigned);
+        return @reduce(.And, v.interpret(interpretation) != @as(interpretation.Type(), @splat(0)));
+    }
+
+    /// Retrieves the high bits of each lane in `v`.
+    ///
+    /// - https://webassembly.github.io/spec/core/exec/numerics.html#op-ivbitmask
+    /// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#bitmask-extraction
+    pub fn bitmask(v: V128, comptime lane_width: LaneWidth) @Vector(lane_width.count(), u1) {
+        const interpretation = comptime lane_width.integerInterpretation(.signed);
+        return @bitCast(v.interpret(interpretation) < @as(interpretation.Type(), @splat(0)));
     }
 };
 
