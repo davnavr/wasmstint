@@ -10,7 +10,7 @@ fn calculateTrapIp(base_ip: Ip, opcode: FDPrefixOpcode) Ip {
     var decoded: u32 = ip[0];
     for (0..4) |_| {
         ip -= 1;
-        std.debug.assert(decoded <= @intFromEnum(opcode));
+        std.debug.assert(decoded <= @intFromEnum(opcode)); // wrong expected opcode?
         if (decoded == @intFromEnum(opcode)) {
             @branchHint(.likely); // Initial SIMD proposal only introduces opcodes <= 0x7F
             break;
@@ -361,6 +361,10 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
                 return -%v;
             }
 
+            fn popcnt(v: Signed) Signed {
+                return @bitCast(@as(Unsigned, @popCount(v)));
+            }
+
             fn shl(a: Signed, y: i32) Signed {
                 return a << bitShiftAmt(y);
             }
@@ -381,10 +385,39 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
             fn sub(i_1: Signed, i_2: Signed) !Signed {
                 return i_1 -% i_2;
             }
+
+            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-imin
+            fn min_s(i_1: Signed, i_2: Signed) !Signed {
+                return @min(i_1, i_2);
+            }
+
+            fn min_u(i_1: Signed, i_2: Signed) !Signed {
+                return @bitCast(@min(@as(Unsigned, @bitCast(i_1)), @as(Unsigned, @bitCast(i_2))));
+            }
+
+            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-imax
+            fn max_s(i_1: Signed, i_2: Signed) !Signed {
+                return @max(i_1, i_2);
+            }
+
+            fn max_u(i_1: Signed, i_2: Signed) !Signed {
+                return @bitCast(@max(@as(Unsigned, @bitCast(i_1)), @as(Unsigned, @bitCast(i_2))));
+            }
+
+            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-iavgr
+            fn avgr_u(i_1: Signed, i_2: Signed) !Signed {
+                const Avgr = @Vector(lane_count, std.meta.Int(.unsigned, lane_width.toBits() + 1));
+                const v_1: Avgr = @as(Unsigned, @bitCast(i_1));
+                const v_2: Avgr = @as(Unsigned, @bitCast(i_2));
+                const j: Avgr = v_1 + v_2 + @as(Avgr, @splat(1));
+                const result: Avgr = @divTrunc(j, @as(Avgr, @splat(2)));
+                return @bitCast(@as(Unsigned, @intCast(result)));
+            }
         };
 
         pub const abs = defineUnaryOp(interpretation, operators.abs);
         pub const neg = defineUnaryOp(interpretation, operators.neg);
+        pub const popcnt = defineUnaryOp(interpretation, operators.popcnt);
 
         pub fn all_true(
             ip: Ip,
@@ -440,6 +473,15 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
 
         /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#integer-subtraction
         pub const sub = defineBinOp(opcode("sub"), interpretation, operators.sub, undefined);
+
+        /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#lane-wise-integer-minimum
+        pub const min_s = defineBinOp(opcode("min_s"), interpretation, operators.min_s, undefined);
+        pub const min_u = defineBinOp(opcode("min_u"), interpretation, operators.min_u, undefined);
+        /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#lane-wise-integer-maximum
+        pub const max_s = defineBinOp(opcode("max_s"), interpretation, operators.max_s, undefined);
+        pub const max_u = defineBinOp(opcode("max_u"), interpretation, operators.max_u, undefined);
+        /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#lane-wise-integer-rounding-average
+        pub const avgr_u = defineBinOp(opcode("avgr_u"), interpretation, operators.avgr_u, undefined);
     };
 }
 
@@ -450,6 +492,7 @@ const i64x2_opcode_handlers = integerOpcodeHandlers(@Vector(2, i64));
 
 pub const @"i8x16.abs" = i8x16_opcode_handlers.abs;
 pub const @"i8x16.neg" = i8x16_opcode_handlers.neg;
+pub const @"i8x16.popcnt" = i8x16_opcode_handlers.popcnt;
 pub const @"i8x16.all_true" = i8x16_opcode_handlers.all_true;
 pub const @"i8x16.bitmask" = i8x16_opcode_handlers.bitmask;
 
@@ -459,6 +502,12 @@ pub const @"i8x16.shr_u" = i8x16_opcode_handlers.shr_u;
 
 pub const @"i8x16.add" = i8x16_opcode_handlers.add;
 pub const @"i8x16.sub" = i8x16_opcode_handlers.sub;
+
+pub const @"i8x16.min_s" = i8x16_opcode_handlers.min_s;
+pub const @"i8x16.min_u" = i8x16_opcode_handlers.min_u;
+pub const @"i8x16.max_s" = i8x16_opcode_handlers.max_s;
+pub const @"i8x16.max_u" = i8x16_opcode_handlers.max_u;
+pub const @"i8x16.avgr_u" = i8x16_opcode_handlers.avgr_u;
 
 pub const @"i16x8.abs" = i16x8_opcode_handlers.abs;
 pub const @"i16x8.neg" = i16x8_opcode_handlers.neg;
@@ -472,6 +521,12 @@ pub const @"i16x8.shr_u" = i16x8_opcode_handlers.shr_u;
 pub const @"i16x8.add" = i16x8_opcode_handlers.add;
 pub const @"i16x8.sub" = i16x8_opcode_handlers.sub;
 
+pub const @"i16x8.min_s" = i16x8_opcode_handlers.min_s;
+pub const @"i16x8.min_u" = i16x8_opcode_handlers.min_u;
+pub const @"i16x8.max_s" = i16x8_opcode_handlers.max_s;
+pub const @"i16x8.max_u" = i16x8_opcode_handlers.max_u;
+pub const @"i16x8.avgr_u" = i16x8_opcode_handlers.avgr_u;
+
 pub const @"i32x4.abs" = i32x4_opcode_handlers.abs;
 pub const @"i32x4.neg" = i32x4_opcode_handlers.neg;
 pub const @"i32x4.all_true" = i32x4_opcode_handlers.all_true;
@@ -483,6 +538,11 @@ pub const @"i32x4.shr_u" = i32x4_opcode_handlers.shr_u;
 
 pub const @"i32x4.add" = i32x4_opcode_handlers.add;
 pub const @"i32x4.sub" = i32x4_opcode_handlers.sub;
+
+pub const @"i32x4.min_s" = i32x4_opcode_handlers.min_s;
+pub const @"i32x4.min_u" = i32x4_opcode_handlers.min_u;
+pub const @"i32x4.max_s" = i32x4_opcode_handlers.max_s;
+pub const @"i32x4.max_u" = i32x4_opcode_handlers.max_u;
 
 pub const @"i64x2.abs" = i64x2_opcode_handlers.abs;
 pub const @"i64x2.neg" = i64x2_opcode_handlers.neg;
