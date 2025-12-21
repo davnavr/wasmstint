@@ -173,12 +173,11 @@ pub fn allocateWithDefinitions(
         module.globalTypes()[module.inner.raw.global_import_count..],
     ) |*value_ptr, *global_type| {
         value_ptr.* = switch (global_type.val_type) {
-            .v128 => unreachable,
             inline else => |val_type| value: {
                 const Pointee = value.GlobalAddr.Pointee(val_type);
                 const is_primitive = switch (@typeInfo(Pointee)) {
-                    .int, .float => true,
-                    else => false,
+                    .@"struct", .@"enum", .@"union" => false,
+                    else => true,
                 };
 
                 const global_value = arena.allocator().create(Pointee) catch unreachable;

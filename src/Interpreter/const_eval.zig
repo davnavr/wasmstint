@@ -94,6 +94,16 @@ pub fn calculate(
             .@"i64.add" => binOp(&val_stack, .i64, operations(.i64).add),
             .@"i64.sub" => binOp(&val_stack, .i64, operations(.i64).sub),
             .@"i64.mul" => binOp(&val_stack, .i64, operations(.i64).mul),
+            .@"0xFD" => switch (@as(opcodes.FDPrefixOpcode, @enumFromInt(instr.readIdxRaw()))) {
+                .@"v128.const" => {
+                    const immediate = instr.readByteArray(16);
+                    val_stack.appendAssumeCapacity(.{ .v128 = .{ .u8x16 = immediate.* } });
+                },
+                else => |bad| switch (builtin.mode) {
+                    .Debug, .ReleaseSafe => std.debug.panic("non-constant SIMD opcode {t}", .{bad}),
+                    .ReleaseFast, .ReleaseSmall => unreachable,
+                },
+            },
             else => switch (builtin.mode) {
                 .Debug, .ReleaseSafe => std.debug.panic("non-constant opcode {t}", .{opcode}),
                 .ReleaseFast, .ReleaseSmall => unreachable,

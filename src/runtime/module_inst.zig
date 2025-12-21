@@ -41,18 +41,12 @@ pub const ModuleInst = packed struct(usize) {
             try size.reserve(*anyopaque, info.global_count);
 
             // More efficient packing of global values is possible
-            // TODO: figure out why allocation failure occurs for global values
-            // const defined_global_types = module.globalTypes()[0..module.globalInitializers().len];
-            // if (defined_global_types.len > 0) {
-            //     try size.alignUpTo(.fromByteUnits(@alignOf(u64)));
-            // }
-
-            // for (defined_global_types) |*global_type| {
-            //     switch (global_type.val_type) {
-            //         .v128 => unreachable,
-            //         inline else => |ty| try size.reserve(GlobalAddr.Pointee(ty), 1),
-            //     }
-            // }
+            const defined_global_types = module.globalTypes()[0..module.globalInitializers().len];
+            for (defined_global_types) |*global_type| {
+                switch (global_type.val_type) {
+                    inline else => |ty| try size.reserve(GlobalAddr.Pointee(ty), 1),
+                }
+            }
 
             try size.reserve(u32, std.math.divCeil(u32, info.datas_count, 32) catch unreachable);
             try size.reserve(u32, std.math.divCeil(u32, info.elems_count, 32) catch unreachable);

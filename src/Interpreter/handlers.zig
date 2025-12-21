@@ -2393,13 +2393,6 @@ const opcode_handlers = struct {
         const global_addr = module.header().globalAddr(global_idx);
 
         vals.pushArray(1).* = .{switch (global_addr.global_type.val_type) {
-            .v128 => unreachable, // TODO
-            .externref => Value{
-                .externref = @as(
-                    *const runtime.ExternAddr,
-                    @ptrCast(@alignCast(@constCast(global_addr.value))),
-                ).*,
-            },
             inline else => |val_type| @unionInit(
                 Value,
                 @tagName(val_type),
@@ -2432,13 +2425,6 @@ const opcode_handlers = struct {
         const popped: *align(@sizeOf(Value)) Value = &vals.popArray(1)[0];
         vals.assertRemainingCountIs(0);
         switch (global_addr.global_type.val_type) {
-            .v128 => unreachable, // TODO
-            .externref => {
-                @as(
-                    *runtime.ExternAddr,
-                    @ptrCast(@alignCast(global_addr.value)),
-                ).* = popped.externref;
-            },
             inline else => |val_type| {
                 @as(
                     *runtime.GlobalAddr.Pointee(val_type),
