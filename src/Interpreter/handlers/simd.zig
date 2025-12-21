@@ -225,34 +225,78 @@ pub fn @"v128.any_true"(
     return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
 }
 
-// /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vbinop
-// fn defineBinOp(
-//     comptime opcode: FDPrefixOpcode,
-//     comptime interpretation: V128.Interpretation,
-//     /// Function that takes two operands as an input and returns the result of the operation.
-//     ///
-//     /// May return an error.
-//     comptime op: anytype,
-//     /// Function that takes an error returned by `op` and returns a `Trap`.
-//     comptime trap: anytype,
-// ) OpcodeHandler {
-//     return struct {
-//         const field_name = interpretation.fieldName();
-//         fn vBinOp(c_1: V128, c_2: V128) !V128 {
-//             return @unionInit(
-//                 V128,
-//                 field_name,
-//                 try op(@field(c_1, field_name), @field(c_2, field_name)),
-//             );
-//         }
-//         const vBinOpHandler = handlers.defineBinOp(
-//             .v128,
-//             opcodePrefixLen(opcode),
-//             vBinOp,
-//             trap,
-//         );
-//     }.vBinOpHandler;
-// }
+/// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vbinop
+fn defineBinOp(
+    comptime opcode: FDPrefixOpcode,
+    comptime interpretation: V128.Interpretation,
+    /// Function that takes two operands as an input and returns the result of the operation.
+    ///
+    /// May return an error.
+    comptime op: anytype,
+    /// Function that takes an error returned by `op` and returns a `Trap`.
+    comptime trap: anytype,
+) OpcodeHandler {
+    return struct {
+        fn vBinOpHandler(
+            ip: Ip,
+            sp: Sp,
+            fuel: *Fuel,
+            stp: Stp,
+            locals: Locals,
+            module: runtime.ModuleInst,
+            interp: *Interpreter,
+            eip: Eip,
+        ) callconv(ohcc) Transition {
+            var vals = Stack.Values.init(sp, &interp.stack, 2, 2);
+
+            const operands = vals.popTyped(&(.{.v128} ** 2));
+            vals.assertRemainingCountIs(0);
+            const field_name = comptime interpretation.fieldName();
+            const c_2 = @field(operands[1], field_name);
+            const c_1 = @field(operands[0], field_name);
+            const result = @call(.always_inline, op, .{ c_1, c_2 }) catch |e| {
+                const trap_ip = calculateTrapIp(ip, opcode);
+                const trap_info = @call(.auto, trap, .{e});
+                return Transition.trap(trap_ip, eip, sp, stp, interp, trap_info);
+            };
+
+            vals.pushTyped(&.{.v128}, .{@unionInit(V128, field_name, result)});
+
+            const instr = Instr.init(ip, eip);
+            return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
+        }
+    }.vBinOpHandler;
+}
+
+/// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vunop
+fn defineUnaryOp(
+    comptime interpretation: V128.Interpretation,
+    comptime op: fn (c_1: interpretation.Type()) interpretation.Type(),
+) OpcodeHandler {
+    return struct {
+        fn vUnOpHandler(
+            ip: Ip,
+            sp: Sp,
+            fuel: *Fuel,
+            stp: Stp,
+            locals: Locals,
+            module: runtime.ModuleInst,
+            interp: *Interpreter,
+            eip: Eip,
+        ) callconv(ohcc) Transition {
+            var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
+
+            const operands = vals.popTyped(&(.{.v128} ** 1));
+            vals.assertRemainingCountIs(0);
+            const field_name = comptime interpretation.fieldName();
+            const result = @call(.always_inline, op, .{@field(operands[0], field_name)});
+            vals.pushTyped(&.{.v128}, .{@unionInit(V128, field_name, result)});
+
+            const instr = Instr.init(ip, eip);
+            return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
+        }
+    }.vUnOpHandler;
+}
 
 /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vshiftop
 fn defineShiftOp(
@@ -309,6 +353,14 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
                 return @splat(@intCast(@mod(y, lane_width.toBits())));
             }
 
+            fn abs(v: Signed) Signed {
+                return @as(Signed, @bitCast(@abs(v)));
+            }
+
+            fn neg(v: Signed) Signed {
+                return -%v;
+            }
+
             fn shl(a: Signed, y: i32) Signed {
                 return a << bitShiftAmt(y);
             }
@@ -321,11 +373,18 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
             fn shr_u(a: Signed, y: i32) Signed {
                 return @bitCast(@as(Unsigned, @bitCast(a)) >> bitShiftAmt(y));
             }
+
+            fn add(i_1: Signed, i_2: Signed) !Signed {
+                return i_1 +% i_2;
+            }
+
+            fn sub(i_1: Signed, i_2: Signed) !Signed {
+                return i_1 -% i_2;
+            }
         };
 
-        // fn opcode(comptime name: []const u8) FDPrefixOpcode {
-        //     return @field(FDPrefixOpcode, interpretation.fieldName() ++ "." ++ name);
-        // }
+        pub const abs = defineUnaryOp(interpretation, operators.abs);
+        pub const neg = defineUnaryOp(interpretation, operators.neg);
 
         pub fn all_true(
             ip: Ip,
@@ -371,6 +430,16 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
         pub const shl = defineShiftOp(interpretation, operators.shl);
         pub const shr_s = defineShiftOp(interpretation, operators.shr_s);
         pub const shr_u = defineShiftOp(interpretation, operators.shr_u);
+
+        fn opcode(comptime name: []const u8) FDPrefixOpcode {
+            return @field(FDPrefixOpcode, interpretation.fieldName() ++ "." ++ name);
+        }
+
+        /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#integer-addition
+        pub const add = defineBinOp(opcode("add"), interpretation, operators.add, undefined);
+
+        /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#integer-subtraction
+        pub const sub = defineBinOp(opcode("sub"), interpretation, operators.sub, undefined);
     };
 }
 
@@ -379,29 +448,53 @@ const i16x8_opcode_handlers = integerOpcodeHandlers(@Vector(8, i16));
 const i32x4_opcode_handlers = integerOpcodeHandlers(@Vector(4, i32));
 const i64x2_opcode_handlers = integerOpcodeHandlers(@Vector(2, i64));
 
+pub const @"i8x16.abs" = i8x16_opcode_handlers.abs;
+pub const @"i8x16.neg" = i8x16_opcode_handlers.neg;
 pub const @"i8x16.all_true" = i8x16_opcode_handlers.all_true;
 pub const @"i8x16.bitmask" = i8x16_opcode_handlers.bitmask;
+
 pub const @"i8x16.shl" = i8x16_opcode_handlers.shl;
 pub const @"i8x16.shr_s" = i8x16_opcode_handlers.shr_s;
 pub const @"i8x16.shr_u" = i8x16_opcode_handlers.shr_u;
 
+pub const @"i8x16.add" = i8x16_opcode_handlers.add;
+pub const @"i8x16.sub" = i8x16_opcode_handlers.sub;
+
+pub const @"i16x8.abs" = i16x8_opcode_handlers.abs;
+pub const @"i16x8.neg" = i16x8_opcode_handlers.neg;
 pub const @"i16x8.all_true" = i16x8_opcode_handlers.all_true;
 pub const @"i16x8.bitmask" = i16x8_opcode_handlers.bitmask;
+
 pub const @"i16x8.shl" = i16x8_opcode_handlers.shl;
 pub const @"i16x8.shr_s" = i16x8_opcode_handlers.shr_s;
 pub const @"i16x8.shr_u" = i16x8_opcode_handlers.shr_u;
 
+pub const @"i16x8.add" = i16x8_opcode_handlers.add;
+pub const @"i16x8.sub" = i16x8_opcode_handlers.sub;
+
+pub const @"i32x4.abs" = i32x4_opcode_handlers.abs;
+pub const @"i32x4.neg" = i32x4_opcode_handlers.neg;
 pub const @"i32x4.all_true" = i32x4_opcode_handlers.all_true;
 pub const @"i32x4.bitmask" = i32x4_opcode_handlers.bitmask;
+
 pub const @"i32x4.shl" = i32x4_opcode_handlers.shl;
 pub const @"i32x4.shr_s" = i32x4_opcode_handlers.shr_s;
 pub const @"i32x4.shr_u" = i32x4_opcode_handlers.shr_u;
 
+pub const @"i32x4.add" = i32x4_opcode_handlers.add;
+pub const @"i32x4.sub" = i32x4_opcode_handlers.sub;
+
+pub const @"i64x2.abs" = i64x2_opcode_handlers.abs;
+pub const @"i64x2.neg" = i64x2_opcode_handlers.neg;
 pub const @"i64x2.all_true" = i64x2_opcode_handlers.all_true;
 pub const @"i64x2.bitmask" = i64x2_opcode_handlers.bitmask;
+
 pub const @"i64x2.shl" = i64x2_opcode_handlers.shl;
 pub const @"i64x2.shr_s" = i64x2_opcode_handlers.shr_s;
 pub const @"i64x2.shr_u" = i64x2_opcode_handlers.shr_u;
+
+pub const @"i64x2.add" = i64x2_opcode_handlers.add;
+pub const @"i64x2.sub" = i64x2_opcode_handlers.sub;
 
 const std = @import("std");
 const Interpreter = @import("../../Interpreter.zig");
