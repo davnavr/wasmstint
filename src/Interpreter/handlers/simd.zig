@@ -268,13 +268,9 @@ fn defineBinOp(
     }.vBinOpHandler;
 }
 
-/// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vunop
-fn defineUnaryOp(
-    comptime interpretation: V128.Interpretation,
-    comptime op: fn (c_1: interpretation.Type()) interpretation.Type(),
-) OpcodeHandler {
+fn defineUnaryOrConversionOp(comptime op: fn (c_1: V128) V128) OpcodeHandler {
     return struct {
-        fn vUnOpHandler(
+        fn unaryOrConversionHandler(
             ip: Ip,
             sp: Sp,
             fuel: *Fuel,
@@ -288,13 +284,70 @@ fn defineUnaryOp(
 
             const operands = vals.popTyped(&(.{.v128} ** 1));
             vals.assertRemainingCountIs(0);
-            const field_name = comptime interpretation.fieldName();
-            const result = @call(.always_inline, op, .{@field(operands[0], field_name)});
-            vals.pushTyped(&.{.v128}, .{@unionInit(V128, field_name, result)});
+            vals.pushTyped(&.{.v128}, .{@call(.always_inline, op, operands)});
 
             const instr = Instr.init(ip, eip);
             return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
         }
+    }.unaryOrConversionHandler;
+}
+
+/// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#conversions
+const conversions = struct {
+    fn @"f32x4.demote_f64x2_zero"(v: V128) V128 {
+        const low: @Vector(2, f32) = @floatCast(v.f64x2);
+        return V128{ .f32x4 = std.simd.join(low, @as(@Vector(2, f32), @splat(0))) };
+    }
+
+    fn @"f64x2.promote_low_f32x4"(v: V128) V128 {
+        const low_f32x2: @Vector(2, f32) = std.simd.extract(@as([4]f32, v.f32x4), 0, 2);
+        return V128{ .f64x2 = low_f32x2 };
+    }
+
+    /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#integer-to-single-precision-floating-point
+    fn @"f32x4.convert_i32x4_s"(v: V128) V128 {
+        return V128{ .f32x4 = @floatFromInt(v.i32x4) };
+    }
+
+    fn @"f32x4.convert_i32x4_u"(v: V128) V128 {
+        return V128{ .f32x4 = @floatFromInt(v.u32x4) };
+    }
+
+    /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#integer-to-double-precision-floating-point
+    fn @"f64x2.convert_low_i32x4_s"(v: V128) V128 {
+        const low: @Vector(2, i32) = std.simd.extract(v.i32x4, 0, 2);
+        return V128{ .f64x2 = @floatFromInt(low) };
+    }
+
+    fn @"f64x2.convert_low_i32x4_u"(v: V128) V128 {
+        const low: @Vector(2, u32) = std.simd.extract(v.u32x4, 0, 2);
+        return V128{ .f64x2 = @floatFromInt(low) };
+    }
+};
+
+pub const @"f32x4.demote_f64x2_zero" = defineUnaryOrConversionOp(conversions.@"f32x4.demote_f64x2_zero");
+pub const @"f64x2.promote_low_f32x4" = defineUnaryOrConversionOp(conversions.@"f64x2.promote_low_f32x4");
+pub const @"f32x4.convert_i32x4_s" = defineUnaryOrConversionOp(conversions.@"f32x4.convert_i32x4_s");
+pub const @"f32x4.convert_i32x4_u" = defineUnaryOrConversionOp(conversions.@"f32x4.convert_i32x4_u");
+pub const @"f64x2.convert_low_i32x4_s" = defineUnaryOrConversionOp(conversions.@"f64x2.convert_low_i32x4_s");
+pub const @"f64x2.convert_low_i32x4_u" = defineUnaryOrConversionOp(conversions.@"f64x2.convert_low_i32x4_u");
+
+/// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vunop
+fn defineUnaryOp(
+    comptime interpretation: V128.Interpretation,
+    comptime op: fn (c_1: interpretation.Type()) interpretation.Type(),
+) OpcodeHandler {
+    return struct {
+        fn vUnOp(c_1: V128) V128 {
+            const field_name = comptime interpretation.fieldName();
+            return @unionInit(
+                V128,
+                field_name,
+                @call(.always_inline, op, .{@field(c_1, field_name)}),
+            );
+        }
+
+        const vUnOpHandler = defineUnaryOrConversionOp(vUnOp);
     }.vUnOpHandler;
 }
 
@@ -329,6 +382,45 @@ fn defineShiftOp(
     }.vShiftOpHandler;
 }
 
+/// - https://webassembly.github.io/spec/core/exec/instructions.html#exec-vnarrow
+/// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#integer-to-integer-narrowing
+fn defineNarrowingOp(
+    /// Has lanes twice the width of `To`. Must be signed.
+    comptime From: type,
+    comptime To: type,
+) OpcodeHandler {
+    return struct {
+        comptime {
+            std.debug.assert(@divExact(@typeInfo(From).int.bits, 2) == @typeInfo(To).int.bits);
+            std.debug.assert(@typeInfo(From).int.signedness == .signed);
+        }
+
+        const interpret_from = V128.Interpretation.fromLaneType(From);
+        const from_lane_count = interpret_from.laneCount();
+        const interpret_to = V128.Interpretation.fromLaneType(To);
+        const to_signedness = @typeInfo(To).int.signedness;
+
+        const BoundsVec = @Vector(from_lane_count, To);
+        const min_bounds: BoundsVec = @splat(std.math.minInt(To));
+        const max_bounds: BoundsVec = @splat(std.math.maxInt(To));
+
+        fn vNarrowOp(a: V128, b: V128) V128 {
+            const low = a.interpret(interpret_from);
+            const high = b.interpret(interpret_from);
+
+            const low_bounded = @min(@max(min_bounds, low), max_bounds);
+            const high_bounded = @min(@max(min_bounds, high), max_bounds);
+
+            const low_casted: BoundsVec = @intCast(low_bounded);
+            const high_casted: BoundsVec = @intCast(high_bounded);
+
+            return V128.init(interpret_to, std.simd.join(low_casted, high_casted));
+        }
+
+        const vNarrowOpHandler = defineBitwiseBinOp(vNarrowOp);
+    }.vNarrowOpHandler;
+}
+
 fn integerOpcodeHandlers(comptime Signed: type) type {
     return struct {
         const SignedInt = @typeInfo(Signed).vector.child;
@@ -337,7 +429,7 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
         const lane_width = interpretation.laneWidth();
         const lane_count = interpretation.laneCount();
 
-        const UnsignedInt = std.meta.Int(.unsigned, lane_width.toBits());
+        const UnsignedInt = @Int(.unsigned, lane_width.toBits());
         const Unsigned = @Vector(lane_count, UnsignedInt);
 
         comptime {
@@ -495,6 +587,8 @@ pub const @"i8x16.neg" = i8x16_opcode_handlers.neg;
 pub const @"i8x16.popcnt" = i8x16_opcode_handlers.popcnt;
 pub const @"i8x16.all_true" = i8x16_opcode_handlers.all_true;
 pub const @"i8x16.bitmask" = i8x16_opcode_handlers.bitmask;
+pub const @"i8x16.narrow_i16x8_s" = defineNarrowingOp(i16, i8);
+pub const @"i8x16.narrow_i16x8_u" = defineNarrowingOp(i16, u8);
 
 pub const @"i8x16.shl" = i8x16_opcode_handlers.shl;
 pub const @"i8x16.shr_s" = i8x16_opcode_handlers.shr_s;
@@ -513,6 +607,8 @@ pub const @"i16x8.abs" = i16x8_opcode_handlers.abs;
 pub const @"i16x8.neg" = i16x8_opcode_handlers.neg;
 pub const @"i16x8.all_true" = i16x8_opcode_handlers.all_true;
 pub const @"i16x8.bitmask" = i16x8_opcode_handlers.bitmask;
+pub const @"i16x8.narrow_i32x4_s" = defineNarrowingOp(i32, i16);
+pub const @"i16x8.narrow_i32x4_u" = defineNarrowingOp(i32, u16);
 
 pub const @"i16x8.shl" = i16x8_opcode_handlers.shl;
 pub const @"i16x8.shr_s" = i16x8_opcode_handlers.shr_s;
