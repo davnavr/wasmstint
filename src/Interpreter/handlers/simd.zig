@@ -237,6 +237,13 @@ pub const @"i32x4.le_u" = laneWiseComparisonHandlers(.u32).le;
 pub const @"i32x4.ge_s" = laneWiseComparisonHandlers(.i32).ge;
 pub const @"i32x4.ge_u" = laneWiseComparisonHandlers(.u32).ge;
 
+pub const @"f32x4.eq" = laneWiseComparisonHandlers(.f32).eq;
+pub const @"f32x4.ne" = laneWiseComparisonHandlers(.f32).ne;
+pub const @"f32x4.lt" = laneWiseComparisonHandlers(.f32).lt;
+pub const @"f32x4.gt" = laneWiseComparisonHandlers(.f32).gt;
+pub const @"f32x4.le" = laneWiseComparisonHandlers(.f32).le;
+pub const @"f32x4.ge" = laneWiseComparisonHandlers(.f32).ge;
+
 pub const @"i64x2.eq" = laneWiseComparisonHandlers(.i64).eq;
 pub const @"i64x2.ne" = laneWiseComparisonHandlers(.i64).ne;
 pub const @"i64x2.lt_s" = laneWiseComparisonHandlers(.i64).lt;
@@ -247,6 +254,13 @@ pub const @"i64x2.le_s" = laneWiseComparisonHandlers(.i64).le;
 pub const @"i64x2.le_u" = laneWiseComparisonHandlers(.u64).le;
 pub const @"i64x2.ge_s" = laneWiseComparisonHandlers(.i64).ge;
 pub const @"i64x2.ge_u" = laneWiseComparisonHandlers(.u64).ge;
+
+pub const @"f64x2.eq" = laneWiseComparisonHandlers(.f64).eq;
+pub const @"f64x2.ne" = laneWiseComparisonHandlers(.f64).ne;
+pub const @"f64x2.lt" = laneWiseComparisonHandlers(.f64).lt;
+pub const @"f64x2.gt" = laneWiseComparisonHandlers(.f64).gt;
+pub const @"f64x2.le" = laneWiseComparisonHandlers(.f64).le;
+pub const @"f64x2.ge" = laneWiseComparisonHandlers(.f64).ge;
 
 pub fn @"v128.not"(
     ip: Ip,
