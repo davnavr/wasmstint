@@ -552,7 +552,6 @@ fn integerExtensionHandlers(
         const interpret_from = V128.Interpretation.fromLaneType(From);
         const interpret_to = V128.Interpretation.fromLaneType(To);
         const to_lane_count = interpret_to.laneCount();
-        const signedness = @typeInfo(From).int.signedness;
 
         comptime {
             std.debug.assert(to_lane_count * 2 == interpret_from.laneCount());
@@ -580,6 +579,47 @@ fn integerExtensionHandlers(
 
         const low = defineUnaryOrConversionOp(extendLow);
         const high = defineUnaryOrConversionOp(extendHigh);
+    };
+}
+
+/// Lane-wise extended integer arithmetic.
+///
+/// - https://webassembly.github.io/spec/core/exec/instructions.html#exec-vextunop
+/// - https://webassembly.github.io/spec/core/exec/numerics.html#op-vextunop
+/// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#extended-integer-arithmetic
+fn extendedArithmeticHandlers(
+    /// Has lanes half the width of `To`.
+    comptime From: type,
+    comptime To: type,
+) type {
+    return struct {
+        comptime {
+            std.debug.assert(@typeInfo(From).int.bits * 2 == @typeInfo(To).int.bits);
+            std.debug.assert(@typeInfo(From).int.signedness == @typeInfo(To).int.signedness);
+        }
+
+        const interpret_from = V128.Interpretation.fromLaneType(From);
+        const from_lane_count = interpret_from.laneCount();
+        const interpret_to = V128.Interpretation.fromLaneType(To);
+        const to_lane_count = interpret_to.laneCount();
+
+        comptime {
+            std.debug.assert(from_lane_count == to_lane_count * 2);
+        }
+
+        const operators = struct {
+            fn addPairWise(v: V128) V128 {
+                const inputs: @Vector(from_lane_count, From) = v.interpret(interpret_from);
+                var result: @Vector(to_lane_count, To) = undefined;
+                inline for (0..to_lane_count) |i| {
+                    result[i] = @as(To, inputs[i * 2]) + @as(To, inputs[(i * 2) + 1]);
+                }
+
+                return V128.init(interpret_to, result);
+            }
+        };
+
+        const addPairWise = defineUnaryOrConversionOp(operators.addPairWise);
     };
 }
 
@@ -772,6 +812,10 @@ pub const @"i8x16.max_s" = i8x16_int_ops.max_s;
 pub const @"i8x16.max_u" = i8x16_int_ops.max_u;
 pub const @"i8x16.avgr_u" = i8x16_int_ops.avgr_u;
 
+pub const @"i16x8.extadd_pairwise_i8x16_s" = extendedArithmeticHandlers(i8, i16).addPairWise;
+pub const @"i16x8.extadd_pairwise_i8x16_u" = extendedArithmeticHandlers(u8, u16).addPairWise;
+pub const @"i32x4.extadd_pairwise_i16x8_s" = extendedArithmeticHandlers(i16, i32).addPairWise;
+pub const @"i32x4.extadd_pairwise_i16x8_u" = extendedArithmeticHandlers(u16, u32).addPairWise;
 pub const @"i16x8.abs" = i16x8_int_ops.abs;
 pub const @"i16x8.neg" = i16x8_int_ops.neg;
 pub const @"i16x8.all_true" = i16x8_int_ops.all_true;
