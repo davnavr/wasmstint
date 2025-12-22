@@ -839,10 +839,11 @@ fn floatOpcodeHandlers(comptime F: type) type {
     return struct {
         const interpretation = V128.Interpretation.fromLaneType(F);
         const Floats = interpretation.Type();
+        const lane_count = interpretation.laneCount();
+        const I = std.meta.Int(.unsigned, @typeInfo(F).float.bits);
+        const Ints = @Vector(interpretation.laneCount(), I);
 
         // Copied from `handlers.zig`
-        //const I = std.meta.Int(.unsigned, @typeInfo(F).float.bits);
-        //const Ints = @Vector(interpretation.laneCount(), I);
         //const canonical_nan_bit: N = 1 << (std.math.floatMantissaBits(F) - 1);
         //const precise_int_limit = 1 << (std.math.floatMantissaBits(F) + 1);
 
@@ -871,6 +872,51 @@ fn floatOpcodeHandlers(comptime F: type) type {
                 return z_1 / z_2;
             }
 
+            fn isNan(z: Floats) @Vector(lane_count, bool) {
+                return z != z;
+            }
+
+            const pos_zeroes: Ints = @bitCast(@as(Floats, @splat(0.0)));
+            const neg_zeroes: Ints = @bitCast(@as(Floats, @splat(-0.0)));
+
+            fn min(z_1: Floats, z_2: Floats) Floats {
+                const z_1_bits: Ints = @bitCast(z_1);
+                const z_2_bits: Ints = @bitCast(z_2);
+                return @select(
+                    F,
+                    isNan(z_1) | isNan(z_2),
+                    // Pick a NaN
+                    z_1 + z_2,
+                    @select(
+                        F,
+                        ((z_1_bits == pos_zeroes) & (z_2_bits == neg_zeroes)) |
+                            ((z_1_bits == neg_zeroes) & (z_2_bits == pos_zeroes)),
+                        comptime @as(Floats, @bitCast(neg_zeroes)),
+                        // https://llvm.org/docs/LangRef.html#llvm-minnum-intrinsic
+                        @min(z_1, z_2),
+                    ),
+                );
+            }
+
+            fn max(z_1: Floats, z_2: Floats) Floats {
+                const z_1_bits: Ints = @bitCast(z_1);
+                const z_2_bits: Ints = @bitCast(z_2);
+                return @select(
+                    F,
+                    isNan(z_1) | isNan(z_2),
+                    // Pick a NaN
+                    z_1 + z_2,
+                    @select(
+                        F,
+                        ((z_1_bits == pos_zeroes) & (z_2_bits == neg_zeroes)) |
+                            ((z_1_bits == neg_zeroes) & (z_2_bits == pos_zeroes)),
+                        comptime @as(Floats, @bitCast(pos_zeroes)),
+                        // https://llvm.org/docs/LangRef.html#llvm-maxnum-intrinsic
+                        @max(z_1, z_2),
+                    ),
+                );
+            }
+
             /// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#pseudo-minimum
             /// - https://webassembly.github.io/spec/core/exec/numerics.html#op-fpmin
             fn pmin(z_1: Floats, z_2: Floats) Floats {
@@ -882,39 +928,49 @@ fn floatOpcodeHandlers(comptime F: type) type {
             fn pmax(z_1: Floats, z_2: Floats) Floats {
                 return @select(F, z_1 < z_2, z_2, z_1);
             }
+
+            fn abs(z: Floats) Floats {
+                return @abs(z);
+            }
         };
 
+        const abs = defineUnaryOp(interpretation, operators.abs);
         const neg = defineUnaryOp(interpretation, operators.neg);
         const sqrt = defineUnaryOp(interpretation, operators.sqrt);
         const add = defineLaneWiseBinOp(interpretation, operators.add);
         const sub = defineLaneWiseBinOp(interpretation, operators.sub);
         const mul = defineLaneWiseBinOp(interpretation, operators.mul);
         const div = defineLaneWiseBinOp(interpretation, operators.div);
-
+        const min = defineLaneWiseBinOp(interpretation, operators.min);
+        const max = defineLaneWiseBinOp(interpretation, operators.max);
         const pmin = defineLaneWiseBinOp(interpretation, operators.pmin);
         const pmax = defineLaneWiseBinOp(interpretation, operators.pmax);
     };
 }
 
 const f32x4_arith_ops = floatOpcodeHandlers(f32);
+pub const @"f32x4.abs" = f32x4_arith_ops.abs;
 pub const @"f32x4.neg" = f32x4_arith_ops.neg;
 pub const @"f32x4.sqrt" = f32x4_arith_ops.sqrt;
 pub const @"f32x4.add" = f32x4_arith_ops.add;
 pub const @"f32x4.sub" = f32x4_arith_ops.sub;
 pub const @"f32x4.mul" = f32x4_arith_ops.mul;
 pub const @"f32x4.div" = f32x4_arith_ops.div;
-
+pub const @"f32x4.min" = f32x4_arith_ops.min;
+pub const @"f32x4.max" = f32x4_arith_ops.max;
 pub const @"f32x4.pmin" = f32x4_arith_ops.pmin;
 pub const @"f32x4.pmax" = f32x4_arith_ops.pmax;
 
 const f64x2_arith_ops = floatOpcodeHandlers(f64);
+pub const @"f64x2.abs" = f64x2_arith_ops.abs;
 pub const @"f64x2.neg" = f64x2_arith_ops.neg;
 pub const @"f64x2.sqrt" = f64x2_arith_ops.sqrt;
 pub const @"f64x2.add" = f64x2_arith_ops.add;
 pub const @"f64x2.sub" = f64x2_arith_ops.sub;
 pub const @"f64x2.mul" = f64x2_arith_ops.mul;
 pub const @"f64x2.div" = f64x2_arith_ops.div;
-
+pub const @"f64x2.min" = f64x2_arith_ops.min;
+pub const @"f64x2.max" = f64x2_arith_ops.max;
 pub const @"f64x2.pmin" = f64x2_arith_ops.pmin;
 pub const @"f64x2.pmax" = f64x2_arith_ops.pmax;
 
