@@ -665,8 +665,24 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
                 return i_1 +% i_2;
             }
 
+            fn add_sat_s(i_1: Signed, i_2: Signed) Signed {
+                return i_1 +| i_2;
+            }
+
+            fn add_sat_u(i_1: Signed, i_2: Signed) Signed {
+                return @bitCast(@as(Unsigned, @bitCast(i_1)) +| @as(Unsigned, @bitCast(i_2)));
+            }
+
             fn sub(i_1: Signed, i_2: Signed) Signed {
                 return i_1 -% i_2;
+            }
+
+            fn sub_sat_s(i_1: Signed, i_2: Signed) Signed {
+                return i_1 -| i_2;
+            }
+
+            fn sub_sat_u(i_1: Signed, i_2: Signed) Signed {
+                return @bitCast(@as(Unsigned, @bitCast(i_1)) -| @as(Unsigned, @bitCast(i_2)));
             }
 
             fn mul(i_1: Signed, i_2: Signed) Signed {
@@ -757,10 +773,14 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
 
         /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#integer-addition
         pub const add = defineLaneWiseBinOp(interpretation, operators.add);
-
+        /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#saturating-integer-addition
+        pub const add_sat_s = defineLaneWiseBinOp(interpretation, operators.add_sat_s);
+        pub const add_sat_u = defineLaneWiseBinOp(interpretation, operators.add_sat_u);
         /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#integer-subtraction
         pub const sub = defineLaneWiseBinOp(interpretation, operators.sub);
-
+        /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#saturating-integer-subtraction
+        pub const sub_sat_s = defineLaneWiseBinOp(interpretation, operators.sub_sat_s);
+        pub const sub_sat_u = defineLaneWiseBinOp(interpretation, operators.sub_sat_u);
         /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#integer-multiplication
         pub const mul = defineLaneWiseBinOp(interpretation, operators.mul);
         /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#lane-wise-integer-minimum
@@ -790,10 +810,12 @@ pub const @"i8x16.narrow_i16x8_u" = defineNarrowingOp(i16, u8);
 pub const @"i8x16.shl" = i8x16_int_ops.shl;
 pub const @"i8x16.shr_s" = i8x16_int_ops.shr_s;
 pub const @"i8x16.shr_u" = i8x16_int_ops.shr_u;
-
 pub const @"i8x16.add" = i8x16_int_ops.add;
+pub const @"i8x16.add_sat_s" = i8x16_int_ops.add_sat_s;
+pub const @"i8x16.add_sat_u" = i8x16_int_ops.add_sat_u;
 pub const @"i8x16.sub" = i8x16_int_ops.sub;
-
+pub const @"i8x16.sub_sat_s" = i8x16_int_ops.sub_sat_s;
+pub const @"i8x16.sub_sat_u" = i8x16_int_ops.sub_sat_u;
 pub const @"i8x16.mul" = i8x16_int_ops.mul;
 pub const @"i8x16.min_s" = i8x16_int_ops.min_s;
 pub const @"i8x16.min_u" = i8x16_int_ops.min_u;
@@ -821,8 +843,11 @@ pub const @"i16x8.shr_s" = i16x8_int_ops.shr_s;
 pub const @"i16x8.shr_u" = i16x8_int_ops.shr_u;
 
 pub const @"i16x8.add" = i16x8_int_ops.add;
+pub const @"i16x8.add_sat_s" = i16x8_int_ops.add_sat_s;
+pub const @"i16x8.add_sat_u" = i16x8_int_ops.add_sat_u;
 pub const @"i16x8.sub" = i16x8_int_ops.sub;
-
+pub const @"i16x8.sub_sat_s" = i16x8_int_ops.sub_sat_s;
+pub const @"i16x8.sub_sat_u" = i16x8_int_ops.sub_sat_u;
 pub const @"i16x8.mul" = i16x8_int_ops.mul;
 pub const @"i16x8.min_s" = i16x8_int_ops.min_s;
 pub const @"i16x8.min_u" = i16x8_int_ops.min_u;
