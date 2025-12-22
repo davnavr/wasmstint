@@ -833,6 +833,69 @@ pub const @"i64x2.add" = i64x2_int_ops.add;
 pub const @"i64x2.sub" = i64x2_int_ops.sub;
 pub const @"i64x2.mul" = i64x2_int_ops.mul;
 
+/// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#floating-point-arithmetic
+fn floatOpcodeHandlers(comptime F: type) type {
+    return struct {
+        const interpretation = V128.Interpretation.fromLaneType(F);
+        const Floats = interpretation.Type();
+
+        // Copied from `handlers.zig`
+        //const I = std.meta.Int(.unsigned, @typeInfo(F).float.bits);
+        //const Ints = @Vector(interpretation.laneCount(), I);
+        //const canonical_nan_bit: N = 1 << (std.math.floatMantissaBits(F) - 1);
+        //const precise_int_limit = 1 << (std.math.floatMantissaBits(F) + 1);
+
+        const operators = struct {
+            fn neg(z: Floats) Floats {
+                return -z;
+            }
+
+            fn sqrt(z: Floats) Floats {
+                return @sqrt(z);
+            }
+
+            fn add(z_1: Floats, z_2: Floats) Floats {
+                return z_1 + z_2;
+            }
+
+            fn sub(z_1: Floats, z_2: Floats) Floats {
+                return z_1 - z_2;
+            }
+
+            fn mul(z_1: Floats, z_2: Floats) Floats {
+                return z_1 * z_2;
+            }
+
+            fn div(z_1: Floats, z_2: Floats) Floats {
+                return z_1 / z_2;
+            }
+        };
+
+        const neg = defineUnaryOp(interpretation, operators.neg);
+        const sqrt = defineUnaryOp(interpretation, operators.sqrt);
+        const add = defineLaneWiseBinOp(interpretation, operators.add);
+        const sub = defineLaneWiseBinOp(interpretation, operators.sub);
+        const mul = defineLaneWiseBinOp(interpretation, operators.mul);
+        const div = defineLaneWiseBinOp(interpretation, operators.div);
+    };
+}
+
+const f32x4_arith_ops = floatOpcodeHandlers(f32);
+pub const @"f32x4.neg" = f32x4_arith_ops.neg;
+pub const @"f32x4.sqrt" = f32x4_arith_ops.sqrt;
+pub const @"f32x4.add" = f32x4_arith_ops.add;
+pub const @"f32x4.sub" = f32x4_arith_ops.sub;
+pub const @"f32x4.mul" = f32x4_arith_ops.mul;
+pub const @"f32x4.div" = f32x4_arith_ops.div;
+
+const f64x2_arith_ops = floatOpcodeHandlers(f64);
+pub const @"f64x2.neg" = f64x2_arith_ops.neg;
+pub const @"f64x2.sqrt" = f64x2_arith_ops.sqrt;
+pub const @"f64x2.add" = f64x2_arith_ops.add;
+pub const @"f64x2.sub" = f64x2_arith_ops.sub;
+pub const @"f64x2.mul" = f64x2_arith_ops.mul;
+pub const @"f64x2.div" = f64x2_arith_ops.div;
+
 const std = @import("std");
 const Interpreter = @import("../../Interpreter.zig");
 const handlers = @import("../handlers.zig");
