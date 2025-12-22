@@ -285,6 +285,20 @@ pub const V128 = extern union {
         const maximums: @Vector(8, i16) = comptime @splat(std.math.maxInt(i16));
         return V128{ .i16x8 = @intCast(@min(maximums, @max(minimums, result))) };
     }
+
+    /// - https://webassembly.github.io/spec/core/exec/numerics.html#op-ivdot
+    /// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#integer-dot-product
+    pub fn @"i32x4.dot_i16x8_s"(i_1: V128, i_2: V128) V128 {
+        const a: @Vector(8, i32) = i_1.i16x8;
+        const b: @Vector(8, i32) = i_2.i16x8;
+        const product = a *% b;
+        var result: @Vector(4, i32) = undefined;
+        inline for (0..4) |i| {
+            result[i] = product[i * 2] +% product[(i * 2) + 1];
+        }
+
+        return V128{ .i32x4 = result };
+    }
 };
 
 const std = @import("std");

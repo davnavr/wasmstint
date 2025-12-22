@@ -879,7 +879,7 @@ pub const @"i32x4.min_s" = i32x4_int_ops.min_s;
 pub const @"i32x4.min_u" = i32x4_int_ops.min_u;
 pub const @"i32x4.max_s" = i32x4_int_ops.max_s;
 pub const @"i32x4.max_u" = i32x4_int_ops.max_u;
-//pub const @"i32x4.dot_i16x8_s"
+pub const @"i32x4.dot_i16x8_s" = defineBinOp(V128.@"i32x4.dot_i16x8_s");
 pub const @"i32x4.extmul_low_i16x8_s" = integerExtensionHandlers(i16, i32).extMulLow;
 pub const @"i32x4.extmul_high_i16x8_s" = integerExtensionHandlers(i16, i32).extMulHigh;
 pub const @"i32x4.extmul_low_i16x8_u" = integerExtensionHandlers(u16, u32).extMulLow;
