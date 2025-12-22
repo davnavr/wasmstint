@@ -132,6 +132,122 @@ pub fn @"v128.const"(
     return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
 }
 
+/// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vrelop
+pub fn defineRelOp(
+    comptime interpretation: V128.Interpretation,
+    comptime op: fn (
+        c_1: interpretation.Type(),
+        c_2: interpretation.Type(),
+    ) @Vector(interpretation.laneCount(), bool),
+) OpcodeHandler {
+    return struct {
+        const results_interpretation = interpretation.laneWidth().integerInterpretation(.signed);
+
+        fn vRelOp(c_1: V128, c_2: V128) V128 {
+            const results: @Vector(interpretation.laneCount(), i1) = @bitCast(
+                @call(
+                    .always_inline,
+                    op,
+                    .{ c_1.interpret(interpretation), c_2.interpret(interpretation) },
+                ),
+            );
+
+            return V128.init(
+                results_interpretation,
+                // Sign-extension fills each line with all ones or all zeroes.
+                results,
+            );
+        }
+
+        const vRelOpHandler = defineBinOp(vRelOp);
+    }.vRelOpHandler;
+}
+
+/// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#comparisons
+fn laneWiseComparisonHandlers(comptime interpretation: V128.Interpretation) type {
+    return struct {
+        const Vec = interpretation.Type();
+        const Results = @Vector(interpretation.laneCount(), bool);
+
+        const operators = struct {
+            fn eq(a: Vec, b: Vec) Results {
+                return a == b;
+            }
+
+            fn ne(a: Vec, b: Vec) Results {
+                return a != b;
+            }
+
+            fn lt(a: Vec, b: Vec) Results {
+                return a < b;
+            }
+
+            fn gt(a: Vec, b: Vec) Results {
+                return a > b;
+            }
+
+            fn le(a: Vec, b: Vec) Results {
+                return a <= b;
+            }
+
+            fn ge(a: Vec, b: Vec) Results {
+                return a >= b;
+            }
+        };
+
+        const eq = defineRelOp(interpretation, operators.eq);
+        const ne = defineRelOp(interpretation, operators.ne);
+        const lt = defineRelOp(interpretation, operators.lt);
+        const gt = defineRelOp(interpretation, operators.gt);
+        const le = defineRelOp(interpretation, operators.le);
+        const ge = defineRelOp(interpretation, operators.ge);
+    };
+}
+
+pub const @"i8x16.eq" = laneWiseComparisonHandlers(.i8).eq;
+pub const @"i8x16.ne" = laneWiseComparisonHandlers(.i8).ne;
+pub const @"i8x16.lt_s" = laneWiseComparisonHandlers(.i8).lt;
+pub const @"i8x16.lt_u" = laneWiseComparisonHandlers(.u8).lt;
+pub const @"i8x16.gt_s" = laneWiseComparisonHandlers(.i8).gt;
+pub const @"i8x16.gt_u" = laneWiseComparisonHandlers(.u8).gt;
+pub const @"i8x16.le_s" = laneWiseComparisonHandlers(.i8).le;
+pub const @"i8x16.le_u" = laneWiseComparisonHandlers(.u8).le;
+pub const @"i8x16.ge_s" = laneWiseComparisonHandlers(.i8).ge;
+pub const @"i8x16.ge_u" = laneWiseComparisonHandlers(.u8).ge;
+
+pub const @"i16x8.eq" = laneWiseComparisonHandlers(.i16).eq;
+pub const @"i16x8.ne" = laneWiseComparisonHandlers(.i16).ne;
+pub const @"i16x8.lt_s" = laneWiseComparisonHandlers(.i16).lt;
+pub const @"i16x8.lt_u" = laneWiseComparisonHandlers(.u16).lt;
+pub const @"i16x8.gt_s" = laneWiseComparisonHandlers(.i16).gt;
+pub const @"i16x8.gt_u" = laneWiseComparisonHandlers(.u16).gt;
+pub const @"i16x8.le_s" = laneWiseComparisonHandlers(.i16).le;
+pub const @"i16x8.le_u" = laneWiseComparisonHandlers(.u16).le;
+pub const @"i16x8.ge_s" = laneWiseComparisonHandlers(.i16).ge;
+pub const @"i16x8.ge_u" = laneWiseComparisonHandlers(.u16).ge;
+
+pub const @"i32x4.eq" = laneWiseComparisonHandlers(.i32).eq;
+pub const @"i32x4.ne" = laneWiseComparisonHandlers(.i32).ne;
+pub const @"i32x4.lt_s" = laneWiseComparisonHandlers(.i32).lt;
+pub const @"i32x4.lt_u" = laneWiseComparisonHandlers(.u32).lt;
+pub const @"i32x4.gt_s" = laneWiseComparisonHandlers(.i32).gt;
+pub const @"i32x4.gt_u" = laneWiseComparisonHandlers(.u32).gt;
+pub const @"i32x4.le_s" = laneWiseComparisonHandlers(.i32).le;
+pub const @"i32x4.le_u" = laneWiseComparisonHandlers(.u32).le;
+pub const @"i32x4.ge_s" = laneWiseComparisonHandlers(.i32).ge;
+pub const @"i32x4.ge_u" = laneWiseComparisonHandlers(.u32).ge;
+
+pub const @"i64x2.eq" = laneWiseComparisonHandlers(.i64).eq;
+pub const @"i64x2.ne" = laneWiseComparisonHandlers(.i64).ne;
+pub const @"i64x2.lt_s" = laneWiseComparisonHandlers(.i64).lt;
+pub const @"i64x2.lt_u" = laneWiseComparisonHandlers(.u64).lt;
+pub const @"i64x2.gt_s" = laneWiseComparisonHandlers(.i64).gt;
+pub const @"i64x2.gt_u" = laneWiseComparisonHandlers(.u64).gt;
+pub const @"i64x2.le_s" = laneWiseComparisonHandlers(.i64).le;
+pub const @"i64x2.le_u" = laneWiseComparisonHandlers(.u64).le;
+pub const @"i64x2.ge_s" = laneWiseComparisonHandlers(.i64).ge;
+pub const @"i64x2.ge_u" = laneWiseComparisonHandlers(.u64).ge;
+
 pub fn @"v128.not"(
     ip: Ip,
     sp: Sp,
@@ -567,84 +683,84 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
     };
 }
 
-const i8x16_opcode_handlers = integerOpcodeHandlers(@Vector(16, i8));
-const i16x8_opcode_handlers = integerOpcodeHandlers(@Vector(8, i16));
-const i32x4_opcode_handlers = integerOpcodeHandlers(@Vector(4, i32));
-const i64x2_opcode_handlers = integerOpcodeHandlers(@Vector(2, i64));
+const i8x16_int_ops = integerOpcodeHandlers(@Vector(16, i8));
+const i16x8_int_ops = integerOpcodeHandlers(@Vector(8, i16));
+const i32x4_int_ops = integerOpcodeHandlers(@Vector(4, i32));
+const i64x2_int_ops = integerOpcodeHandlers(@Vector(2, i64));
 
-pub const @"i8x16.abs" = i8x16_opcode_handlers.abs;
-pub const @"i8x16.neg" = i8x16_opcode_handlers.neg;
-pub const @"i8x16.popcnt" = i8x16_opcode_handlers.popcnt;
-pub const @"i8x16.all_true" = i8x16_opcode_handlers.all_true;
-pub const @"i8x16.bitmask" = i8x16_opcode_handlers.bitmask;
+pub const @"i8x16.abs" = i8x16_int_ops.abs;
+pub const @"i8x16.neg" = i8x16_int_ops.neg;
+pub const @"i8x16.popcnt" = i8x16_int_ops.popcnt;
+pub const @"i8x16.all_true" = i8x16_int_ops.all_true;
+pub const @"i8x16.bitmask" = i8x16_int_ops.bitmask;
 pub const @"i8x16.narrow_i16x8_s" = defineNarrowingOp(i16, i8);
 pub const @"i8x16.narrow_i16x8_u" = defineNarrowingOp(i16, u8);
 
-pub const @"i8x16.shl" = i8x16_opcode_handlers.shl;
-pub const @"i8x16.shr_s" = i8x16_opcode_handlers.shr_s;
-pub const @"i8x16.shr_u" = i8x16_opcode_handlers.shr_u;
+pub const @"i8x16.shl" = i8x16_int_ops.shl;
+pub const @"i8x16.shr_s" = i8x16_int_ops.shr_s;
+pub const @"i8x16.shr_u" = i8x16_int_ops.shr_u;
 
-pub const @"i8x16.add" = i8x16_opcode_handlers.add;
-pub const @"i8x16.sub" = i8x16_opcode_handlers.sub;
+pub const @"i8x16.add" = i8x16_int_ops.add;
+pub const @"i8x16.sub" = i8x16_int_ops.sub;
 
-pub const @"i8x16.mul" = i8x16_opcode_handlers.mul;
-pub const @"i8x16.min_s" = i8x16_opcode_handlers.min_s;
-pub const @"i8x16.min_u" = i8x16_opcode_handlers.min_u;
-pub const @"i8x16.max_s" = i8x16_opcode_handlers.max_s;
-pub const @"i8x16.max_u" = i8x16_opcode_handlers.max_u;
-pub const @"i8x16.avgr_u" = i8x16_opcode_handlers.avgr_u;
+pub const @"i8x16.mul" = i8x16_int_ops.mul;
+pub const @"i8x16.min_s" = i8x16_int_ops.min_s;
+pub const @"i8x16.min_u" = i8x16_int_ops.min_u;
+pub const @"i8x16.max_s" = i8x16_int_ops.max_s;
+pub const @"i8x16.max_u" = i8x16_int_ops.max_u;
+pub const @"i8x16.avgr_u" = i8x16_int_ops.avgr_u;
 
-pub const @"i16x8.abs" = i16x8_opcode_handlers.abs;
-pub const @"i16x8.neg" = i16x8_opcode_handlers.neg;
-pub const @"i16x8.all_true" = i16x8_opcode_handlers.all_true;
-pub const @"i16x8.bitmask" = i16x8_opcode_handlers.bitmask;
+pub const @"i16x8.abs" = i16x8_int_ops.abs;
+pub const @"i16x8.neg" = i16x8_int_ops.neg;
+pub const @"i16x8.all_true" = i16x8_int_ops.all_true;
+pub const @"i16x8.bitmask" = i16x8_int_ops.bitmask;
 pub const @"i16x8.narrow_i32x4_s" = defineNarrowingOp(i32, i16);
 pub const @"i16x8.narrow_i32x4_u" = defineNarrowingOp(i32, u16);
 
-pub const @"i16x8.shl" = i16x8_opcode_handlers.shl;
-pub const @"i16x8.shr_s" = i16x8_opcode_handlers.shr_s;
-pub const @"i16x8.shr_u" = i16x8_opcode_handlers.shr_u;
+pub const @"i16x8.shl" = i16x8_int_ops.shl;
+pub const @"i16x8.shr_s" = i16x8_int_ops.shr_s;
+pub const @"i16x8.shr_u" = i16x8_int_ops.shr_u;
 
-pub const @"i16x8.add" = i16x8_opcode_handlers.add;
-pub const @"i16x8.sub" = i16x8_opcode_handlers.sub;
+pub const @"i16x8.add" = i16x8_int_ops.add;
+pub const @"i16x8.sub" = i16x8_int_ops.sub;
 
-pub const @"i16x8.mul" = i16x8_opcode_handlers.mul;
-pub const @"i16x8.min_s" = i16x8_opcode_handlers.min_s;
-pub const @"i16x8.min_u" = i16x8_opcode_handlers.min_u;
-pub const @"i16x8.max_s" = i16x8_opcode_handlers.max_s;
-pub const @"i16x8.max_u" = i16x8_opcode_handlers.max_u;
-pub const @"i16x8.avgr_u" = i16x8_opcode_handlers.avgr_u;
+pub const @"i16x8.mul" = i16x8_int_ops.mul;
+pub const @"i16x8.min_s" = i16x8_int_ops.min_s;
+pub const @"i16x8.min_u" = i16x8_int_ops.min_u;
+pub const @"i16x8.max_s" = i16x8_int_ops.max_s;
+pub const @"i16x8.max_u" = i16x8_int_ops.max_u;
+pub const @"i16x8.avgr_u" = i16x8_int_ops.avgr_u;
 
-pub const @"i32x4.abs" = i32x4_opcode_handlers.abs;
-pub const @"i32x4.neg" = i32x4_opcode_handlers.neg;
-pub const @"i32x4.all_true" = i32x4_opcode_handlers.all_true;
-pub const @"i32x4.bitmask" = i32x4_opcode_handlers.bitmask;
+pub const @"i32x4.abs" = i32x4_int_ops.abs;
+pub const @"i32x4.neg" = i32x4_int_ops.neg;
+pub const @"i32x4.all_true" = i32x4_int_ops.all_true;
+pub const @"i32x4.bitmask" = i32x4_int_ops.bitmask;
 
-pub const @"i32x4.shl" = i32x4_opcode_handlers.shl;
-pub const @"i32x4.shr_s" = i32x4_opcode_handlers.shr_s;
-pub const @"i32x4.shr_u" = i32x4_opcode_handlers.shr_u;
+pub const @"i32x4.shl" = i32x4_int_ops.shl;
+pub const @"i32x4.shr_s" = i32x4_int_ops.shr_s;
+pub const @"i32x4.shr_u" = i32x4_int_ops.shr_u;
 
-pub const @"i32x4.add" = i32x4_opcode_handlers.add;
-pub const @"i32x4.sub" = i32x4_opcode_handlers.sub;
+pub const @"i32x4.add" = i32x4_int_ops.add;
+pub const @"i32x4.sub" = i32x4_int_ops.sub;
 
-pub const @"i32x4.mul" = i32x4_opcode_handlers.mul;
-pub const @"i32x4.min_s" = i32x4_opcode_handlers.min_s;
-pub const @"i32x4.min_u" = i32x4_opcode_handlers.min_u;
-pub const @"i32x4.max_s" = i32x4_opcode_handlers.max_s;
-pub const @"i32x4.max_u" = i32x4_opcode_handlers.max_u;
+pub const @"i32x4.mul" = i32x4_int_ops.mul;
+pub const @"i32x4.min_s" = i32x4_int_ops.min_s;
+pub const @"i32x4.min_u" = i32x4_int_ops.min_u;
+pub const @"i32x4.max_s" = i32x4_int_ops.max_s;
+pub const @"i32x4.max_u" = i32x4_int_ops.max_u;
 
-pub const @"i64x2.abs" = i64x2_opcode_handlers.abs;
-pub const @"i64x2.neg" = i64x2_opcode_handlers.neg;
-pub const @"i64x2.all_true" = i64x2_opcode_handlers.all_true;
-pub const @"i64x2.bitmask" = i64x2_opcode_handlers.bitmask;
+pub const @"i64x2.abs" = i64x2_int_ops.abs;
+pub const @"i64x2.neg" = i64x2_int_ops.neg;
+pub const @"i64x2.all_true" = i64x2_int_ops.all_true;
+pub const @"i64x2.bitmask" = i64x2_int_ops.bitmask;
 
-pub const @"i64x2.shl" = i64x2_opcode_handlers.shl;
-pub const @"i64x2.shr_s" = i64x2_opcode_handlers.shr_s;
-pub const @"i64x2.shr_u" = i64x2_opcode_handlers.shr_u;
+pub const @"i64x2.shl" = i64x2_int_ops.shl;
+pub const @"i64x2.shr_s" = i64x2_int_ops.shr_s;
+pub const @"i64x2.shr_u" = i64x2_int_ops.shr_u;
 
-pub const @"i64x2.add" = i64x2_opcode_handlers.add;
-pub const @"i64x2.sub" = i64x2_opcode_handlers.sub;
-pub const @"i64x2.mul" = i64x2_opcode_handlers.mul;
+pub const @"i64x2.add" = i64x2_int_ops.add;
+pub const @"i64x2.sub" = i64x2_int_ops.sub;
+pub const @"i64x2.mul" = i64x2_int_ops.mul;
 
 const std = @import("std");
 const Interpreter = @import("../../Interpreter.zig");
