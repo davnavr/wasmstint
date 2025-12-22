@@ -553,6 +553,23 @@ fn resultIntegerVectorMatches(
     );
 }
 
+fn failFloatVectorLaneMismatch(
+    output: Output,
+    comptime lane_interpretation: V128.Interpretation,
+    expected: *const Parser.Command.Expected.FloatVec(
+        lane_interpretation.laneCount(),
+        @typeInfo(lane_interpretation.Type()).vector.child,
+    ),
+    actual: V128,
+    lane_idx: usize,
+) Error {
+    return failFmt(
+        output,
+        "vector values are not equal at lane {d}:\nexpected: {f}\n  actual: {f}\n",
+        .{ lane_idx, expected, actual.formatter(lane_interpretation) },
+    );
+}
+
 fn resultFloatVectorMatches(
     comptime lane_interpretation: V128.Interpretation,
     expected: *const Parser.Command.Expected.FloatVec(
@@ -569,17 +586,34 @@ fn resultFloatVectorMatches(
         @as([lane_interpretation.laneCount()]FloatType, actual_lanes),
         expected.tags,
         expected.raw_values,
-    ) |actual_value, expected_tag, expected_value| {
+        0..,
+    ) |actual_value, expected_tag, expected_value, lane_idx| {
         const expected_nan: Parser.Command.Expected.Nan = switch (expected_tag) {
             .value => {
-                try resultFloatMatchesBits(expected_value, actual_value, index, output);
+                resultFloatMatchesBits(expected_value, actual_value, index, output) catch {
+                    return failFloatVectorLaneMismatch(
+                        output,
+                        lane_interpretation,
+                        expected,
+                        actual,
+                        lane_idx,
+                    );
+                };
                 continue;
             },
             .canonical_nan => .canonical,
             .arithmetic_nan => .arithmetic,
         };
 
-        try resultFloatMatchesNan(expected_nan, actual_value, index, output);
+        resultFloatMatchesNan(expected_nan, actual_value, index, output) catch {
+            return failFloatVectorLaneMismatch(
+                output,
+                lane_interpretation,
+                expected,
+                actual,
+                lane_idx,
+            );
+        };
     }
 }
 

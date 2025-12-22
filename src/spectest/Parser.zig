@@ -507,6 +507,34 @@ pub const Command = struct {
             return struct {
                 tags: [len]FloatTag,
                 raw_values: [len]@Int(.unsigned, @typeInfo(F).float.bits),
+
+                const Self = @This();
+
+                const interpretation = V128.Interpretation.fromLaneType(F);
+
+                pub fn format(vec: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+                    if (std.mem.indexOfScalar(FloatTag, &vec.tags, .canonical_nan) == null and
+                        std.mem.indexOfScalar(FloatTag, &vec.tags, .arithmetic_nan) == null)
+                    {
+                        try V128.init(interpretation, @as([len]F, @bitCast(vec.raw_values)))
+                            .formatter(interpretation).format(writer);
+                    } else {
+                        try writer.writeAll("(v128.const " ++ comptime interpretation.fieldName());
+                        for (0..len) |i| {
+                            try writer.writeByte(' ');
+                            switch (vec.tags[i]) {
+                                .value => try @unionInit(
+                                    @import("wasmstint").Interpreter.TaggedValue,
+                                    @typeName(F),
+                                    @as(F, @bitCast(vec.raw_values[i])),
+                                ).format(writer),
+                                .arithmetic_nan => try writer.writeAll("nan:arithmetic"),
+                                .canonical_nan => try writer.writeAll("nan:canonical"),
+                            }
+                        }
+                        try writer.writeByte(')');
+                    }
+                }
             };
         }
     };
