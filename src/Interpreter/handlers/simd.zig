@@ -587,6 +587,7 @@ pub const @"i8x16.shr_u" = i8x16_opcode_handlers.shr_u;
 pub const @"i8x16.add" = i8x16_opcode_handlers.add;
 pub const @"i8x16.sub" = i8x16_opcode_handlers.sub;
 
+pub const @"i8x16.mul" = i8x16_opcode_handlers.mul;
 pub const @"i8x16.min_s" = i8x16_opcode_handlers.min_s;
 pub const @"i8x16.min_u" = i8x16_opcode_handlers.min_u;
 pub const @"i8x16.max_s" = i8x16_opcode_handlers.max_s;
@@ -607,6 +608,7 @@ pub const @"i16x8.shr_u" = i16x8_opcode_handlers.shr_u;
 pub const @"i16x8.add" = i16x8_opcode_handlers.add;
 pub const @"i16x8.sub" = i16x8_opcode_handlers.sub;
 
+pub const @"i16x8.mul" = i16x8_opcode_handlers.mul;
 pub const @"i16x8.min_s" = i16x8_opcode_handlers.min_s;
 pub const @"i16x8.min_u" = i16x8_opcode_handlers.min_u;
 pub const @"i16x8.max_s" = i16x8_opcode_handlers.max_s;
@@ -625,6 +627,7 @@ pub const @"i32x4.shr_u" = i32x4_opcode_handlers.shr_u;
 pub const @"i32x4.add" = i32x4_opcode_handlers.add;
 pub const @"i32x4.sub" = i32x4_opcode_handlers.sub;
 
+pub const @"i32x4.mul" = i32x4_opcode_handlers.mul;
 pub const @"i32x4.min_s" = i32x4_opcode_handlers.min_s;
 pub const @"i32x4.min_u" = i32x4_opcode_handlers.min_u;
 pub const @"i32x4.max_s" = i32x4_opcode_handlers.max_s;
@@ -641,6 +644,7 @@ pub const @"i64x2.shr_u" = i64x2_opcode_handlers.shr_u;
 
 pub const @"i64x2.add" = i64x2_opcode_handlers.add;
 pub const @"i64x2.sub" = i64x2_opcode_handlers.sub;
+pub const @"i64x2.mul" = i64x2_opcode_handlers.mul;
 
 const std = @import("std");
 const Interpreter = @import("../../Interpreter.zig");
