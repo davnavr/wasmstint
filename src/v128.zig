@@ -271,6 +271,20 @@ pub const V128 = extern union {
         const interpretation = comptime lane_width.integerInterpretation(.signed);
         return @bitCast(v.interpret(interpretation) < @as(interpretation.Type(), @splat(0)));
     }
+
+    /// - https://webassembly.github.io/spec/core/exec/numerics.html#op-iq15mulrsat
+    /// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#saturating-integer-q-format-rounding-multiplication
+    pub fn @"i16x8.q15mulr_sat_s"(i_1: V128, i_2: V128) V128 {
+        const a: @Vector(8, i32) = i_1.i16x8;
+        const b: @Vector(8, i32) = i_2.i16x8;
+        const result: @Vector(8, i32) =
+            ((a * b) + comptime @as(@Vector(8, i32), @splat(0x4000))) >>
+            comptime @as(@Vector(8, i32), @splat(15));
+
+        const minimums: @Vector(8, i16) = comptime @splat(std.math.minInt(i16));
+        const maximums: @Vector(8, i16) = comptime @splat(std.math.maxInt(i16));
+        return V128{ .i16x8 = @intCast(@min(maximums, @max(minimums, result))) };
+    }
 };
 
 const std = @import("std");

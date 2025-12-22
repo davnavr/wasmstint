@@ -807,6 +807,7 @@ pub const @"i32x4.extadd_pairwise_i16x8_s" = integerExtensionHandlers(i16, i32).
 pub const @"i32x4.extadd_pairwise_i16x8_u" = integerExtensionHandlers(u16, u32).addPairWise;
 pub const @"i16x8.abs" = i16x8_int_ops.abs;
 pub const @"i16x8.neg" = i16x8_int_ops.neg;
+pub const @"i16x8.q15mulr_sat_s" = defineBinOp(V128.@"i16x8.q15mulr_sat_s");
 pub const @"i16x8.all_true" = i16x8_int_ops.all_true;
 pub const @"i16x8.bitmask" = i16x8_int_ops.bitmask;
 pub const @"i16x8.narrow_i32x4_s" = defineNarrowingOp(i32, i16);
