@@ -833,7 +833,8 @@ pub const @"i64x2.add" = i64x2_int_ops.add;
 pub const @"i64x2.sub" = i64x2_int_ops.sub;
 pub const @"i64x2.mul" = i64x2_int_ops.mul;
 
-/// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#floating-point-arithmetic
+/// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#floating-point-arithmetic
+/// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#floating-point-min-and-max
 fn floatOpcodeHandlers(comptime F: type) type {
     return struct {
         const interpretation = V128.Interpretation.fromLaneType(F);
@@ -869,6 +870,18 @@ fn floatOpcodeHandlers(comptime F: type) type {
             fn div(z_1: Floats, z_2: Floats) Floats {
                 return z_1 / z_2;
             }
+
+            /// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#pseudo-minimum
+            /// - https://webassembly.github.io/spec/core/exec/numerics.html#op-fpmin
+            fn pmin(z_1: Floats, z_2: Floats) Floats {
+                return @select(F, z_2 < z_1, z_2, z_1);
+            }
+
+            /// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#pseudo-maximum
+            /// - https://webassembly.github.io/spec/core/exec/numerics.html#op-fpmax
+            fn pmax(z_1: Floats, z_2: Floats) Floats {
+                return @select(F, z_1 < z_2, z_2, z_1);
+            }
         };
 
         const neg = defineUnaryOp(interpretation, operators.neg);
@@ -877,6 +890,9 @@ fn floatOpcodeHandlers(comptime F: type) type {
         const sub = defineLaneWiseBinOp(interpretation, operators.sub);
         const mul = defineLaneWiseBinOp(interpretation, operators.mul);
         const div = defineLaneWiseBinOp(interpretation, operators.div);
+
+        const pmin = defineLaneWiseBinOp(interpretation, operators.pmin);
+        const pmax = defineLaneWiseBinOp(interpretation, operators.pmax);
     };
 }
 
@@ -888,6 +904,9 @@ pub const @"f32x4.sub" = f32x4_arith_ops.sub;
 pub const @"f32x4.mul" = f32x4_arith_ops.mul;
 pub const @"f32x4.div" = f32x4_arith_ops.div;
 
+pub const @"f32x4.pmin" = f32x4_arith_ops.pmin;
+pub const @"f32x4.pmax" = f32x4_arith_ops.pmax;
+
 const f64x2_arith_ops = floatOpcodeHandlers(f64);
 pub const @"f64x2.neg" = f64x2_arith_ops.neg;
 pub const @"f64x2.sqrt" = f64x2_arith_ops.sqrt;
@@ -895,6 +914,9 @@ pub const @"f64x2.add" = f64x2_arith_ops.add;
 pub const @"f64x2.sub" = f64x2_arith_ops.sub;
 pub const @"f64x2.mul" = f64x2_arith_ops.mul;
 pub const @"f64x2.div" = f64x2_arith_ops.div;
+
+pub const @"f64x2.pmin" = f64x2_arith_ops.pmin;
+pub const @"f64x2.pmax" = f64x2_arith_ops.pmax;
 
 const std = @import("std");
 const Interpreter = @import("../../Interpreter.zig");
