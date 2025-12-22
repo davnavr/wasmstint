@@ -281,28 +281,61 @@ pub const Command = struct {
                         const lane_type = comptime @field(LaneType, @tagName(tag));
                         const lane_count = comptime @divExact(@as(u5, 16), lane_type.size());
                         const lane_size = comptime 8 * @as(u16, lane_type.size());
-                        const LaneInt = std.meta.Int(.signed, lane_size);
+                        const LaneInt = @Int(.signed, lane_size);
+                        const is_expected_float = T == Expected and
+                            (lane_type == .f32 or lane_type == .f64);
 
                         try parser.expectNextToken(.array_begin);
-                        var lanes: [lane_count]LaneInt = undefined;
-                        for (&lanes) |*lane_value| {
-                            const value_string = try parser.expectNextTokenString(&scratch);
-                            _ = scratch.reset(.retain_capacity);
-                            lane_value.* = @bitCast(
-                                std.fmt.parseInt(
-                                    std.meta.Int(.unsigned, lane_size),
-                                    value_string,
-                                    10,
-                                ) catch return error.MalformedJson, // bad lane value
-                            );
-                        }
-                        try parser.expectNextToken(.array_end);
+                        const v128: T = if (is_expected_float) floats: {
+                            const Float = std.meta.Float(@as(u8, lane_type.size()) * 8);
+                            var floats: Expected.FloatVec(lane_count, Float) = undefined;
+                            for (0..lane_count) |i| {
+                                const value_string = try parser.expectNextTokenString(&scratch);
+                                _ = scratch.reset(.retain_capacity);
 
-                        const interp = comptime V128.Interpretation.fromLaneType(LaneInt);
-                        break :v128 if (T == Const)
-                            T{ .v128 = V128.init(interp, lanes) }
-                        else
-                            @unionInit(T, interp.fieldName(), lanes);
+                                if (Expected.Nan.fromString(value_string)) |nan| {
+                                    floats.tags[i] = switch (nan) {
+                                        .canonical => .canonical_nan,
+                                        .arithmetic => .arithmetic_nan,
+                                    };
+                                } else {
+                                    floats.tags[i] = .value;
+                                    floats.raw_values[i] = std.fmt.parseInt(
+                                        @Int(.unsigned, lane_size),
+                                        value_string,
+                                        10,
+                                    ) catch return error.MalformedJson; // bad lane value
+                                }
+                            }
+
+                            break :floats switch (Float) {
+                                f32 => Expected{ .f32x4 = floats },
+                                f64 => Expected{ .f64x2 = floats },
+                                else => comptime unreachable,
+                            };
+                        } else values: {
+                            var lanes: [lane_count]LaneInt = undefined;
+                            for (&lanes) |*lane_value| {
+                                const value_string = try parser.expectNextTokenString(&scratch);
+                                _ = scratch.reset(.retain_capacity);
+
+                                lane_value.* = @bitCast(
+                                    std.fmt.parseInt(
+                                        @Int(.unsigned, lane_size),
+                                        value_string,
+                                        10,
+                                    ) catch return error.MalformedJson, // bad lane value
+                                );
+                            }
+
+                            const interp = comptime V128.Interpretation.fromLaneType(LaneInt);
+                            break :values if (T == Const)
+                                T{ .v128 = V128.init(interp, lanes) }
+                            else
+                                @unionInit(T, interp.fieldName(), lanes);
+                        };
+                        try parser.expectNextToken(.array_end);
+                        break :v128 v128;
                     },
                 }
             } else value: {
@@ -444,13 +477,13 @@ pub const Command = struct {
         i8x16: @Vector(16, i8),
         i16x8: @Vector(8, i16),
         i32x4: @Vector(4, i32),
-        f32x4: @Vector(4, f32),
+        f32x4: FloatVec(4, f32),
         i64x2: @Vector(2, i64),
-        f64x2: @Vector(2, f64),
+        f64x2: FloatVec(2, f64),
 
         pub const Vec = []const Expected;
 
-        pub const Nan = enum {
+        pub const Nan = enum(u2) {
             canonical,
             arithmetic,
 
@@ -463,6 +496,19 @@ pub const Command = struct {
                     null;
             }
         };
+
+        pub const FloatTag = enum(u3) {
+            value,
+            canonical_nan,
+            arithmetic_nan,
+        };
+
+        pub fn FloatVec(comptime len: u3, comptime F: type) type {
+            return struct {
+                tags: [len]FloatTag,
+                raw_values: [len]@Int(.unsigned, @typeInfo(F).float.bits),
+            };
+        }
     };
 
     pub const AssertReturn = struct {

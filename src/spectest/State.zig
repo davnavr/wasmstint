@@ -533,24 +533,54 @@ fn expectTypedValue(
         @field(value, @tagName(tag));
 }
 
-fn resultVectorMatches(
+fn resultIntegerVectorMatches(
     comptime lane_interpretation: V128.Interpretation,
     expected: lane_interpretation.Type(),
     actual: V128,
     index: usize,
     output: Output,
 ) Error!void {
-    const expected_v = V128.init(lane_interpretation, expected);
-    const comparison = expected_v.u8x16 != actual.u8x16;
-    if (@as(u16, @bitCast(comparison)) != 0) return failFmt(
+    const comparison = expected != actual.interpret(lane_interpretation);
+    if (std.simd.firstTrue(comparison)) |lane_index| return failFmt(
         output,
-        "expected {f}, got {f} at position {d}",
+        "expected {f} at index {d}, got {f} for result {d}",
         .{
-            expected_v.formatter(lane_interpretation),
+            V128.init(lane_interpretation, expected).formatter(lane_interpretation),
+            lane_index,
             actual.formatter(lane_interpretation),
             index,
         },
     );
+}
+
+fn resultFloatVectorMatches(
+    comptime lane_interpretation: V128.Interpretation,
+    expected: *const Parser.Command.Expected.FloatVec(
+        lane_interpretation.laneCount(),
+        @typeInfo(lane_interpretation.Type()).vector.child,
+    ),
+    actual: V128,
+    index: usize,
+    output: Output,
+) Error!void {
+    const actual_lanes = actual.interpret(lane_interpretation);
+    const FloatType = @typeInfo(lane_interpretation.Type()).vector.child;
+    for (
+        @as([lane_interpretation.laneCount()]FloatType, actual_lanes),
+        expected.tags,
+        expected.raw_values,
+    ) |actual_value, expected_tag, expected_value| {
+        const expected_nan: Parser.Command.Expected.Nan = switch (expected_tag) {
+            .value => {
+                try resultFloatMatchesBits(expected_value, actual_value, index, output);
+                continue;
+            },
+            .canonical_nan => .canonical,
+            .arithmetic_nan => .arithmetic,
+        };
+
+        try resultFloatMatchesNan(expected_nan, actual_value, index, output);
+    }
 }
 
 fn resultValueMatches(
@@ -621,8 +651,15 @@ fn resultValueMatches(
                 );
             }
         },
-        inline .i8x16, .i16x8, .i32x4, .i64x2, .f32x4, .f64x2 => |v| try resultVectorMatches(
+        inline .i8x16, .i16x8, .i32x4, .i64x2 => |v| try resultIntegerVectorMatches(
             @field(V128.Interpretation, @typeName(@typeInfo(@TypeOf(v)).vector.child)),
+            v,
+            try expectTypedValue(actual, .v128, index, output),
+            index,
+            output,
+        ),
+        inline .f32x4, .f64x2 => |*v, t| try resultFloatVectorMatches(
+            @field(V128.Interpretation, @tagName(t)[0..3]),
             v,
             try expectTypedValue(actual, .v128, index, output),
             index,
