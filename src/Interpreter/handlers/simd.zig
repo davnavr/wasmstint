@@ -535,6 +535,54 @@ fn defineNarrowingOp(
     }.vNarrowOpHandler;
 }
 
+/// - https://webassembly.github.io/spec/core/exec/instructions.html#exec-vcvtop
+/// - https://webassembly.github.io/spec/core/exec/numerics.html#op-vcvtop
+/// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#integer-to-integer-extension
+fn integerExtensionHandlers(
+    /// Has lanes half the width of `To`.
+    comptime From: type,
+    comptime To: type,
+) type {
+    return struct {
+        comptime {
+            std.debug.assert(@typeInfo(From).int.bits * 2 == @typeInfo(To).int.bits);
+            std.debug.assert(@typeInfo(From).int.signedness == @typeInfo(To).int.signedness);
+        }
+
+        const interpret_from = V128.Interpretation.fromLaneType(From);
+        const interpret_to = V128.Interpretation.fromLaneType(To);
+        const to_lane_count = interpret_to.laneCount();
+        const signedness = @typeInfo(From).int.signedness;
+
+        comptime {
+            std.debug.assert(to_lane_count * 2 == interpret_from.laneCount());
+        }
+
+        fn extend(lanes: @Vector(to_lane_count, From)) interpret_to.Type() {
+            return lanes; // Does zero or sign extension automatically.
+        }
+
+        fn extendLow(v: V128) V128 {
+            return V128.init(
+                interpret_to,
+                extend(std.simd.extract(v.interpret(interpret_from), 0, to_lane_count)),
+            );
+        }
+
+        fn extendHigh(v: V128) V128 {
+            return V128.init(
+                interpret_to,
+                extend(
+                    std.simd.extract(v.interpret(interpret_from), to_lane_count, to_lane_count),
+                ),
+            );
+        }
+
+        const low = defineUnaryOrConversionOp(extendLow);
+        const high = defineUnaryOrConversionOp(extendHigh);
+    };
+}
+
 fn integerOpcodeHandlers(comptime Signed: type) type {
     return struct {
         const SignedInt = @typeInfo(Signed).vector.child;
@@ -730,7 +778,10 @@ pub const @"i16x8.all_true" = i16x8_int_ops.all_true;
 pub const @"i16x8.bitmask" = i16x8_int_ops.bitmask;
 pub const @"i16x8.narrow_i32x4_s" = defineNarrowingOp(i32, i16);
 pub const @"i16x8.narrow_i32x4_u" = defineNarrowingOp(i32, u16);
-
+pub const @"i16x8.extend_low_i8x16_s" = integerExtensionHandlers(i8, i16).low;
+pub const @"i16x8.extend_low_i8x16_u" = integerExtensionHandlers(u8, u16).low;
+pub const @"i16x8.extend_high_i8x16_s" = integerExtensionHandlers(i8, i16).high;
+pub const @"i16x8.extend_high_i8x16_u" = integerExtensionHandlers(u8, u16).high;
 pub const @"i16x8.shl" = i16x8_int_ops.shl;
 pub const @"i16x8.shr_s" = i16x8_int_ops.shr_s;
 pub const @"i16x8.shr_u" = i16x8_int_ops.shr_u;
@@ -749,7 +800,10 @@ pub const @"i32x4.abs" = i32x4_int_ops.abs;
 pub const @"i32x4.neg" = i32x4_int_ops.neg;
 pub const @"i32x4.all_true" = i32x4_int_ops.all_true;
 pub const @"i32x4.bitmask" = i32x4_int_ops.bitmask;
-
+pub const @"i32x4.extend_low_i16x8_s" = integerExtensionHandlers(i16, i32).low;
+pub const @"i32x4.extend_low_i16x8_u" = integerExtensionHandlers(u16, u32).low;
+pub const @"i32x4.extend_high_i16x8_s" = integerExtensionHandlers(i16, i32).high;
+pub const @"i32x4.extend_high_i16x8_u" = integerExtensionHandlers(u16, u32).high;
 pub const @"i32x4.shl" = i32x4_int_ops.shl;
 pub const @"i32x4.shr_s" = i32x4_int_ops.shr_s;
 pub const @"i32x4.shr_u" = i32x4_int_ops.shr_u;
@@ -767,7 +821,10 @@ pub const @"i64x2.abs" = i64x2_int_ops.abs;
 pub const @"i64x2.neg" = i64x2_int_ops.neg;
 pub const @"i64x2.all_true" = i64x2_int_ops.all_true;
 pub const @"i64x2.bitmask" = i64x2_int_ops.bitmask;
-
+pub const @"i64x2.extend_low_i32x4_s" = integerExtensionHandlers(i32, i64).low;
+pub const @"i64x2.extend_low_i32x4_u" = integerExtensionHandlers(u32, u64).low;
+pub const @"i64x2.extend_high_i32x4_s" = integerExtensionHandlers(i32, i64).high;
+pub const @"i64x2.extend_high_i32x4_u" = integerExtensionHandlers(u32, u64).high;
 pub const @"i64x2.shl" = i64x2_int_ops.shl;
 pub const @"i64x2.shr_s" = i64x2_int_ops.shr_s;
 pub const @"i64x2.shr_u" = i64x2_int_ops.shr_u;
