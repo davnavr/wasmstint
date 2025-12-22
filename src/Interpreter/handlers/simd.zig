@@ -4,7 +4,7 @@
 /// Calculates a poitner to the first byte of the instruction based on a pointer to the first byte
 /// after it's opcode.
 ///
-/// NOTE: Might have to move this to `../handlers.zig` in case other prefixed opcodes use LEB128.
+/// NOTE: Move this to `../handlers.zig`, and use it to handle other prefixed opcodes.
 fn calculateTrapIp(base_ip: Ip, opcode: FDPrefixOpcode) Ip {
     var ip = base_ip - 1;
     var decoded: u32 = ip[0];
@@ -153,7 +153,7 @@ pub fn @"v128.not"(
 }
 
 /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vvbinop
-fn defineBitwiseBinOp(comptime op: fn (c_1: V128, c_2: V128) V128) OpcodeHandler {
+fn defineBinOp(comptime op: fn (c_1: V128, c_2: V128) V128) OpcodeHandler {
     return struct {
         fn vvBinOp(
             ip: Ip,
@@ -169,9 +169,7 @@ fn defineBitwiseBinOp(comptime op: fn (c_1: V128, c_2: V128) V128) OpcodeHandler
 
             const operands = vals.popTyped(&(.{.v128} ** 2));
             vals.assertRemainingCountIs(0);
-            const c_2 = operands[1];
-            const c_1 = operands[0];
-            const result = @call(.always_inline, op, .{ c_1, c_2 });
+            const result = @call(.always_inline, op, operands);
             vals.pushTyped(&.{.v128}, .{result});
 
             const instr = Instr.init(ip, eip);
@@ -180,10 +178,10 @@ fn defineBitwiseBinOp(comptime op: fn (c_1: V128, c_2: V128) V128) OpcodeHandler
     }.vvBinOp;
 }
 
-pub const @"v128.and" = defineBitwiseBinOp(V128.@"and");
-pub const @"v128.andnot" = defineBitwiseBinOp(V128.andnot);
-pub const @"v128.or" = defineBitwiseBinOp(V128.@"or");
-pub const @"v128.xor" = defineBitwiseBinOp(V128.xor);
+pub const @"v128.and" = defineBinOp(V128.@"and");
+pub const @"v128.andnot" = defineBinOp(V128.andnot);
+pub const @"v128.or" = defineBinOp(V128.@"or");
+pub const @"v128.xor" = defineBinOp(V128.xor);
 
 pub fn @"v128.bitselect"(
     ip: Ip,
@@ -226,45 +224,31 @@ pub fn @"v128.any_true"(
 }
 
 /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vbinop
-fn defineBinOp(
-    comptime opcode: FDPrefixOpcode,
+fn defineLaneWiseBinOp(
     comptime interpretation: V128.Interpretation,
     /// Function that takes two operands as an input and returns the result of the operation.
-    ///
-    /// May return an error.
-    comptime op: anytype,
-    /// Function that takes an error returned by `op` and returns a `Trap`.
-    comptime trap: anytype,
+    comptime op: fn (
+        c_1: interpretation.Type(),
+        c_2: interpretation.Type(),
+    ) interpretation.Type(),
 ) OpcodeHandler {
     return struct {
-        fn vBinOpHandler(
-            ip: Ip,
-            sp: Sp,
-            fuel: *Fuel,
-            stp: Stp,
-            locals: Locals,
-            module: runtime.ModuleInst,
-            interp: *Interpreter,
-            eip: Eip,
-        ) callconv(ohcc) Transition {
-            var vals = Stack.Values.init(sp, &interp.stack, 2, 2);
-
-            const operands = vals.popTyped(&(.{.v128} ** 2));
-            vals.assertRemainingCountIs(0);
+        fn vBinOp(
+            c_1: V128,
+            c_2: V128,
+        ) V128 {
             const field_name = comptime interpretation.fieldName();
-            const c_2 = @field(operands[1], field_name);
-            const c_1 = @field(operands[0], field_name);
-            const result = @call(.always_inline, op, .{ c_1, c_2 }) catch |e| {
-                const trap_ip = calculateTrapIp(ip, opcode);
-                const trap_info = @call(.auto, trap, .{e});
-                return Transition.trap(trap_ip, eip, sp, stp, interp, trap_info);
-            };
-
-            vals.pushTyped(&.{.v128}, .{@unionInit(V128, field_name, result)});
-
-            const instr = Instr.init(ip, eip);
-            return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
+            return V128.init(
+                interpretation,
+                @call(
+                    .always_inline,
+                    op,
+                    .{ @field(c_1, field_name), @field(c_2, field_name) },
+                ),
+            );
         }
+
+        const vBinOpHandler = defineBinOp(vBinOp);
     }.vBinOpHandler;
 }
 
@@ -417,7 +401,7 @@ fn defineNarrowingOp(
             return V128.init(interpret_to, std.simd.join(low_casted, high_casted));
         }
 
-        const vNarrowOpHandler = defineBitwiseBinOp(vNarrowOp);
+        const vNarrowOpHandler = defineBinOp(vNarrowOp);
     }.vNarrowOpHandler;
 }
 
@@ -470,34 +454,38 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
                 return @bitCast(@as(Unsigned, @bitCast(a)) >> bitShiftAmt(y));
             }
 
-            fn add(i_1: Signed, i_2: Signed) !Signed {
+            fn add(i_1: Signed, i_2: Signed) Signed {
                 return i_1 +% i_2;
             }
 
-            fn sub(i_1: Signed, i_2: Signed) !Signed {
+            fn sub(i_1: Signed, i_2: Signed) Signed {
                 return i_1 -% i_2;
             }
 
+            fn mul(i_1: Signed, i_2: Signed) Signed {
+                return i_1 *% i_2;
+            }
+
             /// https://webassembly.github.io/spec/core/exec/numerics.html#op-imin
-            fn min_s(i_1: Signed, i_2: Signed) !Signed {
+            fn min_s(i_1: Signed, i_2: Signed) Signed {
                 return @min(i_1, i_2);
             }
 
-            fn min_u(i_1: Signed, i_2: Signed) !Signed {
+            fn min_u(i_1: Signed, i_2: Signed) Signed {
                 return @bitCast(@min(@as(Unsigned, @bitCast(i_1)), @as(Unsigned, @bitCast(i_2))));
             }
 
             /// https://webassembly.github.io/spec/core/exec/numerics.html#op-imax
-            fn max_s(i_1: Signed, i_2: Signed) !Signed {
+            fn max_s(i_1: Signed, i_2: Signed) Signed {
                 return @max(i_1, i_2);
             }
 
-            fn max_u(i_1: Signed, i_2: Signed) !Signed {
+            fn max_u(i_1: Signed, i_2: Signed) Signed {
                 return @bitCast(@max(@as(Unsigned, @bitCast(i_1)), @as(Unsigned, @bitCast(i_2))));
             }
 
             /// https://webassembly.github.io/spec/core/exec/numerics.html#op-iavgr
-            fn avgr_u(i_1: Signed, i_2: Signed) !Signed {
+            fn avgr_u(i_1: Signed, i_2: Signed) Signed {
                 const Avgr = @Vector(lane_count, std.meta.Int(.unsigned, lane_width.toBits() + 1));
                 const v_1: Avgr = @as(Unsigned, @bitCast(i_1));
                 const v_2: Avgr = @as(Unsigned, @bitCast(i_2));
@@ -561,19 +549,21 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
         }
 
         /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#integer-addition
-        pub const add = defineBinOp(opcode("add"), interpretation, operators.add, undefined);
+        pub const add = defineLaneWiseBinOp(interpretation, operators.add);
 
         /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#integer-subtraction
-        pub const sub = defineBinOp(opcode("sub"), interpretation, operators.sub, undefined);
+        pub const sub = defineLaneWiseBinOp(interpretation, operators.sub);
 
+        /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#integer-multiplication
+        pub const mul = defineLaneWiseBinOp(interpretation, operators.mul);
         /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#lane-wise-integer-minimum
-        pub const min_s = defineBinOp(opcode("min_s"), interpretation, operators.min_s, undefined);
-        pub const min_u = defineBinOp(opcode("min_u"), interpretation, operators.min_u, undefined);
+        pub const min_s = defineLaneWiseBinOp(interpretation, operators.min_s);
+        pub const min_u = defineLaneWiseBinOp(interpretation, operators.min_u);
         /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#lane-wise-integer-maximum
-        pub const max_s = defineBinOp(opcode("max_s"), interpretation, operators.max_s, undefined);
-        pub const max_u = defineBinOp(opcode("max_u"), interpretation, operators.max_u, undefined);
+        pub const max_s = defineLaneWiseBinOp(interpretation, operators.max_s);
+        pub const max_u = defineLaneWiseBinOp(interpretation, operators.max_u);
         /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#lane-wise-integer-rounding-average
-        pub const avgr_u = defineBinOp(opcode("avgr_u"), interpretation, operators.avgr_u, undefined);
+        pub const avgr_u = defineLaneWiseBinOp(interpretation, operators.avgr_u);
     };
 }
 
