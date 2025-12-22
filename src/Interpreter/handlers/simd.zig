@@ -406,6 +406,25 @@ fn defineUnaryOrConversionOp(comptime op: fn (c_1: V128) V128) OpcodeHandler {
     }.unaryOrConversionHandler;
 }
 
+/// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#single-precision-floating-point-to-integer-with-saturation
+/// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#double-precision-floating-point-to-integer-with-saturation
+fn floatToIntSaturating(
+    comptime F: type,
+    comptime I: type,
+    floats: V128.Interpretation.fromLaneType(F).Type(),
+) @Vector(V128.Interpretation.fromLaneType(F).laneCount(), I) {
+    const float_interp = comptime V128.Interpretation.fromLaneType(F);
+    const lane_count = comptime float_interp.laneCount();
+
+    const zeroes: @Vector(lane_count, F) = comptime @splat(0);
+    const unbounded_no_nan: @Vector(lane_count, F) = @select(F, floats != floats, zeroes, floats);
+    var results: @Vector(lane_count, I) = undefined;
+    inline for (0..lane_count) |i| {
+        results[i] = std.math.lossyCast(I, unbounded_no_nan[i]); // no vector version available
+    }
+    return results;
+}
+
 /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#conversions
 const conversions = struct {
     fn @"f32x4.demote_f64x2_zero"(v: V128) V128 {
@@ -416,6 +435,34 @@ const conversions = struct {
     fn @"f64x2.promote_low_f32x4"(v: V128) V128 {
         const low_f32x2: @Vector(2, f32) = std.simd.extract(@as([4]f32, v.f32x4), 0, 2);
         return V128{ .f64x2 = low_f32x2 };
+    }
+
+    fn @"i32x4.trunc_sat_f32x4_s"(v: V128) V128 {
+        return V128.init(.i32, floatToIntSaturating(f32, i32, v.f32x4));
+    }
+
+    fn @"i32x4.trunc_sat_f32x4_u"(v: V128) V128 {
+        return V128.init(.u32, floatToIntSaturating(f32, u32, v.f32x4));
+    }
+
+    fn @"i32x4.trunc_sat_f64x2_s_zero"(v: V128) V128 {
+        return V128.init(
+            .i32,
+            std.simd.join(
+                floatToIntSaturating(f64, i32, v.f64x2),
+                @as(@Vector(2, i32), @splat(0)),
+            ),
+        );
+    }
+
+    fn @"i32x4.trunc_sat_f64x2_u_zero"(v: V128) V128 {
+        return V128.init(
+            .u32,
+            std.simd.join(
+                floatToIntSaturating(f64, u32, v.f64x2),
+                @as(@Vector(2, u32), @splat(0)),
+            ),
+        );
     }
 
     /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#integer-to-single-precision-floating-point
@@ -443,6 +490,10 @@ pub const @"f32x4.demote_f64x2_zero" = defineUnaryOrConversionOp(conversions.@"f
 pub const @"f64x2.promote_low_f32x4" = defineUnaryOrConversionOp(conversions.@"f64x2.promote_low_f32x4");
 pub const @"f32x4.convert_i32x4_s" = defineUnaryOrConversionOp(conversions.@"f32x4.convert_i32x4_s");
 pub const @"f32x4.convert_i32x4_u" = defineUnaryOrConversionOp(conversions.@"f32x4.convert_i32x4_u");
+pub const @"i32x4.trunc_sat_f32x4_s" = defineUnaryOrConversionOp(conversions.@"i32x4.trunc_sat_f32x4_s");
+pub const @"i32x4.trunc_sat_f32x4_u" = defineUnaryOrConversionOp(conversions.@"i32x4.trunc_sat_f32x4_u");
+pub const @"i32x4.trunc_sat_f64x2_s_zero" = defineUnaryOrConversionOp(conversions.@"i32x4.trunc_sat_f64x2_s_zero");
+pub const @"i32x4.trunc_sat_f64x2_u_zero" = defineUnaryOrConversionOp(conversions.@"i32x4.trunc_sat_f64x2_u_zero");
 pub const @"f64x2.convert_low_i32x4_s" = defineUnaryOrConversionOp(conversions.@"f64x2.convert_low_i32x4_s");
 pub const @"f64x2.convert_low_i32x4_u" = defineUnaryOrConversionOp(conversions.@"f64x2.convert_low_i32x4_u");
 
