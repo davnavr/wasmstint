@@ -119,7 +119,44 @@ pub const @"v128.load16x4_u" = loadAndExtendHandler(.@"v128.load16x4_u", u16, u3
 pub const @"v128.load32x2_s" = loadAndExtendHandler(.@"v128.load32x2_s", i32, i64);
 pub const @"v128.load32x2_u" = loadAndExtendHandler(.@"v128.load32x2_u", u32, u64);
 
-// TODO: load_splat instructions
+/// - https://webassembly.github.io/spec/core/exec/instructions.html#exec-vload-splat
+/// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#load-and-splat
+fn loadAndSplatHandler(comptime opcode: FDPrefixOpcode, comptime To: type) OpcodeHandler {
+    return struct {
+        const interpret_to = V128.Interpretation.fromLaneType(To);
+
+        fn performLoadAndSplat(
+            instr: *Instr,
+            vals: *Stack.Values,
+            fuel: *Fuel,
+            stp: Stp,
+            locals: Locals,
+            module: runtime.ModuleInst,
+            interp: *Interpreter,
+            _: void,
+            access: *[@sizeOf(To)]u8,
+        ) Transition {
+            vals.assertRemainingCountIs(0);
+            const loaded = std.mem.readInt(To, access, .little);
+            vals.pushTyped(&.{.v128}, .{V128.init(interpret_to, @splat(loaded))});
+            return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
+        }
+
+        const loadAndSplat = handlers.linearMemoryAccessor(
+            .fromByteUnits(@sizeOf(To)),
+            .{ .fd = opcode },
+            .load,
+            void,
+            handlers.nopBeforeMemoryAccess,
+            performLoadAndSplat,
+        );
+    }.loadAndSplat;
+}
+
+pub const @"v128.load8_splat" = loadAndSplatHandler(.@"v128.load8_splat", u8);
+pub const @"v128.load16_splat" = loadAndSplatHandler(.@"v128.load16_splat", u16);
+pub const @"v128.load32_splat" = loadAndSplatHandler(.@"v128.load32_splat", u32);
+pub const @"v128.load64_splat" = loadAndSplatHandler(.@"v128.load64_splat", u64);
 
 pub const @"v128.store" = handlers.linearMemoryAccessor(
     .@"16",
