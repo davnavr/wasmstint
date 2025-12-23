@@ -210,8 +210,6 @@ pub const ByteOpcode = enum(u8) {
     @"0xFD" = 0xFD,
 };
 
-// Added in some proposal?
-/// Technically a LEB128 encoded `u32`, but all of these are `<= 0x7F` for now.
 pub const FCPrefixOpcode = enum(u5) {
     @"i32.trunc_sat_f32_s" = 0,
     @"i32.trunc_sat_f32_u" = 1,

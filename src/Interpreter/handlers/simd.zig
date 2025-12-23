@@ -1,43 +1,16 @@
 //! Implementation of instructions introduced in the
 //! [fixed-width SIMD proposal](https://github.com/WebAssembly/simd).
 
-/// Calculates a poitner to the first byte of the instruction based on a pointer to the first byte
-/// after it's opcode.
-///
-/// NOTE: Move this to `../handlers.zig`, and use it to handle other prefixed opcodes.
-fn calculateTrapIp(base_ip: Ip, opcode: FDPrefixOpcode) Ip {
-    var ip = base_ip - 1;
-    var decoded: u32 = ip[0];
-    for (0..4) |_| {
-        ip -= 1;
-        std.debug.assert(decoded <= @intFromEnum(opcode)); // wrong expected opcode?
-        if (decoded == @intFromEnum(opcode)) {
-            @branchHint(.likely); // Initial SIMD proposal only introduces opcodes <= 0x7F
-            break;
-        }
-
-        decoded <<= 7;
-        decoded |= (0x7F & ip[0]);
-    } else unreachable;
-
-    std.debug.assert(ip[0] == 0xFD);
-    return ip;
-}
-
-test calculateTrapIp {
-    {
-        const bytes = [_:0x0B]u8{ 0xAA, 0xFD, 0x6B, 0xAA };
-        try std.testing.expectEqual(&bytes[1], &calculateTrapIp(bytes[3..], .@"i8x16.shl")[0]);
-    }
-    {
-        // WASM spec seems to allow over-long instruction opcodes
-        const bytes = [_:0x0B]u8{ 0xAA, 0xFD, 0xEB, 0x00, 0xAA };
-        try std.testing.expectEqual(&bytes[1], &calculateTrapIp(bytes[4..], .@"i8x16.shl")[0]);
-    }
-    {
-        const bytes = [_:0x0B]u8{ 0xAA, 0xFD, 0x0C, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0xAA };
-        try std.testing.expectEqual(&bytes[1], &calculateTrapIp(bytes[3..], .@"v128.const")[0]);
-    }
+inline fn trap(
+    base_ip: Ip,
+    comptime opcode: FDPrefixOpcode,
+    eip: Eip,
+    sp: Sp,
+    stp: Stp,
+    interp: *Interpreter,
+    info: Interpreter.Trap,
+) Transition {
+    return Transition.trap(base_ip, .{ .fd = opcode }, eip, sp, stp, interp, info);
 }
 
 pub fn @"v128.load"(
@@ -59,15 +32,15 @@ pub fn @"v128.load"(
 
     const trap_info = mem_arg.trap(base_addr, .@"16");
     const effective_addr = std.math.add(u32, base_addr, mem_arg.offset) catch {
-        return Transition.trap(calculateTrapIp(ip, .@"v128.load"), eip, sp, stp, interp, trap_info);
+        return trap(ip, .@"v128.load", eip, sp, stp, interp, trap_info);
     };
 
     const end_addr = std.math.add(u32, effective_addr, 15) catch {
-        return Transition.trap(calculateTrapIp(ip, .@"v128.load"), eip, sp, stp, interp, trap_info);
+        return trap(ip, .@"v128.load", eip, sp, stp, interp, trap_info);
     };
 
     if (mem_arg.mem.size <= end_addr) {
-        return Transition.trap(calculateTrapIp(ip, .@"v128.load"), eip, sp, stp, interp, trap_info);
+        return trap(ip, .@"v128.load", eip, sp, stp, interp, trap_info);
     }
 
     const accessed_bytes = mem_arg.mem.bytes()[effective_addr..][0..16];
@@ -97,15 +70,15 @@ pub fn @"v128.store"(
 
     const trap_info = mem_arg.trap(base_addr, .@"16");
     const effective_addr = std.math.add(u32, base_addr, mem_arg.offset) catch {
-        return Transition.trap(calculateTrapIp(ip, .@"v128.store"), eip, sp, stp, interp, trap_info);
+        return trap(ip, .@"v128.store", eip, sp, stp, interp, trap_info);
     };
 
     const end_addr = std.math.add(u32, effective_addr, 15) catch {
-        return Transition.trap(calculateTrapIp(ip, .@"v128.store"), eip, sp, stp, interp, trap_info);
+        return trap(ip, .@"v128.store", eip, sp, stp, interp, trap_info);
     };
 
     if (mem_arg.mem.size <= end_addr) {
-        return Transition.trap(calculateTrapIp(ip, .@"v128.store"), eip, sp, stp, interp, trap_info);
+        return trap(ip, .@"v128.store", eip, sp, stp, interp, trap_info);
     }
 
     mem_arg.mem.bytes()[effective_addr..][0..16].* = to_store.u8x16;
@@ -1266,6 +1239,5 @@ const Transition = handlers.Transition;
 const MemArg = handlers.MemArg;
 const Value = @import("../value.zig").Value;
 const V128 = @import("../../v128.zig").V128;
-const opcodes = @import("../../opcodes.zig");
-const FDPrefixOpcode = opcodes.FDPrefixOpcode;
+const FDPrefixOpcode = @import("../../opcodes.zig").FDPrefixOpcode;
 const runtime = @import("../../runtime.zig");
