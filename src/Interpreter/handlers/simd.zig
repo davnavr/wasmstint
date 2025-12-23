@@ -157,7 +157,48 @@ pub fn @"i8x16.shuffle"(
 
 pub const @"i8x16.swizzle" = defineBinOp(V128.@"i8x16.swizzle");
 
-// TODO: splat instructions
+/// - https://webassembly.github.io/spec/core/exec/instructions.html#exec-vsplat
+/// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#create-vector-with-identical-lanes
+pub fn defineSplatHandler(
+    comptime value: Value.Tag,
+    comptime To: type,
+) OpcodeHandler {
+    return struct {
+        const to_interpret = V128.Interpretation.fromLaneType(To);
+
+        fn splat(
+            ip: Ip,
+            sp: Sp,
+            fuel: *Fuel,
+            stp: Stp,
+            locals: Locals,
+            module: runtime.ModuleInst,
+            interp: *Interpreter,
+            eip: Eip,
+        ) callconv(ohcc) Transition {
+            var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
+
+            const c = vals.popTyped(&.{value})[0];
+            vals.assertRemainingCountIs(0);
+            const scalar: To = switch (To) {
+                i8, i16 => @truncate(c),
+                i32, i64, f32, f64 => c,
+                else => comptime unreachable,
+            };
+            vals.pushArray(1)[0] = Value{ .v128 = V128.init(to_interpret, @splat(scalar)) };
+
+            const instr = Instr.init(ip, eip);
+            return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
+        }
+    }.splat;
+}
+
+pub const @"i8x16.splat" = defineSplatHandler(.i32, i8);
+pub const @"i16x8.splat" = defineSplatHandler(.i32, i16);
+pub const @"i32x4.splat" = defineSplatHandler(.i32, i32);
+pub const @"i64x2.splat" = defineSplatHandler(.i64, i64);
+pub const @"f32x4.splat" = defineSplatHandler(.f32, f32);
+pub const @"f64x2.splat" = defineSplatHandler(.f64, f64);
 
 /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vrelop
 pub fn defineRelOp(
