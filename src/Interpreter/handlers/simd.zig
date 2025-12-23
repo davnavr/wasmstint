@@ -132,6 +132,33 @@ pub fn @"v128.const"(
     return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
 }
 
+pub fn @"i8x16.shuffle"(
+    ip: Ip,
+    sp: Sp,
+    fuel: *Fuel,
+    stp: Stp,
+    locals: Locals,
+    module: runtime.ModuleInst,
+    interp: *Interpreter,
+    eip: Eip,
+) callconv(ohcc) Transition {
+    var instr = Instr.init(ip, eip);
+    var vals = Stack.Values.init(sp, &interp.stack, 2, 2);
+
+    const indices: *const [16]V128.ShuffleIndex = @ptrCast(instr.readByteArray(16));
+    const operands = vals.popTyped(&(.{.v128} ** 2));
+    vals.assertRemainingCountIs(0);
+    vals.pushArray(1)[0] = Value{
+        .v128 = V128.@"i8x16.shuffle"(operands[0], operands[1], indices.*),
+    };
+
+    return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
+}
+
+pub const @"i8x16.swizzle" = defineBinOp(V128.@"i8x16.swizzle");
+
+// TODO: splat instructions
+
 /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vrelop
 pub fn defineRelOp(
     comptime interpretation: V128.Interpretation,

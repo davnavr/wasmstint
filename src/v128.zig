@@ -299,6 +299,57 @@ pub const V128 = extern union {
 
         return V128{ .i32x4 = result };
     }
+
+    pub const ShuffleIndex = packed struct(u8) {
+        index: u4,
+        source: enum(i1) { a = 0, b = -1 },
+        zero_padding: enum(u3) { zero = 0 } = .zero,
+    };
+
+    /// - https://webassembly.github.io/spec/core/exec/numerics.html#op-ivshuffle
+    /// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#shuffling-using-immediate-indices
+    pub fn @"i8x16.shuffle"(i_1: V128, i_2: V128, indices: [16]ShuffleIndex) V128 {
+        // Can't use Zig `@shuffle`, requires a `comptime mask`.
+        // Semantics are also different from WASM, with negative indices used to select from `b`.
+        const a: [16]u8 = i_1.u8x16;
+        const b: [16]u8 = i_2.u8x16;
+        var result: @Vector(16, u8) = undefined;
+        inline for (indices, 0..16) |src_idx, dst_idx| {
+            if (builtin.mode == .Debug) {
+                _ = src_idx.zero_padding;
+            }
+
+            // TODO: See if branchless code here affects code generation
+            // const a_value = a[src_idx.index] & mask_away_a_or_something;
+            // const b_value = b[src_idx.index] & mask_away_b_or_something;
+            const a_value = a[src_idx.index];
+            const b_value = b[src_idx.index];
+            result[dst_idx] = switch (src_idx.source) {
+                .a => a_value,
+                .b => b_value,
+            };
+        }
+
+        return V128{ .u8x16 = result };
+    }
+
+    /// - https://webassembly.github.io/spec/core/exec/numerics.html#op-ivswizzle
+    /// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#swizzling-using-variable-indices
+    pub fn @"i8x16.swizzle"(values: V128, indices: V128) V128 {
+        // No equivalent Zig builtin.
+        const src: [16]i8 = values.i8x16;
+        const mask = indices.interpret(.u8);
+        // TODO: check that this compiles nicely
+        var result: @Vector(16, i8) = @splat(0);
+        inline for (0..16) |dst_idx| {
+            const src_idx = mask[dst_idx];
+            if (src_idx < 16) {
+                result[dst_idx] = src[src_idx];
+            }
+        }
+
+        return V128{ .i8x16 = result };
+    }
 };
 
 const std = @import("std");
