@@ -1129,14 +1129,15 @@ fn validateStoreInstr(
 
 fn validateStoreLaneInstr(
     reader: *Reader,
+    natural_alignment: Alignment,
     val_stack: *ValStack,
     ctrl_stack: *const CtrlStack,
     comptime lane_size: V128.LaneIdxSize,
     module: Module,
     diag: Diagnostics,
 ) Error!void {
-    try val_stack.popManyExpecting(ctrl_stack, &.{ .v128, .i32 }, diag);
-    try readMemArg(reader, .@"16", module, diag);
+    try val_stack.popManyExpecting(ctrl_stack, &.{ .i32, .v128 }, diag);
+    try readMemArg(reader, natural_alignment, module, diag);
     try reader.readSimdLane(lane_size, diag);
 }
 
@@ -2619,6 +2620,7 @@ pub fn rawValidate(
                 ),
                 .@"v128.store8_lane" => try validateStoreLaneInstr(
                     &reader,
+                    Alignment.@"1",
                     &val_stack,
                     &ctrl_stack,
                     .@"16",
@@ -2627,6 +2629,7 @@ pub fn rawValidate(
                 ),
                 .@"v128.store16_lane" => try validateStoreLaneInstr(
                     &reader,
+                    Alignment.@"2",
                     &val_stack,
                     &ctrl_stack,
                     .@"8",
@@ -2635,6 +2638,7 @@ pub fn rawValidate(
                 ),
                 .@"v128.store32_lane" => try validateStoreLaneInstr(
                     &reader,
+                    Alignment.@"4",
                     &val_stack,
                     &ctrl_stack,
                     .@"4",
@@ -2643,6 +2647,7 @@ pub fn rawValidate(
                 ),
                 .@"v128.store64_lane" => try validateStoreLaneInstr(
                     &reader,
+                    Alignment.@"8",
                     &val_stack,
                     &ctrl_stack,
                     .@"2",
