@@ -13,78 +13,122 @@ inline fn trap(
     return Transition.trap(base_ip, .{ .fd = opcode }, eip, sp, stp, interp, info);
 }
 
-pub fn @"v128.load"(
-    ip: Ip,
-    sp: Sp,
-    fuel: *Fuel,
-    stp: Stp,
-    locals: Locals,
-    module: runtime.ModuleInst,
-    interp: *Interpreter,
-    eip: Eip,
-) callconv(ohcc) Transition {
-    var instr = Instr.init(ip, eip);
-    var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
-
-    const mem_arg = MemArg.read(&instr, module);
-    const base_addr: u32 = @bitCast(vals.popTyped(&.{.i32}).@"0");
-    vals.assertRemainingCountIs(0);
-
-    const trap_info = mem_arg.trap(base_addr, .@"16");
-    const effective_addr = std.math.add(u32, base_addr, mem_arg.offset) catch {
-        return trap(ip, .@"v128.load", eip, sp, stp, interp, trap_info);
-    };
-
-    const end_addr = std.math.add(u32, effective_addr, 15) catch {
-        return trap(ip, .@"v128.load", eip, sp, stp, interp, trap_info);
-    };
-
-    if (mem_arg.mem.size <= end_addr) {
-        return trap(ip, .@"v128.load", eip, sp, stp, interp, trap_info);
+const load_store = struct {
+    fn performLoad(
+        instr: *Instr,
+        vals: *Stack.Values,
+        fuel: *Fuel,
+        stp: Stp,
+        locals: Locals,
+        module: runtime.ModuleInst,
+        interp: *Interpreter,
+        _: void,
+        access: *[16]u8,
+    ) Transition {
+        vals.assertRemainingCountIs(0);
+        vals.pushTyped(&.{.v128}, .{V128{ .u8x16 = access.* }});
+        return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
     }
 
-    const accessed_bytes = mem_arg.mem.bytes()[effective_addr..][0..16];
-    vals.pushTyped(&.{.v128}, .{V128.init(.u8, accessed_bytes.*)});
-
-    return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
-}
-
-pub fn @"v128.store"(
-    ip: Ip,
-    sp: Sp,
-    fuel: *Fuel,
-    stp: Stp,
-    locals: Locals,
-    module: runtime.ModuleInst,
-    interp: *Interpreter,
-    eip: Eip,
-) callconv(ohcc) Transition {
-    var instr = Instr.init(ip, eip);
-    var vals = Stack.Values.init(sp, &interp.stack, 2, 2);
-
-    const mem_arg = MemArg.read(&instr, module);
-    const popped = vals.popArray(2);
-    vals.assertRemainingCountIs(0);
-    const base_addr: u32 = @bitCast(popped[0].i32);
-    const to_store: *const V128 = &popped[1].v128;
-
-    const trap_info = mem_arg.trap(base_addr, .@"16");
-    const effective_addr = std.math.add(u32, base_addr, mem_arg.offset) catch {
-        return trap(ip, .@"v128.store", eip, sp, stp, interp, trap_info);
-    };
-
-    const end_addr = std.math.add(u32, effective_addr, 15) catch {
-        return trap(ip, .@"v128.store", eip, sp, stp, interp, trap_info);
-    };
-
-    if (mem_arg.mem.size <= end_addr) {
-        return trap(ip, .@"v128.store", eip, sp, stp, interp, trap_info);
+    fn popVectorToStore(vals: *Stack.Values, interp: *Interpreter) V128 {
+        _ = interp;
+        return vals.popTyped(&.{.v128})[0];
     }
 
-    mem_arg.mem.bytes()[effective_addr..][0..16].* = to_store.u8x16;
+    fn performStore(
+        instr: *Instr,
+        vals: *Stack.Values,
+        fuel: *Fuel,
+        stp: Stp,
+        locals: Locals,
+        module: runtime.ModuleInst,
+        interp: *Interpreter,
+        value: V128,
+        access: *[16]u8,
+    ) Transition {
+        vals.assertRemainingCountIs(0);
+        access.* = value.u8x16;
+        return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
+    }
+};
 
-    return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
+pub const @"v128.load" = handlers.linearMemoryAccessor(
+    .@"16",
+    .{ .fd = .@"v128.load" },
+    .load,
+    void,
+    handlers.nopBeforeMemoryAccess,
+    load_store.performLoad,
+);
+
+/// - https://webassembly.github.io/spec/core/exec/instructions.html#exec-vload-pack
+/// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#load-and-extend
+fn loadAndExtendHandler(
+    comptime opcode: FDPrefixOpcode,
+    /// Is half the width of `To`.
+    comptime From: type,
+    comptime To: type,
+) OpcodeHandler {
+    return struct {
+        comptime {
+            std.debug.assert(@typeInfo(From).int.bits * 2 == @typeInfo(To).int.bits);
+            std.debug.assert(@typeInfo(From).int.signedness == @typeInfo(To).int.signedness);
+        }
+
+        const interpret_to = V128.Interpretation.fromLaneType(To);
+        const to_lane_count = interpret_to.laneCount();
+        const access_size = @sizeOf(From) * to_lane_count;
+        const AccessBits = @Int(.unsigned, @as(u8, access_size) * 8);
+
+        fn performExtendingLoad(
+            instr: *Instr,
+            vals: *Stack.Values,
+            fuel: *Fuel,
+            stp: Stp,
+            locals: Locals,
+            module: runtime.ModuleInst,
+            interp: *Interpreter,
+            _: void,
+            access: *[access_size]u8,
+        ) Transition {
+            vals.assertRemainingCountIs(0);
+            const bits = std.mem.readInt(AccessBits, access, .little);
+            const v: @Vector(to_lane_count, From) = @bitCast(bits);
+            vals.pushTyped(
+                &.{.v128},
+                .{V128.init(interpret_to, v)}, // automatically sign/zero-extends
+            );
+            return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
+        }
+
+        const extendingLoad = handlers.linearMemoryAccessor(
+            .fromByteUnits(access_size),
+            .{ .fd = opcode },
+            .load,
+            void,
+            handlers.nopBeforeMemoryAccess,
+            performExtendingLoad,
+        );
+    }.extendingLoad;
 }
+
+pub const @"v128.load8x8_s" = loadAndExtendHandler(.@"v128.load8x8_s", i8, i16);
+pub const @"v128.load8x8_u" = loadAndExtendHandler(.@"v128.load8x8_u", u8, u16);
+pub const @"v128.load16x4_s" = loadAndExtendHandler(.@"v128.load16x4_s", i16, i32);
+pub const @"v128.load16x4_u" = loadAndExtendHandler(.@"v128.load16x4_u", u16, u32);
+pub const @"v128.load32x2_s" = loadAndExtendHandler(.@"v128.load32x2_s", i32, i64);
+pub const @"v128.load32x2_u" = loadAndExtendHandler(.@"v128.load32x2_u", u32, u64);
+
+// TODO: load_splat instructions
+
+pub const @"v128.store" = handlers.linearMemoryAccessor(
+    .@"16",
+    .{ .fd = .@"v128.store" },
+    .store,
+    V128,
+    load_store.popVectorToStore,
+    load_store.performStore,
+);
 
 pub fn @"v128.const"(
     ip: Ip,
