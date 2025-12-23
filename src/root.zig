@@ -7,6 +7,7 @@ pub const runtime = @import("runtime.zig");
 pub const Interpreter = @import("Interpreter.zig");
 
 pub const pointer = @import("pointer.zig");
+pub const V128 = @import("v128.zig").V128;
 
 pub fn waitForDebugger() void {
     const os = @import("builtin").target.os;

@@ -54,6 +54,18 @@ const Parsed = struct {
     instr_count: u16,
 };
 
+fn nonConstOpcode(
+    opcode: anytype,
+    diag: Reader.Diagnostics,
+    desc: []const u8,
+) Reader.ValidationError {
+    return diag.print(
+        .validation,
+        "constant expression required: got opcode {t} in {s}",
+        .{ opcode, desc },
+    );
+}
+
 pub fn parse(
     reader: Reader,
     base: [*]const u8,
@@ -143,11 +155,30 @@ pub fn parse(
             .@"i64.sub",
             .@"i64.mul",
             => try binOp(&val_stack, .i64, diag, desc),
-            else => return diag.print(
-                .validation,
-                "constant expression required: got opcode {t} in {s}",
-                .{ opcode, desc },
+            .@"0xFC" => return nonConstOpcode(
+                try reader.readUleb128Enum(
+                    u32,
+                    opcodes.FCPrefixOpcode,
+                    diag,
+                    "0xFC prefixed opcode",
+                ),
+                diag,
+                desc,
             ),
+            // SIMD proposal (https://github.com/WebAssembly/simd) support:
+            .@"0xFD" => switch (try reader.readUleb128Enum(
+                u8,
+                opcodes.FDPrefixOpcode,
+                diag,
+                "SIMD opcode",
+            )) {
+                .@"v128.const" => {
+                    _ = try reader.readArray(16, diag, "v128.const immediate");
+                    try val_stack.append(scratch.allocator(), .v128);
+                },
+                else => |bad| return nonConstOpcode(bad, diag, desc),
+            },
+            else => return nonConstOpcode(opcode, diag, desc),
         }
 
         max_stack = @max(

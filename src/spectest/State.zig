@@ -533,6 +533,90 @@ fn expectTypedValue(
         @field(value, @tagName(tag));
 }
 
+fn resultIntegerVectorMatches(
+    comptime lane_interpretation: V128.Interpretation,
+    expected: lane_interpretation.Type(),
+    actual: V128,
+    index: usize,
+    output: Output,
+) Error!void {
+    const comparison = expected != actual.interpret(lane_interpretation);
+    if (std.simd.firstTrue(comparison)) |lane_index| return failFmt(
+        output,
+        "expected {f} at index {d}, got {f} for result {d}",
+        .{
+            V128.init(lane_interpretation, expected).formatter(lane_interpretation),
+            lane_index,
+            actual.formatter(lane_interpretation),
+            index,
+        },
+    );
+}
+
+fn failFloatVectorLaneMismatch(
+    output: Output,
+    comptime lane_interpretation: V128.Interpretation,
+    expected: *const Parser.Command.Expected.FloatVec(
+        lane_interpretation.laneCount(),
+        @typeInfo(lane_interpretation.Type()).vector.child,
+    ),
+    actual: V128,
+    lane_idx: usize,
+) Error {
+    return failFmt(
+        output,
+        "vector values are not equal at lane {d}:\nexpected: {f}\n  actual: {f}\n",
+        .{ lane_idx, expected, actual.formatter(lane_interpretation) },
+    );
+}
+
+fn resultFloatVectorMatches(
+    comptime lane_interpretation: V128.Interpretation,
+    expected: *const Parser.Command.Expected.FloatVec(
+        lane_interpretation.laneCount(),
+        @typeInfo(lane_interpretation.Type()).vector.child,
+    ),
+    actual: V128,
+    index: usize,
+    output: Output,
+) Error!void {
+    const actual_lanes = actual.interpret(lane_interpretation);
+    const FloatType = @typeInfo(lane_interpretation.Type()).vector.child;
+    for (
+        @as([lane_interpretation.laneCount()]FloatType, actual_lanes),
+        expected.tags,
+        expected.raw_values,
+        0..,
+    ) |actual_value, expected_tag, expected_value, lane_idx| {
+        const expected_nan: Parser.Command.Expected.Nan = switch (expected_tag) {
+            .value => {
+                resultFloatMatchesBits(expected_value, actual_value, index, output) catch {
+                    return failFloatVectorLaneMismatch(
+                        output,
+                        lane_interpretation,
+                        expected,
+                        actual,
+                        lane_idx,
+                    );
+                };
+                continue;
+            },
+            .canonical_nan => .canonical,
+            .arithmetic_nan => .arithmetic,
+        };
+
+        resultFloatMatchesNan(expected_nan, actual_value, index, output) catch {
+            return failFloatVectorLaneMismatch(
+                output,
+                lane_interpretation,
+                expected,
+                actual,
+                lane_idx,
+            );
+        };
+    }
+}
+
 fn resultValueMatches(
     actual: *const Interpreter.TaggedValue,
     expected: *const Parser.Command.Expected,
@@ -601,6 +685,20 @@ fn resultValueMatches(
                 );
             }
         },
+        inline .i8x16, .i16x8, .i32x4, .i64x2 => |v| try resultIntegerVectorMatches(
+            @field(V128.Interpretation, @typeName(@typeInfo(@TypeOf(v)).vector.child)),
+            v,
+            try expectTypedValue(actual, .v128, index, output),
+            index,
+            output,
+        ),
+        inline .f32x4, .f64x2 => |*v, t| try resultFloatVectorMatches(
+            @field(V128.Interpretation, @tagName(t)[0..3]),
+            v,
+            try expectTypedValue(actual, .v128, index, output),
+            index,
+            output,
+        ),
     }
 }
 
@@ -753,7 +851,7 @@ fn allocateFunctionArguments(
 
     for (dst_values, arguments) |*dst, *src| {
         dst.* = switch (src.*) {
-            inline .i32, .i64, .f32, .f64 => |c, tag| @unionInit(
+            inline .i32, .i64, .f32, .f64, .v128 => |c, tag| @unionInit(
                 Interpreter.TaggedValue,
                 @tagName(tag),
                 @bitCast(c),
@@ -1499,6 +1597,7 @@ const wasmstint = @import("wasmstint");
 const ModuleInst = wasmstint.runtime.ModuleInst;
 const Interpreter = wasmstint.Interpreter;
 const Name = wasmstint.Module.Name;
+const V128 = wasmstint.V128;
 const Parser = @import("Parser.zig");
 const Imports = @import("Imports.zig");
 const coz = @import("coz");

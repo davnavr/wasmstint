@@ -126,6 +126,38 @@ impl ExternRef {
     }
 }
 
+#[derive(Clone, Copy)]
+#[repr(C, align(8))]
+pub struct V128 {
+    bytes: [u8; 16],
+}
+
+impl From<wasmi::V128> for V128 {
+    fn from(v: wasmi::V128) -> Self {
+        Self {
+            bytes: v.as_u128().to_le_bytes(),
+        }
+    }
+}
+
+impl From<V128> for wasmi::V128 {
+    fn from(v: V128) -> Self {
+        Self::from(u128::from_le_bytes(v.bytes))
+    }
+}
+
+impl arbitrary::Arbitrary<'_> for V128 {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            bytes: u.arbitrary()?,
+        })
+    }
+
+    fn size_hint(_depth: usize) -> (usize, Option<usize>) {
+        (16, Some(16))
+    }
+}
+
 /// An action for the host to take.
 #[repr(u16)]
 pub enum Action {
@@ -160,6 +192,7 @@ pub enum ArgumentVal {
     F64(f64) = 3,
     FuncRef(FuncRef) = 4,
     ExternRef(ExternRef) = 5,
+    V128(V128) = 6,
 }
 
 impl ArgumentVal {
@@ -184,7 +217,8 @@ impl ArgumentVal {
             wasmi::ValType::ExternRef => {
                 Self::ExternRef(ExternRef(std::num::NonZero::<usize>::new(u.arbitrary()?)))
             }
-            _ => panic!("could not generate argument for {val_type:?}",),
+            wasmi::ValType::V128 => Self::V128(u.arbitrary::<V128>()?),
+            // _ => panic!("could not generate argument for {val_type:?}",),
         })
     }
 
@@ -196,6 +230,7 @@ impl ArgumentVal {
             Self::F64(f) => wasmi::Val::F64(wasmi::F64::from_float(f)),
             Self::FuncRef(f) => wasmi::Val::FuncRef(f.to_wasmi_func(ctx.data().func_imports)),
             Self::ExternRef(e) => wasmi::Val::ExternRef(e.to_wasmi_ref(ctx)),
+            Self::V128(v) => wasmi::Val::V128(wasmi::V128::from(v)),
         }
     }
 }
@@ -225,6 +260,7 @@ pub enum ResultVal {
     F64(f64) = 3,
     FuncRef(ResultFuncRef) = 4,
     ExternRef(ExternRef) = 5,
+    V128(V128) = 6,
 }
 
 impl ResultVal {
@@ -236,7 +272,8 @@ impl ResultVal {
             wasmi::Val::F64(f) => Self::F64(f.to_float()),
             wasmi::Val::FuncRef(f) => Self::FuncRef(ResultFuncRef::from_wasmi_func(f, ctx)),
             wasmi::Val::ExternRef(e) => Self::ExternRef(ExternRef::from_wasmi_ref(e, ctx)),
-            _ => panic!("bad result {val:?}"),
+            wasmi::Val::V128(v) => Self::V128(V128::from(*v)),
+            // _ => panic!("bad result {val:?}"),
         }
     }
 }
@@ -786,7 +823,7 @@ unsafe fn execute(
         config.wasm_multi_memory(false);
         config.wasm_tail_call(true);
         config.wasm_extended_const(true);
-        //config.wasm_simd(false); // enabled by feature flag in `wasmi`
+        config.wasm_simd(true); // enabled by feature flag in `wasmi`
         //config.wasm_relaxed_simd(false);
         config.consume_fuel(true);
         config

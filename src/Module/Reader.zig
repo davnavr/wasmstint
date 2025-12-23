@@ -176,6 +176,41 @@ pub fn readUleb128Casted(
         LimitError.WasmImplementationLimit;
 }
 
+const SimdLaneCount = enum(u5) { @"1" = 1, @"16" = 16 };
+
+pub fn readSimdLaneArray(
+    reader: Reader,
+    comptime lane_size: V128.LaneIdxSize,
+    comptime count: SimdLaneCount,
+    diag: Diagnostics,
+) (Error || ValidationError)!void {
+    const LaneIdx = V128.LaneIdx(lane_size);
+    const max = comptime std.math.maxInt(LaneIdx);
+    const bytes = try reader.readArray(
+        @intFromEnum(count),
+        diag,
+        std.fmt.comptimePrint("ImmLaneIdx{}", .{@typeInfo(LaneIdx).int}),
+    );
+
+    for (bytes) |b| {
+        if (b > max) {
+            return diag.print(
+                .validation,
+                "invalid lane index {d}, must be less than {d}",
+                .{ b, max },
+            );
+        }
+    }
+}
+
+pub fn readSimdLane(
+    reader: Reader,
+    comptime lane_size: V128.LaneIdxSize,
+    diag: Diagnostics,
+) (Error || ValidationError)!void {
+    try reader.readSimdLaneArray(lane_size, .@"1", diag);
+}
+
 pub fn readUleb128Enum(
     reader: Reader,
     comptime T: type,
@@ -285,3 +320,4 @@ pub fn readIdx(
 
 const std = @import("std");
 const ValType = @import("val_type.zig").ValType;
+const V128 = @import("../v128.zig").V128;

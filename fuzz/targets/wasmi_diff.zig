@@ -166,6 +166,14 @@ const Execution = struct {
 
     const ExternRef = wasmstint.runtime.ExternAddr.Nat;
 
+    const V128 = extern struct {
+        bytes: [16]u8 align(8),
+
+        fn convert(v: *const V128) wasmstint.V128 {
+            return .{ .u8x16 = v.bytes };
+        }
+    };
+
     const Action = extern union {
         tag: Tag,
         call: Call,
@@ -246,6 +254,7 @@ const Execution = struct {
         f64 = 3,
         funcref = 4,
         externref = 5,
+        v128 = 6,
 
         fn toValType(tag: ValTag) wasmstint.Module.ValType {
             return switch (tag) {
@@ -313,6 +322,7 @@ const Execution = struct {
                         .{ f, @as(u64, @bitCast(f)) },
                     ),
                     inline .funcref, .externref => |r| try r.format(w),
+                    .v128 => |v| try v.convert().format(w),
                 }
             }
         }.format;
@@ -355,6 +365,7 @@ const Execution = struct {
             f64: f64,
             funcref: FuncRef,
             externref: ExternRef,
+            v128: V128,
         },
 
         const tagged = valTagged(ArgumentVal);
@@ -376,6 +387,7 @@ const Execution = struct {
                     @bitCast(wasmstint.runtime.FuncAddr.init(.{ .host = &func_imports[idx.n] }))
                 else
                     wasmstint.runtime.FuncAddr.Nullable.null },
+                .v128 => |v| .{ .v128 = v.convert() },
             };
         }
     };
@@ -414,6 +426,7 @@ const Execution = struct {
             f64: f64,
             funcref: ResultFuncRef,
             externref: ExternRef,
+            v128: V128,
         },
 
         const tagged = valTagged(ResultVal);
@@ -445,6 +458,7 @@ const Execution = struct {
                         break :eq actual == null;
                     }
                 },
+                .v128 => |*v| @reduce(.And, v.convert().u8x16 == value.v128.u8x16),
             };
         }
     };
@@ -1416,7 +1430,6 @@ const ImportProvider = struct {
                         }
 
                         switch (global_type.val_type) {
-                            .v128 => @panic("v128 globals not supported"),
                             inline else => |val_type| {
                                 const Val = wasmstint.runtime.GlobalAddr.Pointee(val_type);
                                 const val = try allocator.create(Val);

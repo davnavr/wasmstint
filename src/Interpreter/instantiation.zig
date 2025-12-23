@@ -25,7 +25,7 @@ pub fn setupModule(
     ) |*init_expr, global_value, *global_type| {
         errdefer comptime unreachable;
         switch (global_type.val_type) {
-            inline .i32, .i64, .f32, .f64, .funcref, .externref => |val_type| {
+            inline .i32, .i64, .f32, .f64, .funcref, .externref, .v128 => |val_type| {
                 const tag: Value.Tag = @field(Value.Tag, @tagName(val_type));
                 const dst: *(tag.Type()) = @ptrCast(@alignCast(global_value));
                 dst.* = const_eval.calculate(
@@ -35,7 +35,6 @@ pub fn setupModule(
                     const_expr_buf,
                 );
             },
-            .v128 => unreachable,
         }
     }
 

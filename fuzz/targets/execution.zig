@@ -332,7 +332,6 @@ const ImportProvider = struct {
                 .global = wasmstint.runtime.GlobalAddr{
                     .global_type = global_type.*,
                     .value = switch (global_type.val_type) {
-                        .v128 => unreachable,
                         inline else => |val_type| val: {
                             const Val = wasmstint.runtime.GlobalAddr.Pointee(val_type);
                             const val = try allocator.create(Val);
@@ -342,7 +341,8 @@ const ImportProvider = struct {
                                 .f32, .f64 => try provider.input.floatFromBits(Val),
                                 .externref => try generateExternAddr(provider.input),
                                 .funcref => Val.null,
-                                else => unreachable,
+                                .v128 => .{ .u8x16 = (try provider.input.takeArray(16)).* },
+                                // else => unreachable,
                             };
 
                             break :val val;
@@ -380,7 +380,8 @@ fn generateTaggedValue(
         .externref => .{ .externref = try generateExternAddr(input) },
         // TODO: Generate random funcref
         .funcref => .{ .funcref = .null },
-        else => unreachable,
+        .v128 => .{ .v128 = .{ .u8x16 = (try input.takeArray(16)).* } },
+        // else => unreachable,
     };
 }
 

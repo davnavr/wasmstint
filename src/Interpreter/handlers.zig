@@ -1,10 +1,10 @@
 //! Contains the implementations for the handlers of each WebAssembly opcode.
 
-const Ip = Module.Code.Ip;
-const Eip = *const Module.Code.End;
+pub const Ip = Module.Code.Ip;
+pub const Eip = *const Module.Code.End;
 /// The value Stack Pointer.
-const Sp = Stack.Top;
-const Stp = SideTable.Ptr;
+pub const Sp = Stack.Top;
+pub const Stp = SideTable.Ptr;
 
 const DispatchBackend = enum {
     auto,
@@ -33,7 +33,7 @@ const dispatch_backend: DispatchBackend = switch (builtin.zig_backend) {
 };
 
 /// Opcode handler calling convention.
-const ohcc: CallingConvention = switch (dispatch_backend) {
+pub const ohcc: CallingConvention = switch (dispatch_backend) {
     .x86_64_sysv_inline => .{ .x86_64_sysv = .{} },
     .x86_64_win_inline => .{ .x86_64_win = .{} },
     .auto => switch (CallingConvention.c) {
@@ -74,7 +74,7 @@ pub const OpcodeHandler = fn (
 ///
 /// This function is marked `inline` due to the same limitations, and because a tail call is used to
 /// jump to the next opcode handler.
-inline fn handlerTailCall(
+pub inline fn handlerTailCall(
     handler: *const OpcodeHandler,
     ip: Ip,
     sp: Sp,
@@ -181,7 +181,7 @@ inline fn handlerTailCall(
 }
 
 /// `inline` since a tail call is used to jump to the next opcode handler.
-inline fn dispatchNextOpcode(
+pub inline fn dispatchNextOpcode(
     instr: Instr,
     sp: Stack.Top,
     fuel: *Fuel,
@@ -258,7 +258,7 @@ inline fn dispatchNextOpcode(
 //     }.wrapped;
 // }
 
-inline fn transition(
+pub inline fn transition(
     interp: *Interpreter,
     update_wasm_frame_token: Transition.UpdateWasmFrameToken,
     new_state: @FieldType(Interpreter, "current_state"),
@@ -272,7 +272,7 @@ inline fn transition(
 }
 
 /// Asserts that `frame` corresponds to a WASM function.
-fn updateWasmFrameState(
+pub fn updateWasmFrameState(
     frame: *Stack.Frame,
     instr: Instr,
     stp: Stp,
@@ -300,8 +300,9 @@ pub const Transition = packed struct {
         wrote_ip_and_stp_to_the_current_stack_frame,
     };
 
-    fn trap(
-        trap_ip: Ip,
+    pub fn trap(
+        base_ip: Ip,
+        comptime opcode_prefix: OpcodePrefix,
         eip: Eip,
         sp: Sp,
         stp: Stp,
@@ -309,6 +310,7 @@ pub const Transition = packed struct {
         info: Trap,
     ) Transition {
         @branchHint(.unlikely);
+        const trap_ip = calculateTrapIp(base_ip, opcode_prefix);
         interp.stack_top = sp;
         const current_frame = interp.stack.frameAt(interp.stack.current_frame).?;
         return transition(
@@ -653,13 +655,14 @@ inline fn performTailCall(
     }
 }
 
-const MemArg = struct {
+pub const MemArg = struct {
     mem: *const runtime.MemInst,
     idx: Module.MemIdx,
     offset: u32,
 
-    fn read(i: *Instr, module: runtime.ModuleInst) MemArg {
-        // TODO: Spec probably only allows reading single byte here!
+    pub fn read(i: *Instr, module: runtime.ModuleInst) MemArg {
+        // Before multi-memory, spec probably only allows reading single byte here!
+
         // align, maximum is 16 bytes (1 << 4)
         _ = @as(u3, @intCast(i.readByte()));
         const mem_idx = Module.MemIdx.default;
@@ -670,8 +673,8 @@ const MemArg = struct {
         };
     }
 
-    fn trap(
-        mem_arg: MemArg,
+    pub fn trap(
+        mem_arg: *const MemArg,
         address: usize,
         size: std.mem.Alignment,
     ) Trap {
@@ -690,17 +693,74 @@ const MemArg = struct {
     }
 };
 
-fn nopBeforeMemoryAccess(vals: *Stack.Values, interp: *Interpreter) void {
+pub const OpcodePrefix = union(enum(u8)) {
+    none = 0,
+    fc: opcodes.FCPrefixOpcode = 0xFC,
+    fd: opcodes.FDPrefixOpcode = 0xFD,
+};
+
+/// Calculates a pointer to the first byte of the instruction based on a pointer to the first byte
+/// after it's opcode.
+fn calculateTrapIp(base_ip: Ip, comptime prefix: OpcodePrefix) Ip {
+    var ip = base_ip - 1;
+    switch (prefix) {
+        .none => return ip,
+        inline .fc, .fd => |opcode| {
+            var decoded: u32 = ip[0];
+            for (0..4) |_| {
+                ip -= 1;
+                std.debug.assert(decoded <= @intFromEnum(opcode)); // please check expected opcode
+                if (decoded == @intFromEnum(opcode)) {
+                    @branchHint(.likely);
+                    break;
+                }
+
+                decoded <<= 7;
+                decoded |= (0x7F & ip[0]);
+            } else unreachable;
+
+            std.debug.assert(ip[0] == comptime @intFromEnum(prefix));
+            return ip;
+        },
+    }
+}
+
+test calculateTrapIp {
+    {
+        const bytes = [_:0x0B]u8{ 0xAA, 0xFD, 0x6B, 0xAA };
+        try std.testing.expectEqual(
+            &bytes[1],
+            &calculateTrapIp(bytes[3..], .{ .fd = .@"i8x16.shl" })[0],
+        );
+    }
+    {
+        // WASM spec seems to allow over-long instruction opcodes
+        const bytes = [_:0x0B]u8{ 0xAA, 0xFD, 0xEB, 0x00, 0xAA };
+        try std.testing.expectEqual(
+            &bytes[1],
+            &calculateTrapIp(bytes[4..], .{ .fd = .@"i8x16.shl" })[0],
+        );
+    }
+    {
+        const bytes = [_:0x0B]u8{ 0xAA, 0xFD, 0x0C, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0xAA };
+        try std.testing.expectEqual(
+            &bytes[1],
+            &calculateTrapIp(bytes[3..], .{ .fd = .@"v128.const" })[0],
+        );
+    }
+}
+
+pub fn nopBeforeMemoryAccess(vals: *Stack.Values, interp: *Interpreter) void {
     _ = vals;
     _ = interp;
 }
 
-fn linearMemoryAccessor(
+pub fn linearMemoryAccessor(
     /// How many bytes are read to and written from linear memory.
     ///
     /// Must be a positive power of two.
     comptime access_size: std.mem.Alignment,
-    comptime prefix_len: u2,
+    comptime prefix: OpcodePrefix,
     comptime kind: enum { load, store },
     comptime BeforeAccessData: type,
     comptime beforeAccess: fn (*Stack.Values, *Interpreter) BeforeAccessData,
@@ -736,7 +796,6 @@ fn linearMemoryAccessor(
             var coz_begin = coz.begin("wasmstint.Interpreter.accessLinearMemory");
             defer coz_begin.end();
 
-            const trap_ip: Ip = ip - 1 - prefix_len;
             var i = Instr.init(ip, eip);
             const vals_height = switch (kind) {
                 .load => 1,
@@ -762,37 +821,30 @@ fn linearMemoryAccessor(
 
             const effective_addr = std.math.add(u32, base_addr, mem_arg.offset) catch {
                 const info = mem_arg.trap(base_addr, access_size);
-                return Transition.trap(trap_ip, eip, sp, stp, interp, info);
+                return Transition.trap(ip, prefix, eip, sp, stp, interp, info);
             };
 
             const end_addr = std.math.add(u32, effective_addr, access_size_bytes - 1) catch {
                 const info = mem_arg.trap(base_addr, access_size);
-                return Transition.trap(trap_ip, eip, sp, stp, interp, info);
+                return Transition.trap(ip, prefix, eip, sp, stp, interp, info);
             };
 
-            return if (mem_arg.mem.size <= end_addr)
-                Transition.trap(trap_ip, eip, sp, stp, interp, mem_arg.trap(base_addr, access_size))
-            else
-                @call(
+            if (mem_arg.mem.size <= end_addr) {
+                const info = mem_arg.trap(base_addr, access_size);
+                return Transition.trap(ip, prefix, eip, sp, stp, interp, info);
+            } else {
+                const accessed = mem_arg.mem.bytes()[effective_addr..][0..access_size_bytes];
+                return @call(
                     .always_inline,
                     handler,
-                    .{
-                        &i,
-                        &vals,
-                        fuel,
-                        stp,
-                        locals,
-                        module,
-                        interp,
-                        before_access_data,
-                        mem_arg.mem.bytes()[effective_addr..][0..access_size_bytes],
-                    },
+                    .{ &i, &vals, fuel, stp, locals, module, interp, before_access_data, accessed },
                 );
+            }
         }
     }.accessLinearMemory;
 }
 
-fn linearMemoryHandlers(comptime field: Value.Tag, comptime prefix_len: u2) type {
+pub fn linearMemoryHandlers(comptime field: Value.Tag, comptime prefix: OpcodePrefix) type {
     return struct {
         comptime {
             std.debug.assert(builtin.cpu.arch.endian() == .little);
@@ -816,9 +868,11 @@ fn linearMemoryHandlers(comptime field: Value.Tag, comptime prefix_len: u2) type
             return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
         }
 
+        const access_size = std.mem.Alignment.fromByteUnits(@sizeOf(T));
+
         pub const load = linearMemoryAccessor(
-            .fromByteUnits(@sizeOf(T)),
-            prefix_len,
+            access_size,
+            prefix,
             .load,
             void,
             nopBeforeMemoryAccess,
@@ -847,8 +901,8 @@ fn linearMemoryHandlers(comptime field: Value.Tag, comptime prefix_len: u2) type
         }
 
         pub const store = linearMemoryAccessor(
-            .fromByteUnits(@sizeOf(T)),
-            prefix_len,
+            access_size,
+            prefix,
             .store,
             T,
             popValueToStore,
@@ -860,7 +914,7 @@ fn linearMemoryHandlers(comptime field: Value.Tag, comptime prefix_len: u2) type
 fn extendingLinearMemoryLoad(
     comptime field: Value.Tag,
     comptime S: type,
-    comptime prefix_len: u2,
+    comptime prefix: OpcodePrefix,
 ) OpcodeHandler {
     return struct {
         const T = field.Type();
@@ -887,8 +941,8 @@ fn extendingLinearMemoryLoad(
         }
 
         pub const extendingLoad = linearMemoryAccessor(
-            .fromByteUnits(@sizeOf(S)),
-            prefix_len,
+            std.mem.Alignment.fromByteUnits(@sizeOf(S)),
+            prefix,
             .load,
             void,
             nopBeforeMemoryAccess,
@@ -900,7 +954,7 @@ fn extendingLinearMemoryLoad(
 fn narrowingLinearMemoryStore(
     comptime field: Value.Tag,
     comptime access_size: std.mem.Alignment,
-    comptime prefix_len: u2,
+    comptime prefix: OpcodePrefix,
 ) OpcodeHandler {
     return struct {
         const T = field.Type();
@@ -934,7 +988,7 @@ fn narrowingLinearMemoryStore(
 
         pub const narrowingStore = linearMemoryAccessor(
             access_size,
-            prefix_len,
+            prefix,
             .store,
             S,
             popValueNarrowed,
@@ -946,7 +1000,7 @@ fn narrowingLinearMemoryStore(
 /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-binop
 fn defineBinOp(
     comptime value_field: Value.Tag,
-    comptime prefix_len: u2,
+    comptime prefix: OpcodePrefix,
     /// Function that takes two operands as an input and returns the result of the operation.
     ///
     /// May return an error.
@@ -965,29 +1019,18 @@ fn defineBinOp(
             interp: *Interpreter,
             eip: Eip,
         ) callconv(ohcc) Transition {
-            const trap_ip: Ip = ip - (1 - prefix_len);
             var vals = Stack.Values.init(sp, &interp.stack, 2, 2);
 
             const operands = vals.popTyped(&(.{value_field} ** 2));
             vals.assertRemainingCountIs(0);
-            const c_2 = operands[1];
-            const c_1 = operands[0];
-            const result = @call(.always_inline, op, .{ c_1, c_2 }) catch |e| {
-                const trap_info = @call(.auto, trap, .{e});
-                return Transition.trap(trap_ip, eip, sp, stp, interp, trap_info);
+            const result = @call(.always_inline, op, operands) catch |e| {
+                return Transition.trap(ip, prefix, eip, sp, stp, interp, @call(.auto, trap, .{e}));
             };
 
             vals.pushTyped(&.{value_field}, .{result});
 
-            return dispatchNextOpcode(
-                Instr.init(ip, eip),
-                vals.top,
-                fuel,
-                stp,
-                locals,
-                module,
-                interp,
-            );
+            const instr = Instr.init(ip, eip);
+            return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
         }
     }.binOpHandler;
 }
@@ -1010,20 +1053,13 @@ fn defineUnOp(
         ) callconv(ohcc) Transition {
             var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
 
-            const c_1 = vals.popTyped(&.{value_field}).@"0";
+            const operands = vals.popTyped(&.{value_field});
             vals.assertRemainingCountIs(0);
-            const result = @call(.always_inline, op, .{c_1});
+            const result = @call(.always_inline, op, operands);
             vals.pushTyped(&.{value_field}, .{result});
 
-            return dispatchNextOpcode(
-                Instr.init(ip, eip),
-                vals.top,
-                fuel,
-                stp,
-                locals,
-                module,
-                interp,
-            );
+            const instr = Instr.init(ip, eip);
+            return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
         }
     }.unOpHandler;
 }
@@ -1106,7 +1142,7 @@ fn defineRelOp(
 fn defineConvOp(
     comptime src_tag: Value.Tag,
     comptime dst_tag: Value.Tag,
-    comptime prefix_len: u2,
+    comptime prefix: OpcodePrefix,
     /// `fn (t_1: src_tag.Type()) !dst_tag.Type()`
     comptime op: anytype,
     comptime trap: anytype,
@@ -1122,27 +1158,18 @@ fn defineConvOp(
             interp: *Interpreter,
             eip: Eip,
         ) callconv(ohcc) Transition {
-            const trap_ip: Ip = ip - 1 - prefix_len;
             var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
 
-            const t_1 = vals.popTyped(&.{src_tag}).@"0";
+            const operands = vals.popTyped(&.{src_tag});
             vals.assertRemainingCountIs(0);
-            const result = @call(.always_inline, op, .{t_1}) catch |e| {
-                const info = @call(.auto, trap, .{e});
-                return Transition.trap(trap_ip, eip, sp, stp, interp, info);
+            const result = @call(.always_inline, op, operands) catch |e| {
+                return Transition.trap(ip, prefix, eip, sp, stp, interp, @call(.auto, trap, .{e}));
             };
 
             vals.pushTyped(&.{dst_tag}, .{result});
 
-            return dispatchNextOpcode(
-                Instr.init(ip, eip),
-                vals.top,
-                fuel,
-                stp,
-                locals,
-                module,
-                interp,
-            );
+            const instr = Instr.init(ip, eip);
+            return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
         }
     }.handler;
 }
@@ -1372,6 +1399,12 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
             return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
         }
 
+        const opcode_name_prefix = @typeName(Signed) ++ ".";
+
+        fn fcOpcode(comptime name: []const u8) OpcodePrefix {
+            return .{ .fc = @field(opcodes.FCPrefixOpcode, opcode_name_prefix ++ name) };
+        }
+
         const eqz = defineTestOp(value_field, operators.eqz);
         const eq = defineRelOp(value_field, operators.eq);
         const ne = defineRelOp(value_field, operators.ne);
@@ -1387,31 +1420,55 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
         const clz = defineUnOp(value_field, operators.clz);
         const ctz = defineUnOp(value_field, operators.ctz);
         const popcnt = defineUnOp(value_field, operators.popcnt);
-        const add = defineBinOp(value_field, 0, operators.add, undefined);
-        const sub = defineBinOp(value_field, 0, operators.sub, undefined);
-        const mul = defineBinOp(value_field, 0, operators.mul, undefined);
-        const div_s = defineBinOp(value_field, 0, operators.div_s, trapIntegerOperation);
-        const div_u = defineBinOp(value_field, 0, operators.div_u, trapIntegerOperation);
-        const rem_s = defineBinOp(value_field, 0, operators.rem_s, trapIntegerOperation);
-        const rem_u = defineBinOp(value_field, 0, operators.rem_u, trapIntegerOperation);
-        const @"and" = defineBinOp(value_field, 0, operators.@"and", undefined);
-        const @"or" = defineBinOp(value_field, 0, operators.@"or", undefined);
-        const xor = defineBinOp(value_field, 0, operators.xor, undefined);
-        const shl = defineBinOp(value_field, 0, operators.shl, undefined);
-        const shr_s = defineBinOp(value_field, 0, operators.shr_s, undefined);
-        const shr_u = defineBinOp(value_field, 0, operators.shr_u, undefined);
-        const rotl = defineBinOp(value_field, 0, operators.rotl, undefined);
-        const rotr = defineBinOp(value_field, 0, operators.rotr, undefined);
+        const add = defineBinOp(value_field, .none, operators.add, undefined);
+        const sub = defineBinOp(value_field, .none, operators.sub, undefined);
+        const mul = defineBinOp(value_field, .none, operators.mul, undefined);
+        const div_s = defineBinOp(value_field, .none, operators.div_s, trapIntegerOperation);
+        const div_u = defineBinOp(value_field, .none, operators.div_u, trapIntegerOperation);
+        const rem_s = defineBinOp(value_field, .none, operators.rem_s, trapIntegerOperation);
+        const rem_u = defineBinOp(value_field, .none, operators.rem_u, trapIntegerOperation);
+        const @"and" = defineBinOp(value_field, .none, operators.@"and", undefined);
+        const @"or" = defineBinOp(value_field, .none, operators.@"or", undefined);
+        const xor = defineBinOp(value_field, .none, operators.xor, undefined);
+        const shl = defineBinOp(value_field, .none, operators.shl, undefined);
+        const shr_s = defineBinOp(value_field, .none, operators.shr_s, undefined);
+        const shr_u = defineBinOp(value_field, .none, operators.shr_u, undefined);
+        const rotl = defineBinOp(value_field, .none, operators.rotl, undefined);
+        const rotr = defineBinOp(value_field, .none, operators.rotr, undefined);
 
-        const trunc_f32_s = defineConvOp(.f32, value_field, 0, operators.trunc_s, trapIntegerOperation);
-        const trunc_f32_u = defineConvOp(.f32, value_field, 0, operators.trunc_u, trapIntegerOperation);
-        const trunc_f64_s = defineConvOp(.f64, value_field, 0, operators.trunc_s, trapIntegerOperation);
-        const trunc_f64_u = defineConvOp(.f64, value_field, 0, operators.trunc_u, trapIntegerOperation);
+        const trunc_f32_s = defineConvOp(.f32, value_field, .none, operators.trunc_s, trapIntegerOperation);
+        const trunc_f32_u = defineConvOp(.f32, value_field, .none, operators.trunc_u, trapIntegerOperation);
+        const trunc_f64_s = defineConvOp(.f64, value_field, .none, operators.trunc_s, trapIntegerOperation);
+        const trunc_f64_u = defineConvOp(.f64, value_field, .none, operators.trunc_u, trapIntegerOperation);
 
-        const trunc_sat_f32_s = defineConvOp(.f32, value_field, 0, operators.trunc_sat_s, trapIntegerOperation);
-        const trunc_sat_f32_u = defineConvOp(.f32, value_field, 0, operators.trunc_sat_u, trapIntegerOperation);
-        const trunc_sat_f64_s = defineConvOp(.f64, value_field, 0, operators.trunc_sat_s, trapIntegerOperation);
-        const trunc_sat_f64_u = defineConvOp(.f64, value_field, 0, operators.trunc_sat_u, trapIntegerOperation);
+        const trunc_sat_f32_s = defineConvOp(
+            .f32,
+            value_field,
+            fcOpcode("trunc_sat_f32_s"),
+            operators.trunc_sat_s,
+            trapIntegerOperation,
+        );
+        const trunc_sat_f32_u = defineConvOp(
+            .f32,
+            value_field,
+            fcOpcode("trunc_sat_f32_u"),
+            operators.trunc_sat_u,
+            trapIntegerOperation,
+        );
+        const trunc_sat_f64_s = defineConvOp(
+            .f64,
+            value_field,
+            fcOpcode("trunc_sat_f64_s"),
+            operators.trunc_sat_s,
+            trapIntegerOperation,
+        );
+        const trunc_sat_f64_u = defineConvOp(
+            .f64,
+            value_field,
+            fcOpcode("trunc_sat_f64_u"),
+            operators.trunc_sat_u,
+            trapIntegerOperation,
+        );
     };
 }
 
@@ -1644,18 +1701,18 @@ fn floatOpcodeHandlers(comptime F: type) type {
         const trunc = defineUnOp(value_field, operators.trunc);
         const nearest = defineUnOp(value_field, operators.nearest);
         const sqrt = defineUnOp(value_field, operators.sqrt);
-        const add = defineBinOp(value_field, 0, operators.add, undefined);
-        const sub = defineBinOp(value_field, 0, operators.sub, undefined);
-        const mul = defineBinOp(value_field, 0, operators.mul, undefined);
-        const div = defineBinOp(value_field, 0, operators.div, undefined);
-        const min = defineBinOp(value_field, 0, operators.min, undefined);
-        const max = defineBinOp(value_field, 0, operators.max, undefined);
-        const copysign = defineBinOp(value_field, 0, operators.copysign, undefined);
+        const add = defineBinOp(value_field, .none, operators.add, {});
+        const sub = defineBinOp(value_field, .none, operators.sub, {});
+        const mul = defineBinOp(value_field, .none, operators.mul, {});
+        const div = defineBinOp(value_field, .none, operators.div, {});
+        const min = defineBinOp(value_field, .none, operators.min, {});
+        const max = defineBinOp(value_field, .none, operators.max, {});
+        const copysign = defineBinOp(value_field, .none, operators.copysign, {});
 
-        const convert_i32_s = defineConvOp(.i32, value_field, 0, operators.convert_s, undefined);
-        const convert_i32_u = defineConvOp(.i32, value_field, 0, operators.convert_u, undefined);
-        const convert_i64_s = defineConvOp(.i64, value_field, 0, operators.convert_s, undefined);
-        const convert_i64_u = defineConvOp(.i64, value_field, 0, operators.convert_u, undefined);
+        const convert_i32_s = defineConvOp(.i32, value_field, .none, operators.convert_s, {});
+        const convert_i32_u = defineConvOp(.i32, value_field, .none, operators.convert_u, {});
+        const convert_i64_s = defineConvOp(.i64, value_field, .none, operators.convert_s, {});
+        const convert_i64_u = defineConvOp(.i64, value_field, .none, operators.convert_u, {});
     };
 }
 
@@ -1680,6 +1737,10 @@ fn dispatchTableLength(comptime Opcode: type, comptime length_override: ?usize) 
 
 fn dispatchTable(
     comptime Opcode: type,
+    /// Namespace containing the opcode handler functions.
+    ///
+    /// Opcode handler functions should be marked `pub`.
+    comptime handlers: type,
     comptime invalid: OpcodeHandler,
     comptime length_override: ?usize,
 ) [dispatchTableLength(Opcode, length_override)]*const OpcodeHandler {
@@ -1687,18 +1748,19 @@ fn dispatchTable(
         dispatchTableLength(Opcode, length_override);
 
     for (@typeInfo(Opcode).@"enum".fields) |op| {
-        if (@hasDecl(opcode_handlers, op.name)) {
-            table[op.value] = @as(
-                *const OpcodeHandler,
-                @field(opcode_handlers, op.name),
-            );
+        if (@hasDecl(handlers, op.name)) {
+            table[op.value] = @as(*const OpcodeHandler, @field(handlers, op.name));
         }
     }
 
     return table;
 }
 
-fn prefixDispatchTable(comptime prefix: opcodes.ByteOpcode, comptime Opcode: type) type {
+fn prefixDispatchTable(
+    comptime prefix: opcodes.ByteOpcode,
+    comptime Opcode: type,
+    comptime handlers: type,
+) type {
     return struct {
         fn panicInvalidInstruction(
             ip: Ip,
@@ -1728,7 +1790,7 @@ fn prefixDispatchTable(comptime prefix: opcodes.ByteOpcode, comptime Opcode: typ
             .ReleaseFast, .ReleaseSmall => undefined,
         };
 
-        const entries = dispatchTable(Opcode, invalid, null);
+        const entries = dispatchTable(Opcode, handlers, invalid, null);
 
         pub fn handler(
             ip: Ip,
@@ -1747,7 +1809,10 @@ fn prefixDispatchTable(comptime prefix: opcodes.ByteOpcode, comptime Opcode: typ
     };
 }
 
-const fc_prefixed_dispatch = prefixDispatchTable(.@"0xFC", opcodes.FCPrefixOpcode);
+const simd_handlers = @import("handlers/simd.zig");
+
+const fc_prefixed_dispatch = prefixDispatchTable(.@"0xFC", opcodes.FCPrefixOpcode, opcode_handlers);
+const fd_prefixed_dispatch = prefixDispatchTable(.@"0xFD", opcodes.FDPrefixOpcode, simd_handlers);
 
 pub fn outOfFuelHandler(
     ip: Ip,
@@ -1809,12 +1874,12 @@ const opcode_handlers = struct {
         interp: *Interpreter,
         eip: Eip,
     ) callconv(ohcc) Transition {
+        @branchHint(.unlikely);
         _ = fuel;
         _ = locals;
         _ = module;
 
-        const unreachable_ip: Ip = ip - 1;
-        const is_validation_failure = @intFromPtr(unreachable_ip) ==
+        const is_validation_failure = @intFromPtr(@as(Ip, ip - 1)) ==
             @intFromPtr(Module.Code.validation_failed.instructions_start);
         const info = if (is_validation_failure) invalid: {
             @branchHint(.cold);
@@ -1829,7 +1894,7 @@ const opcode_handlers = struct {
             );
         } else Trap.init(.unreachable_code_reached, {});
 
-        return Transition.trap(unreachable_ip, eip, sp, stp, interp, info);
+        return Transition.trap(ip, .none, eip, sp, stp, interp, info);
     }
 
     pub fn nop(
@@ -2104,12 +2169,12 @@ const opcode_handlers = struct {
 
         if (table.len <= elem_index) {
             const info = Trap.init(.table_access_out_of_bounds, .init(table_idx, .call_indirect));
-            return Transition.trap(call_ip, eip, sp, stp, interp, info);
+            return Transition.trap(ip, .none, eip, sp, stp, interp, info);
         }
 
         const callee = table.base.func_ref[0..table.len][elem_index].funcInst() orelse {
             const info = Trap.init(.indirect_call_to_null, .{ .index = elem_index });
-            return Transition.trap(call_ip, eip, sp, stp, interp, info);
+            return Transition.trap(ip, .none, eip, sp, stp, interp, info);
         };
 
         const actual_signature = callee.signature();
@@ -2119,7 +2184,7 @@ const opcode_handlers = struct {
                 .{ .expected = expected_signature, .actual = actual_signature },
             );
 
-            return Transition.trap(call_ip, eip, sp, stp, interp, info);
+            return Transition.trap(ip, .none, eip, sp, stp, interp, info);
         }
 
         // std.debug.print(" - calling {f}\n - sp = {*}\n", .{ callee, vals.stack.ptr });
@@ -2194,12 +2259,12 @@ const opcode_handlers = struct {
                 .table_access_out_of_bounds,
                 .init(table_idx, .return_call_indirect),
             );
-            return Transition.trap(return_call_indirect_ip, eip, sp, stp, interp, info);
+            return Transition.trap(ip, .none, eip, sp, stp, interp, info);
         }
 
         const callee = table.base.func_ref[0..table.len][elem_index].funcInst() orelse {
             const info = Trap.init(.indirect_call_to_null, .{ .index = elem_index });
-            return Transition.trap(return_call_indirect_ip, eip, sp, stp, interp, info);
+            return Transition.trap(ip, .none, eip, sp, stp, interp, info);
         };
 
         const actual_signature = callee.signature();
@@ -2209,7 +2274,7 @@ const opcode_handlers = struct {
                 .{ .expected = expected_signature, .actual = actual_signature },
             );
 
-            return Transition.trap(return_call_indirect_ip, eip, sp, stp, interp, info);
+            return Transition.trap(ip, .none, eip, sp, stp, interp, info);
         }
 
         return performTailCall(
@@ -2383,13 +2448,6 @@ const opcode_handlers = struct {
         const global_addr = module.header().globalAddr(global_idx);
 
         vals.pushArray(1).* = .{switch (global_addr.global_type.val_type) {
-            .v128 => unreachable, // TODO
-            .externref => Value{
-                .externref = @as(
-                    *const runtime.ExternAddr,
-                    @ptrCast(@alignCast(@constCast(global_addr.value))),
-                ).*,
-            },
             inline else => |val_type| @unionInit(
                 Value,
                 @tagName(val_type),
@@ -2422,13 +2480,6 @@ const opcode_handlers = struct {
         const popped: *align(@sizeOf(Value)) Value = &vals.popArray(1)[0];
         vals.assertRemainingCountIs(0);
         switch (global_addr.global_type.val_type) {
-            .v128 => unreachable, // TODO
-            .externref => {
-                @as(
-                    *runtime.ExternAddr,
-                    @ptrCast(@alignCast(global_addr.value)),
-                ).* = popped.externref;
-            },
             inline else => |val_type| {
                 @as(
                     *runtime.GlobalAddr.Pointee(val_type),
@@ -2452,7 +2503,8 @@ const opcode_handlers = struct {
         interp: *Interpreter,
         eip: Eip,
     ) callconv(ohcc) Transition {
-        const table_get_ip: Ip = ip - 1;
+        std.debug.assert(@as(Ip, ip - 1)[0] == @intFromEnum(opcodes.ByteOpcode.@"table.get"));
+
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
 
@@ -2469,7 +2521,7 @@ const opcode_handlers = struct {
                 .init(table_idx, .{ .@"table.get" = .{ .index = idx, .maximum = table.len } }),
             );
 
-            return Transition.trap(table_get_ip, eip, vals.top, stp, interp, info);
+            return Transition.trap(ip, .none, eip, vals.top, stp, interp, info);
         }).*;
 
         std.debug.assert(vals.remaining == 1);
@@ -2487,7 +2539,8 @@ const opcode_handlers = struct {
         interp: *Interpreter,
         eip: Eip,
     ) callconv(ohcc) Transition {
-        const table_set_ip: Ip = ip - 1;
+        std.debug.assert(@as(Ip, ip - 1)[0] == @intFromEnum(opcodes.ByteOpcode.@"table.set"));
+
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 2, 2);
 
@@ -2502,7 +2555,7 @@ const opcode_handlers = struct {
                 .table_access_out_of_bounds,
                 .init(table_idx, .{ .@"table.set" = .{ .index = idx, .maximum = table.len } }),
             );
-            return Transition.trap(table_set_ip, eip, vals.top, stp, interp, info);
+            return Transition.trap(ip, .none, eip, vals.top, stp, interp, info);
         };
 
         dst.* = undefined;
@@ -2512,29 +2565,29 @@ const opcode_handlers = struct {
         return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
-    pub const @"i32.load" = linearMemoryHandlers(.i32, 0).load;
-    pub const @"i64.load" = linearMemoryHandlers(.i64, 0).load;
-    pub const @"f32.load" = linearMemoryHandlers(.f32, 0).load;
-    pub const @"f64.load" = linearMemoryHandlers(.f64, 0).load;
-    pub const @"i32.load8_s" = extendingLinearMemoryLoad(.i32, i8, 0);
-    pub const @"i32.load8_u" = extendingLinearMemoryLoad(.i32, u8, 0);
-    pub const @"i32.load16_s" = extendingLinearMemoryLoad(.i32, i16, 0);
-    pub const @"i32.load16_u" = extendingLinearMemoryLoad(.i32, u16, 0);
-    pub const @"i64.load8_s" = extendingLinearMemoryLoad(.i64, i8, 0);
-    pub const @"i64.load8_u" = extendingLinearMemoryLoad(.i64, u8, 0);
-    pub const @"i64.load16_s" = extendingLinearMemoryLoad(.i64, i16, 0);
-    pub const @"i64.load16_u" = extendingLinearMemoryLoad(.i64, u16, 0);
-    pub const @"i64.load32_s" = extendingLinearMemoryLoad(.i64, i32, 0);
-    pub const @"i64.load32_u" = extendingLinearMemoryLoad(.i64, u32, 0);
-    pub const @"i32.store" = linearMemoryHandlers(.i32, 0).store;
-    pub const @"i64.store" = linearMemoryHandlers(.i64, 0).store;
-    pub const @"f32.store" = linearMemoryHandlers(.f32, 0).store;
-    pub const @"f64.store" = linearMemoryHandlers(.f64, 0).store;
-    pub const @"i32.store8" = narrowingLinearMemoryStore(.i32, .@"1", 0);
-    pub const @"i32.store16" = narrowingLinearMemoryStore(.i32, .@"2", 0);
-    pub const @"i64.store8" = narrowingLinearMemoryStore(.i64, .@"1", 0);
-    pub const @"i64.store16" = narrowingLinearMemoryStore(.i64, .@"2", 0);
-    pub const @"i64.store32" = narrowingLinearMemoryStore(.i64, .@"4", 0);
+    pub const @"i32.load" = linearMemoryHandlers(.i32, .none).load;
+    pub const @"i64.load" = linearMemoryHandlers(.i64, .none).load;
+    pub const @"f32.load" = linearMemoryHandlers(.f32, .none).load;
+    pub const @"f64.load" = linearMemoryHandlers(.f64, .none).load;
+    pub const @"i32.load8_s" = extendingLinearMemoryLoad(.i32, i8, .none);
+    pub const @"i32.load8_u" = extendingLinearMemoryLoad(.i32, u8, .none);
+    pub const @"i32.load16_s" = extendingLinearMemoryLoad(.i32, i16, .none);
+    pub const @"i32.load16_u" = extendingLinearMemoryLoad(.i32, u16, .none);
+    pub const @"i64.load8_s" = extendingLinearMemoryLoad(.i64, i8, .none);
+    pub const @"i64.load8_u" = extendingLinearMemoryLoad(.i64, u8, .none);
+    pub const @"i64.load16_s" = extendingLinearMemoryLoad(.i64, i16, .none);
+    pub const @"i64.load16_u" = extendingLinearMemoryLoad(.i64, u16, .none);
+    pub const @"i64.load32_s" = extendingLinearMemoryLoad(.i64, i32, .none);
+    pub const @"i64.load32_u" = extendingLinearMemoryLoad(.i64, u32, .none);
+    pub const @"i32.store" = linearMemoryHandlers(.i32, .none).store;
+    pub const @"i64.store" = linearMemoryHandlers(.i64, .none).store;
+    pub const @"f32.store" = linearMemoryHandlers(.f32, .none).store;
+    pub const @"f64.store" = linearMemoryHandlers(.f64, .none).store;
+    pub const @"i32.store8" = narrowingLinearMemoryStore(.i32, .@"1", .none);
+    pub const @"i32.store16" = narrowingLinearMemoryStore(.i32, .@"2", .none);
+    pub const @"i64.store8" = narrowingLinearMemoryStore(.i64, .@"1", .none);
+    pub const @"i64.store16" = narrowingLinearMemoryStore(.i64, .@"2", .none);
+    pub const @"i64.store32" = narrowingLinearMemoryStore(.i64, .@"4", .none);
 
     pub fn @"memory.size"(
         ip: Ip,
@@ -2749,13 +2802,13 @@ const opcode_handlers = struct {
         }.op;
     }
 
-    pub const @"i32.wrap_i64" = defineConvOp(.i64, .i32, 0, conv_ops.@"i32.wrap_i64", undefined);
+    pub const @"i32.wrap_i64" = defineConvOp(.i64, .i32, .none, conv_ops.@"i32.wrap_i64", {});
     pub const @"i32.trunc_f32_s" = i32_opcode_handlers.trunc_f32_s;
     pub const @"i32.trunc_f32_u" = i32_opcode_handlers.trunc_f32_u;
     pub const @"i32.trunc_f64_s" = i32_opcode_handlers.trunc_f64_s;
     pub const @"i32.trunc_f64_u" = i32_opcode_handlers.trunc_f64_u;
-    pub const @"i64.extend_i32_s" = defineConvOp(.i32, .i64, 0, conv_ops.@"i64.extend_i32_s", undefined);
-    pub const @"i64.extend_i32_u" = defineConvOp(.i32, .i64, 0, conv_ops.@"i64.extend_i32_u", undefined);
+    pub const @"i64.extend_i32_s" = defineConvOp(.i32, .i64, .none, conv_ops.@"i64.extend_i32_s", {});
+    pub const @"i64.extend_i32_u" = defineConvOp(.i32, .i64, .none, conv_ops.@"i64.extend_i32_u", {});
     pub const @"i64.trunc_f32_s" = i64_opcode_handlers.trunc_f32_s;
     pub const @"i64.trunc_f32_u" = i64_opcode_handlers.trunc_f32_u;
     pub const @"i64.trunc_f64_s" = i64_opcode_handlers.trunc_f64_s;
@@ -2764,16 +2817,16 @@ const opcode_handlers = struct {
     pub const @"f32.convert_i32_u" = f32_opcode_handlers.convert_i32_u;
     pub const @"f32.convert_i64_s" = f32_opcode_handlers.convert_i64_s;
     pub const @"f32.convert_i64_u" = f32_opcode_handlers.convert_i64_u;
-    pub const @"f32.demote_f64" = defineConvOp(.f64, .f32, 0, conv_ops.@"f32.demote_f64", undefined);
+    pub const @"f32.demote_f64" = defineConvOp(.f64, .f32, .none, conv_ops.@"f32.demote_f64", {});
     pub const @"f64.convert_i32_s" = f64_opcode_handlers.convert_i32_s;
     pub const @"f64.convert_i32_u" = f64_opcode_handlers.convert_i32_u;
     pub const @"f64.convert_i64_s" = f64_opcode_handlers.convert_i64_s;
     pub const @"f64.convert_i64_u" = f64_opcode_handlers.convert_i64_u;
-    pub const @"f64.promote_f32" = defineConvOp(.f32, .f64, 0, conv_ops.@"f64.promote_f32", undefined);
-    pub const @"i32.reinterpret_f32" = defineConvOp(.f32, .i32, 0, reinterpretOp(f32, i32), undefined);
-    pub const @"i64.reinterpret_f64" = defineConvOp(.f64, .i64, 0, reinterpretOp(f64, i64), undefined);
-    pub const @"f32.reinterpret_i32" = defineConvOp(.i32, .f32, 0, reinterpretOp(i32, f32), undefined);
-    pub const @"f64.reinterpret_i64" = defineConvOp(.i64, .f64, 0, reinterpretOp(i64, f64), undefined);
+    pub const @"f64.promote_f32" = defineConvOp(.f32, .f64, .none, conv_ops.@"f64.promote_f32", {});
+    pub const @"i32.reinterpret_f32" = defineConvOp(.f32, .i32, .none, reinterpretOp(f32, i32), {});
+    pub const @"i64.reinterpret_f64" = defineConvOp(.f64, .i64, .none, reinterpretOp(f64, i64), {});
+    pub const @"f32.reinterpret_i32" = defineConvOp(.i32, .f32, .none, reinterpretOp(i32, f32), {});
+    pub const @"f64.reinterpret_i64" = defineConvOp(.i64, .f64, .none, reinterpretOp(i64, f64), {});
 
     fn intSignExtend(comptime I: type, comptime M: type) (fn (I) I) {
         std.debug.assert(@bitSizeOf(M) < @bitSizeOf(I));
@@ -2854,6 +2907,7 @@ const opcode_handlers = struct {
     }
 
     pub const @"0xFC" = fc_prefixed_dispatch.handler;
+    pub const @"0xFD" = fd_prefixed_dispatch.handler;
     pub const @"i32.trunc_sat_f32_s" = i32_opcode_handlers.trunc_sat_f32_s;
     pub const @"i32.trunc_sat_f32_u" = i32_opcode_handlers.trunc_sat_f32_u;
     pub const @"i32.trunc_sat_f64_s" = i32_opcode_handlers.trunc_sat_f64_s;
@@ -2874,7 +2928,6 @@ const opcode_handlers = struct {
         interp: *Interpreter,
         eip: Eip,
     ) callconv(ohcc) Transition {
-        const memory_init_ip = ip - 2;
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 3, 3);
 
@@ -2894,7 +2947,7 @@ const opcode_handlers = struct {
                 .memory_access_out_of_bounds,
                 .init(mem_idx, .@"memory.init", {}),
             );
-            return Transition.trap(memory_init_ip, eip, sp, stp, interp, info);
+            return Transition.trap(ip, .{ .fc = .@"memory.init" }, eip, sp, stp, interp, info);
         };
 
         return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
@@ -2927,7 +2980,6 @@ const opcode_handlers = struct {
         interp: *Interpreter,
         eip: Eip,
     ) callconv(ohcc) Transition {
-        const memory_copy_ip = ip - 2;
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 3, 3);
 
@@ -2949,7 +3001,7 @@ const opcode_handlers = struct {
                 .memory_access_out_of_bounds,
                 .init(if (dst_mem.size < src_mem.size) dst_idx else src_idx, .@"memory.copy", {}),
             );
-            return Transition.trap(memory_copy_ip, eip, sp, stp, interp, info);
+            return Transition.trap(ip, .{ .fc = .@"memory.copy" }, eip, sp, stp, interp, info);
         };
 
         return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
@@ -2966,7 +3018,6 @@ const opcode_handlers = struct {
         interp: *Interpreter,
         eip: Eip,
     ) callconv(ohcc) Transition {
-        const memory_fill_ip = ip - 2;
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 3, 3);
 
@@ -2985,7 +3036,7 @@ const opcode_handlers = struct {
                 .memory_access_out_of_bounds,
                 .init(mem_idx, .@"memory.fill", {}),
             );
-            return Transition.trap(memory_fill_ip, eip, sp, stp, interp, info);
+            return Transition.trap(ip, .{ .fc = .@"memory.fill" }, eip, sp, stp, interp, info);
         };
 
         return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
@@ -3002,7 +3053,6 @@ const opcode_handlers = struct {
         interp: *Interpreter,
         eip: Eip,
     ) callconv(ohcc) Transition {
-        const table_init_ip = ip - 2;
         var instr = Instr.init(ip, eip);
 
         const elem_idx = instr.readIdx(Module.ElemIdx);
@@ -3040,17 +3090,10 @@ const opcode_handlers = struct {
             d,
             vals.unallocated(),
         ) catch |e| switch (e) {
-            error.TableAccessOutOfBounds => return Transition.trap(
-                table_init_ip,
-                eip,
-                sp,
-                stp,
-                interp,
-                Trap.init(
-                    .table_access_out_of_bounds,
-                    .init(table_idx, .@"table.init"),
-                ),
-            ),
+            error.TableAccessOutOfBounds => {
+                const info = Trap.init(.table_access_out_of_bounds, .init(table_idx, .@"table.init"));
+                return Transition.trap(ip, .{ .fc = .@"table.init" }, eip, sp, stp, interp, info);
+            },
         };
 
         return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
@@ -3083,7 +3126,6 @@ const opcode_handlers = struct {
         interp: *Interpreter,
         eip: Eip,
     ) callconv(ohcc) Transition {
-        const table_copy_ip = ip - 2;
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 3, 3);
 
@@ -3108,7 +3150,7 @@ const opcode_handlers = struct {
                     .@"table.copy",
                 ),
             );
-            return Transition.trap(table_copy_ip, eip, sp, stp, interp, info);
+            return Transition.trap(ip, .{ .fc = .@"table.copy" }, eip, sp, stp, interp, info);
         };
 
         return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
@@ -3191,7 +3233,6 @@ const opcode_handlers = struct {
         interp: *Interpreter,
         eip: Eip,
     ) callconv(ohcc) Transition {
-        const table_fill_ip = ip - 2;
         var instr = Instr.init(ip, eip);
         var vals = Stack.Values.init(sp, &interp.stack, 3, 3);
 
@@ -3206,7 +3247,7 @@ const opcode_handlers = struct {
 
         table.fill(n, elem, d) catch {
             const info = Trap.init(.table_access_out_of_bounds, .init(table_idx, .@"table.fill"));
-            return Transition.trap(table_fill_ip, eip, sp, stp, interp, info);
+            return Transition.trap(ip, .{ .fc = .@"table.fill" }, eip, sp, stp, interp, info);
         };
 
         @memset(operands, undefined);
@@ -3217,6 +3258,7 @@ const opcode_handlers = struct {
 /// If the handler is not appearing in this table, make sure it is public first.
 pub const byte_dispatch_table = dispatchTable(
     opcodes.ByteOpcode,
+    opcode_handlers,
     opcode_handlers.invalid,
     256,
 );

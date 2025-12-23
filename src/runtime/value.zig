@@ -10,7 +10,7 @@ pub const GlobalAddr = extern struct {
             .f64 => f64,
             .funcref => FuncAddr.Nullable,
             .externref => ExternAddr,
-            .v128 => unreachable,
+            .v128 => V128,
         };
     }
 
@@ -20,7 +20,7 @@ pub const GlobalAddr = extern struct {
             inline .i32, .f32, .i64, .f64 => |num| {
                 try writer.print(
                     "(" ++ @tagName(num) ++ ".const {})",
-                    .{@as(*const Pointee(num), @ptrCast(@alignCast(global.value)))},
+                    .{@as(*const Pointee(num), @ptrCast(@alignCast(global.value))).*},
                 );
             },
             inline .funcref, .externref => |ref| {
@@ -29,7 +29,9 @@ pub const GlobalAddr = extern struct {
                     .{@as(*const Pointee(ref), @ptrCast(@alignCast(global.value)))},
                 );
             },
-            .v128 => unreachable,
+            .v128 => {
+                try V128.format(@as(*const V128, @ptrCast(@alignCast(global.value))).*, writer);
+            },
         }
     }
 };
@@ -298,3 +300,4 @@ const builtin = @import("builtin");
 const Writer = std.Io.Writer;
 const Module = @import("../Module.zig");
 const ModuleInst = @import("module_inst.zig").ModuleInst;
+const V128 = @import("../v128.zig").V128;

@@ -11,6 +11,7 @@ diagnostics: json.Diagnostics,
 state: State,
 command_lookup: std.StringHashMapUnmanaged(Command.Type.LookupKey),
 value_lookup: std.StringHashMapUnmanaged(Command.ValueLookupKey),
+lane_type_lookup: std.StringHashMapUnmanaged(Command.LaneType),
 
 const State = enum { more, finished };
 
@@ -109,6 +110,7 @@ pub fn init(
         .scanner = json.Scanner.initCompleteInput(arena.allocator(), input.bytes),
         .command_lookup = try initEnumStringLookup(arena, Command.Type.LookupKey),
         .value_lookup = try initEnumStringLookup(arena, Command.ValueLookupKey),
+        .lane_type_lookup = try initEnumStringLookup(arena, Command.LaneType),
         .diagnostics = .{},
         .state = .more,
     };
@@ -211,11 +213,30 @@ pub const Command = struct {
         f64: u64,
         funcref, // ?u32
         externref: ?u31,
+        v128: V128,
 
         pub const Vec = []const Const;
     };
 
     const ValueLookupKey = @typeInfo(Const).@"union".tag_type.?;
+
+    const LaneType = enum {
+        i8,
+        i16,
+        i32,
+        f32,
+        i64,
+        f64,
+
+        fn size(ty: LaneType) u4 {
+            return switch (ty) {
+                .i8 => 1,
+                .i16 => 2,
+                .i32, .f32 => 4,
+                .i64, .f64 => 8,
+            };
+        }
+    };
 
     fn parseValueVec(
         parser: *Parser,
@@ -240,63 +261,134 @@ pub const Command = struct {
             try parser.expectNextTokenStringEql(&scratch, "type");
             _ = scratch.reset(.retain_capacity);
             const type_string = try parser.expectNextTokenString(&scratch);
-            _ = scratch.reset(.retain_capacity);
-
             const type_tag = parser.value_lookup.get(type_string) orelse
                 return error.MalformedJson; // bad value type
-
-            // Would parse "lane_type" here if V128 support was added
-
-            try parser.expectNextTokenStringEql(&scratch, "value");
             _ = scratch.reset(.retain_capacity);
 
-            // V128 support would require an array of strings instead
-            const value_string = try parser.expectNextTokenString(&scratch);
+            const value: T = if (type_tag == .v128) v128: {
+                try parser.expectNextTokenStringEql(&scratch, "lane_type");
+                _ = scratch.reset(.retain_capacity);
 
-            const value: T = value: switch (type_tag) {
-                .i32 => .{
-                    .i32 = std.fmt.parseInt(u32, value_string, 10) catch
-                        return error.MalformedJson, // bad i32
-                },
-                .f32 => {
-                    if (T == Expected) {
-                        if (Expected.Nan.fromString(value_string)) |nan| {
-                            break :value .{ .f32_nan = nan };
+                const lane_type_string = try parser.expectNextTokenString(&scratch);
+                const lane_type_tag = parser.lane_type_lookup.get(lane_type_string) orelse
+                    return error.MalformedJson; // bad lane type
+
+                switch (lane_type_tag) {
+                    inline else => |tag| {
+                        try parser.expectNextTokenStringEql(&scratch, "value");
+                        _ = scratch.reset(.retain_capacity);
+
+                        const lane_type = comptime @field(LaneType, @tagName(tag));
+                        const lane_count = comptime @divExact(@as(u5, 16), lane_type.size());
+                        const lane_size = comptime 8 * @as(u16, lane_type.size());
+                        const LaneInt = @Int(.signed, lane_size);
+                        const is_expected_float = T == Expected and
+                            (lane_type == .f32 or lane_type == .f64);
+
+                        try parser.expectNextToken(.array_begin);
+                        const v128: T = if (is_expected_float) floats: {
+                            const Float = std.meta.Float(@as(u8, lane_type.size()) * 8);
+                            var floats: Expected.FloatVec(lane_count, Float) = undefined;
+                            for (0..lane_count) |i| {
+                                const value_string = try parser.expectNextTokenString(&scratch);
+                                _ = scratch.reset(.retain_capacity);
+
+                                if (Expected.Nan.fromString(value_string)) |nan| {
+                                    floats.tags[i] = switch (nan) {
+                                        .canonical => .canonical_nan,
+                                        .arithmetic => .arithmetic_nan,
+                                    };
+                                } else {
+                                    floats.tags[i] = .value;
+                                    floats.raw_values[i] = std.fmt.parseInt(
+                                        @Int(.unsigned, lane_size),
+                                        value_string,
+                                        10,
+                                    ) catch return error.MalformedJson; // bad lane value
+                                }
+                            }
+
+                            break :floats switch (Float) {
+                                f32 => Expected{ .f32x4 = floats },
+                                f64 => Expected{ .f64x2 = floats },
+                                else => comptime unreachable,
+                            };
+                        } else values: {
+                            var lanes: [lane_count]LaneInt = undefined;
+                            for (&lanes) |*lane_value| {
+                                const value_string = try parser.expectNextTokenString(&scratch);
+                                _ = scratch.reset(.retain_capacity);
+
+                                lane_value.* = @bitCast(
+                                    std.fmt.parseInt(
+                                        @Int(.unsigned, lane_size),
+                                        value_string,
+                                        10,
+                                    ) catch return error.MalformedJson, // bad lane value
+                                );
+                            }
+
+                            const interp = comptime V128.Interpretation.fromLaneType(LaneInt);
+                            break :values if (T == Const)
+                                T{ .v128 = V128.init(interp, lanes) }
+                            else
+                                @unionInit(T, interp.fieldName(), lanes);
+                        };
+                        try parser.expectNextToken(.array_end);
+                        break :v128 v128;
+                    },
+                }
+            } else value: {
+                try parser.expectNextTokenStringEql(&scratch, "value");
+                _ = scratch.reset(.retain_capacity);
+
+                const value_string = try parser.expectNextTokenString(&scratch);
+                switch (type_tag) {
+                    .i32 => break :value T{
+                        .i32 = std.fmt.parseInt(u32, value_string, 10) catch
+                            return error.MalformedJson, // bad i32
+                    },
+                    .f32 => {
+                        if (T == Expected) {
+                            if (Expected.Nan.fromString(value_string)) |nan| {
+                                break :value .{ .f32_nan = nan };
+                            }
                         }
-                    }
 
-                    break :value .{
-                        .f32 = std.fmt.parseInt(u32, value_string, 10) catch
-                            return error.MalformedJson, // bad f32
-                    };
-                },
-                .i64 => .{
-                    .i64 = std.fmt.parseInt(u64, value_string, 10) catch
-                        return error.MalformedJson, // bad i64
-                },
-                .f64 => {
-                    if (T == Expected) {
-                        if (Expected.Nan.fromString(value_string)) |nan| {
-                            break :value .{ .f64_nan = nan };
+                        break :value .{
+                            .f32 = std.fmt.parseInt(u32, value_string, 10) catch
+                                return error.MalformedJson, // bad f32
+                        };
+                    },
+                    .i64 => break :value T{
+                        .i64 = std.fmt.parseInt(u64, value_string, 10) catch
+                            return error.MalformedJson, // bad i64
+                    },
+                    .f64 => {
+                        if (T == Expected) {
+                            if (Expected.Nan.fromString(value_string)) |nan| {
+                                break :value .{ .f64_nan = nan };
+                            }
                         }
-                    }
 
-                    break :value .{
-                        .f64 = std.fmt.parseInt(u64, value_string, 10) catch
-                            return error.MalformedJson, // bad f64
-                    };
-                },
-                .externref => .{
-                    .externref = if (std.mem.eql(u8, "null", value_string))
-                        null
+                        break :value .{
+                            .f64 = std.fmt.parseInt(u64, value_string, 10) catch
+                                return error.MalformedJson, // bad f64
+                        };
+                    },
+                    .externref => break :value T{
+                        .externref = if (std.mem.eql(u8, "null", value_string))
+                            null
+                        else
+                            std.fmt.parseInt(u31, value_string, 10) catch
+                                return error.MalformedJson, // bad externref number
+                    },
+                    .funcref => if (std.mem.eql(u8, "null", value_string))
+                        break :value T.funcref
                     else
-                        std.fmt.parseInt(u31, value_string, 10) catch
-                            return error.MalformedJson, // bad externref number
-                },
-                .funcref => if (std.mem.eql(u8, "null", value_string))
-                    .funcref
-                else
-                    return error.MalformedJson, // only null funcref is allowed
+                        return error.MalformedJson, // only null funcref is allowed
+                    .v128 => unreachable,
+                }
             };
 
             try parser.expectNextToken(.object_end);
@@ -382,10 +474,16 @@ pub const Command = struct {
         f64_nan: Nan,
         funcref, // ?u32
         externref: ?u31,
+        i8x16: @Vector(16, i8),
+        i16x8: @Vector(8, i16),
+        i32x4: @Vector(4, i32),
+        f32x4: FloatVec(4, f32),
+        i64x2: @Vector(2, i64),
+        f64x2: FloatVec(2, f64),
 
         pub const Vec = []const Expected;
 
-        pub const Nan = enum {
+        pub const Nan = enum(u2) {
             canonical,
             arithmetic,
 
@@ -398,6 +496,47 @@ pub const Command = struct {
                     null;
             }
         };
+
+        pub const FloatTag = enum(u3) {
+            value,
+            canonical_nan,
+            arithmetic_nan,
+        };
+
+        pub fn FloatVec(comptime len: u3, comptime F: type) type {
+            return struct {
+                tags: [len]FloatTag,
+                raw_values: [len]@Int(.unsigned, @typeInfo(F).float.bits),
+
+                const Self = @This();
+
+                const interpretation = V128.Interpretation.fromLaneType(F);
+
+                pub fn format(vec: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+                    if (std.mem.indexOfScalar(FloatTag, &vec.tags, .canonical_nan) == null and
+                        std.mem.indexOfScalar(FloatTag, &vec.tags, .arithmetic_nan) == null)
+                    {
+                        try V128.init(interpretation, @as([len]F, @bitCast(vec.raw_values)))
+                            .formatter(interpretation).format(writer);
+                    } else {
+                        try writer.writeAll("(v128.const " ++ comptime interpretation.fieldName());
+                        for (0..len) |i| {
+                            try writer.writeByte(' ');
+                            switch (vec.tags[i]) {
+                                .value => try @unionInit(
+                                    @import("wasmstint").Interpreter.TaggedValue,
+                                    @typeName(F),
+                                    @as(F, @bitCast(vec.raw_values[i])),
+                                ).format(writer),
+                                .arithmetic_nan => try writer.writeAll("nan:arithmetic"),
+                                .canonical_nan => try writer.writeAll("nan:canonical"),
+                            }
+                        }
+                        try writer.writeByte(')');
+                    }
+                }
+            };
+        }
     };
 
     pub const AssertReturn = struct {
@@ -572,5 +711,7 @@ const std = @import("std");
 const Oom = std.mem.Allocator.Error;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const json = std.json;
-const Name = @import("wasmstint").Module.Name;
+const wasmstint = @import("wasmstint");
+const Name = wasmstint.Module.Name;
+const V128 = wasmstint.V128;
 const coz = @import("coz");
