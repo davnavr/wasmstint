@@ -15,3 +15,15 @@
 (assert_return
   (invoke "" (i32.const 0xFB30_3030) (i32.const 0) (i64.const 0))
   (i32.const 0))
+
+;; allocation of memory for globals
+(module
+  (type (;0;) (func))
+  (import "spectest" "global_f32" (global (;0;) f32))
+  (import "spectest" "print" (func (;0;) (type 0)))
+  (import "spectest" "global_f32" (global (;1;) f32))
+  (import "spectest" "global_f32" (global (;2;) f32))
+  (func (;1;) (type 0))
+  (global (;3;) v128 (v128.const i32x4 0x30303030 0x30303030 0x30303030 0x30303030))
+  (global (;4;) i32 (i32.const 0))
+  (global (;5;) v128 (v128.const i32x4 0x00000000 0x00000000 0x00000000 0x00000000)))
