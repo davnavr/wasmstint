@@ -884,7 +884,7 @@ fn buildFuzzers(
                 .target = options.project.target,
                 .optimize = options.project.optimize,
             }),
-            .max_rss = ByteSize.mib(291).bytes,
+            .max_rss = ByteSize.mib(305).bytes,
             .use_llvm = true,
             // .use_lld = options.project.use_llvm.interpreter,
         });
