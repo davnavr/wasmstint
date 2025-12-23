@@ -607,6 +607,54 @@ pub const @"v128.load16_lane" = loadLaneHandler(.@"v128.load16_lane", u16);
 pub const @"v128.load32_lane" = loadLaneHandler(.@"v128.load32_lane", u32);
 pub const @"v128.load64_lane" = loadLaneHandler(.@"v128.load64_lane", u64);
 
+/// - https://webassembly.github.io/spec/core/exec/instructions.html#exec-vstore-lane
+/// - https://webassembly.github.io/spec/core/exec/instructions.html#exec-vload-lane
+fn storeLaneHandler(
+    comptime opcode: FDPrefixOpcode,
+    comptime T: type,
+) OpcodeHandler {
+    return struct {
+        const interpret = V128.Interpretation.fromLaneType(T);
+
+        fn popVectorToStoreLaneOf(vals: *Stack.Values, interp: *Interpreter) V128 {
+            _ = interp;
+            return vals.popTyped(&.{.v128})[0];
+        }
+
+        fn performStoreLane(
+            instr: *Instr,
+            vals: *Stack.Values,
+            fuel: *Fuel,
+            stp: Stp,
+            locals: Locals,
+            module: runtime.ModuleInst,
+            interp: *Interpreter,
+            v: V128,
+            access: *[@sizeOf(T)]u8,
+        ) Transition {
+            const idx = instr.readByte();
+            vals.assertRemainingCountIs(0);
+            const lanes: [interpret.laneCount()]T = v.interpret(interpret);
+            std.mem.writeInt(T, access, lanes[idx], .little);
+            return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
+        }
+
+        const storeLane = handlers.linearMemoryAccessor(
+            .fromByteUnits(@sizeOf(T)),
+            .{ .fd = opcode },
+            .store,
+            V128,
+            popVectorToStoreLaneOf,
+            performStoreLane,
+        );
+    }.storeLane;
+}
+
+pub const @"v128.store8_lane" = storeLaneHandler(.@"v128.store8_lane", u8);
+pub const @"v128.store16_lane" = storeLaneHandler(.@"v128.store16_lane", u16);
+pub const @"v128.store32_lane" = storeLaneHandler(.@"v128.store32_lane", u32);
+pub const @"v128.store64_lane" = storeLaneHandler(.@"v128.store64_lane", u64);
+
 /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vbinop
 fn defineLaneWiseBinOp(
     comptime interpretation: V128.Interpretation,
