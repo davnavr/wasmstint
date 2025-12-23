@@ -1315,6 +1315,25 @@ fn floatOpcodeHandlers(comptime F: type) type {
         //const precise_int_limit = 1 << (std.math.floatMantissaBits(F) + 1);
 
         const operators = struct {
+            fn ceil(z: Floats) Floats {
+                return @ceil(z);
+            }
+
+            fn floor(z: Floats) Floats {
+                // See comment on `f32.floor` implementation on why this may be inaccurate/incorrect
+                return @floor(z);
+            }
+
+            fn trunc(z: Floats) Floats {
+                return @select(F, z <= @as(Floats, @splat(-0.0)), @ceil(z), @floor(z));
+            }
+
+            // fn nearest
+
+            fn abs(z: Floats) Floats {
+                return @abs(z);
+            }
+
             fn neg(z: Floats) Floats {
                 return -z;
             }
@@ -1395,12 +1414,12 @@ fn floatOpcodeHandlers(comptime F: type) type {
             fn pmax(z_1: Floats, z_2: Floats) Floats {
                 return @select(F, z_1 < z_2, z_2, z_1);
             }
-
-            fn abs(z: Floats) Floats {
-                return @abs(z);
-            }
         };
 
+        const ceil = defineUnaryOp(interpretation, operators.ceil);
+        const floor = defineUnaryOp(interpretation, operators.floor);
+        const trunc = defineUnaryOp(interpretation, operators.trunc);
+        // const nearest = defineUnaryOp(interpretation, operators.nearest);
         const abs = defineUnaryOp(interpretation, operators.abs);
         const neg = defineUnaryOp(interpretation, operators.neg);
         const sqrt = defineUnaryOp(interpretation, operators.sqrt);
@@ -1416,6 +1435,18 @@ fn floatOpcodeHandlers(comptime F: type) type {
 }
 
 const f32x4_arith_ops = floatOpcodeHandlers(f32);
+const f64x2_arith_ops = floatOpcodeHandlers(f64);
+
+pub const @"f32x4.ceil" = f32x4_arith_ops.ceil;
+pub const @"f32x4.floor" = f32x4_arith_ops.floor;
+pub const @"f32x4.trunc" = f32x4_arith_ops.trunc;
+// pub const @"f32x4.nearest" = f32x4_arith_ops.nearest;
+
+pub const @"f64x2.ceil" = f64x2_arith_ops.ceil;
+pub const @"f64x2.floor" = f64x2_arith_ops.floor;
+pub const @"f64x2.trunc" = f64x2_arith_ops.trunc;
+// pub const @"f64x2.nearest" = f64x2_arith_ops.nearest;
+
 pub const @"f32x4.abs" = f32x4_arith_ops.abs;
 pub const @"f32x4.neg" = f32x4_arith_ops.neg;
 pub const @"f32x4.sqrt" = f32x4_arith_ops.sqrt;
@@ -1428,7 +1459,6 @@ pub const @"f32x4.max" = f32x4_arith_ops.max;
 pub const @"f32x4.pmin" = f32x4_arith_ops.pmin;
 pub const @"f32x4.pmax" = f32x4_arith_ops.pmax;
 
-const f64x2_arith_ops = floatOpcodeHandlers(f64);
 pub const @"f64x2.abs" = f64x2_arith_ops.abs;
 pub const @"f64x2.neg" = f64x2_arith_ops.neg;
 pub const @"f64x2.sqrt" = f64x2_arith_ops.sqrt;
