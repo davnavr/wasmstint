@@ -163,6 +163,88 @@ pub fn defineRelOp(
     }.vRelOpHandler;
 }
 
+/// - https://webassembly.github.io/spec/core/exec/instructions.html#exec-vextract-lane
+/// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#extract-lane-as-a-scalar
+fn extractLaneHandler(comptime From: type, comptime to: Value.Tag) OpcodeHandler {
+    return struct {
+        const interpret_from = V128.Interpretation.fromLaneType(From);
+
+        fn extractLane(
+            ip: Ip,
+            sp: Sp,
+            fuel: *Fuel,
+            stp: Stp,
+            locals: Locals,
+            module: runtime.ModuleInst,
+            interp: *Interpreter,
+            eip: Eip,
+        ) callconv(ohcc) Transition {
+            var instr = Instr.init(ip, eip);
+            var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
+
+            const lane = instr.readByte();
+            const vector: [interpret_from.laneCount()]From = V128.interpret(
+                vals.popTyped(&.{.v128})[0],
+                interpret_from,
+            );
+            vals.assertRemainingCountIs(0);
+            vals.pushArray(1)[0] = @unionInit(Value, @tagName(to), vector[lane]);
+
+            return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
+        }
+    }.extractLane;
+}
+
+/// - https://webassembly.github.io/spec/core/exec/instructions.html#exec-vreplace-lane
+/// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#replace-lane-value
+fn replaceLaneHandler(comptime T: type, comptime lane: Value.Tag) OpcodeHandler {
+    return struct {
+        const interpret_as = V128.Interpretation.fromLaneType(T);
+        const needs_truncation = @typeInfo(T) == .int and
+            @typeInfo(T).int.bits < @typeInfo(lane.Type()).int.bits;
+
+        fn replaceLane(
+            ip: Ip,
+            sp: Sp,
+            fuel: *Fuel,
+            stp: Stp,
+            locals: Locals,
+            module: runtime.ModuleInst,
+            interp: *Interpreter,
+            eip: Eip,
+        ) callconv(ohcc) Transition {
+            var instr = Instr.init(ip, eip);
+            var vals = Stack.Values.init(sp, &interp.stack, 2, 2);
+
+            const lane_idx = instr.readByte();
+            const operands = vals.popTyped(&.{ .v128, lane });
+            vals.assertRemainingCountIs(0);
+            var vector: [interpret_as.laneCount()]T = operands[0].interpret(interpret_as);
+            const replacement = operands[1];
+            vector[lane_idx] = if (needs_truncation) @truncate(replacement) else replacement;
+            vals.pushArray(1)[0] = Value{ .v128 = V128.init(interpret_as, vector) };
+            vals.assertRemainingCountIs(1);
+
+            return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
+        }
+    }.replaceLane;
+}
+
+pub const @"i8x16.extract_lane_s" = extractLaneHandler(i8, .i32);
+pub const @"i8x16.extract_lane_u" = extractLaneHandler(u8, .i32);
+pub const @"i8x16.replace_lane" = replaceLaneHandler(i8, .i32);
+pub const @"i16x8.extract_lane_s" = extractLaneHandler(i16, .i32);
+pub const @"i16x8.extract_lane_u" = extractLaneHandler(u16, .i32);
+pub const @"i16x8.replace_lane" = replaceLaneHandler(i16, .i32);
+pub const @"i32x4.extract_lane" = extractLaneHandler(i32, .i32);
+pub const @"i32x4.replace_lane" = replaceLaneHandler(i32, .i32);
+pub const @"i64x2.extract_lane" = extractLaneHandler(i64, .i64);
+pub const @"i64x2.replace_lane" = replaceLaneHandler(i64, .i64);
+pub const @"f32x4.extract_lane" = extractLaneHandler(f32, .f32);
+pub const @"f32x4.replace_lane" = replaceLaneHandler(f32, .f32);
+pub const @"f64x2.extract_lane" = extractLaneHandler(f64, .f64);
+pub const @"f64x2.replace_lane" = replaceLaneHandler(f64, .f64);
+
 /// https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#comparisons
 fn laneWiseComparisonHandlers(comptime interpretation: V128.Interpretation) type {
     return struct {
