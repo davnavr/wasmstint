@@ -1100,6 +1100,7 @@ fn validateLoadInstr(
 
 fn validateLoadLaneInstr(
     reader: *Reader,
+    natural_alignment: Alignment,
     val_stack: *ValStack,
     ctrl_stack: *const CtrlStack,
     comptime lane_size: V128.LaneIdxSize,
@@ -1109,7 +1110,7 @@ fn validateLoadLaneInstr(
 ) Error!void {
     try val_stack.popExpecting(ctrl_stack, .v128, diag);
     try val_stack.popThenPushExpecting(arena, ctrl_stack, .i32, .v128, diag);
-    try readMemArg(reader, .@"16", module, diag);
+    try readMemArg(reader, natural_alignment, module, diag);
     try reader.readSimdLane(lane_size, diag);
 }
 
@@ -2578,6 +2579,7 @@ pub fn rawValidate(
                 },
                 .@"v128.load8_lane" => try validateLoadLaneInstr(
                     &reader,
+                    Alignment.@"1",
                     &val_stack,
                     &ctrl_stack,
                     .@"16",
@@ -2587,6 +2589,7 @@ pub fn rawValidate(
                 ),
                 .@"v128.load16_lane" => try validateLoadLaneInstr(
                     &reader,
+                    Alignment.@"2",
                     &val_stack,
                     &ctrl_stack,
                     .@"8",
@@ -2596,6 +2599,7 @@ pub fn rawValidate(
                 ),
                 .@"v128.load32_lane" => try validateLoadLaneInstr(
                     &reader,
+                    Alignment.@"4",
                     &val_stack,
                     &ctrl_stack,
                     .@"4",
@@ -2605,6 +2609,7 @@ pub fn rawValidate(
                 ),
                 .@"v128.load64_lane" => try validateLoadLaneInstr(
                     &reader,
+                    Alignment.@"8",
                     &val_stack,
                     &ctrl_stack,
                     .@"2",
