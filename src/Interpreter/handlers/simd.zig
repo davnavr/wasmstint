@@ -655,6 +655,47 @@ pub const @"v128.store16_lane" = storeLaneHandler(.@"v128.store16_lane", u16);
 pub const @"v128.store32_lane" = storeLaneHandler(.@"v128.store32_lane", u32);
 pub const @"v128.store64_lane" = storeLaneHandler(.@"v128.store64_lane", u64);
 
+/// - https://webassembly.github.io/spec/core/exec/instructions.html#exec-vload-zero
+/// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#load-and-zero-pad
+fn loadAndZeroPadHandler(
+    comptime opcode: FDPrefixOpcode,
+    comptime T: type,
+) OpcodeHandler {
+    return struct {
+        const interpret = V128.Interpretation.fromLaneType(T);
+
+        fn performLoadAndZeroPad(
+            instr: *Instr,
+            vals: *Stack.Values,
+            fuel: *Fuel,
+            stp: Stp,
+            locals: Locals,
+            module: runtime.ModuleInst,
+            interp: *Interpreter,
+            _: void,
+            access: *[@sizeOf(T)]u8,
+        ) Transition {
+            vals.assertRemainingCountIs(0);
+            var lanes: interpret.Type() = @splat(0);
+            lanes[0] = std.mem.readInt(T, access, .little);
+            vals.pushTyped(&.{.v128}, .{V128.init(interpret, lanes)});
+            return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
+        }
+
+        const loadAndZeroPad = handlers.linearMemoryAccessor(
+            .fromByteUnits(@sizeOf(T)),
+            .{ .fd = opcode },
+            .load,
+            void,
+            handlers.nopBeforeMemoryAccess,
+            performLoadAndZeroPad,
+        );
+    }.loadAndZeroPad;
+}
+
+pub const @"v128.load32_zero" = loadAndZeroPadHandler(.@"v128.load32_zero", u32);
+pub const @"v128.load64_zero" = loadAndZeroPadHandler(.@"v128.load64_zero", u64);
+
 /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vbinop
 fn defineLaneWiseBinOp(
     comptime interpretation: V128.Interpretation,
