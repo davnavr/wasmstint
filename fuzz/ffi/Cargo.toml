@@ -28,7 +28,7 @@ features = ["collections"]
 [dependencies.wasmi]
 version = "1.0.5"
 default-features = false
-features = [] # No std means no serde
+features = ["simd"] # No std means no serde
 
 [dependencies.wasmi_core]
 version = "1.0.5"
