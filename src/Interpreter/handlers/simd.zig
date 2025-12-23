@@ -557,6 +557,56 @@ pub fn @"v128.any_true"(
     return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
 }
 
+/// - https://webassembly.github.io/spec/core/exec/instructions.html#exec-vload-lane
+/// - https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#load-lane
+fn loadLaneHandler(
+    comptime opcode: FDPrefixOpcode,
+    comptime T: type,
+) OpcodeHandler {
+    return struct {
+        const interpret = V128.Interpretation.fromLaneType(T);
+
+        fn popVectorToReplaceLaneOf(vals: *Stack.Values, interp: *Interpreter) V128 {
+            _ = interp;
+            return vals.popTyped(&.{.v128})[0];
+        }
+
+        fn performLoadLane(
+            instr: *Instr,
+            vals: *Stack.Values,
+            fuel: *Fuel,
+            stp: Stp,
+            locals: Locals,
+            module: runtime.ModuleInst,
+            interp: *Interpreter,
+            v: V128,
+            access: *[@sizeOf(T)]u8,
+        ) Transition {
+            const idx = instr.readByte();
+            vals.assertRemainingCountIs(0);
+            const elem = std.mem.readInt(T, access, .little);
+            var lanes: [interpret.laneCount()]T = v.interpret(interpret);
+            lanes[idx] = elem;
+            vals.pushTyped(&.{.v128}, .{V128.init(interpret, lanes)});
+            return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
+        }
+
+        const loadLane = handlers.linearMemoryAccessor(
+            .fromByteUnits(@sizeOf(T)),
+            .{ .fd = opcode },
+            .store, // actually a load, this ensures an assertion checks for 2 values on the stack
+            V128,
+            popVectorToReplaceLaneOf,
+            performLoadLane,
+        );
+    }.loadLane;
+}
+
+pub const @"v128.load8_lane" = loadLaneHandler(.@"v128.load8_lane", u8);
+pub const @"v128.load16_lane" = loadLaneHandler(.@"v128.load16_lane", u16);
+pub const @"v128.load32_lane" = loadLaneHandler(.@"v128.load32_lane", u32);
+pub const @"v128.load64_lane" = loadLaneHandler(.@"v128.load64_lane", u64);
+
 /// https://webassembly.github.io/spec/core/exec/instructions.html#exec-vbinop
 fn defineLaneWiseBinOp(
     comptime interpretation: V128.Interpretation,
