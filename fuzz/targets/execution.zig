@@ -419,7 +419,10 @@ fn mainLoop(
                 switch (interrupt.cause().*) {
                     .out_of_fuel => return error.OutOfFuel,
                     .memory_grow => |grow_request| {
-                        const accepted = try input.boolean();
+                        const accepted =
+                            grow_request.new_size <= wasm_smith_config.max_max_memory_bytes and
+                            try input.boolean();
+
                         std.debug.print(
                             "memory.grow from {[old]d} to {[new]d} {[status]s}\n",
                             .{
@@ -433,7 +436,10 @@ fn mainLoop(
                         }
                     },
                     .table_grow => |grow_request| {
-                        const accepted = try input.boolean();
+                        const accepted =
+                            grow_request.new_len <= wasm_smith_config.max_max_table_elements and
+                            try input.boolean();
+
                         std.debug.print(
                             "table.grow from {[old]d} to {[new]d} {[status]s}\n",
                             .{
