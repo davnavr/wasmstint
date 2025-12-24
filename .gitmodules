@@ -1,4 +1,0 @@
-[submodule "wasi-testsuite"]
-	path = tests/wasi
-	url = https://github.com/WebAssembly/wasi-testsuite.git
-	shallow = true

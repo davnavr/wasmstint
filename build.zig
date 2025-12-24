@@ -166,13 +166,6 @@ pub fn build(b: *Build) void {
         .interpreter = wasip1_exe,
         .subprocess = modules.subprocess,
     });
-
-    // buildWasiTestsuite(
-    //     b,
-    //     &steps,
-    //     .{ .project = &project_options, .tool_paths = &tool_paths },
-    //     .{ .driver = wasip1_test_runner, .interpreter = wasip1_exe },
-    // );
 }
 
 const ByteSize = packed struct(usize) {
@@ -723,53 +716,6 @@ const Wasip1Interp = struct {
     }
 };
 
-const Wasip1TestRunner = struct {
-    exe: *Build.Step.Compile,
-
-    fn build(
-        b: *Build,
-        steps: *const TopLevelSteps,
-        options: struct { project: *const ProjectOptions },
-        modules: struct {
-            cli_args: Modules.CliArgs,
-            file_content: Modules.FileContent,
-            interpreter: Wasip1Interp,
-        },
-    ) Wasip1TestRunner {
-        const module = b.createModule(.{
-            .root_source_file = b.path("src/WasiPreview1/test_driver.zig"),
-            .target = options.project.target,
-            .optimize = options.project.optimize,
-        });
-        Modules.addAsImportTo(Modules.CliArgs, modules.cli_args, module);
-        Modules.addAsImportTo(Modules.FileContent, modules.file_content, module);
-
-        const exe = b.addExecutable(.{
-            .name = "wasmstint-wasip1-test",
-            .root_module = module,
-            .use_llvm = false,
-            .max_rss = ByteSize.mib(174).bytes,
-        });
-
-        steps.check.dependOn(&exe.step);
-        b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{}).step);
-
-        {
-            const step = b.step("run-wasip1-test", "Run WASI testsuite test interpreter");
-            const run = b.addRunArtifact(exe);
-            run.addArg("--interpreter");
-            run.addArtifactArg(modules.interpreter.exe);
-            if (b.args) |args| {
-                run.addArgs(args);
-            }
-
-            step.dependOn(&run.step);
-        }
-
-        return .{ .exe = exe };
-    }
-};
-
 fn buildFuzzers(
     b: *Build,
     steps: *const TopLevelSteps,
@@ -1040,80 +986,4 @@ fn buildWasiSamplePrograms(
         run_test.step.max_rss = ByteSize.mib(18).bytes;
         test_step.dependOn(&run_test.step);
     }
-}
-
-fn buildWasiTestsuite(
-    b: *Build,
-    steps: *const TopLevelSteps,
-    options: struct { project: *const ProjectOptions },
-    dependencies: struct { driver: Wasip1TestRunner, interpreter: Wasip1Interp },
-) void {
-    const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
-    const install_step = b.step("install-wasi-test-c", "Compile WASI C test programs");
-    const tests_step = b.step("test-wasi-c", "Run WASI C test suite");
-
-    const tests_dir = b.path("tests/wasi/tests/c/src/");
-    const tests_dir_handle = b.build_root.handle.openDir(
-        tests_dir.src_path.sub_path,
-        .{ .iterate = true },
-    ) catch @panic("could not open tests directory");
-
-    var tests_iter = tests_dir_handle.iterateAssumeFirstIteration();
-    while (tests_iter.next() catch @panic("bad entry in tests directory")) |tests_entry| {
-        if (tests_entry.kind != .file or
-            !std.mem.eql(u8, ".c", std.fs.path.extension(tests_entry.name)))
-        {
-            continue;
-        }
-
-        const test_module = b.createModule(.{
-            .target = wasm_target,
-            .optimize = options.project.optimize,
-            .link_libc = true,
-        });
-        test_module.addCSourceFile(.{ .file = tests_dir.path(b, tests_entry.name) });
-
-        const test_exe = b.addExecutable(.{
-            .name = b.dupe(tests_entry.name[0 .. tests_entry.name.len - 2]),
-            .root_module = test_module,
-            .max_rss = ByteSize.mib(171).bytes,
-        });
-
-        const install_test = b.addInstallArtifact(
-            test_exe,
-            .{ .dest_dir = .{ .override = .{ .custom = "wasitest/c" } } },
-        );
-
-        install_step.dependOn(&install_test.step);
-
-        // Steps to run against the test driver
-        const run_test = b.addRunArtifact(dependencies.driver.exe);
-        run_test.step.max_rss = ByteSize.mib(3).bytes;
-        run_test.setName(b.fmt("{s}.wasm", .{tests_entry.name}));
-
-        run_test.addArg("--module");
-        run_test.addArtifactArg(test_exe);
-
-        json: {
-            const json_file_name = b.fmt("{s}.json", .{std.fs.path.stem(tests_entry.name)});
-            tests_dir_handle.access(json_file_name, .{}) catch |e| switch (e) {
-                error.FileNotFound => break :json,
-                else => unreachable,
-            };
-
-            run_test.addArg("--test");
-            run_test.addFileArg(tests_dir.path(b, json_file_name));
-        }
-
-        run_test.addArg("--interpreter");
-        run_test.addArtifactArg(dependencies.interpreter.exe);
-
-        if (b.args) |args| {
-            run_test.addArgs(args);
-        }
-
-        tests_step.dependOn(&run_test.step);
-    }
-
-    steps.@"test".dependOn(tests_step);
 }
