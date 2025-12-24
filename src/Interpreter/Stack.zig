@@ -124,7 +124,7 @@ pub const Top = packed struct(usize) {
 
 /// The operand stack that WebAssembly instructions operate on.
 pub const Values = struct {
-    const bounds_checking = switch (builtin.mode) {
+    pub const bounds_checking = switch (builtin.mode) {
         .Debug, .ReleaseSafe => true,
         .ReleaseFast, .ReleaseSmall => false,
     };
@@ -184,7 +184,9 @@ pub const Values = struct {
             stack.top.ptr - count,
         )[0..count];
 
-        std.debug.assert(count <= stack.remaining);
+        if (bounds_checking) {
+            std.debug.assert(count <= stack.remaining);
+        }
 
         return values;
     }
@@ -239,8 +241,11 @@ pub const Values = struct {
         return typed;
     }
 
-    pub fn unallocated(values: *const Values) []align(@sizeOf(Value)) Value {
-        return values.top.ptr[0..(values.max_height - values.remaining)];
+    pub fn unallocated(values: *const Values, stack: *const Stack) []align(@sizeOf(Value)) Value {
+        return if (bounds_checking)
+            values.top.ptr[0..(values.max_height - values.remaining)]
+        else
+            values.top.ptr[0 .. (stack.allocated.ptr + stack.allocated.len) - values.top.ptr];
     }
 
     /// Returns a slice where pushed values can be written to. The `Value` at index `0` is the

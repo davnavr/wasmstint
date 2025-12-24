@@ -324,7 +324,7 @@ const Modules = struct {
             });
 
             const tests_run = &b.addRunArtifact(tests).step;
-            tests_run.max_rss = ByteSize.mib(19).bytes;
+            tests_run.max_rss = ByteSize.mib(43).bytes;
             steps.@"test-unit".dependOn(tests_run);
             addCheck(b, steps, .@"test", module, name, .{
                 .max_rss = .mib(126),
@@ -394,12 +394,12 @@ const Modules = struct {
             const tests = b.addTest(.{
                 .name = name,
                 .root_module = module,
-                .max_rss = ByteSize.mib(219).bytes,
+                .max_rss = ByteSize.mib(255).bytes,
                 .use_llvm = options.use_llvm.interpreter,
             });
 
             const tests_run = &b.addRunArtifact(tests).step;
-            tests_run.max_rss = ByteSize.mib(16).bytes;
+            tests_run.max_rss = ByteSize.mib(43).bytes;
             steps.@"test-unit".dependOn(tests_run);
 
             addCheck(b, steps, .@"test", module, name, .{
@@ -478,7 +478,7 @@ const SpectestInterp = struct {
             .name = "wasmstint-spectest",
             .root_module = module,
             .use_llvm = proj_opts.use_llvm.interpreter,
-            .max_rss = ByteSize.mib(447).bytes,
+            .max_rss = ByteSize.mib(452).bytes,
         });
 
         b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{}).step);
@@ -983,7 +983,7 @@ fn buildWasiSamplePrograms(
 
         // Can't add to "check" step, since it would require building the WASM.
         const run_test = b.addRunArtifact(invoke_test);
-        run_test.step.max_rss = ByteSize.mib(18).bytes;
+        run_test.step.max_rss = ByteSize.mib(44).bytes;
         test_step.dependOn(&run_test.step);
     }
 }

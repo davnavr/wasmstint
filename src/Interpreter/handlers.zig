@@ -1719,20 +1719,19 @@ fn floatOpcodeHandlers(comptime F: type) type {
 const f32_opcode_handlers = floatOpcodeHandlers(f32);
 const f64_opcode_handlers = floatOpcodeHandlers(f64);
 
-fn dispatchTableLength(comptime Opcode: type, comptime length_override: ?usize) comptime_int {
+fn dispatchTableLength(comptime Opcode: type, comptime manual_len: usize) comptime_int {
     var maximum = 0;
     for (@typeInfo(Opcode).@"enum".fields) |op| {
         maximum = @max(maximum, op.value);
     }
 
     const actual_len = maximum + 1;
+    std.debug.assert(actual_len <= manual_len);
 
-    if (length_override) |manual_len| {
-        std.debug.assert(actual_len <= manual_len);
-        return manual_len;
-    } else {
-        return actual_len;
-    }
+    return switch (builtin.mode) {
+        .ReleaseSafe => manual_len, // optimization should remove bounds checks
+        .Debug, .ReleaseFast, .ReleaseSmall => actual_len,
+    };
 }
 
 fn dispatchTable(
@@ -1741,18 +1740,15 @@ fn dispatchTable(
     ///
     /// Opcode handler functions should be marked `pub`.
     comptime handlers: type,
+    /// Must not be `undefined`, as this seems to cause a crash in the Zig compiler.
     comptime invalid: OpcodeHandler,
-    comptime length_override: ?usize,
-) [dispatchTableLength(Opcode, length_override)]*const OpcodeHandler {
-    var table = [_]*const OpcodeHandler{invalid} **
-        dispatchTableLength(Opcode, length_override);
-
-    for (@typeInfo(Opcode).@"enum".fields) |op| {
-        if (@hasDecl(handlers, op.name)) {
-            table[op.value] = @as(*const OpcodeHandler, @field(handlers, op.name));
-        }
+    comptime manual_length: usize,
+) [dispatchTableLength(Opcode, manual_length)]*const OpcodeHandler {
+    var table: [dispatchTableLength(Opcode, manual_length)]*const OpcodeHandler = @splat(invalid);
+    for (std.enums.values(Opcode)) |op| {
+        const name = @tagName(op);
+        table[@intFromEnum(op)] = @as(*const OpcodeHandler, @field(handlers, name));
     }
-
     return table;
 }
 
@@ -1760,9 +1756,10 @@ fn prefixDispatchTable(
     comptime prefix: opcodes.ByteOpcode,
     comptime Opcode: type,
     comptime handlers: type,
+    comptime manual_length: usize,
 ) type {
     return struct {
-        fn panicInvalidInstruction(
+        fn invalid(
             ip: Ip,
             sp: Sp,
             fuel: *Fuel,
@@ -1779,18 +1776,16 @@ fn prefixDispatchTable(
             _ = module;
             _ = interp;
             _ = eip;
-            std.debug.panic(
-                "invalid instruction 0x{X:0>2} ... 0x{X:0>2}",
-                .{ @intFromEnum(prefix), (ip - 1)[0] },
-            );
+            switch (builtin.mode) {
+                .Debug, .ReleaseSafe => std.debug.panic(
+                    "invalid instruction 0x{X:0>2} ... 0x{X:0>2}",
+                    .{ @intFromEnum(prefix), (ip - 1)[0] },
+                ),
+                .ReleaseSmall, .ReleaseFast => @trap(),
+            }
         }
 
-        const invalid: OpcodeHandler = switch (builtin.mode) {
-            .Debug, .ReleaseSafe => panicInvalidInstruction,
-            .ReleaseFast, .ReleaseSmall => undefined,
-        };
-
-        const entries = dispatchTable(Opcode, handlers, invalid, null);
+        const entries = dispatchTable(Opcode, handlers, invalid, manual_length);
 
         pub fn handler(
             ip: Ip,
@@ -1809,10 +1804,20 @@ fn prefixDispatchTable(
     };
 }
 
-const simd_handlers = @import("handlers/simd.zig");
+const fc_prefixed_dispatch = prefixDispatchTable(
+    .@"0xFC",
+    opcodes.FCPrefixOpcode,
+    opcode_handlers,
+    std.math.maxInt(u5),
+);
 
-const fc_prefixed_dispatch = prefixDispatchTable(.@"0xFC", opcodes.FCPrefixOpcode, opcode_handlers);
-const fd_prefixed_dispatch = prefixDispatchTable(.@"0xFD", opcodes.FDPrefixOpcode, simd_handlers);
+const simd_handlers = @import("handlers/simd.zig");
+const fd_prefixed_dispatch = prefixDispatchTable(
+    .@"0xFD",
+    opcodes.FDPrefixOpcode,
+    simd_handlers,
+    256,
+);
 
 pub fn outOfFuelHandler(
     ip: Ip,
@@ -1831,7 +1836,7 @@ pub fn outOfFuelHandler(
 }
 
 const opcode_handlers = struct {
-    fn panicInvalidInstruction(
+    fn invalid(
         ip: Ip,
         sp: Sp,
         fuel: *Fuel,
@@ -1848,21 +1853,24 @@ const opcode_handlers = struct {
         _ = module;
         _ = interp;
         _ = eip;
-        const bad_opcode: u8 = (ip - 1)[0];
-        const opcode_name = name: {
-            const tag = std.meta.intToEnum(opcodes.ByteOpcode, bad_opcode) catch
-                break :name "unknown";
+        switch (builtin.mode) {
+            .Debug, .ReleaseSafe => {
+                const bad_opcode: u8 = (ip - 1)[0];
+                const opcode_name = name: {
+                    const tag = std.meta.intToEnum(opcodes.ByteOpcode, bad_opcode) catch
+                        break :name "unknown";
 
-            break :name @tagName(tag);
-        };
+                    break :name @tagName(tag);
+                };
 
-        std.debug.panic("invalid instruction 0x{X:0>2} ({s})", .{ bad_opcode, opcode_name });
+                std.debug.panic(
+                    "invalid instruction 0x{X:0>2} ({s})",
+                    .{ bad_opcode, opcode_name },
+                );
+            },
+            .ReleaseFast, .ReleaseSmall => @trap(),
+        }
     }
-
-    const invalid: OpcodeHandler = switch (builtin.mode) {
-        .Debug, .ReleaseSafe => panicInvalidInstruction,
-        .ReleaseFast, .ReleaseSmall => undefined,
-    };
 
     pub fn @"unreachable"(
         ip: Ip,
@@ -2524,7 +2532,10 @@ const opcode_handlers = struct {
             return Transition.trap(ip, .none, eip, vals.top, stp, interp, info);
         }).*;
 
-        std.debug.assert(vals.remaining == 1);
+        if (Stack.Values.bounds_checking) {
+            std.debug.assert(vals.remaining == 1);
+        }
+
         return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }
 
@@ -3088,7 +3099,7 @@ const opcode_handlers = struct {
             n,
             src_idx,
             d,
-            vals.unallocated(),
+            vals.unallocated(&interp.stack),
         ) catch |e| switch (e) {
             error.TableAccessOutOfBounds => {
                 const info = Trap.init(.table_access_out_of_bounds, .init(table_idx, .@"table.init"));
