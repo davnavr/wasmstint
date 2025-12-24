@@ -1,54 +1,147 @@
-pub const TableStride = enum(u32) {
-    ptr = @sizeOf(*anyopaque),
-    fat = @sizeOf([2]*anyopaque),
-
-    pub fn ofType(elem_type: Module.ValType) TableStride {
-        return switch (elem_type) {
-            .funcref => .fat,
-            .externref => .ptr,
-            else => unreachable,
-        };
-    }
-
-    pub inline fn toBytes(stride: TableStride) u32 {
-        return @intFromEnum(stride);
-    }
-
-    comptime {
-        std.debug.assert(ofType(.funcref).toBytes() == @sizeOf(FuncAddr.Nullable));
-        std.debug.assert(ofType(.externref).toBytes() == @sizeOf(ExternAddr));
-    }
-};
-
 pub const TableInst = extern struct {
     base: Base,
-    stride: TableStride,
+    elem_type: Module.ValType,
     /// The current size, in elements.
     len: u32,
     /// Indicates the amount that the tables's size, in elements, can grow without reallocating.
+    ///
+    /// Elements in the range `base[len..capacity]` are `undefined`.
     capacity: u32,
     /// The maximum size, in elements.
     limit: u32,
+    vtable: *const VTable,
 
-    pub const buffer_align = @max(@alignOf(FuncAddr.Nullable), @alignOf(ExternAddr));
+    pub fn tableType(table: *const TableInst) Module.TableType {
+        return .{
+            .elem_type = table.elem_type,
+            .limits = .{ .min = table.len, .max = table.limit },
+        };
+    }
 
-    comptime {
-        std.debug.assert(buffer_align == @alignOf(*anyopaque));
+    pub fn format(table: *const TableInst, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print(
+            "(table {f} (;@{X};))",
+            .{ table.tableType(), @intFromPtr(table.base.ptr) },
+        );
     }
 
     pub const Base = packed union {
         func_ref: [*]FuncAddr.Nullable,
         extern_ref: [*]ExternAddr,
-        ptr: [*]align(buffer_align) u8,
+        ptr: [*]?*anyopaque,
 
         comptime {
-            std.debug.assert(@sizeOf(Base) == @sizeOf([*]const u8));
+            std.debug.assert(@sizeOf(Base) == @sizeOf(*anyopaque));
         }
     };
 
     pub const OobError = error{TableAccessOutOfBounds};
 
+    fn checkInvariants(table: *const TableInst) void {
+        std.debug.assert(table.len <= table.capacity);
+        std.debug.assert(table.len <= table.limit);
+        if (builtin.mode == .Debug) {
+            std.debug.assert(@intFromPtr(table.base.ptr) % @alignOf(?*anyopaque) == 0);
+        }
+    }
+
+    pub const VTable = struct {
+        /// Implements the logic for performing a resize when there is no more capacity remaining.
+        ///
+        /// After a successful resize, `table.len == new_len`, and the elements in the newly
+        /// allocated range are set to `init_elem`.
+        grow: *const fn (
+            table: *TableInst,
+            init_elem: ?*anyopaque,
+            /// Must be `> table.len`, `> table.capacity` and `<= table.limit`.
+            new_len: u32,
+        ) Oom!void,
+        free: *const fn (*TableInst) void,
+    };
+
+    pub fn grow(table: *TableInst, init_elem: ?*anyopaque, new_len: u32) Oom!void {
+        table.checkInvariants();
+        if (table.limit < new_len) {
+            return Oom.OutOfMemory;
+        } else if (new_len <= table.len) {
+            return;
+        }
+
+        const old_len = table.len;
+        if (new_len <= table.capacity) {
+            @memset(table.base.ptr[table.len..new_len], init_elem);
+            table.len = new_len;
+        } else {
+            try table.vtable.grow(table, init_elem, new_len);
+        }
+        table.checkInvariants();
+        std.debug.assert(table.len == new_len);
+        if (builtin.mode == .Debug) {
+            const expected = @intFromPtr(init_elem);
+            for (table.elements()[old_len..new_len], old_len..) |*e, i| {
+                const actual = @intFromPtr(e.*);
+                if (actual != expected) {
+                    std.debug.panic(
+                        "expected element {X:0>8} at index {d} (0x{X}), got {X:0>8}",
+                        .{ expected, i, @intFromPtr(e), actual },
+                    );
+                }
+            }
+        }
+    }
+
+    pub fn free(table: *TableInst) void {
+        table.checkInvariants();
+        table.vtable.free(table);
+        table.* = undefined;
+    }
+
+    pub const Allocated = @import("table/Allocated.zig");
+
+    /// Creates a `TableInst` from a static buffer.
+    pub fn fromStaticBuffer(
+        buffer: []?*anyopaque,
+        init_elem: ?*anyopaque,
+        /// The initial size of the table.
+        size: usize,
+    ) TableInst {
+        std.debug.assert(size <= buffer.len);
+        @memset(buffer[0..size], init_elem);
+        return TableInst{
+            .base = buffer.ptr,
+            .len = size,
+            .capacity = buffer.len,
+            .limit = buffer.len,
+            .vtable = &VTable{
+                .grow = noGrow,
+                .free = emptyFree,
+            },
+        };
+    }
+
+    pub fn noGrow(_: *TableInst, new_len: usize) Oom!void {
+        _ = new_len;
+        return error.OutOfMemory;
+    }
+
+    fn emptyFree(table: *TableInst) void {
+        std.debug.assert(table.len == 0);
+        std.debug.assert(table.capacity == 0);
+    }
+
+    pub fn limits(table: *const TableInst) Module.Limits {
+        table.checkInvariants();
+        return .{ .min = table.len, .max = table.limit };
+    }
+
+    pub const InitError = OobError || error{
+        // InsufficientFuel,
+        };
+
     /// Implements the [`table.init`] instruction, which is also used in module instantiation.
+    ///
+    /// UNIMPLEMENTED: If the value in `fuel` is too low, `InitError.InsufficientFuel` is returned and no
+    /// elements are written.
     ///
     /// [`table.init`]: https://webassembly.github.io/spec/core/exec/instructions.html#exec-table-init
     pub fn init(
@@ -58,35 +151,49 @@ pub const TableInst = extern struct {
         len: ?u32,
         src_idx: u32,
         dst_idx: u32,
+        // /// Limits the number of elements that can be written.
+        // fuel: *u64,
+        const_eval_buf: []align(@sizeOf(InterpreterValue)) InterpreterValue,
     ) OobError!void {
         const module_inst = module.header();
-        const table_addr = module_inst.tableAddr(table);
-        const table_inst = table_addr.table;
+        const table_inst = module_inst.tableAddr(table);
         const src_elems = module_inst.elemSegment(src);
         const actual_len = len orelse src_elems.len;
+
+        table_inst.checkInvariants();
 
         const src_end_idx = std.math.add(usize, src_idx, actual_len) catch
             return error.TableAccessOutOfBounds;
 
-        if (src_end_idx > src_elems.len)
+        if (src_end_idx > src_elems.len) {
             return error.TableAccessOutOfBounds;
-
+        }
         const dst_end_idx = std.math.add(usize, dst_idx, actual_len) catch
             return error.TableAccessOutOfBounds;
 
-        if (dst_end_idx > table_inst.len)
+        if (dst_end_idx > table_inst.len) {
             return error.TableAccessOutOfBounds;
+        }
 
-        std.debug.assert(src_elems.elementType() == table_addr.elem_type);
+        std.debug.assert(src_elems.elementType() == table_inst.elem_type);
 
-        if (actual_len == 0) return;
+        if (actual_len == 0) {
+            return;
+        }
 
-        switch (table_addr.elem_type) {
+        // if (fuel.* < src_elems.header.instruction_count) {
+        //     return error.InsufficientFuel; // wrong, changes depending on len
+        // }
+
+        errdefer comptime unreachable;
+
+        // TODO: Fuel check for initializer expressions in `table.init`
+        switch (table_inst.elem_type) {
             .funcref => {
                 const dst_elems: []FuncAddr.Nullable = table_inst.base
                     .func_ref[0..table_inst.len][dst_idx..dst_end_idx];
 
-                switch (src_elems.tag) {
+                switch (src_elems.header.tag) {
                     .func_indices => {
                         const src_indices = src_elems.contents.func_indices[src_idx..src_end_idx];
                         for (src_indices, dst_elems) |i, *dst| {
@@ -96,69 +203,49 @@ pub const TableInst = extern struct {
                     .func_expressions => {
                         const src_exprs = src_elems.contents.expressions[src_idx..src_end_idx];
                         for (src_exprs, dst_elems) |*src_expr, *dst| {
-                            dst.* = switch (src_expr.tag) {
-                                .@"ref.null" => FuncAddr.Nullable.null,
-                                .@"ref.func" => @bitCast(
-                                    module_inst.funcAddr(src_expr.inner.@"ref.func".get()),
-                                ),
-                                .@"global.get" => get: {
-                                    const global = module_inst.globalAddr(
-                                        src_expr.inner.@"global.get".get(),
-                                    );
-
-                                    std.debug.assert(global.global_type.val_type == .funcref);
-
-                                    break :get @as(
-                                        *const FuncAddr.Nullable,
-                                        @ptrCast(@alignCast(global.value)),
-                                    ).*;
-                                },
-                            };
+                            dst.* = const_eval.calculate(
+                                src_expr.bytes(module_inst.module),
+                                module,
+                                .funcref,
+                                const_eval_buf,
+                            );
                         }
                     },
                     .extern_expressions => unreachable,
                 }
             },
             .externref => {
+                std.debug.assert(src_elems.header.tag == .extern_expressions);
+
                 const dst_elems: []ExternAddr = table_inst.base
                     .extern_ref[0..table_inst.len][dst_idx..dst_end_idx];
 
                 const src_exprs = src_elems.contents.expressions[src_idx..src_end_idx];
                 for (src_exprs, dst_elems) |*src_expr, *dst| {
-                    dst.* = switch (src_expr.tag) {
-                        .@"ref.null" => ExternAddr.null,
-                        .@"global.get" => get: {
-                            const global = module_inst.globalAddr(
-                                src_expr.inner.@"global.get".get(),
-                            );
-
-                            std.debug.assert(global.global_type.val_type == .externref);
-
-                            break :get @as(
-                                *const ExternAddr,
-                                @ptrCast(@alignCast(global.value)),
-                            ).*;
-                        },
-                        .@"ref.func" => unreachable,
-                    };
+                    dst.* = const_eval.calculate(
+                        src_expr.bytes(module_inst.module),
+                        module,
+                        .externref,
+                        const_eval_buf,
+                    );
                 }
             },
             else => unreachable,
         }
+
+        // fuel.* -= src_elems.header.instruction_count;
     }
 
-    pub fn bytes(table: *const TableInst) []align(buffer_align) u8 {
-        return table.base.ptr[0..(@as(usize, table.len) * table.stride.toBytes())];
+    pub fn elements(table: *const TableInst) []?*anyopaque {
+        table.checkInvariants();
+        return table.base.ptr[0..table.len];
     }
 
-    pub fn elementSlice(
-        table: *const TableInst,
-        idx: usize,
-    ) OobError![]align(@alignOf(*anyopaque)) u8 {
-        if (table.len <= idx) return error.TableAccessOutOfBounds;
-        const stride = table.stride.toBytes();
-        const base_addr = idx * stride;
-        return @alignCast(table.bytes()[base_addr .. base_addr + stride]);
+    pub fn elementAt(table: *const TableInst, idx: usize) OobError!*?*anyopaque {
+        return if (table.len <= idx)
+            error.TableAccessOutOfBounds
+        else
+            &table.elements()[idx];
     }
 
     /// Implements the [`table.copy`] instruction.
@@ -173,7 +260,10 @@ pub const TableInst = extern struct {
         src_idx: u32,
         dst_idx: u32,
     ) OobError!void {
-        std.debug.assert(dst.stride == src.stride);
+        dst.checkInvariants();
+        src.checkInvariants();
+        std.debug.assert(src.elem_type == dst.elem_type);
+
         const src_end_idx = std.math.add(usize, src_idx, len) catch
             return error.TableAccessOutOfBounds;
 
@@ -186,90 +276,47 @@ pub const TableInst = extern struct {
         if (dst_end_idx > dst.len)
             return error.TableAccessOutOfBounds;
 
-        if (len == 0) return;
-
-        const stride = src.stride.toBytes();
-        const src_slice: []align(@sizeOf(usize)) const u8 =
-            @alignCast(src.bytes()[src_idx * stride .. src_end_idx * stride]);
-        std.debug.assert(src_slice.len % stride == 0);
-
-        const dst_slice: []align(@sizeOf(usize)) u8 =
-            @alignCast(dst.bytes()[dst_idx * stride .. dst_end_idx * stride]);
-        std.debug.assert(dst_slice.len % stride == 0);
-
-        // This is duplicate code from the `memory.copy` helper
-        if (@intFromPtr(src) == @intFromPtr(dst) and (dst_idx < src_end_idx or src_idx < dst_end_idx)) {
-            @memmove(dst_slice, src_slice);
-        } else {
-            @memcpy(dst_slice, src_slice);
-        }
+        const src_slice: []const ?*anyopaque = src.elements()[src_idx..src_end_idx];
+        @memmove(dst.elements()[dst_idx..dst_end_idx], src_slice);
     }
 
+    /// Asserts that `idx` and `end_idx` refer to a valid range within the table's allocated
+    /// capacity.
     pub fn fillWithinCapacity(
         table: *const TableInst,
-        elem: []align(@alignOf(*anyopaque)) const u8,
+        elem: ?*anyopaque,
         idx: u32,
         end_idx: u32,
     ) void {
-        const stride = table.stride.toBytes();
-        std.debug.assert(elem.len == stride);
+        table.checkInvariants();
         std.debug.assert(idx <= end_idx);
         std.debug.assert(end_idx <= table.capacity);
+        std.debug.assert(end_idx <= table.limit);
 
-        const FatPtr = [2]*anyopaque;
-        const fat_size = @sizeOf(FatPtr);
-        comptime {
-            std.debug.assert(TableStride.fat.toBytes() == fat_size);
-        }
-
-        var src_fat_buf: FatPtr align(fat_size) = undefined;
-        switch (table.stride) {
-            .ptr => @memset(&src_fat_buf, @as(*const *anyopaque, @ptrCast(elem)).*),
-            .fat => @memcpy(&src_fat_buf, @as(*const FatPtr, @ptrCast(elem))),
-        }
-
-        // Rely on auto-vectorization to fill the table.
-        const dst_bytes = table.base.ptr[@as(usize, idx) * stride .. @as(usize, end_idx) * stride];
-        const dst_fat_bytes = dst_bytes[0 .. (dst_bytes.len / fat_size) * fat_size];
-        @memset(
-            @as(
-                []align(buffer_align) FatPtr,
-                @ptrCast(@alignCast(dst_fat_bytes)),
-            ),
-            src_fat_buf,
-        );
-
-        switch (table.stride) {
-            .fat => {},
-            .ptr => if (dst_bytes.len % fat_size != 0) {
-                @as(
-                    **anyopaque,
-                    @alignCast(@ptrCast(dst_bytes[dst_bytes.len - stride ..])),
-                ).* = src_fat_buf[0];
-            },
-        }
+        @memset(table.base.ptr[idx..end_idx], elem);
     }
 
-    pub fn fill(
-        table: *const TableInst,
-        len: u32,
-        elem: []align(@alignOf(*anyopaque)) const u8,
-        idx: u32,
-    ) OobError!void {
+    /// Returns an error if the range of elements to fill is out of bounds.
+    pub fn fill(table: *const TableInst, len: u32, elem: ?*anyopaque, idx: u32) OobError!void {
+        table.checkInvariants();
+
         const end_idx = std.math.add(u32, idx, len) catch
             return error.TableAccessOutOfBounds;
 
-        if (end_idx > table.len)
+        if (end_idx > table.len) {
             return error.TableAccessOutOfBounds;
-
-        if (len == 0) return;
+        }
 
         return table.fillWithinCapacity(elem, idx, end_idx);
     }
 };
 
 const std = @import("std");
+const builtin = @import("builtin");
+const const_eval = @import("../Interpreter/const_eval.zig");
+const Oom = std.mem.Allocator.Error;
 const FuncAddr = @import("value.zig").FuncAddr;
 const ExternAddr = @import("value.zig").ExternAddr;
 const Module = @import("../Module.zig");
 const ModuleInst = @import("module_inst.zig").ModuleInst;
+const InterpreterValue = @import("../Interpreter/value.zig").Value;

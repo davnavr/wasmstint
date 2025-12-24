@@ -11,7 +11,7 @@ pub const ModuleInst = packed struct(usize) {
     /// Makes calculating the layout of a `ModuleInst` a single cost when a `Module` is parsed,
     /// rather than recalculating it every time a module is instantiated.
     pub const Shape = struct {
-        size: reservation_allocator.ReservationAllocator,
+        size: allocators.ReservationAllocator(.@"16"),
         // /// Stores the offsets of the values of defined globals.
         // ///
         // /// These offsets are relative to the address of the value of the first defined global.
@@ -29,31 +29,29 @@ pub const ModuleInst = packed struct(usize) {
         ) std.mem.Allocator.Error!void {
             const info = &module.inner.raw;
 
-            var size = reservation_allocator.ReservationAllocator{ .bytes = @sizeOf(Header) };
+            var size = allocators.ReservationAllocator(.@"16"){ .bytes = @sizeOf(Header) };
+            try size.reserveAligned(
+                FuncAddr.Wasm.Block,
+                .fromByteUnits(@sizeOf(FuncAddr.Wasm.Block)),
+                Header.funcBlockCount(module),
+            );
             try size.reserve(FuncAddr, info.func_import_count);
             try size.reserve(*TableInst, info.table_count);
-            try size.reserve(TableInst, info.table_count - info.table_import_count);
             try size.reserve(*MemInst, info.mem_count);
-            try size.reserve(MemInst, info.mem_count - info.mem_import_count);
             try size.reserve(*anyopaque, info.global_count);
-
-            // More efficient packing of global values is possible
-            // TODO: figure out why allocation failure occurs for global values
-            // const defined_global_types = module.globalTypes()[0..module.globalInitializers().len];
-            // if (defined_global_types.len > 0) {
-            //     try size.alignUpTo(.fromByteUnits(@alignOf(u64)));
-            // }
-
-            // for (defined_global_types) |*global_type| {
-            //     switch (global_type.val_type) {
-            //         .v128 => unreachable,
-            //         inline else => |ty| try size.reserve(GlobalAddr.Pointee(ty), 1),
-            //     }
-            // }
-            try size.reserve(FuncAddr, module.globalInitializers().len);
 
             try size.reserve(u32, std.math.divCeil(u32, info.datas_count, 32) catch unreachable);
             try size.reserve(u32, std.math.divCeil(u32, info.elems_count, 32) catch unreachable);
+
+            try size.reserve(u64, module.globalInitializers().len);
+
+            // More efficient packing of global values is possible
+            const defined_global_types = module.globalTypes()[info.global_import_count..];
+            for (defined_global_types) |*global_type| {
+                switch (global_type.val_type) {
+                    inline else => |ty| try size.reserve(GlobalAddr.Pointee(ty), 1),
+                }
+            }
 
             shape.* = .{ .size = size };
         }
@@ -69,6 +67,8 @@ pub const ModuleInst = packed struct(usize) {
         // /// *shared* memories currently being the sole exception.
         // acquired_flag: std.atomic.Value(bool) = .{ .raw = false },
         func_imports: [*]const FuncAddr,
+        // TODO: Use a hashmap, since only functions in element segments & exports can be turned into FuncAddr
+        func_blocks: [*]align(@sizeOf(FuncAddr.Wasm.Block)) const FuncAddr.Wasm.Block,
         mems: [*]const *MemInst, // TODO: Could use comptime config to have specialized [1]MemInst (same for TableInst)
         tables: [*]const *TableInst,
         globals: [*]const *anyopaque,
@@ -85,18 +85,61 @@ pub const ModuleInst = packed struct(usize) {
             return ModuleInst{ .inner = @alignCast(inst) };
         }
 
+        pub inline fn funcBlockCount(module: Module) u32 {
+            return std.math.divCeil(
+                u32,
+                module.inner.raw.code_count,
+                FuncAddr.Wasm.Block.funcs_per_block,
+            ) catch unreachable;
+        }
+
+        fn funcBlocks(
+            inst: *const Header,
+        ) []align(@sizeOf(FuncAddr.Wasm.Block)) const FuncAddr.Wasm.Block {
+            return inst.func_blocks[0..funcBlockCount(inst.module)];
+        }
+
+        /// Asserts that `idx` refers to a valid function within this module.
         pub fn funcAddr(inst: *const Header, idx: Module.FuncIdx) FuncAddr {
-            const i: usize = @intFromEnum(idx);
+            const i: u32 = @intFromEnum(idx);
+            const import_count = inst.module.inner.raw.func_import_count;
             std.debug.assert(i < inst.module.funcCount());
-            return if (i < inst.module.inner.raw.func_import_count)
-                inst.func_imports[i]
+            if (i < import_count) {
+                return inst.func_imports[i];
+            } else {
+                const rounded_idx: u32 =
+                    @divFloor(i - import_count, FuncAddr.Wasm.Block.funcs_per_block);
+
+                const block: *align(@sizeOf(FuncAddr.Wasm.Block)) const FuncAddr.Wasm.Block =
+                    &inst.funcBlocks()[rounded_idx];
+
+                const index_bits: FuncAddr.Wasm.IdxBits =
+                    @intCast((i - import_count) % FuncAddr.Wasm.Block.funcs_per_block);
+
+                std.debug.assert(i == block.starting_idx + index_bits);
+
+                const wasm = FuncAddr.Wasm{
+                    .idx_bits = index_bits,
+                    .block_addr = @intCast(@shrExact(
+                        @intFromPtr(block),
+                        comptime @bitSizeOf(FuncAddr.Wasm.IdxBits) + 1,
+                    )),
+                };
+
+                if (builtin.mode == .Debug) {
+                    std.debug.assert(@intFromPtr(wasm.module().inner) == @intFromPtr(inst));
+                    std.debug.assert(wasm.funcIdx() == idx);
+                }
+
+                return FuncAddr.init(.{ .wasm = wasm });
+            }
+        }
+
+        pub fn startFuncAddr(inst: *const Header) FuncAddr.Nullable {
+            return if (inst.module.inner.raw.start.get()) |start_idx|
+                @bitCast(inst.funcAddr(start_idx))
             else
-                FuncAddr.init(.{
-                    .wasm = .{
-                        .module = inst.moduleInst(),
-                        .idx = idx,
-                    },
-                });
+                FuncAddr.Nullable.null;
         }
 
         pub inline fn tableInsts(inst: *const Header) []const *TableInst {
@@ -107,12 +150,9 @@ pub const ModuleInst = packed struct(usize) {
             return inst.tableInsts()[inst.module.inner.raw.table_import_count..];
         }
 
-        pub fn tableAddr(inst: *const Header, idx: Module.TableIdx) TableAddr {
-            const i: usize = @intFromEnum(idx);
-            return TableAddr{
-                .elem_type = inst.module.tableTypes()[i].elem_type,
-                .table = inst.tableInsts()[i],
-            };
+        /// Internal API.
+        pub fn tableAddr(inst: *const Header, idx: Module.TableIdx) *TableInst {
+            return inst.tableInsts()[@intFromEnum(idx)];
         }
 
         pub inline fn memInsts(inst: *const Header) []const *MemInst {
@@ -124,8 +164,6 @@ pub const ModuleInst = packed struct(usize) {
         }
 
         /// Internal API.
-        ///
-        /// TODO: Add a note here about how some `wasm32-wasip1` applications don't export memory.
         pub fn memAddr(inst: *const Header, idx: Module.MemIdx) *MemInst {
             return inst.memInsts()[@intFromEnum(idx)];
         }
@@ -225,10 +263,10 @@ pub const ModuleInst = packed struct(usize) {
     fn exportVal(inst: ModuleInst, exp: *align(4) const Module.Export) ExternVal {
         const instance = inst.header();
         return switch (exp.desc_tag) {
-            .func => .{ .func = instance.funcAddr(exp.desc.func) },
-            .table => .{ .table = instance.tableAddr(exp.desc.table) },
-            .mem => .{ .mem = instance.memAddr(exp.desc.mem) },
-            .global => .{ .global = instance.globalAddr(exp.desc.global) },
+            .func => .{ .func = instance.funcAddr(exp.desc.func.idx) },
+            .table => .{ .table = instance.tableAddr(exp.desc.table.idx) },
+            .mem => .{ .mem = instance.memAddr(exp.desc.mem.idx) },
+            .global => .{ .global = instance.globalAddr(exp.desc.global.idx) },
         };
     }
 
@@ -254,6 +292,12 @@ pub const ModuleInst = packed struct(usize) {
         pub const Export = struct {
             name: Module.Name,
             val: ExternVal,
+
+            pub fn format(self: *const Export, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+                try writer.print("(export {f} ", .{self.name});
+                try self.val.format(writer);
+                try writer.writeByte(')');
+            }
         };
 
         pub fn at(self: ExportVals, i: usize) Export {
@@ -273,27 +317,39 @@ pub const ModuleInst = packed struct(usize) {
         };
     }
 
+    /// Frees the allocation backing the `ModuleInst`, and deinitializes its defined memories
+    /// and tables.
+    ///
     /// Callers must ensure that there are no dangling references to this module's functions,
     /// memories, globals, and tables.
     ///
     /// Additionally, callers are responsible for freeing any imported functions, memories, globals
     /// used by this module.
-    pub fn deinit(inst: *ModuleInst) ModuleDeallocation {
-        return .{
-            .inst = inst,
-            .mems = inst.header().definedMemInsts(),
-            .tables = inst.header().definedTableInsts(),
-        };
+    pub fn deinit(inst: *ModuleInst, allocator: std.mem.Allocator) void {
+        for (inst.inner.definedMemInsts()) |mem| {
+            mem.free();
+        }
+
+        for (inst.inner.definedTableInsts()) |table| {
+            table.free();
+        }
+
+        const buffer: []align(std.atomic.cache_line) u8 = @as(
+            [*]align(std.atomic.cache_line) u8,
+            @ptrCast(@constCast(inst.inner)),
+        )[0..inst.inner.buffer_len];
+
+        allocator.free(buffer);
+        inst.* = undefined;
     }
 };
 
 const std = @import("std");
-const reservation_allocator = @import("../reservation_allocator.zig");
+const builtin = @import("builtin");
+const allocators = @import("allocators");
 const Module = @import("../Module.zig");
 const MemInst = @import("memory.zig").MemInst;
 const TableInst = @import("table.zig").TableInst;
 const FuncAddr = @import("value.zig").FuncAddr;
-const TableAddr = @import("value.zig").TableAddr;
 const GlobalAddr = @import("value.zig").GlobalAddr;
 const ExternVal = @import("value.zig").ExternVal;
-const ModuleDeallocation = @import("ModuleDeallocation.zig");

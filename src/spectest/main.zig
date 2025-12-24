@@ -3,45 +3,43 @@
 const Arguments = cli_args.CliArgs(.{
     .description = "WebAssembly specification JSON test interpreter.",
     .flags = &[_]cli_args.Flag{
-        .string(
+        cli_args.Flag.string(
             .{
                 .long = "run",
                 .short = 'r',
                 .description = "Path to .json specification test file",
             },
             "PATH",
-        ),
+        ).required(),
 
-        cli_args.Flag.intUnsigned(
+        cli_args.Flag.integer(
             .{ .long = "rng-seed", .description = "Specifies the RNG seed to use" },
             "SEED",
             u256,
-        ).optional(),
+        ),
 
-        cli_args.Flag.intUnsigned(
+        cli_args.Flag.integer(
             .{
                 .long = "fuel",
                 .description = "Limits the number of WASM instructions executed",
             },
             "AMOUNT",
             u64,
-        ).withDefault(3_000_000),
+        ).withDefault(8_000_000),
 
-        cli_args.Flag.intUnsigned(
+        cli_args.Flag.integerSizeSuffix(
             .{
                 .long = "max-stack-size",
                 .description = "Limits the size of the WASM value/call stack",
             },
-            "AMOUNT",
             u32,
         ).withDefault(5000),
 
-        cli_args.Flag.intUnsigned(
+        cli_args.Flag.integerSizeSuffix(
             .{
                 .long = "max-memory-size",
                 .description = "Upper bound on the size of a WASM linear memory, in bytes",
             },
-            "SIZE",
             usize,
         ).withDefault(1000 * 65536),
 
@@ -49,43 +47,48 @@ const Arguments = cli_args.CliArgs(.{
     },
 });
 
-fn parseProgramArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) Arguments.Parsed {
-    var buf: [512]u8 align(16) = undefined;
-    var buf_allocator = std.heap.FixedBufferAllocator.init(&buf);
-    const parser = Arguments.init(buf_allocator.allocator()) catch @panic("oom");
-    return parser.programArguments(scratch, arena) catch @panic("oom");
-}
-
 pub fn main() u8 {
     var scratch = ArenaAllocator.init(std.heap.page_allocator);
-    defer scratch.deinit();
+    defer if (builtin.mode == .Debug) scratch.deinit();
 
     var arena = ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
+    defer if (builtin.mode == .Debug) arena.deinit();
 
-    const arguments = parseProgramArguments(&scratch, &arena);
+    const arguments = args: {
+        var parser: Arguments = undefined;
+        parser.init();
+        break :args parser.programArguments(&scratch, &arena) catch @panic("oom");
+    };
     _ = scratch.reset(.retain_capacity);
 
     if (arguments.@"wait-for-debugger") {
         wasmstint.waitForDebugger();
     }
 
+    var io_threaded = Io.Threaded.init_single_threaded;
+    const io = io_threaded.ioBasic();
+
     const stderr_buffer = std.heap.page_allocator.alignedAlloc(
         u8,
         .fromByteUnits(std.heap.page_size_min),
         8192,
     ) catch @panic("oom");
-    const stderr = State.Output{
-        .tty_config = std.Io.tty.detectConfig(std.fs.File.stderr()),
-        .writer = std.debug.lockStderrWriter(stderr_buffer),
+    const stderr = stderr: {
+        const locked = std.debug.lockStderrWriter(stderr_buffer);
+        break :stderr State.Output{ .tty_config = locked[1], .writer = locked[0] };
     };
     // Flush happens even if error occurs
     defer std.debug.unlockStderrWriter();
 
     const fmt_json_path = std.unicode.fmtUtf8(arguments.run);
 
-    const cwd = std.fs.cwd();
-    const json_file = wasmstint.FileContent.readFileZ(cwd, arguments.run) catch |e| switch (e) {
+    const cwd = Io.Dir.cwd();
+    var json_file = file_content.readFilePortable(
+        io,
+        cwd,
+        arguments.run,
+        if (builtin.os.tag == .windows) scratch.allocator() else arena.allocator(),
+    ) catch |e| switch (e) {
         error.OutOfMemory => @panic("oom"),
         else => |io_err| {
             stderr.writeErrorPreamble();
@@ -93,8 +96,11 @@ pub fn main() u8 {
             return 1;
         },
     };
+    _ = scratch.reset(.retain_capacity);
+    defer if (builtin.mode == .Debug) json_file.deinit();
 
-    var json_dir = std.fs.cwd().openDir(
+    var json_dir = cwd.openDir(
+        io,
         std.fs.path.dirname(arguments.run).?,
         .{ .access_sub_paths = true },
     ) catch |e| {
@@ -102,7 +108,7 @@ pub fn main() u8 {
         stderr.print("Could not open directory {f}: {t}\n", .{ fmt_json_path, e });
         return 1;
     };
-    errdefer json_dir.close();
+    errdefer json_dir.close(io);
 
     var rng = rng: {
         var init = std.Random.Xoshiro256{ .s = undefined };
@@ -122,7 +128,7 @@ pub fn main() u8 {
     var json_script: Parser = undefined;
     json_script.init(
         &arena,
-        std.unicode.Utf8View.init(json_file.contents) catch {
+        std.unicode.Utf8View.init(json_file.contents()) catch {
             stderr.writeErrorPreamble();
             stderr.print("Input file {f} is not valid UTF-8", .{fmt_json_path});
             return 1;
@@ -133,18 +139,20 @@ pub fn main() u8 {
     _ = scratch.reset(.retain_capacity);
     const fmt_wast_path = std.unicode.fmtUtf8(json_script.source_filename);
 
-    var interpreter_allocated_amount = @as(usize, arguments.@"max-stack-size") *| 16;
-    var interpreter_allocator = wasmstint.LimitedAllocator.init(
-        &interpreter_allocated_amount,
-        std.heap.page_allocator,
-    );
+    var interpreter_allocator = allocators.PageAllocation.init(
+        .{},
+        @as(usize, arguments.@"max-stack-size") *| 16,
+    ) catch @panic("oom");
+    defer if (builtin.mode == .Debug) interpreter_allocator.deinit();
 
     var imports: Imports = undefined;
     imports.init(rng.random(), &arena);
+    defer imports.deinit();
 
     var state: State = undefined;
     State.init(
         &state,
+        io,
         interpreter_allocator.allocator(),
         arguments.@"max-memory-size",
         .{ .remaining = arguments.fuel },
@@ -167,7 +175,7 @@ pub fn main() u8 {
             error.ScriptError => {
                 if (builtin.mode == .Debug) {
                     if (@errorReturnTrace()) |trace| {
-                        trace.format(stderr.writer) catch {};
+                        std.debug.writeStackTrace(trace, stderr.writer, stderr.tty_config) catch {};
                     }
                 }
                 break 1;
@@ -205,7 +213,7 @@ fn handleJsonError(
 
             if (builtin.mode == .Debug) {
                 if (@errorReturnTrace()) |trace| {
-                    trace.format(stderr.writer) catch {};
+                    std.debug.writeStackTrace(trace, stderr.writer, stderr.tty_config) catch {};
                 }
             }
         },
@@ -216,10 +224,17 @@ fn handleJsonError(
 }
 
 const std = @import("std");
+const Io = std.Io;
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
+const allocators = @import("allocators");
 const wasmstint = @import("wasmstint");
 const cli_args = @import("cli_args");
+const file_content = @import("file_content");
 const Parser = @import("Parser.zig");
 const State = @import("State.zig");
 const Imports = @import("Imports.zig");
+
+test {
+    _ = main;
+}

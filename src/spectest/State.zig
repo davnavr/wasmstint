@@ -5,6 +5,7 @@ const NamedModule = struct {
     instance: ModuleInst,
 };
 
+io: Io,
 module_arena: ArenaAllocator,
 /// Allocated in `std.heap.page_allocator`.
 module_lookup: std.StringHashMapUnmanaged(NamedModule),
@@ -15,21 +16,23 @@ interpreter: Interpreter,
 starting_fuel: Interpreter.Fuel,
 
 imports: *Imports,
-script_dir: std.fs.Dir,
+script_dir: Io.Dir,
 rng: *std.Random.Xoshiro256,
 
 const Error = error{ScriptError};
 
 pub fn init(
     state: *State,
+    io: Io,
     interpreter_allocator: std.mem.Allocator,
     max_memory_size: usize,
     starting_fuel: Interpreter.Fuel,
     imports: *Imports,
-    script_dir: std.fs.Dir,
+    script_dir: Io.Dir,
     rng: *std.Random.Xoshiro256,
 ) void {
     state.* = .{
+        .io = io,
         .module_arena = ArenaAllocator.init(std.heap.page_allocator),
         .module_lookup = .empty,
         .current_module = null,
@@ -87,17 +90,15 @@ pub fn processCommand(
     output: Output,
     scratch: *ArenaAllocator,
 ) Error!void {
+    var coz_begin = coz.begin("wasmstint.spectest.State.processCommand");
+    defer coz_begin.end();
+
     switch (command.type) {
         .module => try state.processModuleCommand(command, output, scratch),
         .action => |*act| {
             var fuel = state.starting_fuel;
             switch (try state.processActionCommand(act, output, &fuel, scratch)) {
-                .invoke => |invoke_state| _ = state.runToCompletion(
-                    invoke_state,
-                    &fuel,
-                    output,
-                    &state.module_arena,
-                ),
+                .invoke => |invoke_state| _ = state.runToCompletion(invoke_state, &fuel, output),
                 .get => {},
             }
         },
@@ -139,11 +140,14 @@ pub fn processCommand(
 fn openModuleContents(
     state: *State,
     filename: [:0]const u8,
+    contents_allocator: std.mem.Allocator,
     output: Output,
-) Error!wasmstint.FileContent {
-    return wasmstint.FileContent.readFileZ(
+) Error!file_content.FileContent {
+    return file_content.readFilePortable(
+        state.io,
         state.script_dir,
         filename,
+        contents_allocator,
     ) catch |e| switch (e) {
         error.OutOfMemory => @panic("oom"),
         else => |io_err| failFmt(
@@ -154,28 +158,83 @@ fn openModuleContents(
     };
 }
 
-fn finishModuleAllocation(
-    max_memory_size: usize,
-    module: *wasmstint.runtime.ModuleAllocating,
+fn allocateModuleDefinitions(
+    state: *State,
+    module: wasmstint.Module,
     arena: *ArenaAllocator,
+) wasmstint.runtime.ModuleAlloc.Definitions {
+    const defined_table_types = module.tableDefinedTypes();
+    const table_insts = arena.allocator().alloc(
+        *wasmstint.runtime.TableInst,
+        defined_table_types.len,
+    ) catch @panic("oom");
+    for (
+        state.module_arena.allocator().alloc(
+            wasmstint.runtime.TableInst.Allocated,
+            defined_table_types.len,
+        ) catch @panic("oom"),
+        table_insts,
+        module.tableDefinedTypes(),
+    ) |*table, *inst, *table_type| {
+        const max: u32 = @intCast(table_type.limits.max);
+        table.* = wasmstint.runtime.TableInst.Allocated.allocateFromType(
+            state.module_arena.allocator(),
+            table_type,
+            null,
+            @min(max, 65536), // 1 MiB, 16 bytes per funcref
+            max,
+        ) catch @panic("oom");
+        inst.* = &table.table;
+    }
+
+    const defined_mem_types = module.memDefinedTypes();
+    const mem_insts = arena.allocator().alloc(
+        *wasmstint.runtime.MemInst,
+        defined_mem_types.len,
+    ) catch @panic("oom");
+    for (
+        state.module_arena.allocator().alloc(
+            wasmstint.runtime.MemInst.Mapped,
+            defined_mem_types.len,
+        ) catch @panic("oom"),
+        mem_insts,
+        module.memDefinedTypes(),
+    ) |*mem, *inst, *mem_type| {
+        mem.* = wasmstint.runtime.MemInst.Mapped.allocateFromType(
+            mem_type,
+            mem_type.limits.min * wasmstint.runtime.MemInst.page_size,
+            state.max_memory_size,
+        ) catch @panic("oom");
+        inst.* = &mem.memory;
+    }
+
+    return .{
+        .tables = table_insts,
+        .memories = mem_insts,
+    };
+}
+
+fn allocateModule(
+    state: *State,
+    module: wasmstint.Module,
+    output: Output,
+    scratch: *ArenaAllocator,
 ) Error!wasmstint.runtime.ModuleAlloc {
-    while (module.nextMemoryType()) |ty| {
-        wasmstint.runtime.paged_memory.allocate(
-            module,
-            ty.limits.min * wasmstint.runtime.MemInst.page_size,
-            max_memory_size,
-        ) catch @panic("bad mem");
-    }
-
-    while (module.nextTableType()) |_| {
-        wasmstint.runtime.table_allocator.allocateForModule(
-            module,
-            arena.allocator(),
-            65536, // 1 MiB, 16 bytes per funcref
-        ) catch @panic("bad table");
-    }
-
-    return module.finish() catch @panic("bad alloc");
+    var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
+    var definitions = state.allocateModuleDefinitions(module, scratch);
+    return wasmstint.runtime.ModuleAlloc.allocateWithDefinitions(
+        module,
+        state.module_arena.allocator(),
+        state.imports.provider(),
+        &import_error,
+        definitions,
+    ) catch |e| switch (e) {
+        error.OutOfMemory => @panic("oom module alloc"),
+        error.ImportFailure => {
+            definitions.deinit();
+            return failFmt(output, "{f}", .{import_error});
+        },
+    };
 }
 
 fn processModuleCommand(
@@ -201,14 +260,18 @@ fn processModuleCommand(
         break :has_name entry;
     } else null;
 
-    const module_binary = try state.openModuleContents(module.filename, output);
+    const module_binary = try state.openModuleContents(
+        module.filename,
+        state.module_arena.allocator(),
+        output,
+    );
     const fmt_filename = std.unicode.fmtUtf8(module.filename);
     // errdefer module_binary.deinit();
 
     var parse_diagnostics = std.Io.Writer.Allocating.initCapacity(alloca.allocator(), 128) catch
         @panic("oom");
     const parsed_module = module: {
-        var wasm: []const u8 = module_binary.contents;
+        var wasm: []const u8 = module_binary.contents();
         break :module wasmstint.Module.parse(
             state.module_arena.allocator(),
             &wasm,
@@ -259,22 +322,9 @@ fn processModuleCommand(
 
     std.debug.assert(validation_finished);
 
-    var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
-    var module_allocating = wasmstint.runtime.ModuleAllocating.begin(
-        parsed_module,
-        state.imports.provider(),
-        state.module_arena.allocator(),
-        &import_error,
-    ) catch |e| switch (e) {
-        error.OutOfMemory => @panic("oom"),
-        error.ImportFailure => return failFmt(output, "{f}", .{import_error}),
-    };
-
-    var module_alloc = try finishModuleAllocation(
-        state.max_memory_size,
-        &module_allocating,
-        &state.module_arena,
-    );
+    var module_alloc = try state.allocateModule(parsed_module, output, alloca);
+    errdefer module_alloc.deinit(state.module_arena.allocator());
+    _ = alloca.reset(.retain_capacity);
 
     var fuel = state.starting_fuel;
     var interp = state.interpreter.reset();
@@ -287,7 +337,7 @@ fn processModuleCommand(
     _ = try state.expectResultValues(
         interp,
         &fuel,
-        &Parser.Command.Expected.Vec{},
+        &.{},
         output,
         alloca,
     );
@@ -345,16 +395,17 @@ fn processRegisterCommand(
     }
 
     output.print(
-        "registered module {f} exports under {f}\n",
+        "registered {f} exports under {f}\n",
         .{ fmtModuleName(command.name), command.as },
     );
 }
 
 fn failCallStackExhausted(state: *const State, output: Output) Error {
+    const stack = &state.interpreter.stack;
     return failFmt(
         output,
         "call stack exhausted after {} frames\n{f}",
-        .{ state.interpreter.call_depth, state.interpreter.walkCallStack() },
+        .{ stack.call_depth, stack.walkCallStack() },
     );
 }
 
@@ -366,10 +417,10 @@ fn failInterpreterTrap(
 }
 
 fn failInterpreterInterrupted(
-    cause: Interpreter.InterruptionCause,
+    cause: *const Interpreter.InterruptionCause,
     output: Output,
 ) Error {
-    const message = switch (cause) {
+    const message = switch (cause.*) {
         .out_of_fuel => "interpreter ran out of fuel",
         .memory_grow, .table_grow => unreachable,
     };
@@ -482,6 +533,90 @@ fn expectTypedValue(
         @field(value, @tagName(tag));
 }
 
+fn resultIntegerVectorMatches(
+    comptime lane_interpretation: V128.Interpretation,
+    expected: lane_interpretation.Type(),
+    actual: V128,
+    index: usize,
+    output: Output,
+) Error!void {
+    const comparison = expected != actual.interpret(lane_interpretation);
+    if (std.simd.firstTrue(comparison)) |lane_index| return failFmt(
+        output,
+        "expected {f} at index {d}, got {f} for result {d}",
+        .{
+            V128.init(lane_interpretation, expected).formatter(lane_interpretation),
+            lane_index,
+            actual.formatter(lane_interpretation),
+            index,
+        },
+    );
+}
+
+fn failFloatVectorLaneMismatch(
+    output: Output,
+    comptime lane_interpretation: V128.Interpretation,
+    expected: *const Parser.Command.Expected.FloatVec(
+        lane_interpretation.laneCount(),
+        @typeInfo(lane_interpretation.Type()).vector.child,
+    ),
+    actual: V128,
+    lane_idx: usize,
+) Error {
+    return failFmt(
+        output,
+        "vector values are not equal at lane {d}:\nexpected: {f}\n  actual: {f}\n",
+        .{ lane_idx, expected, actual.formatter(lane_interpretation) },
+    );
+}
+
+fn resultFloatVectorMatches(
+    comptime lane_interpretation: V128.Interpretation,
+    expected: *const Parser.Command.Expected.FloatVec(
+        lane_interpretation.laneCount(),
+        @typeInfo(lane_interpretation.Type()).vector.child,
+    ),
+    actual: V128,
+    index: usize,
+    output: Output,
+) Error!void {
+    const actual_lanes = actual.interpret(lane_interpretation);
+    const FloatType = @typeInfo(lane_interpretation.Type()).vector.child;
+    for (
+        @as([lane_interpretation.laneCount()]FloatType, actual_lanes),
+        expected.tags,
+        expected.raw_values,
+        0..,
+    ) |actual_value, expected_tag, expected_value, lane_idx| {
+        const expected_nan: Parser.Command.Expected.Nan = switch (expected_tag) {
+            .value => {
+                resultFloatMatchesBits(expected_value, actual_value, index, output) catch {
+                    return failFloatVectorLaneMismatch(
+                        output,
+                        lane_interpretation,
+                        expected,
+                        actual,
+                        lane_idx,
+                    );
+                };
+                continue;
+            },
+            .canonical_nan => .canonical,
+            .arithmetic_nan => .arithmetic,
+        };
+
+        resultFloatMatchesNan(expected_nan, actual_value, index, output) catch {
+            return failFloatVectorLaneMismatch(
+                output,
+                lane_interpretation,
+                expected,
+                actual,
+                lane_idx,
+            );
+        };
+    }
+}
+
 fn resultValueMatches(
     actual: *const Interpreter.TaggedValue,
     expected: *const Parser.Command.Expected,
@@ -550,6 +685,20 @@ fn resultValueMatches(
                 );
             }
         },
+        inline .i8x16, .i16x8, .i32x4, .i64x2 => |v| try resultIntegerVectorMatches(
+            @field(V128.Interpretation, @typeName(@typeInfo(@TypeOf(v)).vector.child)),
+            v,
+            try expectTypedValue(actual, .v128, index, output),
+            index,
+            output,
+        ),
+        inline .f32x4, .f64x2 => |*v, t| try resultFloatVectorMatches(
+            @field(V128.Interpretation, @tagName(t)[0..3]),
+            v,
+            try expectTypedValue(actual, .v128, index, output),
+            index,
+            output,
+        ),
     }
 }
 
@@ -557,19 +706,19 @@ fn expectResultValues(
     state: *State,
     interp: Interpreter.State,
     fuel: *Interpreter.Fuel,
-    expected: *const Parser.Command.Expected.Vec,
+    expected: Parser.Command.Expected.Vec,
     output: Output,
     scratch: *ArenaAllocator,
 ) Error![]const Interpreter.TaggedValue {
-    const result_state = switch (state.runToCompletion(interp, fuel, output, &state.module_arena)) {
+    const result_state = switch (state.runToCompletion(interp, fuel, output)) {
         .awaiting_validation => unreachable,
         .call_stack_exhaustion => return state.failCallStackExhausted(output),
-        .trapped => |trap| return failInterpreterTrap(&trap.trap, output),
-        .interrupted => |interrupt| return failInterpreterInterrupted(interrupt.cause, output),
+        .trapped => |trap| return failInterpreterTrap(trap.trap(), output),
+        .interrupted => |interrupt| return failInterpreterInterrupted(interrupt.cause(), output),
         .awaiting_host => |awaiting| awaiting,
     };
 
-    std.debug.assert(state.interpreter.call_depth == 0);
+    std.debug.assert(state.interpreter.stack.call_depth == 0);
 
     const actual_results: []const Interpreter.TaggedValue =
         result_state.allocResults(scratch.allocator()) catch @panic("oom");
@@ -580,8 +729,7 @@ fn expectResultValues(
         .{ expected.len, actual_results.len },
     );
 
-    for (0.., actual_results) |i, *actual_val| {
-        const expected_val: *const Parser.Command.Expected = expected.at(i);
+    for (expected, actual_results, 0..) |*expected_val, *actual_val, i| {
         try resultValueMatches(actual_val, expected_val, i, output);
     }
 
@@ -593,15 +741,13 @@ fn runToCompletion(
     interpreter_state: Interpreter.State,
     fuel: *Interpreter.Fuel,
     output: Output,
-    /// Used to allocate tables.
-    store_arena: *ArenaAllocator,
 ) Interpreter.State {
     var interp = interpreter_state;
     for (0..123456) |_| {
         interp = next: switch (interp) {
             .awaiting_host => |*host| if (host.currentHostFunction()) |callee| {
                 const print_func_idx = @divExact(
-                    @intFromPtr(callee.func) - @intFromPtr(&Imports.PrintFunction.functions),
+                    @intFromPtr(callee) - @intFromPtr(&Imports.PrintFunction.functions),
                     @sizeOf(wasmstint.runtime.FuncAddr.Host),
                 );
 
@@ -645,27 +791,28 @@ fn runToCompletion(
                 fuel,
             ) catch return interp,
             .interrupted => |*interrupt| {
-                switch (interrupt.cause) {
+                switch (interrupt.cause().*) {
                     .out_of_fuel => return interp,
                     .memory_grow => |*grow| {
-                        wasmstint.runtime.paged_memory.grow(grow);
+                        const result = result: {
+                            grow.grow() catch break :result "failure";
+                            break :result "success";
+                        };
                         output.print(
-                            "- handling memory.grow from {[old]} to {[new]}, " ++
-                                "now {[current]} <= {[maximum]} ({[status]s}), was {[result]} pages\n",
-                            .{
-                                .old = grow.old_size,
-                                .new = grow.new_size,
-                                .current = grow.memory.size,
-                                .maximum = grow.memory.limit,
-                                .status = if (grow.memory.size == grow.new_size) "success" else "failure",
-                                .result = grow.result.i32,
-                            },
+                            "- handling memory.grow from {[old]} to {[new]} -> {[result]s}\n",
+                            .{ .old = grow.old_size, .new = grow.new_size, .result = result },
                         );
                     },
-                    .table_grow => |*grow| wasmstint.runtime.table_allocator.grow(
-                        grow,
-                        store_arena.allocator(),
-                    ),
+                    .table_grow => |*grow| {
+                        const result = result: {
+                            grow.grow() catch break :result "failure";
+                            break :result "success";
+                        };
+                        output.print(
+                            "- handling table.grow from {[old]} to {[new]} -> {[result]s}\n\n",
+                            .{ .old = grow.old_len, .new = grow.new_len, .result = result },
+                        );
+                    },
                 }
 
                 break :next interrupt.resumeExecution(fuel);
@@ -696,16 +843,15 @@ fn fmtModuleName(name: ?Name) std.fmt.Alt(?Name, formatModuleName) {
 
 // TODO: What if arguments could be allocated directly in the Interpreter's value_stack?
 fn allocateFunctionArguments(
-    arguments: *const Parser.Command.Const.Vec,
+    arguments: Parser.Command.Const.Vec,
     arena: *ArenaAllocator,
 ) []const Interpreter.TaggedValue {
     const dst_values = arena.allocator().alloc(Interpreter.TaggedValue, arguments.len) catch
         @panic("oom");
 
-    for (dst_values, 0..) |*dst, i| {
-        const src: *const Parser.Command.Const = arguments.at(i);
+    for (dst_values, arguments) |*dst, *src| {
         dst.* = switch (src.*) {
-            inline .i32, .i64, .f32, .f64 => |c, tag| @unionInit(
+            inline .i32, .i64, .f32, .f64, .v128 => |c, tag| @unionInit(
                 Interpreter.TaggedValue,
                 @tagName(tag),
                 @bitCast(c),
@@ -753,11 +899,11 @@ fn processActionCommand(
             const invoke_state = state.interpreter.reset().awaiting_host.beginCall(
                 state.interpreter_allocator,
                 callee,
-                allocateFunctionArguments(&invoke.args, scratch),
+                allocateFunctionArguments(invoke.args, scratch),
                 fuel,
             ) catch |e| switch (e) {
                 error.OutOfMemory => @panic("oom"),
-                error.ValueTypeOrCountMismatch => {
+                error.SignatureMismatch => {
                     const signature = callee.signature();
                     return if (signature.param_count != invoke.args.len) failFmt(
                         output,
@@ -898,7 +1044,7 @@ const TrapMessage = union(enum) {
                             .{ tag, access.index, access.maximum },
                         );
                     },
-                    inline .call_indirect => |_, tag| try writer.print(
+                    inline .call_indirect, .return_call_indirect => |_, tag| try writer.print(
                         "{t} undefined element",
                         .{tag},
                     ),
@@ -933,18 +1079,17 @@ const TrapMessage = union(enum) {
 fn expectTrap(
     state: *State,
     interp: Interpreter.State,
-    store_arena: *ArenaAllocator,
     fuel: *Interpreter.Fuel,
     expected: Name,
     scratch: *ArenaAllocator,
     output: Output,
 ) Error![]const u8 {
-    const result_state = state.runToCompletion(interp, fuel, output, store_arena);
+    const result_state = state.runToCompletion(interp, fuel, output);
     const trap: *const Interpreter.Trap = switch (result_state) {
         .awaiting_validation => unreachable,
-        .trapped => |trapped| &trapped.trap,
+        .trapped => |trapped| trapped.trap(),
         .call_stack_exhaustion => return state.failCallStackExhausted(output),
-        .interrupted => |interrupt| return failInterpreterInterrupted(interrupt.cause, output),
+        .interrupted => |interrupt| return failInterpreterInterrupted(interrupt.cause(), output),
         .awaiting_host => |awaiting| return failInterpreterResults(
             awaiting,
             expected,
@@ -980,7 +1125,7 @@ fn processAssertReturn(
             const results = try state.expectResultValues(
                 interp,
                 &fuel,
-                &command.expected,
+                command.expected,
                 output,
                 scratch,
             );
@@ -1004,12 +1149,9 @@ fn processAssertReturn(
                 );
             }
 
-            try resultValueMatches(&actual_value, command.expected.at(0), 0, output);
+            try resultValueMatches(&actual_value, &command.expected[0], 0, output);
 
-            output.print(
-                "get {f} yielded {f}\n",
-                .{ command.action.field, actual_value },
-            );
+            output.print("get {f} yielded {f}\n", .{ command.action.field, actual_value });
         },
     }
 }
@@ -1034,7 +1176,6 @@ fn processAssertTrap(
 
     const message = try state.expectTrap(
         finished_action.invoke,
-        &state.module_arena,
         &fuel,
         command.text,
         scratch,
@@ -1061,12 +1202,15 @@ fn processAssertExhaustion(
         return failFmt(output, "cannot check '{t}' for resource exhaustion", .{finished_action});
     }
 
-    switch (state.runToCompletion(finished_action.invoke, &fuel, output, &state.module_arena)) {
+    switch (state.runToCompletion(finished_action.invoke, &fuel, output)) {
         .awaiting_validation => unreachable,
         .call_stack_exhaustion => {},
-        .trapped => |trap| return failInterpreterTrap(&trap.trap, output),
-        .interrupted => |interrupt| if (interrupt.cause != .out_of_fuel) {
-            return failInterpreterInterrupted(interrupt.cause, output);
+        .trapped => |trap| return failInterpreterTrap(trap.trap(), output),
+        .interrupted => |interrupt| {
+            const cause = interrupt.cause();
+            if (cause.* != .out_of_fuel) {
+                return failInterpreterInterrupted(cause, output);
+            }
         },
         .awaiting_host => |awaiting| return failInterpreterResults(
             awaiting,
@@ -1091,10 +1235,11 @@ fn processAssertExhaustion(
 fn openAssertionModuleContents(
     state: *State,
     command: *const Parser.Command.AssertWithModule,
+    arena: *ArenaAllocator,
     output: Output,
-) Error!?wasmstint.FileContent {
+) Error!?file_content.FileContent {
     return switch (command.module_type) {
-        .binary => try state.openModuleContents(command.filename, output),
+        .binary => try state.openModuleContents(command.filename, arena.allocator(), output),
         .text => null,
     };
 }
@@ -1106,13 +1251,13 @@ fn processAssertInvalid(
     arena: *ArenaAllocator,
 ) Error!void {
     const fmt_filename = std.unicode.fmtUtf8(command.filename);
-    const module_binary = (try state.openAssertionModuleContents(command, output)) orelse {
+    const module_binary = (try state.openAssertionModuleContents(command, arena, output)) orelse {
         output.print("skipping text module \"{f}\"\n", .{fmt_filename});
         return;
     };
 
     var scratch = std.heap.ArenaAllocator.init(arena.allocator());
-    var wasm: []const u8 = module_binary.contents;
+    var wasm: []const u8 = module_binary.contents();
     var parse_diagnostics = std.Io.Writer.Allocating.initCapacity(arena.allocator(), 128) catch
         @panic("oom");
     validation_failed: {
@@ -1185,13 +1330,13 @@ fn processAssertMalformed(
     arena: *ArenaAllocator,
 ) Error!void {
     const fmt_filename = std.unicode.fmtUtf8(command.filename);
-    const module_binary = (try state.openAssertionModuleContents(command, output)) orelse {
+    const module_binary = (try state.openAssertionModuleContents(command, arena, output)) orelse {
         output.print("skipping text module \"{f}\"\n", .{fmt_filename});
         return;
     };
 
     var scratch = std.heap.ArenaAllocator.init(arena.allocator());
-    var wasm: []const u8 = module_binary.contents;
+    var wasm: []const u8 = module_binary.contents();
     var parse_diagnostics = std.Io.Writer.Allocating.initCapacity(arena.allocator(), 128) catch
         @panic("oom");
     parse_failed: {
@@ -1268,17 +1413,17 @@ fn processAssertUninstantiable(
     arena: *ArenaAllocator,
 ) Error!void {
     const fmt_filename = std.unicode.fmtUtf8(command.filename);
-    const module_binary = (try state.openAssertionModuleContents(command, output)) orelse {
+    const module_binary = (try state.openAssertionModuleContents(command, arena, output)) orelse {
         output.print("skipping text module \"{f}\"\n", .{fmt_filename});
         return;
     };
 
     var scratch = std.heap.ArenaAllocator.init(arena.allocator());
-    var wasm: []const u8 = module_binary.contents;
+    var wasm: []const u8 = module_binary.contents();
     var parse_diagnostics = std.Io.Writer.Allocating.initCapacity(arena.allocator(), 128) catch
         @panic("oom");
     const module = wasmstint.Module.parse(
-        arena.allocator(),
+        state.module_arena.allocator(),
         &wasm,
         &scratch,
         .{
@@ -1302,7 +1447,7 @@ fn processAssertUninstantiable(
 
     parse_diagnostics.clearRetainingCapacity();
     const validation_finished = module.finishCodeValidation(
-        arena.allocator(),
+        state.module_arena.allocator(),
         &scratch,
         .init(&parse_diagnostics.writer),
     ) catch |e| switch (e) {
@@ -1322,23 +1467,10 @@ fn processAssertUninstantiable(
 
     std.debug.assert(validation_finished);
 
-    var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
-    var module_allocating = wasmstint.runtime.ModuleAllocating.begin(
-        module,
-        state.imports.provider(),
-        arena.allocator(),
-        &import_error,
-    ) catch |e| switch (e) {
-        error.OutOfMemory => @panic("oom"),
-        error.ImportFailure => return failFmt(output, "{f}", .{import_error}),
-    };
-
-    // Dangling allocations (pages for WASM memory)
-    var module_alloc = try finishModuleAllocation(
-        state.max_memory_size,
-        &module_allocating,
-        arena,
-    );
+    var module_alloc = try state.allocateModule(module, output, &scratch);
+    // Storing of funcrefs means module can't be unconditionally freed
+    errdefer module_alloc.deinit(arena.allocator());
+    _ = scratch.reset(.retain_capacity);
 
     var fuel = state.starting_fuel;
     const instantiating = state.interpreter.reset().awaiting_host.instantiateModule(
@@ -1349,7 +1481,6 @@ fn processAssertUninstantiable(
 
     const message = try state.expectTrap(
         instantiating,
-        arena,
         &fuel,
         command.text,
         &scratch,
@@ -1365,13 +1496,13 @@ fn processAssertUnlinkable(
     arena: *ArenaAllocator,
 ) Error!void {
     const fmt_filename = std.unicode.fmtUtf8(command.filename);
-    const module_binary = (try state.openAssertionModuleContents(command, output)) orelse {
+    const module_binary = (try state.openAssertionModuleContents(command, arena, output)) orelse {
         output.print("skipping text module \"{f}\"\n", .{fmt_filename});
         return;
     };
 
     var scratch = std.heap.ArenaAllocator.init(arena.allocator());
-    var wasm: []const u8 = module_binary.contents;
+    var wasm: []const u8 = module_binary.contents();
     var parse_diagnostics = std.Io.Writer.Allocating.initCapacity(arena.allocator(), 128) catch
         @panic("oom");
     var module = wasmstint.Module.parse(
@@ -1419,17 +1550,25 @@ fn processAssertUnlinkable(
     std.debug.assert(validation_finished);
 
     var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
-    _ = wasmstint.runtime.ModuleAllocating.begin(
+    _ = scratch.reset(.retain_capacity);
+    var definitions = state.allocateModuleDefinitions(module, &scratch);
+    var module_alloc = wasmstint.runtime.ModuleAlloc.allocateWithDefinitions(
         module,
-        state.imports.provider(),
         arena.allocator(),
+        state.imports.provider(),
         &import_error,
+        definitions,
     ) catch |e| switch (e) {
         error.OutOfMemory => @panic("oom"),
         error.ImportFailure => {
+            defer definitions.deinit();
             const expected_message = switch (import_error.reason) {
                 .none_provided => "unknown import",
                 .type_mismatch, .wrong_desc => "incompatible import type",
+                .error_returned => |err| std.debug.panic(
+                    "import provider cannot return errors: {t}",
+                    .{err},
+                ),
             };
 
             if (std.mem.eql(u8, expected_message, command.text.bytes())) {
@@ -1440,18 +1579,25 @@ fn processAssertUnlinkable(
                 "could not match expected error {f} with \"{f}\"",
                 .{ command.text, import_error },
             );
+
+            comptime unreachable;
         },
     };
+    module_alloc.deinit(arena.allocator());
 
     return failFmt(output, "expected linker error for module \"{f}\"", .{fmt_filename});
 }
 
 const std = @import("std");
+const Io = std.Io;
 const builtin = @import("builtin");
 const ArenaAllocator = std.heap.ArenaAllocator;
+const file_content = @import("file_content");
 const wasmstint = @import("wasmstint");
 const ModuleInst = wasmstint.runtime.ModuleInst;
 const Interpreter = wasmstint.Interpreter;
 const Name = wasmstint.Module.Name;
+const V128 = wasmstint.V128;
 const Parser = @import("Parser.zig");
 const Imports = @import("Imports.zig");
+const coz = @import("coz");

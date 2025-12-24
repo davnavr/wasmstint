@@ -1,0 +1,35 @@
+[package]
+name = "wasmstint-fuzz-ffi"
+rust-version = "1.88"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+bench = false
+
+[profile.release]
+codegen-units = 2
+debug = "line-tables-only"
+panic = "abort"
+lto = "thin"
+
+[dependencies]
+wasm-smith = "0.240.0"
+# Existing dependencies of `wasm-smith`
+arbitrary = "1.4.2"
+
+[dependencies.bumpalo]
+version = "3.19.0"
+features = ["collections"]
+
+[dependencies.wasmi]
+version = "1.0.5"
+default-features = false
+features = ["simd"] # No std means no serde
+
+[dependencies.wasmi_core]
+version = "1.0.5"
+default-features = false

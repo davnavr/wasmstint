@@ -45,7 +45,10 @@ pub const Code = extern struct {
         pop_count: u8,
         /// Set to the same value as `fixup_origin` to catch bugs during side table construction.
         origin: if (builtin.mode == .Debug) u32 else void,
-        padding: if (builtin.mode == .Debug) u32 else u0 = undefined,
+        safety_flags: if (builtin.mode == .Debug) packed struct(u32) {
+            finished: bool = false,
+            padding: enum(u31) { padding } = .padding,
+        } else u0 = if (builtin.mode == .Debug) .{} else 0,
     };
 
     pub const Inner = extern struct {
@@ -129,6 +132,9 @@ pub const Code = extern struct {
             };
         }
 
+        var coz_transaction = coz.begin("wasmstint.validator");
+        defer coz_transaction.end();
+
         const code_addr = @intFromPtr(code);
         const code_sec_ptr = module.inner.raw.code;
         std.debug.assert(@intFromPtr(code_sec_ptr) <= code_addr);
@@ -165,20 +171,30 @@ pub const Code = extern struct {
     }
 };
 
-const Val = @Type(std.builtin.Type{
-    .@"enum" = std.builtin.Type.Enum{
-        .tag_type = u8,
-        .fields = fields: {
-            const val_type_fields = @typeInfo(ValType).@"enum".fields;
-            var fields: [val_type_fields.len + 1]std.builtin.Type.EnumField = undefined;
-            fields[0] = .{ .name = "unknown", .value = 0 };
-            @memcpy(fields[1..], val_type_fields);
-            break :fields &fields;
+const Val = val: {
+    const val_type_fields = @typeInfo(ValType).@"enum".fields;
+    const field_count = val_type_fields.len + 1;
+    break :val @Enum(
+        u8,
+        .exhaustive,
+        names: {
+            var names: [field_count][]const u8 = undefined;
+            names[0] = "unknown";
+            for (names[1..], val_type_fields) |*n, f| {
+                n.* = f.name;
+            }
+            break :names &names;
         },
-        .decls = &[0]std.builtin.Type.Declaration{},
-        .is_exhaustive = true,
-    },
-});
+        values: {
+            var values: [field_count]u8 = undefined;
+            values[0] = 0;
+            for (values[1..], val_type_fields) |*v, f| {
+                v.* = f.value;
+            }
+            break :values &values;
+        },
+    );
+};
 
 fn isNumVal(val: Val) bool {
     return switch (val) {
@@ -210,8 +226,6 @@ inline fn valTypeToVal(val_type: ValType) Val {
 
     return @enumFromInt(@intFromEnum(val_type));
 }
-
-const ValBuf = std.SegmentedList(Val, 128);
 
 const BlockType = union(enum) {
     type: packed struct(u32) {
@@ -314,27 +328,29 @@ const CtrlFrame = struct {
     }
 };
 
-const CtrlStack = std.SegmentedList(CtrlFrame, 16);
+const CtrlStack = std.ArrayList(CtrlFrame);
 
 const ValStack = struct {
-    buf: ValBuf,
-    max: u16 = 0,
+    buf: std.ArrayList(Val),
+    max: u16,
 
     inline fn len(val_stack: *const ValStack) u16 {
-        return @intCast(val_stack.buf.len);
+        return @intCast(val_stack.buf.items.len);
     }
 
-    fn pushAny(val_stack: *ValStack, arena: *ArenaAllocator, val: Val) !void {
+    const PushError = Allocator.Error || error{WasmImplementationLimit};
+
+    fn pushAny(val_stack: *ValStack, arena: *ArenaAllocator, val: Val) PushError!void {
         try val_stack.buf.append(arena.allocator(), val);
         // Note, if someone pushes a known value over an unknown, the max will grow anyway
         // TODO: check that current frame is reachable instead.
         // if (val != .unknown) {
-        val_stack.max = @max(val_stack.max, std.math.cast(u16, val_stack.buf.len) orelse
+        val_stack.max = @max(val_stack.max, std.math.cast(u16, val_stack.buf.items.len) orelse
             return Error.WasmImplementationLimit);
         // }
     }
 
-    fn push(val_stack: *ValStack, arena: *ArenaAllocator, val_type: ValType) !void {
+    fn push(val_stack: *ValStack, arena: *ArenaAllocator, val_type: ValType) PushError!void {
         return val_stack.pushAny(arena, valTypeToVal(val_type));
     }
 
@@ -343,12 +359,9 @@ const ValStack = struct {
         const new_len = std.math.add(u16, val_stack.len(), @intCast(types.len)) catch
             return Error.WasmImplementationLimit;
 
-        if (new_len > ValBuf.prealloc_count) {
-            try val_stack.buf.growCapacity(arena.allocator(), new_len);
-        }
-
+        try val_stack.buf.ensureUnusedCapacity(arena.allocator(), new_len);
         for (types) |ty| {
-            val_stack.buf.append(undefined, valTypeToVal(ty)) catch unreachable;
+            val_stack.buf.appendAssumeCapacity(valTypeToVal(ty));
         }
 
         // TODO: check that current frame is reachable instead.
@@ -364,7 +377,7 @@ const ValStack = struct {
     }
 
     fn popAny(val_stack: *ValStack, ctrl_stack: *const CtrlStack, diag: Diagnostics) !Val {
-        const current_frame: *const CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
+        const current_frame: *const CtrlFrame = &ctrl_stack.items[ctrl_stack.items.len - 1];
         return if (val_stack.len() == current_frame.info.height)
             if (current_frame.info.@"unreachable")
                 Val.unknown
@@ -399,9 +412,9 @@ const ValStack = struct {
         replacement: ValType,
         diag: Diagnostics,
     ) !void {
-        const current_frame: *const CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
+        const current_frame: *const CtrlFrame = &ctrl_stack.items[ctrl_stack.items.len - 1];
         if (val_stack.len() > current_frame.info.height) {
-            const top: *Val = val_stack.buf.at(val_stack.len() - 1);
+            const top: *Val = &val_stack.buf.items[val_stack.len() - 1];
 
             if (top.* != valTypeToVal(expected) and top.* != .unknown) {
                 return diag.print(
@@ -438,17 +451,20 @@ const ValStack = struct {
         expected: []const ValType,
         diag: Diagnostics,
     ) !void {
-        const current_frame: *const CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
+        const current_frame: *const CtrlFrame = &ctrl_stack.items[ctrl_stack.items.len - 1];
         for (0..expected.len) |i| {
             const expected_type = valTypeToVal(expected[expected.len - 1 - i]);
-            const current_height = val_stack.len() - i;
-            const actual_type: Val = if (current_height == current_frame.info.height)
-                if (current_frame.info.@"unreachable")
-                    Val.unknown
+            const actual_type: Val = ty: {
+                const current_frame_height = current_frame.info.height;
+                const current_height = val_stack.len() -| @as(u16, @intCast(i));
+                break :ty if (current_height <= current_frame_height)
+                    if (current_frame.info.@"unreachable")
+                        Val.unknown
+                    else
+                        return errorValueStackUnderflow(current_frame_height, diag)
                 else
-                    return errorValueStackUnderflow(current_frame.info.height, diag)
-            else
-                val_stack.buf.at(current_height - 1).*;
+                    val_stack.buf.items[current_height - 1];
+            };
 
             if (actual_type != expected_type and actual_type != .unknown) {
                 return diag.print(
@@ -458,6 +474,28 @@ const ValStack = struct {
                 );
             }
         }
+    }
+
+    fn binOp(
+        val_stack: *ValStack,
+        scratch: *ArenaAllocator,
+        ctrl_stack: *const CtrlStack,
+        ty: ValType,
+        diag: Reader.Diagnostics,
+    ) Error!void {
+        try val_stack.popExpecting(ctrl_stack, ty, diag);
+        try val_stack.popThenPushExpecting(scratch, ctrl_stack, ty, ty, diag);
+    }
+
+    fn relOp(
+        val_stack: *ValStack,
+        scratch: *ArenaAllocator,
+        ctrl_stack: *const CtrlStack,
+        ty: ValType,
+        diag: Reader.Diagnostics,
+    ) Error!void {
+        try val_stack.popExpecting(ctrl_stack, ty, diag);
+        try val_stack.popThenPushExpecting(scratch, ctrl_stack, ty, .i32, diag);
     }
 };
 
@@ -473,15 +511,23 @@ fn readMemIdx(reader: *Reader, module: Module, diag: Diagnostics) !void {
     }
 }
 
+const Alignment = enum(u3) {
+    @"1" = 0,
+    @"2" = 1,
+    @"4" = 2,
+    @"8" = 3,
+    @"16" = 4,
+};
+
 fn readMemArg(
     reader: *Reader,
-    natural_alignment: u3,
+    natural_alignment: Alignment,
     module: Module,
     diag: Diagnostics,
 ) !void {
     const a = try reader.readUleb128(u32, diag, "memarg alignment");
 
-    if (a > natural_alignment) {
+    if (a > @intFromEnum(natural_alignment)) {
         return if (a < 32)
             diag.writeAll(.validation, "alignment must not be larger than natural")
         else
@@ -572,8 +618,8 @@ const Label = struct {
         module: Module,
         diag: Diagnostics,
     ) !Label {
-        const frame: *const CtrlFrame = if (depth < ctrl_stack.len)
-            ctrl_stack.at(ctrl_stack.len - 1 - depth)
+        const frame: *const CtrlFrame = if (depth < ctrl_stack.items.len)
+            &ctrl_stack.items[ctrl_stack.items.len - 1 - depth]
         else
             return diag.print(.validation, "unknown label {}", .{depth});
 
@@ -636,11 +682,11 @@ fn popCtrlFrame(
     module: Module,
     diag: Diagnostics,
 ) !CtrlFrame {
-    if (ctrl_stack.len == 0) {
+    if (ctrl_stack.items.len == 0) {
         return diag.writeAll(.validation, "control stack underflow");
     }
 
-    const frame: CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1).*;
+    const frame: CtrlFrame = ctrl_stack.items[ctrl_stack.items.len - 1];
     const result_types = frame.types.funcType(module).results();
     // std.debug.print("processing {t} {any}\n", .{ frame.info.opcode, result_types });
 
@@ -653,13 +699,14 @@ fn popCtrlFrame(
         );
     }
 
-    ctrl_stack.len -= 1;
+    _ = ctrl_stack.pop().?;
     return frame;
 }
 
 fn markUnreachable(val_stack: *ValStack, ctrl_stack: *CtrlStack) void {
-    const current_frame: *CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
-    val_stack.buf.len = current_frame.info.height;
+    const current_frame: *CtrlFrame = &ctrl_stack.items[ctrl_stack.items.len - 1];
+    @memset(val_stack.buf.items[current_frame.info.height..], undefined);
+    val_stack.buf.shrinkRetainingCapacity(current_frame.info.height);
     current_frame.info.@"unreachable" = true;
 }
 
@@ -763,7 +810,7 @@ const BranchFixup = packed struct(u32) {
 
 const SideTableBuilder = struct {
     const Entry = Code.SideTableEntry;
-    const Entries = std.SegmentedList(Entry, 4);
+    // const Entries = std.SegmentedList(Entry, 4); // TODO: unrolled link list based on cache line size
 
     const ActiveList = struct {
         block_offset: BlockOffset,
@@ -774,17 +821,17 @@ const SideTableBuilder = struct {
 
     /// The contents of the side table, which contain branch targets inserted in increasing
     /// origin offset order.
-    entries: Entries = .{},
+    entries: std.ArrayList(Entry),
     /// Maps pending fixups to each frame in the WebAssembly validation control stack.
     ///
     /// Since `loop`s never need fixups, they only push empty lists.
-    active: std.SegmentedList(ActiveList, 4) = .{},
+    active: std.ArrayList(ActiveList) = .empty,
     /// Separate stack used to fixup branches in `if`/`else` blocks.
-    alternate: std.SegmentedList(BranchFixup, 4) = .{},
+    alternate: std.ArrayList(BranchFixup) = .empty,
     free: BranchFixup.List = .empty,
 
     fn nextEntryIdx(table: *const SideTableBuilder) Module.LimitError!u32 {
-        return std.math.cast(u32, table.entries.len) orelse return error.WasmImplementationLimit;
+        return std.math.cast(u32, table.entries.items.len) orelse error.WasmImplementationLimit;
     }
 
     fn pushFixupList(
@@ -811,10 +858,7 @@ const SideTableBuilder = struct {
 
         try table.active.append(
             arena.allocator(),
-            ActiveList{
-                .block_offset = block_offset,
-                .fixups = fixups,
-            },
+            ActiveList{ .block_offset = block_offset, .fixups = fixups },
         );
     }
 
@@ -827,7 +871,10 @@ const SideTableBuilder = struct {
     ) (Module.LimitError || Allocator.Error)!void {
         const idx = try table.nextEntryIdx();
         const entry = try table.entries.addOne(arena.allocator());
+        errdefer _ = table.entries.pop().?;
         const fixup = try table.alternate.addOne(arena.allocator());
+
+        errdefer comptime unreachable;
 
         fixup.* = .{ .entry_idx = idx };
         entry.* = Entry{
@@ -846,6 +893,8 @@ const SideTableBuilder = struct {
         side_table_idx: u32,
     };
 
+    const AppendError = Module.LimitError || Allocator.Error;
+
     fn append(
         table: *SideTableBuilder,
         arena: *ArenaAllocator,
@@ -855,9 +904,10 @@ const SideTableBuilder = struct {
         pop_count: u8,
         block_offset: ActiveList.BlockOffset,
         target_depth: u32,
-    ) (Module.LimitError || Allocator.Error)!u32 {
+    ) AppendError!u32 {
         const idx = try table.nextEntryIdx();
         const entry = try table.entries.addOne(arena.allocator());
+        errdefer _ = table.entries.pop().?;
         entry.copy_count = copy_count;
         entry.pop_count = pop_count;
         entry.origin = if (builtin.mode == .Debug) origin else {};
@@ -867,6 +917,9 @@ const SideTableBuilder = struct {
                 return Error.WasmImplementationLimit;
 
             entry.delta_ip = .{ .done = delta_ip };
+            if (builtin.mode == .Debug) {
+                entry.safety_flags.finished = true;
+            }
 
             const delta_stp = std.math.negateCast(idx - target.side_table_idx) catch
                 return Error.WasmImplementationLimit;
@@ -882,7 +935,8 @@ const SideTableBuilder = struct {
             entry.delta_ip = .{ .fixup_origin = origin };
             entry.delta_stp = undefined;
 
-            const current_list: *ActiveList = table.active.at(table.active.len - 1 - target_depth);
+            const current_list: *ActiveList =
+                &table.active.items[table.active.items.len - 1 - target_depth];
             std.debug.assert(current_list.block_offset == block_offset);
             try current_list.fixups.append(arena, .{ .entry_idx = idx });
         }
@@ -896,13 +950,20 @@ const SideTableBuilder = struct {
         target_side_table_idx: u32,
         end_offset: u32,
     ) Module.LimitError!void {
-        const entry: *Entry = table.entries.at(fixup_entry.entry_idx);
+        var coz_begin = coz.begin("wasmstint.validator.resolveFixupEntry");
+        defer coz_begin.end();
+
+        const entry: *Entry = &table.entries.items[fixup_entry.entry_idx];
         const origin = entry.delta_ip.fixup_origin;
 
         entry.delta_ip = .{
             .done = std.math.cast(i32, end_offset - origin) orelse
                 return error.WasmImplementationLimit,
         };
+
+        if (builtin.mode == .Debug) {
+            entry.safety_flags.finished = true;
+        }
 
         entry.delta_stp = std.math.cast(i16, target_side_table_idx - fixup_entry.entry_idx) orelse
             return error.WasmImplementationLimit;
@@ -938,8 +999,8 @@ const SideTableBuilder = struct {
         std.debug.assert(block_offset == popped.block_offset);
 
         const popped_header = popped.fixups.header;
-        if (table.active.len > 0 and popped_header.capacity > 0) {
-            const other: *ActiveList = table.active.at(table.active.len - 1);
+        if (table.active.items.len > 0 and popped_header.capacity > 0) {
+            const other: *ActiveList = &table.active.items[table.active.items.len - 1];
             const other_header = other.fixups.header;
             if (@intFromPtr(popped_header) == @intFromPtr(other_header)) {
                 if (builtin.mode != .Debug) unreachable;
@@ -957,6 +1018,9 @@ const SideTableBuilder = struct {
 
         var remaining = popped.fixups;
         while (remaining.header.len > 0) {
+            var coz_fixup = coz.begin("wasmstint.validator.popAndResolveFixups");
+            defer coz_fixup.end();
+
             for (remaining.entries()) |*fixup_entry| {
                 try table.resolveFixupEntry(
                     fixup_entry,
@@ -980,8 +1044,8 @@ const SideTableBuilder = struct {
         end_offset: u32,
     ) Module.LimitError!void {
         const target_side_table_idx = try table.nextEntryIdx();
-        const fixup: *const BranchFixup = table.alternate.at(table.alternate.len - 1);
-        defer _ = table.alternate.pop();
+        const fixup: *const BranchFixup = &table.alternate.items[table.alternate.items.len - 1];
+        defer _ = table.alternate.pop().?;
         try table.resolveFixupEntry(
             fixup,
             target_side_table_idx,
@@ -995,7 +1059,7 @@ fn appendSideTableEntry(
     side_table: *SideTableBuilder,
     origin_offset: u32,
     target: Label,
-) !void {
+) SideTableBuilder.AppendError!void {
     const loop_target = target.frame.info.opcode == .loop;
     // if (loop_target)
     //     std.debug.print("BRNCH targeting 0x{X} (loop) originating from 0x{X}\n", .{ target.frame.offset, origin_offset });
@@ -1023,7 +1087,7 @@ fn validateLoadInstr(
     reader: *Reader,
     val_stack: *ValStack,
     ctrl_stack: *const CtrlStack,
-    natural_alignment: u3,
+    natural_alignment: Alignment,
     loaded: ValType,
     module: Module,
     arena: *ArenaAllocator,
@@ -1034,17 +1098,76 @@ fn validateLoadInstr(
     try readMemArg(reader, natural_alignment, module, diag);
 }
 
+fn validateLoadLaneInstr(
+    reader: *Reader,
+    natural_alignment: Alignment,
+    val_stack: *ValStack,
+    ctrl_stack: *const CtrlStack,
+    comptime lane_size: V128.LaneIdxSize,
+    module: Module,
+    arena: *ArenaAllocator,
+    diag: Diagnostics,
+) Error!void {
+    try val_stack.popExpecting(ctrl_stack, .v128, diag);
+    try val_stack.popThenPushExpecting(arena, ctrl_stack, .i32, .v128, diag);
+    try readMemArg(reader, natural_alignment, module, diag);
+    try reader.readSimdLane(lane_size, diag);
+}
+
 fn validateStoreInstr(
     reader: *Reader,
     val_stack: *ValStack,
     ctrl_stack: *const CtrlStack,
-    natural_alignment: u3,
+    natural_alignment: Alignment,
     stored: ValType,
     module: Module,
     diag: Diagnostics,
 ) Error!void {
     try val_stack.popManyExpecting(ctrl_stack, &[_]ValType{ .i32, stored }, diag);
     try readMemArg(reader, natural_alignment, module, diag);
+}
+
+fn validateStoreLaneInstr(
+    reader: *Reader,
+    natural_alignment: Alignment,
+    val_stack: *ValStack,
+    ctrl_stack: *const CtrlStack,
+    comptime lane_size: V128.LaneIdxSize,
+    module: Module,
+    diag: Diagnostics,
+) Error!void {
+    try val_stack.popManyExpecting(ctrl_stack, &.{ .i32, .v128 }, diag);
+    try readMemArg(reader, natural_alignment, module, diag);
+    try reader.readSimdLane(lane_size, diag);
+}
+
+fn validateTailCallSignature(
+    func_type: *const Module.FuncType,
+    callee_signature: *const Module.FuncType,
+    diag: Diagnostics,
+    opcode: opcodes.ByteOpcode,
+) Reader.ValidationError!void {
+    if (callee_signature.result_count != func_type.result_count) {
+        return diag.print(
+            .validation,
+            "type mismatch: {[opcode]t} expected {[expected]d} results, but got {[actual]d}",
+            .{
+                .opcode = opcode,
+                .expected = func_type.result_count,
+                .actual = callee_signature.result_count,
+            },
+        );
+    }
+
+    for (callee_signature.results(), func_type.results()) |expected, actual| {
+        if (!expected.eql(actual)) {
+            return diag.print(
+                .validation,
+                "type mismatch: {[opcode]t} expected {[expected]t}, but got {[actual]t}",
+                .{ .opcode = opcode, .expected = expected, .actual = actual },
+            );
+        }
+    }
 }
 
 pub fn rawValidate(
@@ -1063,8 +1186,10 @@ pub fn rawValidate(
 
     const func_type = signature.funcType(module);
 
-    var val_stack: ValStack = undefined;
     const locals: struct { types: []const ValType, count: u16 } = locals: {
+        var coz_all_locals = coz.begin("wasmstint.validator.locals");
+        defer coz_all_locals.end();
+
         const local_group_count = try reader.readUleb128(u32, diag, "locals count");
 
         const LocalGroup = struct { type: ValType, count: u32 };
@@ -1086,49 +1211,36 @@ pub fn rawValidate(
             return error.WasmImplementationLimit; // too many locals
         }
 
-        const buf = try scratch.allocator().alloc(ValType, total_locals_count);
-        @memcpy(buf[0..func_type.param_count], func_type.parameters());
-        var local_vars = ValBuf{};
-        const locals_only_count = total_locals_count - func_type.param_count;
-        if (locals_only_count > ValBuf.prealloc_count) {
-            // TODO(Zig): handle OOMs properly for std.SegmentedList
-            // https://github.com/ziglang/zig/issues/23027
-            try local_vars.growCapacity(scratch.allocator(), locals_only_count);
-        }
+        const locals_buf = try scratch.allocator().alloc(ValType, total_locals_count);
+        @memcpy(locals_buf[0..func_type.param_count], func_type.parameters());
 
         errdefer comptime unreachable;
 
         var local_idx: u16 = func_type.param_count;
         for (local_groups) |*group| {
             for (0..group.count) |_| {
-                local_vars.append(undefined, valTypeToVal(group.type)) catch unreachable;
-                buf[local_idx] = group.type;
+                locals_buf[local_idx] = group.type;
                 local_idx += 1;
             }
         }
 
-        std.debug.assert(local_idx == buf.len);
-        local_vars.clearRetainingCapacity();
-        val_stack = ValStack{ .buf = local_vars };
-        break :locals .{ .types = buf, .count = @intCast(total_locals_count) };
+        std.debug.assert(local_idx == locals_buf.len);
+        break :locals .{ .types = locals_buf, .count = @intCast(total_locals_count) };
     };
 
-    var side_table = SideTableBuilder{};
+    var side_table = SideTableBuilder{ .entries = try .initCapacity(scratch.allocator(), 4) };
     _ = &side_table;
 
-    var ctrl_stack = CtrlStack{};
-    ctrl_stack.append(
-        undefined,
-        CtrlFrame{
-            .types = .{ .type = .{ .idx = signature, .results_only = true } },
-            .info = .{
-                .height = 0,
-                .opcode = .block,
-            },
-            .offset = 0,
-            .side_table_idx = 0,
+    var ctrl_stack = try CtrlStack.initCapacity(scratch.allocator(), 16);
+    ctrl_stack.appendAssumeCapacity(CtrlFrame{
+        .types = .{ .type = .{ .idx = signature, .results_only = true } },
+        .info = .{
+            .height = 0,
+            .opcode = .block,
         },
-    ) catch unreachable;
+        .offset = 0,
+        .side_table_idx = 0,
+    });
 
     side_table.pushFixupList(
         scratch,
@@ -1138,8 +1250,12 @@ pub fn rawValidate(
 
     const instructions: Code.Ip = @ptrCast(reader.bytes.ptr);
 
+    var val_stack = ValStack{ .buf = .empty, .max = 0 };
     var instr_offset: u32 = 0;
-    while (ctrl_stack.len > 0) {
+    while (ctrl_stack.items.len > 0) {
+        var coz_instr = coz.begin("wasmstint.validator.instruction");
+        defer coz_instr.end();
+
         _ = per_instr_arena.reset(.retain_capacity);
 
         // Offset from the first byte of the first instruction to the first
@@ -1160,7 +1276,7 @@ pub fn rawValidate(
         const opcode_tag = std.meta.intToEnum(opcodes.ByteOpcode, opcode_byte) catch
             return diag.print(.parse, "illegal opcode 0x{X:0>2}", .{opcode_byte});
 
-        // std.debug.print("validate: {} 0x{X:0>2}\n", .{ opcode_tag, opcode_byte });
+        // std.log.debug("validate: {t} 0x{X:0>2}", .{ opcode_tag, opcode_byte });
         switch (opcode_tag) {
             .@"unreachable" => markUnreachable(&val_stack, &ctrl_stack),
             .nop => {},
@@ -1288,16 +1404,20 @@ pub fn rawValidate(
                 try side_table.popAndResolveAlternate(instr_offset + 1);
 
                 if (builtin.mode == .Debug) {
-                    side_table.active.at(side_table.active.len - 1).block_offset = instr_offset;
+                    side_table.active.items[side_table.active.items.len - 1].block_offset =
+                        instr_offset;
                 }
             },
             .end => {
+                var coz_opcode_end = coz.begin("wasmstint.validator.opcode.end");
+                defer coz_opcode_end.end();
+
                 // std.debug.print("PROCESSING END\n", .{});
                 const frame = try popCtrlFrame(&ctrl_stack, &val_stack, module, diag);
 
                 // TODO: Skip branch fixup processing for unreachable code.
 
-                const current_list = side_table.active.at(side_table.active.len - 1);
+                const current_list = &side_table.active.items[side_table.active.items.len - 1];
                 if (builtin.mode == .Debug) {
                     std.debug.assert(frame.offset == current_list.block_offset);
                 }
@@ -1367,19 +1487,7 @@ pub fn rawValidate(
                 const label_count = try reader.readUleb128(u32, diag, "br_table label count");
                 const labels = try per_instr_arena.allocator().alloc(u32, label_count);
 
-                // Reserve space for the new side table entries.
-                {
-                    const grow_side_table = std.math.add(
-                        usize,
-                        std.math.add(usize, 1, labels.len) catch
-                            return error.OutOfMemory,
-                        side_table.entries.len,
-                    ) catch return error.OutOfMemory;
-
-                    if (grow_side_table > SideTableBuilder.Entries.prealloc_count) {
-                        try side_table.entries.growCapacity(scratch.allocator(), grow_side_table);
-                    }
-                }
+                try side_table.entries.ensureUnusedCapacity(scratch.allocator(), labels.len);
 
                 // Validation bases the "arity" on the default branch, so all labels must be parsed
                 // to get to the default label.
@@ -1411,7 +1519,15 @@ pub fn rawValidate(
                         diag,
                     );
 
-                    try appendSideTableEntry(scratch, &side_table, instr_offset, l);
+                    appendSideTableEntry(
+                        scratch,
+                        &side_table,
+                        instr_offset,
+                        l,
+                    ) catch |e| switch (e) {
+                        error.OutOfMemory => unreachable,
+                        else => |err| return err,
+                    };
 
                     const l_types = l.frame.labelTypes(module);
                     if (l_types.len != arity) {
@@ -1493,12 +1609,66 @@ pub fn rawValidate(
                 try val_stack.popManyExpecting(&ctrl_stack, callee_signature.parameters(), diag);
                 try val_stack.pushMany(scratch, callee_signature.results());
             },
+            // Introduced in [tail call proposal](https://github.com/WebAssembly/tail-call/)
+            .return_call => {
+                const callee = try reader.readIdx(
+                    Module.FuncIdx,
+                    module.funcTypes().len,
+                    diag,
+                    &.{ "function", "in return_call" },
+                );
+                const callee_signature = module.funcTypes()[@intFromEnum(callee)];
+
+                try validateTailCallSignature(func_type, callee_signature, diag, .return_call);
+                try val_stack.popManyExpecting(&ctrl_stack, callee_signature.parameters(), diag);
+                markUnreachable(&val_stack, &ctrl_stack);
+            },
+            .return_call_indirect => {
+                const module_types = module.types();
+                const type_idx = try reader.readIdx(
+                    Module.TypeIdx,
+                    module_types.len,
+                    diag,
+                    &.{ "type", "in return_call_indirect" },
+                );
+
+                const callee_signature: *const Module.FuncType =
+                    &module_types[@intFromEnum(type_idx)];
+
+                const table_types = module.tableTypes();
+                const table_idx = try reader.readIdx(
+                    Module.TableIdx,
+                    table_types.len,
+                    diag,
+                    &.{ "table", "in return_call_indirect" },
+                );
+                const table_type: *const Module.TableType = &table_types[@intFromEnum(table_idx)];
+
+                if (table_type.elem_type != .funcref) {
+                    return diag.print(
+                        .validation,
+                        "type mismatch: return_call_indirect expects funcref, but type of table " ++
+                            "{} is {f}",
+                        .{ @intFromEnum(table_idx), table_type },
+                    );
+                }
+
+                try val_stack.popExpecting(&ctrl_stack, .i32, diag);
+                try validateTailCallSignature(
+                    func_type,
+                    callee_signature,
+                    diag,
+                    .return_call_indirect,
+                );
+                try val_stack.popManyExpecting(&ctrl_stack, callee_signature.parameters(), diag);
+                markUnreachable(&val_stack, &ctrl_stack);
+            },
 
             .drop => _ = try val_stack.popAny(&ctrl_stack, diag),
             .select => {
                 try val_stack.popExpecting(&ctrl_stack, .i32, diag);
 
-                const current_frame: *const CtrlFrame = ctrl_stack.at(ctrl_stack.len - 1);
+                const current_frame: *const CtrlFrame = &ctrl_stack.items[ctrl_stack.items.len - 1];
                 if (val_stack.len() == current_frame.info.height and
                     !current_frame.info.@"unreachable")
                 {
@@ -1527,10 +1697,7 @@ pub fn rawValidate(
                     return diag.print(.validation, "type mismatch: {t} != {t}", .{ t_1, t_2 });
                 }
 
-                val_stack.pushAny(
-                    undefined,
-                    if (t_1 == .unknown) t_2 else t_1,
-                ) catch unreachable;
+                val_stack.pushAny(scratch, if (t_1 == .unknown) t_2 else t_1) catch unreachable;
             },
             .@"select t" => {
                 const type_count = try reader.readUleb128(u32, diag, "select arity");
@@ -1544,7 +1711,10 @@ pub fn rawValidate(
 
                 const t = try ValType.parse(reader, diag);
                 try val_stack.popManyExpecting(&ctrl_stack, &.{ t, t, .i32 }, diag);
-                try val_stack.push(undefined, t);
+                val_stack.push(scratch, t) catch |e| switch (e) {
+                    error.OutOfMemory => unreachable,
+                    else => |err| return err,
+                };
             },
 
             .@"local.get" => {
@@ -1619,7 +1789,7 @@ pub fn rawValidate(
                 &reader,
                 &val_stack,
                 &ctrl_stack,
-                std.math.log2(4),
+                .@"4",
                 .i32,
                 module,
                 scratch,
@@ -1629,7 +1799,7 @@ pub fn rawValidate(
                 &reader,
                 &val_stack,
                 &ctrl_stack,
-                std.math.log2(8),
+                .@"8",
                 .i64,
                 module,
                 scratch,
@@ -1639,7 +1809,7 @@ pub fn rawValidate(
                 &reader,
                 &val_stack,
                 &ctrl_stack,
-                std.math.log2(4),
+                .@"4",
                 .f32,
                 module,
                 scratch,
@@ -1649,7 +1819,7 @@ pub fn rawValidate(
                 &reader,
                 &val_stack,
                 &ctrl_stack,
-                std.math.log2(8),
+                .@"8",
                 .f64,
                 module,
                 scratch,
@@ -1659,7 +1829,7 @@ pub fn rawValidate(
                 &reader,
                 &val_stack,
                 &ctrl_stack,
-                std.math.log2(1),
+                .@"1",
                 .i32,
                 module,
                 scratch,
@@ -1669,7 +1839,7 @@ pub fn rawValidate(
                 &reader,
                 &val_stack,
                 &ctrl_stack,
-                std.math.log2(2),
+                .@"2",
                 .i32,
                 module,
                 scratch,
@@ -1679,7 +1849,7 @@ pub fn rawValidate(
                 &reader,
                 &val_stack,
                 &ctrl_stack,
-                std.math.log2(1),
+                .@"1",
                 .i64,
                 module,
                 scratch,
@@ -1689,7 +1859,7 @@ pub fn rawValidate(
                 &reader,
                 &val_stack,
                 &ctrl_stack,
-                std.math.log2(2),
+                .@"2",
                 .i64,
                 module,
                 scratch,
@@ -1699,93 +1869,39 @@ pub fn rawValidate(
                 &reader,
                 &val_stack,
                 &ctrl_stack,
-                std.math.log2(4),
+                .@"4",
                 .i64,
                 module,
                 scratch,
                 diag,
             ),
-            .@"i32.store" => try validateStoreInstr(
-                &reader,
-                &val_stack,
-                &ctrl_stack,
-                std.math.log2(4),
-                .i32,
-                module,
-                diag,
-            ),
-            .@"i64.store" => try validateStoreInstr(
-                &reader,
-                &val_stack,
-                &ctrl_stack,
-                std.math.log2(8),
-                .i64,
-                module,
-                diag,
-            ),
-            .@"f32.store" => try validateStoreInstr(
-                &reader,
-                &val_stack,
-                &ctrl_stack,
-                std.math.log2(4),
-                .f32,
-                module,
-                diag,
-            ),
-            .@"f64.store" => try validateStoreInstr(
-                &reader,
-                &val_stack,
-                &ctrl_stack,
-                std.math.log2(8),
-                .f64,
-                module,
-                diag,
-            ),
-            .@"i32.store8" => try validateStoreInstr(
-                &reader,
-                &val_stack,
-                &ctrl_stack,
-                std.math.log2(1),
-                .i32,
-                module,
-                diag,
-            ),
-            .@"i32.store16" => try validateStoreInstr(
-                &reader,
-                &val_stack,
-                &ctrl_stack,
-                std.math.log2(2),
-                .i32,
-                module,
-                diag,
-            ),
-            .@"i64.store8" => try validateStoreInstr(
-                &reader,
-                &val_stack,
-                &ctrl_stack,
-                std.math.log2(1),
-                .i64,
-                module,
-                diag,
-            ),
-            .@"i64.store16" => try validateStoreInstr(
-                &reader,
-                &val_stack,
-                &ctrl_stack,
-                std.math.log2(2),
-                .i64,
-                module,
-                diag,
-            ),
-            .@"i64.store32" => try validateStoreInstr(
-                &reader,
-                &val_stack,
-                &ctrl_stack,
-                std.math.log2(4),
-                .i64,
-                module,
-                diag,
-            ),
+            .@"i32.store" => {
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"4", .i32, module, diag);
+            },
+            .@"i64.store" => {
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"8", .i64, module, diag);
+            },
+            .@"f32.store" => {
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"4", .f32, module, diag);
+            },
+            .@"f64.store" => {
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"8", .f64, module, diag);
+            },
+            .@"i32.store8" => {
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"1", .i32, module, diag);
+            },
+            .@"i32.store16" => {
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"2", .i32, module, diag);
+            },
+            .@"i64.store8" => {
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"1", .i64, module, diag);
+            },
+            .@"i64.store16" => {
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"2", .i64, module, diag);
+            },
+            .@"i64.store32" => {
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"4", .i64, module, diag);
+            },
             .@"memory.size" => {
                 try readMemIdx(&reader, module, diag);
                 try val_stack.push(scratch, .i32);
@@ -1843,10 +1959,7 @@ pub fn rawValidate(
             .@"i32.shr_u",
             .@"i32.rotl",
             .@"i32.rotr",
-            => {
-                try val_stack.popExpecting(&ctrl_stack, .i32, diag);
-                try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i32, .i32, diag);
-            },
+            => try val_stack.binOp(scratch, &ctrl_stack, .i32, diag),
             .@"i64.eqz",
             .@"i32.wrap_i64",
             => try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i64, .i32, diag),
@@ -1860,30 +1973,21 @@ pub fn rawValidate(
             .@"i64.le_u",
             .@"i64.ge_s",
             .@"i64.ge_u",
-            => {
-                try val_stack.popExpecting(&ctrl_stack, .i64, diag);
-                try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i64, .i32, diag);
-            },
+            => try val_stack.relOp(scratch, &ctrl_stack, .i64, diag),
             .@"f32.eq",
             .@"f32.ne",
             .@"f32.lt",
             .@"f32.gt",
             .@"f32.le",
             .@"f32.ge",
-            => {
-                try val_stack.popExpecting(&ctrl_stack, .f32, diag);
-                try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f32, .i32, diag);
-            },
+            => try val_stack.relOp(scratch, &ctrl_stack, .f32, diag),
             .@"f64.eq",
             .@"f64.ne",
             .@"f64.lt",
             .@"f64.gt",
             .@"f64.le",
             .@"f64.ge",
-            => {
-                try val_stack.popExpecting(&ctrl_stack, .f64, diag);
-                try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f64, .i32, diag);
-            },
+            => try val_stack.relOp(scratch, &ctrl_stack, .f64, diag),
             .@"i64.clz",
             .@"i64.ctz",
             .@"i64.popcnt",
@@ -1906,10 +2010,7 @@ pub fn rawValidate(
             .@"i64.shr_u",
             .@"i64.rotl",
             .@"i64.rotr",
-            => {
-                try val_stack.popExpecting(&ctrl_stack, .i64, diag);
-                try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i64, .i64, diag);
-            },
+            => try val_stack.binOp(scratch, &ctrl_stack, .i64, diag),
             .@"f32.abs",
             .@"f32.neg",
             .@"f32.ceil",
@@ -1925,10 +2026,7 @@ pub fn rawValidate(
             .@"f32.min",
             .@"f32.max",
             .@"f32.copysign",
-            => {
-                try val_stack.popExpecting(&ctrl_stack, .f32, diag);
-                try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f32, .f32, diag);
-            },
+            => try val_stack.binOp(scratch, &ctrl_stack, .f32, diag),
             .@"f64.abs",
             .@"f64.neg",
             .@"f64.ceil",
@@ -1944,10 +2042,7 @@ pub fn rawValidate(
             .@"f64.min",
             .@"f64.max",
             .@"f64.copysign",
-            => {
-                try val_stack.popExpecting(&ctrl_stack, .f64, diag);
-                try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f64, .f64, diag);
-            },
+            => try val_stack.binOp(scratch, &ctrl_stack, .f64, diag),
             .@"i32.trunc_f32_s",
             .@"i32.trunc_f32_u",
             .@"i32.reinterpret_f32",
@@ -2076,14 +2171,16 @@ pub fn rawValidate(
                     // Spectests require first checking the table index
                     const elem_idx = try reader.readUleb128(u32, diag, "elemidx in table.init");
                     const table_type = try readTableIdx(&reader, module, diag);
-                    const elem_type = if (elem_idx < module.elementSegments().len)
-                        module.elementSegments()[elem_idx].elementType()
-                    else
+                    const elem_segment = if (elem_idx < module.elementSegments().len)
+                        module.elementSegments()[elem_idx]
+                    else {
                         return diag.print(
                             .validation,
                             "unknown element segment {} in table.init",
                             .{elem_idx},
                         );
+                    };
+                    const elem_type = elem_segment.elementType();
 
                     if (elem_type != table_type) {
                         return diag.print(
@@ -2094,6 +2191,14 @@ pub fn rawValidate(
                     }
 
                     try val_stack.popManyExpecting(&ctrl_stack, &[_]ValType{.i32} ** 3, diag);
+                    val_stack.max = @max(
+                        val_stack.max,
+                        std.math.add(
+                            u16,
+                            @intCast(val_stack.buf.items.len),
+                            elem_segment.header.elem_max_stack,
+                        ) catch return error.WasmImplementationLimit, // out of stack space
+                    );
                 },
                 .@"elem.drop" => _ = try readElemIdx(&reader, module, diag),
                 .@"table.copy" => {
@@ -2133,54 +2238,479 @@ pub fn rawValidate(
                         diag,
                     );
                 },
-
-                // else => |bad| std.debug.panic("TODO: handle 0xFC {s}\n", .{@tagName(bad)}),
             },
 
-            // else => |bad| {
-            //     std.debug.panic(
-            //         "TODO: handle {s} (0x{X:0>2})\n",
-            //         .{ @tagName(bad), @intFromEnum(bad) },
-            //     );
-            // },
+            // SIMD proposal (https://github.com/WebAssembly/simd)
+            .@"0xFD" => switch (try reader.readUleb128Enum(
+                u8,
+                opcodes.FDPrefixOpcode,
+                diag,
+                "SIMD opcode",
+            )) {
+                .@"v128.load" => try validateLoadInstr(
+                    &reader,
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"16",
+                    .v128,
+                    module,
+                    scratch,
+                    diag,
+                ),
+                .@"v128.load8_splat",
+                => try validateLoadInstr(
+                    &reader,
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"1",
+                    .v128,
+                    module,
+                    scratch,
+                    diag,
+                ),
+                .@"v128.load16_splat" => try validateLoadInstr(
+                    &reader,
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"2",
+                    .v128,
+                    module,
+                    scratch,
+                    diag,
+                ),
+                .@"v128.load32_splat" => try validateLoadInstr(
+                    &reader,
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"4",
+                    .v128,
+                    module,
+                    scratch,
+                    diag,
+                ),
+                .@"v128.load8x8_s",
+                .@"v128.load8x8_u",
+                .@"v128.load16x4_s",
+                .@"v128.load16x4_u",
+                .@"v128.load32x2_s",
+                .@"v128.load32x2_u",
+                .@"v128.load64_splat",
+                => try validateLoadInstr(
+                    &reader,
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"8",
+                    .v128,
+                    module,
+                    scratch,
+                    diag,
+                ),
+                .@"v128.store" => try validateStoreInstr(
+                    &reader,
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"16",
+                    .v128,
+                    module,
+                    diag,
+                ),
+                .@"v128.const" => {
+                    _ = try reader.readArray(16, diag, "v128.const immediate");
+                    try val_stack.push(scratch, .v128);
+                },
+                .@"i8x16.shuffle" => {
+                    _ = try reader.readSimdLaneArray(.@"32", .@"16", diag);
+                    try val_stack.binOp(scratch, &ctrl_stack, .v128, diag);
+                },
+                .@"i8x16.swizzle",
+                .@"i8x16.eq",
+                .@"i8x16.ne",
+                .@"i8x16.lt_s",
+                .@"i8x16.lt_u",
+                .@"i8x16.gt_s",
+                .@"i8x16.gt_u",
+                .@"i8x16.le_s",
+                .@"i8x16.le_u",
+                .@"i8x16.ge_s",
+                .@"i8x16.ge_u",
+                .@"i16x8.eq",
+                .@"i16x8.ne",
+                .@"i16x8.lt_s",
+                .@"i16x8.lt_u",
+                .@"i16x8.gt_s",
+                .@"i16x8.gt_u",
+                .@"i16x8.le_s",
+                .@"i16x8.le_u",
+                .@"i16x8.ge_s",
+                .@"i16x8.ge_u",
+                .@"i32x4.eq",
+                .@"i32x4.ne",
+                .@"i32x4.lt_s",
+                .@"i32x4.lt_u",
+                .@"i32x4.gt_s",
+                .@"i32x4.gt_u",
+                .@"i32x4.le_s",
+                .@"i32x4.le_u",
+                .@"i32x4.ge_s",
+                .@"i32x4.ge_u",
+                .@"f32x4.eq",
+                .@"f32x4.ne",
+                .@"f32x4.lt",
+                .@"f32x4.gt",
+                .@"f32x4.le",
+                .@"f32x4.ge",
+                .@"f64x2.eq",
+                .@"f64x2.ne",
+                .@"f64x2.lt",
+                .@"f64x2.gt",
+                .@"f64x2.le",
+                .@"f64x2.ge",
+                .@"v128.and",
+                .@"v128.andnot",
+                .@"v128.or",
+                .@"v128.xor",
+                .@"i8x16.narrow_i16x8_s",
+                .@"i8x16.narrow_i16x8_u",
+                .@"i8x16.add",
+                .@"i8x16.add_sat_s",
+                .@"i8x16.add_sat_u",
+                .@"i8x16.sub",
+                .@"i8x16.sub_sat_s",
+                .@"i8x16.sub_sat_u",
+                .@"i8x16.min_s",
+                .@"i8x16.min_u",
+                .@"i8x16.max_s",
+                .@"i8x16.max_u",
+                .@"i8x16.avgr_u",
+                .@"i16x8.q15mulr_sat_s",
+                .@"i16x8.narrow_i32x4_s",
+                .@"i16x8.narrow_i32x4_u",
+                .@"i16x8.add",
+                .@"i16x8.add_sat_s",
+                .@"i16x8.add_sat_u",
+                .@"i16x8.sub",
+                .@"i16x8.sub_sat_s",
+                .@"i16x8.sub_sat_u",
+                .@"i16x8.mul",
+                .@"i16x8.min_s",
+                .@"i16x8.min_u",
+                .@"i16x8.max_s",
+                .@"i16x8.max_u",
+                .@"i16x8.avgr_u",
+                .@"i16x8.extmul_low_i8x16_s",
+                .@"i16x8.extmul_high_i8x16_s",
+                .@"i16x8.extmul_low_i8x16_u",
+                .@"i16x8.extmul_high_i8x16_u",
+                .@"i32x4.add",
+                .@"i32x4.sub",
+                .@"i32x4.mul",
+                .@"i32x4.min_s",
+                .@"i32x4.min_u",
+                .@"i32x4.max_s",
+                .@"i32x4.max_u",
+                .@"i32x4.dot_i16x8_s",
+                .@"i32x4.extmul_low_i16x8_s",
+                .@"i32x4.extmul_high_i16x8_s",
+                .@"i32x4.extmul_low_i16x8_u",
+                .@"i32x4.extmul_high_i16x8_u",
+                .@"i64x2.add",
+                .@"i64x2.sub",
+                .@"i64x2.mul",
+                .@"i64x2.eq",
+                .@"i64x2.ne",
+                .@"i64x2.lt_s",
+                .@"i64x2.gt_s",
+                .@"i64x2.le_s",
+                .@"i64x2.ge_s",
+                .@"i64x2.extmul_low_i32x4_s",
+                .@"i64x2.extmul_high_i32x4_s",
+                .@"i64x2.extmul_low_i32x4_u",
+                .@"i64x2.extmul_high_i32x4_u",
+                .@"f32x4.add",
+                .@"f32x4.sub",
+                .@"f32x4.mul",
+                .@"f32x4.div",
+                .@"f32x4.min",
+                .@"f32x4.max",
+                .@"f32x4.pmin",
+                .@"f32x4.pmax",
+                .@"f64x2.add",
+                .@"f64x2.sub",
+                .@"f64x2.mul",
+                .@"f64x2.div",
+                .@"f64x2.min",
+                .@"f64x2.max",
+                .@"f64x2.pmin",
+                .@"f64x2.pmax",
+                => try val_stack.binOp(scratch, &ctrl_stack, .v128, diag),
+                .@"i8x16.splat", .@"i16x8.splat", .@"i32x4.splat" => {
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i32, .v128, diag);
+                },
+                .@"i64x2.splat" => {
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i64, .v128, diag);
+                },
+                .@"f32x4.splat" => {
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f32, .v128, diag);
+                },
+                .@"f64x2.splat" => {
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .f64, .v128, diag);
+                },
+                .@"i8x16.extract_lane_s", .@"i8x16.extract_lane_u" => {
+                    _ = try reader.readSimdLane(.@"16", diag);
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .i32, diag);
+                },
+                .@"i8x16.replace_lane" => {
+                    _ = try reader.readSimdLane(.@"16", diag);
+                    try val_stack.popExpecting(&ctrl_stack, .i32, diag);
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .v128, diag);
+                },
+                .@"i16x8.extract_lane_s", .@"i16x8.extract_lane_u" => {
+                    _ = try reader.readSimdLane(.@"8", diag);
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .i32, diag);
+                },
+                .@"i16x8.replace_lane" => {
+                    _ = try reader.readSimdLane(.@"8", diag);
+                    try val_stack.popExpecting(&ctrl_stack, .i32, diag);
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .v128, diag);
+                },
+                .@"i32x4.extract_lane" => {
+                    _ = try reader.readSimdLane(.@"4", diag);
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .i32, diag);
+                },
+                .@"i32x4.replace_lane" => {
+                    _ = try reader.readSimdLane(.@"4", diag);
+                    try val_stack.popExpecting(&ctrl_stack, .i32, diag);
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .v128, diag);
+                },
+                .@"i64x2.extract_lane" => {
+                    _ = try reader.readSimdLane(.@"2", diag);
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .i64, diag);
+                },
+                .@"i64x2.replace_lane" => {
+                    _ = try reader.readSimdLane(.@"2", diag);
+                    try val_stack.popExpecting(&ctrl_stack, .i64, diag);
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .v128, diag);
+                },
+                .@"f32x4.extract_lane" => {
+                    _ = try reader.readSimdLane(.@"4", diag);
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .f32, diag);
+                },
+                .@"f32x4.replace_lane" => {
+                    _ = try reader.readSimdLane(.@"4", diag);
+                    try val_stack.popExpecting(&ctrl_stack, .f32, diag);
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .v128, diag);
+                },
+                .@"f64x2.extract_lane" => {
+                    _ = try reader.readSimdLane(.@"2", diag);
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .f64, diag);
+                },
+                .@"f64x2.replace_lane" => {
+                    _ = try reader.readSimdLane(.@"2", diag);
+                    try val_stack.popExpecting(&ctrl_stack, .f64, diag);
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .v128, diag);
+                },
+                .@"v128.not",
+                .@"i8x16.abs",
+                .@"i8x16.neg",
+                .@"i8x16.popcnt",
+                .@"f32x4.ceil",
+                .@"f32x4.floor",
+                .@"f32x4.trunc",
+                .@"f32x4.nearest",
+                .@"f32x4.demote_f64x2_zero",
+                .@"f64x2.promote_low_f32x4",
+                .@"f64x2.ceil",
+                .@"f64x2.floor",
+                .@"f64x2.trunc",
+                .@"i16x8.extadd_pairwise_i8x16_s",
+                .@"i16x8.extadd_pairwise_i8x16_u",
+                .@"i32x4.extadd_pairwise_i16x8_s",
+                .@"i32x4.extadd_pairwise_i16x8_u",
+                .@"i16x8.abs",
+                .@"i16x8.neg",
+                .@"i16x8.extend_low_i8x16_s",
+                .@"i16x8.extend_high_i8x16_s",
+                .@"i16x8.extend_low_i8x16_u",
+                .@"i16x8.extend_high_i8x16_u",
+                .@"f64x2.nearest",
+                .@"i32x4.abs",
+                .@"i32x4.neg",
+                .@"i32x4.extend_low_i16x8_s",
+                .@"i32x4.extend_high_i16x8_s",
+                .@"i32x4.extend_low_i16x8_u",
+                .@"i32x4.extend_high_i16x8_u",
+                .@"i64x2.abs",
+                .@"i64x2.neg",
+                .@"i64x2.extend_low_i32x4_s",
+                .@"i64x2.extend_high_i32x4_s",
+                .@"i64x2.extend_low_i32x4_u",
+                .@"i64x2.extend_high_i32x4_u",
+                .@"f32x4.abs",
+                .@"f32x4.neg",
+                .@"f32x4.sqrt",
+                .@"f64x2.abs",
+                .@"f64x2.neg",
+                .@"f64x2.sqrt",
+                .@"i32x4.trunc_sat_f32x4_s",
+                .@"i32x4.trunc_sat_f32x4_u",
+                .@"f32x4.convert_i32x4_s",
+                .@"f32x4.convert_i32x4_u",
+                .@"i32x4.trunc_sat_f64x2_s_zero",
+                .@"i32x4.trunc_sat_f64x2_u_zero",
+                .@"f64x2.convert_low_i32x4_s",
+                .@"f64x2.convert_low_i32x4_u",
+                => {
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .v128, diag);
+                },
+                .@"v128.bitselect" => {
+                    try val_stack.popManyExpecting(&ctrl_stack, &.{ .v128, .v128 }, diag);
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .v128, diag);
+                },
+                .@"v128.any_true",
+                .@"i8x16.all_true",
+                .@"i8x16.bitmask",
+                .@"i16x8.all_true",
+                .@"i16x8.bitmask",
+                .@"i32x4.all_true",
+                .@"i32x4.bitmask",
+                .@"i64x2.all_true",
+                .@"i64x2.bitmask",
+                => {
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .i32, diag);
+                },
+                .@"v128.load8_lane" => try validateLoadLaneInstr(
+                    &reader,
+                    Alignment.@"1",
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"16",
+                    module,
+                    scratch,
+                    diag,
+                ),
+                .@"v128.load16_lane" => try validateLoadLaneInstr(
+                    &reader,
+                    Alignment.@"2",
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"8",
+                    module,
+                    scratch,
+                    diag,
+                ),
+                .@"v128.load32_lane" => try validateLoadLaneInstr(
+                    &reader,
+                    Alignment.@"4",
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"4",
+                    module,
+                    scratch,
+                    diag,
+                ),
+                .@"v128.load64_lane" => try validateLoadLaneInstr(
+                    &reader,
+                    Alignment.@"8",
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"2",
+                    module,
+                    scratch,
+                    diag,
+                ),
+                .@"v128.store8_lane" => try validateStoreLaneInstr(
+                    &reader,
+                    Alignment.@"1",
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"16",
+                    module,
+                    diag,
+                ),
+                .@"v128.store16_lane" => try validateStoreLaneInstr(
+                    &reader,
+                    Alignment.@"2",
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"8",
+                    module,
+                    diag,
+                ),
+                .@"v128.store32_lane" => try validateStoreLaneInstr(
+                    &reader,
+                    Alignment.@"4",
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"4",
+                    module,
+                    diag,
+                ),
+                .@"v128.store64_lane" => try validateStoreLaneInstr(
+                    &reader,
+                    Alignment.@"8",
+                    &val_stack,
+                    &ctrl_stack,
+                    .@"2",
+                    module,
+                    diag,
+                ),
+                .@"v128.load32_zero", .@"v128.load64_zero" => {
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i32, .v128, diag);
+                    try readMemArg(&reader, .@"16", module, diag);
+                },
+                .@"i8x16.shl",
+                .@"i8x16.shr_s",
+                .@"i8x16.shr_u",
+                .@"i16x8.shl",
+                .@"i16x8.shr_s",
+                .@"i16x8.shr_u",
+                .@"i32x4.shl",
+                .@"i32x4.shr_s",
+                .@"i32x4.shr_u",
+                .@"i64x2.shl",
+                .@"i64x2.shr_s",
+                .@"i64x2.shr_u",
+                => {
+                    try val_stack.popExpecting(&ctrl_stack, .i32, diag);
+                    try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .v128, .v128, diag);
+                },
+            },
         }
     }
 
     try reader.expectEnd(diag, "END opcode expected as last byte");
 
-    if (ctrl_stack.len != 0) {
+    if (ctrl_stack.items.len != 0) {
         return diag.writeAll(.parse, "END opcode expected, but control stack was not empty");
     }
 
     std.debug.assert(val_stack.len() == func_type.result_count);
-    std.debug.assert(side_table.active.len == 0);
-    std.debug.assert(side_table.alternate.len == 0);
+    std.debug.assert(side_table.active.items.len == 0);
+    std.debug.assert(side_table.alternate.items.len == 0);
 
     const eip: *const Code.End = @ptrCast(instructions + instr_offset);
     const max_values: u16 = val_stack.max;
-    const final_side_table: []const Code.SideTableEntry = side_table: {
-        const copied = try allocator.alloc(Code.SideTableEntry, side_table.entries.len);
-        side_table.entries.writeToSlice(copied, 0);
-        break :side_table copied;
-    };
+    const final_side_table: []const Code.SideTableEntry =
+        try allocator.dupe(Code.SideTableEntry, side_table.entries.items);
 
     errdefer comptime unreachable;
 
     for (final_side_table, 0..) |*entry, i| {
-        // Catch any entries that were not fixed up when safety checks are enabled.
-        _ = entry.delta_ip.done;
-        _ = i;
+        if (builtin.mode == .Debug and !entry.safety_flags.finished) {
+            std.debug.panic("entry #{} was not fixed up", .{i});
+        }
 
-        //std.debug.print(
-        //    "#{}: delta_ip = {}, delta_stp = {}, copied = {}, popped = {}\n",
-        //    .{
-        //        i,
-        //        entry.delta_ip.done,
-        //        entry.delta_stp,
-        //        entry.copy_count,
-        //        entry.pop_count,
-        //    },
-        //);
+        // std.debug.print(
+        //     "#{}: \u{394}ip={}, \u{394}stp={}, copy={}, pop={}, origin={X:0>6}\n",
+        //     .{
+        //         i,
+        //         entry.delta_ip.done,
+        //         entry.delta_stp,
+        //         entry.copy_count,
+        //         entry.pop_count,
+        //         (instructions + entry.origin) - module.inner.wasm.ptr,
+        //     },
+        // );
     }
 
     return .{
@@ -2201,4 +2731,6 @@ const Module = @import("../Module.zig");
 const Reader = @import("Reader.zig");
 const Diagnostics = Reader.Diagnostics;
 const ValType = Module.ValType;
+const V128 = @import("../v128.zig").V128;
 const opcodes = @import("../opcodes.zig");
+const coz = @import("coz");

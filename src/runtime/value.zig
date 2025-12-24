@@ -1,19 +1,3 @@
-pub const TableAddr = extern struct {
-    elem_type: Module.ValType,
-    table: *@import("table.zig").TableInst,
-
-    pub fn tableType(addr: *const TableAddr) Module.TableType {
-        return .{
-            .elem_type = addr.elem_type,
-            .limits = .{ .min = addr.table.len, .max = addr.table.limit },
-        };
-    }
-
-    pub fn format(addr: *const TableAddr, writer: *Writer) Writer.Error!void {
-        try writer.print("(table {f})", .{addr.tableType()});
-    }
-};
-
 pub const GlobalAddr = extern struct {
     global_type: Module.GlobalType, // *const GlobalType if it becomes too big
     value: *anyopaque, // TODO: Have it be a pointer to struct containing both value and its size? Need to allow global.get/set to know the operand size
@@ -26,7 +10,7 @@ pub const GlobalAddr = extern struct {
             .f64 => f64,
             .funcref => FuncAddr.Nullable,
             .externref => ExternAddr,
-            .v128 => unreachable,
+            .v128 => V128,
         };
     }
 
@@ -36,7 +20,7 @@ pub const GlobalAddr = extern struct {
             inline .i32, .f32, .i64, .f64 => |num| {
                 try writer.print(
                     "(" ++ @tagName(num) ++ ".const {})",
-                    .{@as(*const Pointee(num), @ptrCast(@alignCast(global.value)))},
+                    .{@as(*const Pointee(num), @ptrCast(@alignCast(global.value))).*},
                 );
             },
             inline .funcref, .externref => |ref| {
@@ -45,49 +29,104 @@ pub const GlobalAddr = extern struct {
                     .{@as(*const Pointee(ref), @ptrCast(@alignCast(global.value)))},
                 );
             },
-            .v128 => unreachable,
+            .v128 => {
+                try V128.format(@as(*const V128, @ptrCast(@alignCast(global.value))).*, writer);
+            },
         }
     }
 };
 
-pub const FuncAddr = extern struct {
-    /// If the lowest bit is `0`, then this is a `ModuleInst`.
-    module_or_host: *anyopaque,
-    func: packed union {
-        wasm: Module.FuncIdx,
-        host_data: ?*anyopaque,
+pub const FuncAddr = packed struct(usize) {
+    pub const Tag = enum(u1) { wasm = 0, host = 1 };
+
+    const high_bits_size = @bitSizeOf(*anyopaque) - @bitSizeOf(Tag);
+    const HighBits = std.meta.Int(.unsigned, high_bits_size);
+
+    tag: Tag,
+    high_bits: packed union {
+        wasm: Wasm,
+        host: HighBits,
     },
 
     /// A *host function*, uniquely identified by its address.
     ///
-    /// Embedders of *wasmstint* are intended to store the data of a host function in some structure containing a
-    /// `HostFunc`, passing the pointer to the `HostFunc` to *wasmstint*.
+    /// Hosts using *wasmstint* are expected to embed a `Host` structure in some allocation
+    /// representing a host function in some, passing the pointer to the `Host` to *wasmstint*.
     pub const Host = extern struct {
+        /// It is illegal to mutate this value if existing reference to the host function currently
+        /// exist.
         signature: Module.FuncType,
+
+        pub fn format(func: *const Host, writer: *Writer) Writer.Error!void {
+            try (Expanded{ .host = func }).format(writer);
+        }
     };
 
-    pub const Expanded = union(enum) {
-        host: Expanded.Host,
-        wasm: Wasm,
+    pub const Wasm = packed struct(HighBits) {
+        // Note that on x86-64, there are technically extra bits that can be used (48-bit pointers?)
+        // https://en.wikipedia.org/wiki/X86-64#Canonical_form_addresses
+        pub const IdxBits = u3;
 
-        pub const Host = struct {
-            func: *FuncAddr.Host,
-            data: ?*anyopaque,
-        };
+        idx_bits: IdxBits,
+        block_addr: std.meta.Int(.unsigned, high_bits_size - @bitSizeOf(IdxBits)),
 
-        pub const Wasm = struct {
+        /// Allows for a compact representation of `FuncAddr`s referring to functions defined
+        /// within a `ModuleInst`.
+        pub const Block = extern struct {
             module: ModuleInst,
-            idx: Module.FuncIdx,
+            /// Invariant that this is `>=` the # of function imports in the module.
+            starting_idx: u32,
 
-            pub inline fn code(wasm: *const Wasm) *Module.Code {
-                return wasm.idx.code(wasm.module.header().module).?;
-            }
+            pub const funcs_per_block = std.math.maxInt(IdxBits) + 1;
         };
+
+        fn block(wasm: Wasm) *align(@sizeOf(Block)) Block {
+            const shift_amt = comptime @bitSizeOf(IdxBits) + 1;
+            return @ptrFromInt(@as(usize, wasm.block_addr) << shift_amt);
+        }
+
+        pub fn module(wasm: Wasm) ModuleInst {
+            return wasm.block().module;
+        }
+
+        /// Never refers to a function import.
+        pub fn funcIdx(wasm: Wasm) Module.FuncIdx {
+            if (builtin.mode == .Debug) {
+                std.debug.assert( // corrupted module pointer
+                    @intFromPtr(wasm.module().inner) % std.atomic.cache_line == 0,
+                );
+            }
+
+            return @enumFromInt(
+                @as(
+                    @typeInfo(Module.FuncIdx).@"enum".tag_type,
+                    @intCast(wasm.block().starting_idx),
+                ) + wasm.idx_bits,
+            );
+        }
+
+        pub inline fn code(wasm: Wasm) *Module.Code {
+            return wasm.funcIdx().code(wasm.module().header().module).?;
+        }
+
+        pub fn signature(wasm: Wasm) *const Module.FuncType {
+            const idx = @intFromEnum(wasm.funcIdx());
+            return wasm.module().header().module.funcTypes()[idx];
+        }
+
+        pub fn format(func: Wasm, writer: *Writer) Writer.Error!void {
+            try (Expanded{ .wasm = func }).format(writer);
+        }
+    };
+
+    pub const Expanded = union(Tag) {
+        wasm: Wasm,
+        host: *const Host,
 
         pub fn signature(inst: *const Expanded) *const Module.FuncType {
             return switch (inst.*) {
-                .host => |*host| &host.func.signature,
-                .wasm => |*wasm| wasm.module.header().module.funcTypes()[@intFromEnum(wasm.idx)],
+                .host => |host| &host.signature,
+                .wasm => |*wasm| wasm.signature(),
             };
         }
 
@@ -95,23 +134,20 @@ pub const FuncAddr = extern struct {
             try writer.writeAll("(func ");
             switch (func.*) {
                 .wasm => |*wasm| {
-                    try writer.print("$f{}", .{@intFromEnum(wasm.idx)});
+                    try writer.print("$f{}", .{@intFromEnum(wasm.funcIdx())});
 
-                    const module = wasm.module.header().module;
+                    const module = wasm.module().header().module;
                     // for (wasm.module.findExportNames(.{ .func = wasm.idx })) |name| {
                     for (module.exports()) |exp| {
                         const desc = exp.descIdx();
-                        if (desc == .func and desc.func == wasm.idx) {
+                        if (desc == .func and desc.func == wasm.funcIdx()) {
                             try writer.print(" (export {f})", .{exp.name(module)});
                         }
                     }
 
-                    try writer.print(" (;module@{X};)", .{@intFromPtr(wasm.module.header())});
+                    try writer.print(" (;module@{X};)", .{@intFromPtr(wasm.module().header())});
                 },
-                .host => |*host| try writer.print(
-                    "(;host@{X};)",
-                    .{@intFromPtr(host.func)},
-                ),
+                .host => |host| try writer.print("(;host@{X};)", .{@intFromPtr(host)}),
             }
 
             const sig = func.signature();
@@ -124,36 +160,26 @@ pub const FuncAddr = extern struct {
     };
 
     pub fn init(inst: Expanded) FuncAddr {
-        return FuncAddr{
-            .module_or_host = switch (inst) {
-                .wasm => |*wasm| @ptrCast(@constCast(wasm.module.inner)),
-                .host => |*host| @ptrFromInt(@intFromPtr(host.func) | 1),
-            },
-            .func = switch (inst) {
-                .wasm => |*wasm| .{ .wasm = wasm.idx },
-                .host => |*host| .{ .host_data = host.data },
+        return switch (inst) {
+            .wasm => |wasm| .{ .tag = .wasm, .high_bits = .{ .wasm = wasm } },
+            .host => |host| .{
+                .tag = .host,
+                .high_bits = .{ .host = @intCast(@shrExact(@intFromPtr(host), 1)) },
             },
         };
     }
 
     pub fn expanded(inst: FuncAddr) Expanded {
-        const module_or_host = @intFromPtr(inst.module_or_host);
-        return if (module_or_host & 1 == 0) Expanded{
-            .wasm = .{
-                .module = ModuleInst{ .inner = @ptrFromInt(module_or_host) },
-                .idx = inst.func.wasm,
-            },
-        } else .{
-            .host = .{
-                .func = @ptrFromInt(module_or_host & ~@as(usize, 1)),
-                .data = inst.func.host_data,
-            },
+        return switch (inst.tag) {
+            .wasm => .{ .wasm = inst.high_bits.wasm },
+            .host => .{ .host = @ptrFromInt(@shlExact(@as(usize, inst.high_bits.host), 1)) },
         };
     }
 
     comptime {
-        std.debug.assert(@sizeOf(FuncAddr) == @sizeOf([2]*anyopaque));
-        std.debug.assert(std.meta.alignment(@FieldType(ModuleInst, "inner")) >= 2);
+        std.debug.assert(@sizeOf(FuncAddr) == @sizeOf(*anyopaque));
+        std.debug.assert(std.meta.alignment(@FieldType(ModuleInst, "inner")) >= @sizeOf(Wasm.Block));
+        std.debug.assert(@divExact(@sizeOf(Wasm.Block), 2) == Wasm.Block.funcs_per_block);
         std.debug.assert(@alignOf(Host) >= 2);
     }
 
@@ -161,17 +187,16 @@ pub const FuncAddr = extern struct {
         return inst.expanded().signature();
     }
 
-    pub const Nullable = extern struct {
-        module_or_host: ?*anyopaque,
-        func: @FieldType(FuncAddr, "func"),
+    pub const Nullable = packed struct(usize) {
+        bits: usize,
 
-        pub const @"null" = std.mem.zeroes(Nullable);
+        pub const @"null" = Nullable{ .bits = 0 };
 
         pub fn funcInst(inst: Nullable) ?FuncAddr {
-            return if (inst.module_or_host) |module_or_host|
-                .{ .module_or_host = module_or_host, .func = inst.func }
+            return if (inst.bits == 0)
+                null
             else
-                null;
+                @as(FuncAddr, @bitCast(inst.bits));
         }
 
         comptime {
@@ -188,6 +213,10 @@ pub const FuncAddr = extern struct {
         }
     };
 
+    pub fn hash(func: FuncAddr, hasher: anytype) void {
+        std.hash.autoHash(hasher, @as(usize, @bitCast(func)));
+    }
+
     pub fn format(func: FuncAddr, writer: *Writer) Writer.Error!void {
         try func.expanded().format(writer);
     }
@@ -196,7 +225,7 @@ pub const FuncAddr = extern struct {
 pub const ExternVal = union(enum) {
     func: FuncAddr,
     mem: *@import("memory.zig").MemInst,
-    table: TableAddr,
+    table: *@import("table.zig").TableInst,
     global: GlobalAddr,
 
     // @sizeOf(ExternVal) ~= @sizeOf([3]usize), but this is fine as it is not expected to be stored in slices
@@ -205,7 +234,7 @@ pub const ExternVal = union(enum) {
         switch (val.*) {
             .func => |*func| try func.format(writer),
             .mem => |mem| try mem.format(writer),
-            .table => |*table| try table.format(writer),
+            .table => |table| try table.format(writer),
             .global => |*global| try global.format(writer),
         }
     }
@@ -267,6 +296,8 @@ pub const ExternAddr = packed union {
 };
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Writer = std.Io.Writer;
 const Module = @import("../Module.zig");
 const ModuleInst = @import("module_inst.zig").ModuleInst;
+const V128 = @import("../v128.zig").V128;

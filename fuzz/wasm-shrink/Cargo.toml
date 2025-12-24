@@ -1,0 +1,25 @@
+[package]
+name = "wasmstint-wasm-shrink"
+rust-version = "1.88"
+edition = "2024"
+publish = false
+
+[profile.release]
+codegen-units = 1
+debug = "line-tables-only"
+panic = "abort"
+lto = "thin"
+
+[profile.release.package.clap]
+opt-level = 2
+
+[dependencies]
+wasm-shrink = "0.241.2"
+# Existing dependencies of wasm-shrink
+anyhow = "1.0.100" 
+log = "0.4.28"
+
+[dependencies.clap]
+version = "4.5.51"
+default-features = false
+features = ["std", "derive", "error-context", "help", "usage", "suggestions"]

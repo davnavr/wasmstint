@@ -3,16 +3,11 @@
 //! [WebAssembly]: https://webassembly.org/
 
 pub const Module = @import("Module.zig");
-pub const float = @import("float.zig");
 pub const runtime = @import("runtime.zig");
 pub const Interpreter = @import("Interpreter.zig");
 
-pub const LimitedAllocator = @import("LimitedAllocator.zig");
-pub const PageBufferAllocator = @import("PageBufferAllocator.zig");
-
-pub const FileContent = @import("FileContent.zig");
-
-const std = @import("std");
+pub const pointer = @import("pointer.zig");
+pub const V128 = @import("v128.zig").V128;
 
 pub fn waitForDebugger() void {
     const os = @import("builtin").target.os;
@@ -24,7 +19,7 @@ pub fn waitForDebugger() void {
         };
 
         while (debugapi.IsDebuggerPresent() == 0) {
-            std.Thread.sleep(100);
+            _ = std.os.windows.kernel32.SleepEx(100, 0);
         }
     } else {
         if (os.tag == .linux) {
@@ -34,7 +29,7 @@ pub fn waitForDebugger() void {
         var dbg: usize = 0;
         const dbg_ptr: *volatile usize = &dbg;
         while (dbg_ptr.* == 0) {
-            std.Thread.sleep(100);
+            std.posix.nanosleep(0, 100_000_000);
         }
     }
 }
@@ -44,9 +39,10 @@ comptime {
     std.debug.assert(std.mem.byte_size_in_bits == 8);
 }
 
+const std = @import("std");
+
 test {
-    _ = @import("reservation_allocator.zig");
-    _ = PageBufferAllocator;
     _ = Module;
     _ = Interpreter;
+    _ = pointer;
 }

@@ -1,3 +1,28 @@
+// No, I don't want to reimplement `std.process.ArgIteratorWindows`, and by extension, Windows
+// argument parsing just to get WTF-16 strings.
+
+// /// A string of platform-specific characters passed as a command-line argument.
+// ///
+// /// Similar to Rust's `std::ffi::OsStr`.
+// pub const Arg = struct {
+//     const Encoding = enum { wtf8, wtf16le };
+//
+//     pub const encoding: Encoding = if (builtin.os.tag == .windows) .wtf16le else .wtf8;
+//
+//     pub const Inner = switch (encoding) {
+//         .wtf16 => [:0]const u16,
+//         .wtf8 => [:0]const u8,
+//     };
+//
+//     inner: Inner,
+//
+//     pub fn format(arg: Arg, writer: *Writer) Writer.Error!void {
+//         switch (encoding) {
+//             .wtf8 => try std.unicode.fmtUtf8(arg.inner).format(writer),
+//         }
+//     }
+// };
+
 pub const ArgIterator = struct {
     remaining: []const [:0]const u8,
 
@@ -5,15 +30,27 @@ pub const ArgIterator = struct {
         return .{ .remaining = args };
     }
 
-    fn initProcessArgs(arena: *ArenaAllocator) Oom!ArgIterator {
+    pub fn initProcessArgs(arena: *ArenaAllocator) Oom!ArgIterator {
         return .{
-            .remaining = switch (builtin.os.tag) {
+            .remaining = args: switch (builtin.os.tag) {
                 .wasi => (try std.process.ArgIteratorWasi.init(arena.allocator())).args,
-                .windows => std.process.argsAlloc(arena.allocator()) catch |e| return switch (e) {
-                    error.OutOfMemory => |oom| oom,
-                    error.Overflow => Oom.OutOfMemory,
+                .windows => {
+                    // Copied from `std.process.ArgIterator.initWithAllocator`.
+                    const command_line = std.os.windows.peb().ProcessParameters.CommandLine;
+                    var args = try std.process.ArgIteratorWindows.init(
+                        arena.allocator(),
+                        command_line.Buffer.?[0..(command_line.Length / 2)],
+                    );
+
+                    var arg_list = std.ArrayList([:0]const u8).empty;
+                    // Arguments are allocated in separate parts of `args.buffer` in the `arena`.
+                    while (args.next()) |a| {
+                        try arg_list.append(arena.allocator(), a);
+                    }
+
+                    break :args arg_list.items;
                 },
-                else => posix: {
+                else => {
                     var args = try arena.allocator().alloc(
                         [:0]const u8,
                         std.os.argv.len,
@@ -24,7 +61,7 @@ pub const ArgIterator = struct {
                         args[i] = std.mem.sliceTo(a, 0);
                     }
 
-                    break :posix args;
+                    break :args args;
                 },
             },
         };
@@ -40,14 +77,14 @@ pub const ArgIterator = struct {
         }
     }
 
-    pub fn nextAlloc(args: *ArgIterator, arena: *ArenaAllocator) Oom!?[:0]u8 {
+    pub fn nextDupe(args: *ArgIterator, arena: *ArenaAllocator) Oom!?[:0]u8 {
         const a = args.next() orelse return null;
         return try arena.allocator().dupeZ(u8, a);
     }
 };
 
 pub const Flag = struct {
-    pub const Info = struct {
+    const Info = struct {
         long: [:0]const u8,
         short: ?u8 = null,
         description: [:0]const u8 = "",
@@ -56,11 +93,37 @@ pub const Flag = struct {
             return "--" ++ info.long ++
                 (if (info.short) |short| "/-" ++ .{short} else "");
         }
+
+        fn reportDuplicate(comptime info: Info, diag: ?*Diagnostics) InvalidError {
+            return Diagnostics.report(
+                diag,
+                comptime "cannot specify flag " ++ info.names() ++ " more than once",
+            );
+        }
+
+        pub fn reportMissing(
+            comptime info: Info,
+            diag: ?*Diagnostics,
+            comptime arg_help: ArgHelp,
+        ) InvalidError {
+            return Diagnostics.report(
+                diag,
+                comptime "missing " ++ arg_help.string() ++ " argument for flag " ++ info.names(),
+            );
+        }
+    };
+
+    const ArgHelp = struct {
+        name: [:0]const u8,
+
+        fn string(comptime arg_help: ArgHelp) []const u8 {
+            return .{'<'} ++ arg_help.name ++ .{'>'};
+        }
     };
 
     info: Info,
-    args_help: [:0]const u8 = "",
-    type: type,
+    arg_help: ?ArgHelp,
+    namespace: type,
 
     pub const Diagnostics = struct {
         message: []const u8,
@@ -108,28 +171,43 @@ pub const Flag = struct {
         }
     };
 
-    const InvalidError = error{
+    pub const InvalidError = error{
         /// Must only be returned by `Diagnostics` methods.
         InvalidCliFlag,
     };
 
     pub const FinishError = InvalidError || Oom;
-    pub const ParseError = error{PrintCliUsage} || FinishError;
 
-    pub fn init(
+    pub const HelpError = error{
+        /// Used by the `--help` flag to print usage information.
+        PrintCliUsage,
+    };
+
+    pub const RemainingError = error{
+        /// Stop all argument parsing to allow retrieval of the remaining CLI arguments.
+        ParseRemainingArguments,
+        ParseCustomArgument,
+    };
+
+    pub const ParseError = HelpError || RemainingError || FinishError;
+
+    fn init(
         comptime info: Info,
-        comptime args_help: [:0]const u8,
+        comptime arg_help: ?ArgHelp,
         comptime ParserState: type,
+        comptime initial_parser_state: ParserState,
         comptime ParserResult: type,
-        comptime default_state_value: ParserState,
-        comptime parser: fn (
+        /// Parses any argument strings that come after the flag.
+        comptime parseArgs: fn (
             args: *ArgIterator,
             arena: *ArenaAllocator,
             diagnostics: ?*Diagnostics,
-            state: *ParserState,
-        ) ParseError!void,
-        comptime parser_finish: fn (
-            ParserState,
+            state: ParserState,
+        ) ParseError!ParserState,
+        /// Takes the parser state, and converts it to the final value inserted in the result
+        /// struct.
+        comptime parseFinish: fn (
+            @TypeOf(initial_parser_state),
             diagnostics: ?*Diagnostics,
         ) FinishError!ParserResult,
     ) Flag {
@@ -140,35 +218,36 @@ pub const Flag = struct {
 
         return .{
             .info = info,
-            .args_help = args_help,
-            .type = struct {
+            .arg_help = arg_help,
+            .namespace = struct {
                 pub const State = ParserState;
+                pub const initial_state: State = initial_parser_state;
                 pub const Result = ParserResult;
-                pub const parse = parser;
-                pub const finish = parser_finish;
-                pub const default_state: State = default_state_value;
+                pub const parse = parseArgs;
+                pub const finish = parseFinish;
             },
         };
     }
 
-    fn helpParser(
-        _: *ArgIterator,
-        _: *ArenaAllocator,
-        _: ?*Diagnostics,
-        _: *void,
-    ) ParseError!void {
-        return ParseError.PrintCliUsage;
-    }
-
-    fn idFinish(
-        comptime State: type,
-        comptime Result: type,
-    ) fn (State, ?*Diagnostics) FinishError!Result {
+    fn idFinish(comptime T: type) fn (T, ?*Diagnostics) FinishError!T {
         return struct {
-            fn finish(state: State, _: ?*Diagnostics) FinishError!Result {
+            fn finish(state: T, _: ?*Diagnostics) FinishError!T {
                 return state;
             }
         }.finish;
+    }
+
+    fn parseHelpArgs(
+        args: *ArgIterator,
+        arena: *ArenaAllocator,
+        diagnostics: ?*Diagnostics,
+        state: void,
+    ) ParseError!void {
+        _ = args;
+        _ = arena;
+        _ = diagnostics;
+        _ = state;
+        return error.PrintCliUsage;
     }
 
     const help = Flag.init(
@@ -177,124 +256,202 @@ pub const Flag = struct {
             .short = 'h',
             .description = "Print this help message and exit",
         },
-        "",
-        void,
+        null,
         void,
         {},
-        helpParser,
-        idFinish(void, void),
+        void,
+        parseHelpArgs,
+        idFinish(void),
     );
 
-    fn finishRequiredFromOptional(
-        comptime info: Info,
-        comptime T: type,
-    ) fn (?T, ?*Diagnostics) FinishError!T {
-        const flag_names = comptime info.names();
-        return struct {
-            fn finish(state: ?T, diagnostics: ?*Diagnostics) FinishError!T {
-                return state orelse Diagnostics.report(
-                    diagnostics,
-                    "missing required flag " ++ flag_names,
-                );
-            }
-        }.finish;
+    fn stopParsing(
+        args: *ArgIterator,
+        arena: *ArenaAllocator,
+        diagnostics: ?*Diagnostics,
+        state: void,
+    ) ParseError!void {
+        _ = args;
+        _ = arena;
+        _ = diagnostics;
+        _ = state;
+        return error.ParseRemainingArguments;
+    }
+
+    /// Use `remainingArguments()` or `parseRemaining()`.
+    pub const remainder = Flag.init(
+        .{ .long = "" },
+        null,
+        void,
+        {},
+        void,
+        stopParsing,
+        idFinish(void),
+    );
+
+    fn parseCustom(
+        args: *ArgIterator,
+        arena: *ArenaAllocator,
+        diagnostics: ?*Diagnostics,
+        state: void,
+    ) ParseError!void {
+        _ = args;
+        _ = arena;
+        _ = diagnostics;
+        _ = state;
+        return error.ParseCustomArgument;
+    }
+
+    /// Use `parseRemainingWithCustom()`.
+    pub fn custom(comptime info: Info, comptime arg_help: ?ArgHelp) Flag {
+        return .init(
+            info,
+            arg_help,
+            void,
+            {},
+            void,
+            parseCustom,
+            idFinish(void),
+        );
     }
 
     fn parseBoolean(
-        _: *ArgIterator,
-        _: *ArenaAllocator,
-        _: ?*Diagnostics,
-        state: *bool,
-    ) ParseError!void {
-        state.* = true;
+        args: *ArgIterator,
+        arena: *ArenaAllocator,
+        diagnostics: ?*Diagnostics,
+        state: bool,
+    ) ParseError!bool {
+        _ = args;
+        _ = arena;
+        _ = diagnostics;
+        _ = state;
+        return true;
     }
 
     pub fn boolean(comptime info: Info) Flag {
         return Flag.init(
             info,
-            "",
-            bool,
+            null,
             bool,
             false,
+            bool,
             parseBoolean,
-            idFinish(bool, bool),
+            idFinish(bool),
         );
     }
 
-    pub fn string(comptime info: Info, comptime arg_name: [:0]const u8) Flag {
-        const flag_names = comptime info.names();
+    pub fn enumeration(
+        comptime E: type,
+        comptime info: Info,
+        comptime arg_name: [:0]const u8,
+    ) Flag {
+        const arg_help = ArgHelp{ .name = arg_name };
+        const valid_values = desc: {
+            var buf: []const u8 = "";
+            for (@typeInfo(E).@"enum".fields, 0..) |f, i| {
+                buf = buf ++ (if (i > 0) "," else "") ++ " " ++ f.name;
+            }
+            break :desc buf;
+        };
+
         const Parser = struct {
             fn parse(
                 args: *ArgIterator,
                 arena: *ArenaAllocator,
                 diagnostics: ?*Diagnostics,
-                state: *?[:0]const u8,
-            ) ParseError!void {
-                if (state.* != null) {
-                    return Diagnostics.report(
-                        diagnostics,
-                        "cannot specify flag " ++ flag_names ++ " more than once",
-                    );
+                state: ?E,
+            ) ParseError!?E {
+                if (state != null) {
+                    return info.reportDuplicate(diagnostics);
                 }
 
-                state.* = try args.nextAlloc(arena) orelse return Diagnostics.report(
+                const str = args.next() orelse return info.reportMissing(diagnostics, arg_help);
+
+                return std.meta.stringToEnum(E, str) orelse Diagnostics.reportFmt(
                     diagnostics,
-                    "missing " ++ arg_name ++ " argument for flag " ++ flag_names,
+                    arena,
+                    "{s} is invalid, valid values are: " ++ valid_values,
+                    .{str},
                 );
             }
         };
 
         return Flag.init(
-            info,
-            arg_name,
-            ?[:0]const u8,
-            [:0]const u8,
+            Info{
+                .long = info.long,
+                .short = info.short,
+                .description = info.description ++ "[valid values:" ++ valid_values ++ "]",
+            },
+            arg_help,
+            ?E,
             null,
+            ?E,
             Parser.parse,
-            finishRequiredFromOptional(info, [:0]const u8),
+            idFinish(?E),
         );
     }
 
-    pub fn intUnsigned(
-        comptime info: Info,
-        comptime arg_name: ?[:0]const u8,
-        comptime T: type,
-    ) Flag {
-        const used_arg_name = arg_name orelse "INTEGER";
-        const flag_names = comptime info.names();
-
+    pub fn string(comptime info: Info, comptime arg_name: [:0]const u8) Flag {
+        const arg_help = ArgHelp{ .name = arg_name };
         const Parser = struct {
             fn parse(
                 args: *ArgIterator,
                 arena: *ArenaAllocator,
                 diagnostics: ?*Diagnostics,
-                state: *?T,
-            ) ParseError!void {
-                if (state.* != null) {
-                    return Diagnostics.report(
-                        diagnostics,
-                        "cannot specify flag " ++ flag_names ++ " more than once",
-                    );
+                state: ?[:0]const u8,
+            ) ParseError!?[:0]const u8 {
+                return if (state) |_|
+                    info.reportDuplicate(diagnostics)
+                else
+                    try args.nextDupe(arena) orelse info.reportMissing(diagnostics, arg_help);
+            }
+        };
+
+        return Flag.init(
+            info,
+            arg_help,
+            ?[:0]const u8,
+            null,
+            ?[:0]const u8,
+            Parser.parse,
+            idFinish(?[:0]const u8),
+        );
+    }
+
+    pub fn integerGeneric(
+        comptime info: Info,
+        comptime arg_name: [:0]const u8,
+        comptime T: type,
+        comptime parse: fn ([:0]const u8) std.fmt.ParseIntError!T,
+    ) Flag {
+        const arg_help = ArgHelp{ .name = arg_name };
+        const Parser = struct {
+            const flag_names = info.names();
+
+            fn parseArg(
+                args: *ArgIterator,
+                arena: *ArenaAllocator,
+                diagnostics: ?*Diagnostics,
+                state: ?T,
+            ) ParseError!?T {
+                if (state != null) {
+                    return info.reportDuplicate(diagnostics);
                 }
 
-                const int_string = args.next() orelse return Diagnostics.report(
-                    diagnostics,
-                    "missing " ++ used_arg_name ++ " argument for flag " ++ flag_names,
-                );
+                const str = args.next() orelse return info.reportMissing(diagnostics, arg_help);
 
-                state.* = std.fmt.parseUnsigned(T, int_string, 0) catch |e| return switch (e) {
+                return parse(str) catch |e| switch (e) {
                     error.Overflow => Diagnostics.reportFmt(
                         diagnostics,
                         arena,
                         "flag " ++ flag_names ++ " does not accept {s}, a value greater than " ++
                             std.fmt.comptimePrint("{}", .{std.math.maxInt(T)}),
-                        .{int_string},
+                        .{str},
                     ),
                     error.InvalidCharacter => Diagnostics.reportFmt(
                         diagnostics,
                         arena,
                         "'{f}' is not a valid integer argument for flag " ++ flag_names,
-                        .{std.unicode.fmtUtf8(int_string)},
+                        .{std.unicode.fmtUtf8(str)},
                     ),
                 };
             }
@@ -302,75 +459,99 @@ pub const Flag = struct {
 
         return Flag.init(
             info,
-            "<" ++ used_arg_name ++ ">",
+            arg_help,
             ?T,
-            T,
             null,
-            Parser.parse,
-            finishRequiredFromOptional(info, T),
+            ?T,
+            Parser.parseArg,
+            idFinish(?T),
         );
     }
 
-    pub fn withDefault(comptime flag: Flag, comptime default_value: flag.type.Result) Flag {
-        std.debug.assert(?flag.type.Result == flag.type.State);
-
-        const T = flag.type.Result;
+    pub fn integer(comptime info: Info, comptime arg_name: [:0]const u8, comptime T: type) Flag {
         const Parser = struct {
-            fn parse(
-                args: *ArgIterator,
-                arena: *ArenaAllocator,
-                diagnostics: ?*Diagnostics,
-                state: *T,
-            ) ParseError!void {
-                var optional_state: ?T = state.*;
-                defer state.* = optional_state.?;
-                try flag.type.parse(args, arena, diagnostics, &optional_state);
+            fn parse(s: [:0]const u8) std.fmt.ParseIntError!T {
+                return switch (@typeInfo(T).int.signedness) {
+                    .signed => std.fmt.parseInt(T, s, 0),
+                    .unsigned => std.fmt.parseUnsigned(T, s, 0),
+                };
+            }
+        };
+
+        return integerGeneric(info, arg_name, T, Parser.parse);
+    }
+
+    pub fn integerSizeSuffix(comptime info: Info, comptime T: type) Flag {
+        const Parser = struct {
+            fn parse(s: [:0]const u8) std.fmt.ParseIntError!T {
+                return std.math.cast(T, try std.fmt.parseIntSizeSuffix(s, 10)) orelse
+                    error.Overflow;
+            }
+        };
+
+        return integerGeneric(info, "SIZE", T, Parser.parse);
+    }
+
+    pub fn withDefault(
+        comptime flag: Flag,
+        comptime default_value: @typeInfo(flag.namespace.State).optional.child,
+    ) Flag {
+        comptime {
+            std.debug.assert(flag.namespace.State == flag.namespace.Result);
+        }
+
+        const T = @typeInfo(flag.namespace.State).optional.child;
+
+        const Parser = struct {
+            fn finish(state: ?T, _: ?*Diagnostics) FinishError!T {
+                return state orelse default_value;
             }
         };
 
         var new_info = flag.info;
-        new_info.description = std.fmt.comptimePrint(
-            "{s} (default: {})",
-            .{ flag.info.description, default_value },
-        );
+        new_info.description = flag.info.description ++ " (default: " ++ switch (T) {
+            []const u8, [:0]const u8 => default_value,
+            else => std.fmt.comptimePrint("{any}", .{default_value}),
+        } ++ ")";
 
         return Flag.init(
             new_info,
-            "[" ++ flag.args_help ++ "]",
+            flag.arg_help.?,
+            ?T,
+            null,
             T,
-            T,
-            default_value,
-            Parser.parse,
-            idFinish(T, T),
+            flag.namespace.parse,
+            Parser.finish,
         );
     }
 
-    pub fn optional(comptime flag: Flag) Flag {
-        std.debug.assert(?flag.type.Result == flag.type.State);
+    pub fn required(comptime flag: Flag) Flag {
+        comptime {
+            std.debug.assert(flag.namespace.State == flag.namespace.Result);
+        }
 
-        const T = flag.type.Result;
+        const T = @typeInfo(flag.namespace.State).optional.child;
+
+        const arg_help = ArgHelp{ .name = flag.arg_help.?.name };
         const Parser = struct {
-            fn finish(state: ?T, diagnostics: ?*Diagnostics) FinishError!?T {
-                return if (state) |not_null|
-                    try flag.type.finish(not_null, diagnostics)
-                else
-                    null;
+            fn finish(state: ?T, diag: ?*Diagnostics) FinishError!T {
+                return state orelse flag.info.reportMissing(diag, arg_help);
             }
         };
 
         return Flag.init(
             flag.info,
-            flag.args_help,
-            ?T,
+            arg_help,
             ?T,
             null,
-            flag.type.parse,
+            T,
+            flag.namespace.parse,
             Parser.finish,
         );
     }
 };
 
-pub const AppInfo = struct {
+const AppInfo = struct {
     // name: [:0]const u8,
     description: [:0]const u8 = "",
     flags: []const Flag,
@@ -383,65 +564,97 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
 
         const flags: []const Flag = app_info.flags ++ .{Flag.help};
 
-        pub const State = @Type(.{
-            .@"struct" = Type.Struct{
-                .layout = .auto,
-                .decls = &.{},
-                .is_tuple = false,
-                .fields = fields: {
-                    var fields: [flags.len]Type.StructField = undefined;
-                    for (&fields, flags) |*struct_field, f| {
-                        struct_field.* = .{
-                            .name = f.info.long,
-                            .type = f.type.State,
-                            .default_value_ptr = &f.type.default_state,
-                            .is_comptime = false,
-                            .alignment = @alignOf(f.type.State),
-                        };
+        pub const State = state: {
+            break :state @Struct(
+                .auto,
+                null,
+                names: {
+                    var names: [flags.len][]const u8 = undefined;
+                    for (&names, flags) |*n, f| {
+                        n.* = f.info.long;
                     }
-                    break :fields &fields;
+                    break :names &names;
                 },
-            },
-        });
+                types: {
+                    var types: [flags.len]type = undefined;
+                    for (&types, flags) |*t, f| {
+                        t.* = f.namespace.State;
+                    }
+                    break :types &types;
+                },
+                attributes: {
+                    var attributes: [flags.len]std.builtin.Type.StructField.Attributes = undefined;
+                    for (&attributes, flags) |*a, f| {
+                        a.* = .{ .default_value_ptr = @ptrCast(&f.namespace.initial_state) };
+                    }
+                    break :attributes &attributes;
+                },
+            );
+        };
 
-        pub const Parsed = @Type(.{
-            .@"struct" = Type.Struct{
-                .layout = .auto,
-                .decls = &.{},
-                .is_tuple = false,
-                .fields = fields: {
-                    var fields: [flags.len]Type.StructField = undefined;
-                    for (&fields, flags) |*struct_field, f| {
-                        struct_field.* = .{
-                            .name = f.info.long,
-                            .type = f.type.Result,
-                            .default_value_ptr = null,
-                            .is_comptime = false,
-                            .alignment = @alignOf(f.type.Result),
-                        };
-                    }
-                    break :fields &fields;
-                },
-            },
-        });
+        const non_void_flag_result_count = count: {
+            var count = 0;
+            for (flags) |f| {
+                if (f.namespace.Result != void) {
+                    count += 1;
+                }
+            }
+            break :count count;
+        };
 
-        pub const FlagEnum = @Type(.{
-            .@"enum" = Type.Enum{
-                .tag_type = std.math.IntFittingRange(0, flags.len -| 1),
-                .decls = &.{},
-                .is_exhaustive = true,
-                .fields = fields: {
-                    var cases: [flags.len]Type.EnumField = undefined;
-                    for (0.., flags, &cases) |i, f, *enum_field| {
-                        enum_field.* = .{ .name = f.info.long, .value = i };
-                    }
-                    break :fields &cases;
-                },
-            },
-        });
+        pub const Parsed = parsed: {
+            var names: [non_void_flag_result_count][]const u8 = undefined;
+            var types: [non_void_flag_result_count]type = undefined;
+            var flags_idx = 0;
+            for (&names, &types) |*n, *t| {
+                const f = flags[flags_idx];
+                if (f.namespace.Result == void) {
+                    @compileError(f.info.long ++ " has invalid result");
+                }
+
+                n.* = f.info.long;
+                t.* = f.namespace.Result;
+                flags_idx += 1;
+            }
+            break :parsed @Struct(
+                .auto,
+                null,
+                &names,
+                &types,
+                &(.{std.builtin.Type.StructField.Attributes{}} ** non_void_flag_result_count),
+            );
+        };
+
+        pub const FlagEnum = flag_enum: {
+            const TagInt = std.math.IntFittingRange(0, flags.len - 1);
+            var names: [flags.len][]const u8 = undefined;
+            var values: [flags.len]TagInt = undefined;
+            for (0.., flags, &names, &values) |i, f, *n, *v| {
+                n.* = f.info.long;
+                v.* = i;
+            }
+            break :flag_enum @Enum(
+                TagInt,
+                .exhaustive,
+                &names,
+                &values,
+            );
+        };
 
         const FlagLookup = std.hash_map.StringHashMapUnmanaged(FlagEnum);
 
+        const all_flags_count_and_more = all_flags_count * 4;
+
+        const flags_map_buffer_len = (@sizeOf(*anyopaque) * 3) + // Header
+            std.mem.alignForward(usize, all_flags_count_and_more, @alignOf(*anyopaque)) + // Metadata
+            (@sizeOf([]const u8) * all_flags_count_and_more) + // Keys
+            std.mem.alignForward(
+                usize,
+                @sizeOf(FlagEnum) * all_flags_count_and_more,
+                @alignOf(*anyopaque),
+            );
+
+        flags_map_buffer: [flags_map_buffer_len]u8 align(16) = undefined,
         flags_map: FlagLookup,
 
         const FlagLookupEntry = struct {
@@ -478,39 +691,47 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             break :flags entries;
         };
 
-        pub fn init(allocator: std.mem.Allocator) Oom!Self {
-            var lookup = FlagLookup.empty;
-            try lookup.ensureTotalCapacity(allocator, all_flags.len);
-            errdefer comptime unreachable;
+        pub fn init(parser: *Self) void {
+            parser.* = .{ .flags_map = .empty };
+            var map_buf = std.heap.FixedBufferAllocator.init(&parser.flags_map_buffer);
+            parser.flags_map.ensureTotalCapacity(map_buf.allocator(), all_flags.len) catch
+                unreachable;
+
             for (all_flags) |entry| {
-                lookup.putAssumeCapacityNoClobber(entry.s, entry.flag);
+                parser.flags_map.putAssumeCapacityNoClobber(entry.s, entry.flag);
             }
-
-            return .{ .flags_map = lookup };
         }
 
-        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            self.flags_map.deinit(allocator);
-            self.* = undefined;
+        pub const ParseError = Flag.HelpError || Flag.FinishError;
+
+        fn ParseCustomArguments(comptime Context: type) type {
+            return fn (
+                Context,
+                comptime FlagEnum,
+                *ArgIterator,
+                arena: *ArenaAllocator,
+                ?*Flag.Diagnostics,
+            ) Flag.FinishError!void;
         }
 
-        pub const ParseError = Flag.ParseError;
-
-        pub fn parseRemaining(
+        pub fn parseRemainingWithCustom(
             self: *const Self,
             args: *ArgIterator,
             arena: *ArenaAllocator,
             diagnostics: ?*Flag.Diagnostics,
+            context: anytype,
+            comptime parseCustomArguments: ParseCustomArguments(@TypeOf(context)),
         ) ParseError!Parsed {
             var state = State{};
             while (args.next()) |flag_arg| {
-                const chosen_flag: FlagEnum = self.flags_map.get(flag_arg) orelse
+                const chosen_flag: FlagEnum = self.flags_map.get(flag_arg) orelse {
                     return Flag.Diagnostics.reportFmt(
                         diagnostics,
                         arena,
                         "unknown flag '{f}'",
                         .{std.unicode.fmtUtf8(flag_arg)},
                     );
+                };
 
                 switch (chosen_flag) {
                     inline else => |f| {
@@ -520,23 +741,61 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
                             std.debug.assert(std.mem.eql(u8, @tagName(f), known_flag.info.long));
                         }
 
-                        try known_flag.type.parse(
+                        @field(state, known_flag.info.long) = known_flag.namespace.parse(
                             args,
                             arena,
                             diagnostics,
-                            &@field(state, known_flag.info.long),
-                        );
+                            @field(state, known_flag.info.long),
+                        ) catch |e| switch (e) {
+                            error.ParseRemainingArguments => break,
+                            error.ParseCustomArgument => {
+                                try parseCustomArguments(
+                                    context,
+                                    f,
+                                    args,
+                                    arena,
+                                    diagnostics,
+                                );
+                                continue;
+                            },
+                            else => |err| return err,
+                        };
                     },
                 }
             }
 
             var result: Parsed = undefined;
             inline for (flags) |f| {
-                @field(result, f.info.long) =
-                    try f.type.finish(@field(state, f.info.long), diagnostics);
+                if (@hasField(Parsed, f.info.long)) {
+                    @field(result, f.info.long) =
+                        try f.namespace.finish(@field(state, f.info.long), diagnostics);
+                }
             }
 
             return result;
+        }
+
+        fn noCustomArguments(
+            _: void,
+            comptime _: FlagEnum,
+            _: *ArgIterator,
+            _: *ArenaAllocator,
+            _: ?*Flag.Diagnostics,
+        ) Flag.FinishError!void {}
+
+        pub fn parseRemaining(
+            self: *const Self,
+            args: *ArgIterator,
+            arena: *ArenaAllocator,
+            diagnostics: ?*Flag.Diagnostics,
+        ) ParseError!Parsed {
+            return self.parseRemainingWithCustom(
+                args,
+                arena,
+                diagnostics,
+                {},
+                noCustomArguments,
+            );
         }
 
         pub fn parseProcessArgs(
@@ -564,6 +823,8 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             writer: *Writer,
             color: std.Io.tty.Config,
         ) std.Io.tty.Config.SetColorError!void {
+            @branchHint(.cold);
+
             if (comptime app_info.description.len > 0) {
                 try writer.writeAll(app_info.description ++ "\n\n");
             }
@@ -571,6 +832,10 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             try writer.writeAll("OPTIONS:\n");
 
             inline for (flags) |f| {
+                if (f.namespace == Flag.remainder.namespace) {
+                    continue;
+                }
+
                 try writer.writeByte('\n');
 
                 if (f.info.short) |short| {
@@ -581,12 +846,12 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
                 }
 
                 try color.setColor(writer, .bright_cyan);
-                const has_args_help = f.args_help.len > 0;
+                const has_args_help = f.arg_help != null;
                 try writer.writeAll("--" ++ f.info.long ++ (if (has_args_help) " " else ""));
 
                 if (has_args_help) {
                     try color.setColor(writer, .bright_blue);
-                    try writer.writeAll(f.args_help);
+                    try writer.writeAll(f.arg_help.?.string());
                 }
 
                 try color.setColor(writer, .reset);
@@ -598,108 +863,157 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             }
         }
 
+        fn exitBadArguments(diagnostics: ?Flag.Diagnostics) noreturn {
+            @branchHint(.cold);
+            {
+                var stderr_buffer: [1024]u8 align(16) = undefined;
+                const stderr, const color = std.debug.lockStderrWriter(&stderr_buffer);
+                defer std.debug.unlockStderrWriter();
+
+                if (diagnostics) |diag| {
+                    diag.print(stderr, color) catch {};
+                } else {
+                    printUsage(stderr, color) catch {};
+                }
+            }
+
+            if (builtin.os.tag == .windows) {
+                std.os.windows.ntdll.RtlExitUserProcess(@bitCast(@as(i32, -1)));
+            } else {
+                std.process.exit(2);
+            }
+        }
+
+        inline fn parsedArgumentsOrExit(
+            result: ParseError!Parsed,
+            diagnostics: *const Flag.Diagnostics,
+        ) Oom!Parsed {
+            exitBadArguments(diag: {
+                // Can't store error{PrintCliUsage, InvalidCliFlag}, Zig bug?
+                return result catch |e| switch (e) {
+                    Oom.OutOfMemory => |oom| oom,
+                    Flag.HelpError.PrintCliUsage => break :diag null,
+                    Flag.FinishError.InvalidCliFlag => break :diag diagnostics.*,
+                };
+            });
+        }
+
+        pub fn remainingArgumentsWithCustom(
+            self: *const Self,
+            args: *ArgIterator,
+            arena: *ArenaAllocator,
+            context: anytype,
+            comptime parseCustomArguments: ParseCustomArguments(@TypeOf(context)),
+        ) Oom!Parsed {
+            var diagnostics: Flag.Diagnostics = undefined;
+            return parsedArgumentsOrExit(
+                self.parseRemainingWithCustom(
+                    args,
+                    arena,
+                    &diagnostics,
+                    context,
+                    parseCustomArguments,
+                ),
+                &diagnostics,
+            );
+        }
+
+        pub fn remainingArguments(
+            self: *const Self,
+            args: *ArgIterator,
+            arena: *ArenaAllocator,
+        ) Oom!Parsed {
+            return self.remainingArgumentsWithCustom(args, arena, {}, noCustomArguments);
+        }
+
         pub fn programArguments(
             self: *const Self,
             scratch: *ArenaAllocator,
             arena: *ArenaAllocator,
         ) Oom!Parsed {
             var diagnostics: Flag.Diagnostics = undefined;
-            // Can't store error{PrintCliUsage, InvalidCliFlag}, Zig bug?
-            const has_diagnostics = has_diag: {
-                return (self.parseProcessArgs(scratch, arena, &diagnostics) catch |e| switch (e) {
-                    Oom.OutOfMemory => |oom| return oom,
-                    Flag.ParseError.PrintCliUsage => break :has_diag false,
-                    Flag.FinishError.InvalidCliFlag => break :has_diag true,
-                });
-            };
-
-            var stderr_buffer: [1024]u8 = undefined;
-            {
-                const stderr = std.debug.lockStderrWriter(&stderr_buffer);
-                defer std.debug.unlockStderrWriter();
-
-                const color = std.Io.tty.detectConfig(std.fs.File.stderr());
-
-                if (has_diagnostics) {
-                    diagnostics.print(stderr, color) catch {};
-                } else {
-                    printUsage(stderr, color) catch {};
-                }
-            }
-
-            std.process.exit(1);
+            return parsedArgumentsOrExit(
+                self.parseProcessArgs(scratch, arena, &diagnostics),
+                &diagnostics,
+            );
         }
     };
 }
 
+const std = @import("std");
+const Writer = std.Io.Writer;
+const Type = std.builtin.Type;
+const builtin = @import("builtin");
+const ArenaAllocator = std.heap.ArenaAllocator;
+const Oom = std.mem.Allocator.Error;
+
 fn expectPrintCliUsage(
     parser: anytype,
-    arena: *ArenaAllocator,
     comptime input: []const [:0]const u8,
 ) !void {
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
     try std.testing.expectError(
         Flag.ParseError.PrintCliUsage,
-        parser.parseComptime(input, arena, null),
+        parser.parseComptime(input, &arena, null),
     );
 }
 
-fn expectFlagInvalidError(
+fn expectInvalidCliFlag(
     parser: anytype,
-    arena: *ArenaAllocator,
     comptime input: []const [:0]const u8,
     expected_message: []const u8,
 ) !void {
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
     var diagnostics: Flag.Diagnostics = undefined;
     try std.testing.expectError(
         Flag.ParseError.InvalidCliFlag,
-        parser.parseComptime(input, arena, &diagnostics),
+        parser.parseComptime(input, &arena, &diagnostics),
     );
 
-    try std.testing.expectEqualStrings(expected_message, diagnostics);
+    try std.testing.expectEqualStrings(expected_message, diagnostics.message);
 }
 
 test "simple" {
     const ExampleArgs = CliArgs(.{
         .flags = &.{
-            Flag.intUnsigned(.{ .long = "foo" }, null, u32).optional(),
-            Flag.string(.{ .long = "bar" }, "STRING").optional(),
+            Flag.integer(.{ .long = "foo" }, "INTEGER", u32),
+            Flag.string(.{ .long = "bar" }, "STRING"),
             Flag.boolean(.{ .long = "switch" }),
         },
     });
 
-    var parser = try ExampleArgs.init(std.testing.allocator);
-    defer parser.deinit(std.testing.allocator);
+    var parser: ExampleArgs = undefined;
+    parser.init();
 
-    var arena = ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    try expectPrintCliUsage(&parser, &arena, &.{"--help"});
-    try expectPrintCliUsage(&parser, &arena, &.{"-h"});
-    try expectPrintCliUsage(&parser, &arena, &.{ "-h", "--foo", "42" });
-    try expectPrintCliUsage(&parser, &arena, &.{ "--help", "--invalid" });
-    try expectPrintCliUsage(&parser, &arena, &.{ "--foo", "123", "--help" });
-    try expectPrintCliUsage(&parser, &arena, &.{ "--help", "--foo", "123", "--bar", "--help" });
-    try expectPrintCliUsage(
-        &parser,
-        &arena,
-        &.{ "--switch", "--foo", "12345678", "--switch", "--help" },
-    );
+    try expectPrintCliUsage(&parser, &.{"--help"});
+    try expectPrintCliUsage(&parser, &.{"-h"});
+    try expectPrintCliUsage(&parser, &.{ "-h", "--foo", "42" });
+    try expectPrintCliUsage(&parser, &.{ "--help", "--invalid" });
+    try expectPrintCliUsage(&parser, &.{ "--foo", "123", "--help" });
+    try expectPrintCliUsage(&parser, &.{ "--help", "--foo", "123", "--bar", "--help" });
+    try expectPrintCliUsage(&parser, &.{ "--switch", "--foo", "12345678", "--switch", "--help" });
 }
 
 fn expectSuccessfulParse(
     parser: anytype,
-    arena: *ArenaAllocator,
     comptime input: []const [:0]const u8,
     expected: std.meta.Child(@TypeOf(parser)).Parsed,
 ) !void {
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
     var diagnostics: Flag.Diagnostics = undefined;
     const result: std.meta.Child(@TypeOf(parser)).Parsed = parser.parseComptime(
         input,
-        arena,
+        &arena,
         &diagnostics,
     ) catch |e| {
         if (e == Flag.ParseError.InvalidCliFlag) {
-            std.debug.print("{s}", .{diagnostics.message});
+            std.debug.print("{s}\n", .{diagnostics.message});
         }
 
         return e;
@@ -711,35 +1025,56 @@ fn expectSuccessfulParse(
 test "required" {
     const ExampleArgs = CliArgs(.{
         .flags = &.{
-            Flag.intUnsigned(.{ .long = "bar" }, null, u32),
+            Flag.integer(.{ .long = "bar" }, "INTEGER", u32).required(),
             Flag.boolean(.{ .long = "do-something" }),
         },
     });
 
-    var parser = try ExampleArgs.init(std.testing.allocator);
-    defer parser.deinit(std.testing.allocator);
+    var parser: ExampleArgs = undefined;
+    parser.init();
 
-    var arena = ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    try expectPrintCliUsage(&parser, &arena, &.{"--help"});
+    try expectPrintCliUsage(&parser, &.{"--help"});
     try expectSuccessfulParse(
         &parser,
-        &arena,
         &.{ "--bar", "456" },
-        .{ .help = {}, .bar = 456, .@"do-something" = false },
+        .{ .bar = 456, .@"do-something" = false },
     );
     try expectSuccessfulParse(
         &parser,
-        &arena,
         &.{ "--bar", "4294967295", "--do-something" },
-        .{ .help = {}, .bar = std.math.maxInt(u32), .@"do-something" = true },
+        .{ .bar = std.math.maxInt(u32), .@"do-something" = true },
     );
 }
 
-const std = @import("std");
-const Writer = std.Io.Writer;
-const Type = std.builtin.Type;
-const builtin = @import("builtin");
-const ArenaAllocator = std.heap.ArenaAllocator;
-const Oom = std.mem.Allocator.Error;
+test "remainder" {
+    const ExampleArgs = CliArgs(.{
+        .flags = &.{
+            Flag.integer(.{ .long = "loquaciousness" }, "INTEGER", u64).required(),
+            Flag.remainder,
+        },
+    });
+
+    var parser: ExampleArgs = undefined;
+    parser.init();
+
+    try expectSuccessfulParse(
+        &parser,
+        &.{ "--loquaciousness", "999999" },
+        .{ .loquaciousness = 999999 },
+    );
+    try expectInvalidCliFlag(
+        &parser,
+        &.{ "--loquaciousness", "1", "--invalid" },
+        "unknown flag '--invalid'",
+    );
+    try expectSuccessfulParse(
+        &parser,
+        &.{ "--loquaciousness", "9999999", "--" },
+        .{ .loquaciousness = 9999999 },
+    );
+    try expectSuccessfulParse(
+        &parser,
+        &.{ "--loquaciousness", "999", "--", "--invalid" },
+        .{ .loquaciousness = 999 },
+    );
+}

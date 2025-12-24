@@ -89,7 +89,9 @@ const RawInner = extern struct {
     code_entries: [*]const Code.Entry,
     code: [*]Code,
 
-    global_exprs: [*]const ConstExpr,
+    /// Not set if the number of defined globals is zero.
+    global_section: [*]const u8,
+    global_exprs: [*]const GlobalExpr,
     global_types: [*]const GlobalType,
     table_types: [*]const TableType,
     mem_types: [*]const MemType,
@@ -113,9 +115,10 @@ const RawInner = extern struct {
     export_section: [*]const u8,
     exports: [*]const Export,
     export_count: u32,
+    init_max_stack: u16,
     has_data_count_section: bool,
-    // padding: [3]u8,
 
+    elem_section: [*]const u8,
     elems: [*]const ElemSegment,
     active_elems: [*]const ActiveElem,
     /// A bitmask indicating which data segments are passive or active.
@@ -128,6 +131,7 @@ const RawInner = extern struct {
 
     active_datas_count: u16,
     datas_count: u16,
+    data_section: [*]const u8,
     datas_ptrs: [*]const [*]const u8,
     datas_lens: [*]const u32,
     active_datas: [*]const ActiveData,
@@ -206,6 +210,10 @@ pub inline fn tableImportTypes(module: Module) []const TableType {
     return module.tableTypes()[0..module.inner.raw.table_import_count];
 }
 
+pub inline fn tableDefinedTypes(module: Module) []const TableType {
+    return module.tableTypes()[module.inner.raw.table_import_count..];
+}
+
 pub inline fn memTypes(module: Module) []const MemType {
     return module.inner.raw.mem_types[0..module.inner.raw.mem_count];
 }
@@ -216,6 +224,10 @@ pub inline fn memImportNames(module: Module) []const ImportName {
 
 pub inline fn memImportTypes(module: Module) []const MemType {
     return module.memTypes()[0..module.inner.raw.mem_import_count];
+}
+
+pub inline fn memDefinedTypes(module: Module) []const MemType {
+    return module.memTypes()[module.inner.raw.mem_import_count..];
 }
 
 pub fn globalTypes(module: Module) []const GlobalType {
@@ -230,7 +242,7 @@ pub inline fn globalImportTypes(module: Module) []const GlobalType {
     return module.globalTypes()[0..module.inner.raw.global_import_count];
 }
 
-pub inline fn globalInitializers(module: Module) []const ConstExpr {
+pub inline fn globalInitializers(module: Module) []const GlobalExpr {
     const defined_count = module.inner.raw.global_count - module.inner.raw.global_import_count;
     return module.inner.raw.global_exprs[0..defined_count];
 }
@@ -410,13 +422,7 @@ pub const ImportName = struct {
     }
 };
 
-const FuncRefs = struct {
-    set: std.bit_set.DynamicBitSetUnmanaged,
-
-    fn insert(refs: *FuncRefs, idx: FuncIdx) void {
-        refs.set.set(@intFromEnum(idx));
-    }
-};
+const FuncRefs = @import("Module/FuncRefs.zig");
 
 pub const Export = packed struct(u64) {
     desc: Desc,
@@ -425,10 +431,17 @@ pub const Export = packed struct(u64) {
     name_offset: u16,
 
     pub const Desc = packed union {
-        func: FuncIdx,
-        table: TableIdx,
-        mem: MemIdx,
-        global: GlobalIdx,
+        func: PackedIdx(FuncIdx),
+        table: PackedIdx(TableIdx),
+        mem: PackedIdx(MemIdx),
+        global: PackedIdx(GlobalIdx),
+
+        fn PackedIdx(comptime Idx: type) type {
+            return packed struct(u31) {
+                idx: Idx,
+                padding: std.meta.Int(.unsigned, 31 - @bitSizeOf(Idx)) = 0,
+            };
+        }
     };
 
     pub inline fn name(self: Export, module: Module) Module.Name {
@@ -440,33 +453,35 @@ pub const Export = packed struct(u64) {
     // /// Numeric identifier referring to an `Export`.
     // pub const Id = enum(u32) { _ };
 
-    pub const DescIdx = @Type(.{
-        .@"union" = .{
-            .layout = .auto,
-            .fields = fields: {
-                const src_fields = @typeInfo(Desc).@"union".fields;
-                var dst_fields: [src_fields.len]std.builtin.Type.UnionField = undefined;
-                for (src_fields, &dst_fields) |src, *dst| {
-                    dst.* = .{
-                        .name = src.name,
-                        .type = src.type,
-                        // For some reason, src.alignment > 0
-                        .alignment = @alignOf(src.type),
-                    };
+    pub const DescIdx = t: {
+        const src_fields = @typeInfo(Desc).@"union".fields;
+        break :t @Union(
+            .auto,
+            std.meta.FieldEnum(Desc),
+            names: {
+                var names: [src_fields.len][]const u8 = undefined;
+                for (src_fields, &names) |src, *dst| {
+                    dst.* = src.name;
                 }
-                break :fields &dst_fields;
+                break :names &names;
             },
-            .tag_type = std.meta.FieldEnum(Desc),
-            .decls = &.{},
-        },
-    });
+            types: {
+                var field_types: [src_fields.len]type = undefined;
+                for (src_fields, &field_types) |src, *dst| {
+                    dst.* = @FieldType(src.type, "idx");
+                }
+                break :types &field_types;
+            },
+            &(.{std.builtin.Type.UnionField.Attributes{}} ** src_fields.len),
+        );
+    };
 
     pub fn descIdx(self: Export) DescIdx {
         return switch (self.desc_tag) {
             inline else => |tag| @unionInit(
                 DescIdx,
                 @tagName(tag),
-                @field(self.desc, @tagName(tag)),
+                @field(self.desc, @tagName(tag)).idx,
             ),
         };
     }
@@ -643,210 +658,30 @@ pub const GlobalType = extern struct {
     }
 };
 
-pub const ConstExpr = union(enum) {
-    i32_or_f32: u32,
-    i64_or_f64: u64,
-    @"ref.null": ValType,
-    @"ref.func": FuncIdx,
-    @"global.get": GlobalIdx,
-
-    fn parse(
-        reader: Reader,
-        expected_type: ValType,
-        func_count: u32,
-        /// Should refer to global imports only.
-        global_types: []const GlobalType,
-        func_refs: *FuncRefs,
-        diag: ParseDiagnostics,
-        desc: []const u8,
-    ) !ConstExpr {
-        const const_opcode = try reader.readByteTag(opcodes.ByteOpcode, diag, "illegal opcode");
-        const expr: ConstExpr = expr: switch (const_opcode) {
-            .@"i32.const" => {
-                if (!expected_type.eql(ValType.i32)) {
-                    return diag.print(
-                        .validation,
-                        "type mismatch: expected {t} but got i32.const in {s}",
-                        .{ expected_type, desc },
-                    );
-                }
-
-                break :expr .{
-                    .i32_or_f32 = @bitCast(try reader.readIleb128(i32, diag, "i32.const")),
-                };
-            },
-            .@"f32.const" => {
-                if (!expected_type.eql(ValType.f32)) {
-                    return diag.print(
-                        .validation,
-                        "type mismatch: expected {t}, but got f32.const in {s}",
-                        .{ expected_type, desc },
-                    );
-                }
-
-                break :expr .{
-                    .i32_or_f32 = std.mem.readInt(
-                        u32,
-                        try reader.readArray(4, diag, "f32.const"),
-                        .little,
-                    ),
-                };
-            },
-            .@"i64.const" => {
-                if (!expected_type.eql(ValType.i64)) {
-                    return diag.print(
-                        .validation,
-                        "type mismatch: expected {t}, but got i64.const in {s}",
-                        .{ expected_type, desc },
-                    );
-                }
-
-                break :expr .{
-                    .i64_or_f64 = @bitCast(try reader.readIleb128(i64, diag, "i64.const")),
-                };
-            },
-            .@"f64.const" => {
-                if (!expected_type.eql(ValType.f64)) {
-                    return diag.print(
-                        .validation,
-                        "type mismatch: expected {t}, but got f64.const in {s}",
-                        .{ expected_type, desc },
-                    );
-                }
-
-                break :expr .{
-                    .i64_or_f64 = std.mem.readInt(
-                        u64,
-                        try reader.readArray(8, diag, "f64.const"),
-                        .little,
-                    ),
-                };
-            },
-            .@"ref.null" => ref_null: {
-                const actual_type = try ValType.parse(reader, diag);
-                if (!actual_type.isRefType()) {
-                    return diag.print(
-                        .validation,
-                        "type mismatch: expected reference type for ref.null, but got {t} in {s}",
-                        .{ actual_type, desc },
-                    );
-                }
-
-                if (actual_type != expected_type) {
-                    return diag.print(
-                        .validation,
-                        "type mismatch: expected {t}, but got ref.null {t} in {s}",
-                        .{ expected_type, actual_type, desc },
-                    );
-                }
-
-                break :ref_null .{ .@"ref.null" = expected_type };
-            },
-            .@"ref.func" => ref_func: {
-                const func_idx = try reader.readIdx(
-                    FuncIdx,
-                    func_count,
-                    diag,
-                    &.{ "function", "in constant expression" },
-                );
-
-                if (expected_type != .funcref) {
-                    return diag.print(
-                        .validation,
-                        "type mismatch: expected {t}, but got ref.func in {s}",
-                        .{ expected_type, desc },
-                    );
-                }
-
-                func_refs.insert(func_idx);
-                break :ref_func .{ .@"ref.func" = func_idx };
-            },
-            .@"global.get" => {
-                const global_idx = try reader.readIdx(
-                    GlobalIdx,
-                    global_types.len,
-                    diag,
-                    &.{ "global", "in constant expression" },
-                );
-
-                const actual_type: *const GlobalType = &global_types[@intFromEnum(global_idx)];
-                if (!actual_type.val_type.eql(expected_type)) {
-                    return diag.print(
-                        .validation,
-                        "type mismatch: expected global {} to have type {t}, but got {f} in {s}",
-                        .{ @intFromEnum(global_idx), expected_type, actual_type, desc },
-                    );
-                } else if (actual_type.mut == .@"var") {
-                    return diag.print(
-                        .validation,
-                        "constant expression required: global.get {} in {s} must be const",
-                        .{ @intFromEnum(global_idx), desc },
-                    );
-                } else {
-                    break :expr .{ .@"global.get" = global_idx };
-                }
-            },
-            .end => return diag.print(
-                .validation,
-                "type mismatch: expected {t}, but got opcode END at end of {s}",
-                .{ expected_type, desc },
-            ),
-            else => return diag.print(
-                .validation,
-                "constant expression required: got opcode {t} in {s}",
-                .{ const_opcode, desc },
-            ),
-        };
-
-        if (reader.isEmpty()) {
-            // Spec thinks reading into code section is ok!?
-            return diag.writeAll(.parse, "illegal opcode or unexpected end");
-        }
-
-        const end_opcode = try reader.readByteTag(
-            opcodes.ByteOpcode,
-            diag,
-            "END opcode",
-        );
-        if (end_opcode != .end) {
-            return switch (end_opcode) {
-                .@"i32.const",
-                .@"i64.const",
-                .@"f32.const",
-                .@"f64.const",
-                .@"ref.null",
-                .@"ref.func",
-                .@"global.get",
-                => diag.print(
-                    .validation,
-                    "type mismatch: expected END opcode, but got opcode {t} in {s}",
-                    .{ end_opcode, desc },
-                ),
-                else => diag.print(
-                    .validation,
-                    "constant expression required: got opcode {t} in {s}",
-                    .{ end_opcode, desc },
-                ),
-            };
-        }
-
-        return expr;
-    }
-};
+pub const ConstExpr = @import("Module/ConstExpr.zig");
 
 pub const ElemSegment = struct {
-    tag: Tag,
+    header: packed struct(u32) {
+        tag: Tag,
+        /// When the `contents` are expressions, this counts the total number of instructions in
+        /// each element expression.
+        ///
+        /// Set to `0` when tag` is `.func_indices`.
+        instruction_count: u15,
+        /// Maximum height of value stack needed to evaluate all elements.
+        elem_max_stack: u15,
+    },
     len: u32,
     contents: Contents,
 
-    pub const Tag = enum {
+    pub const Tag = enum(u2) {
         func_indices,
         func_expressions,
         extern_expressions,
     };
 
     pub inline fn elementType(elem: *const ElemSegment) ValType {
-        return switch (elem.tag) {
+        return switch (elem.header.tag) {
             .func_indices, .func_expressions => .funcref,
             .extern_expressions => .externref,
         };
@@ -857,74 +692,51 @@ pub const ElemSegment = struct {
         expressions: [*]const Expr,
     };
 
-    pub const Expr = packed struct(u32) {
-        tag: enum(u2) {
-            @"ref.null",
-            @"ref.func",
-            @"global.get",
-        },
-        inner: packed union {
-            @"ref.func": SmallIdx(u30, FuncIdx),
-            @"global.get": SmallIdx(u30, GlobalIdx),
-        },
+    pub const Expr = struct {
+        /// Must evaluate to a value that is of a reference type.
+        init: ConstExpr,
 
-        pub fn init(expr: ConstExpr, diag: ParseDiagnostics) !Expr {
-            return switch (expr) {
-                .@"ref.null" => |_| .{
-                    .tag = .@"ref.null",
-                    .inner = undefined,
-                },
-                .@"ref.func" => |func_idx| .{
-                    .tag = .@"ref.func",
-                    .inner = .{
-                        .@"ref.func" = try SmallIdx(u30, FuncIdx).init(func_idx),
-                    },
-                },
-                .@"global.get" => |global_idx| .{
-                    .tag = .@"global.get",
-                    .inner = .{
-                        .@"global.get" = try SmallIdx(u30, GlobalIdx).init(global_idx),
-                    },
-                },
-                else => diag.writeAll(
-                    .validation,
-                    "type mismatch: opcode does not produce reference value",
-                ),
-            };
+        pub fn bytes(
+            expr: Expr,
+            module: Module,
+        ) [:@intFromEnum(opcodes.ByteOpcode.end)]const u8 {
+            return expr.init.bytes(module.inner.raw.elem_section, module);
         }
     };
 };
 
+const OffsetExpr = struct {
+    /// Must evaluate to an `i32`.
+    value: ConstExpr,
+};
+
 pub const ActiveElem = struct {
-    header: packed struct(u32) {
-        offset_tag: enum(u9) {
-            @"i32.const",
-            @"global.get",
-        },
-        table: TableIdx,
-        elements: ElemIdx,
-    },
-    offset: packed union {
-        @"i32.const": u32,
-        @"global.get": GlobalIdx,
-    },
+    // header: packed struct (u32) { fuel_count: u25, table: TableIdx, },
+    table: TableIdx,
+    elements: ElemIdx,
+    offset: OffsetExpr,
+
+    pub fn offsetBytes(
+        elem: *const ActiveElem,
+        module: Module,
+    ) [:@intFromEnum(opcodes.ByteOpcode.end)]const u8 {
+        return elem.offset.value.bytes(module.inner.raw.elem_section, module);
+    }
 };
 
 pub const Code = validator.Code;
 
-pub const ActiveData = extern struct {
-    header: packed struct(u32) {
-        memory: MemIdx,
-        offset_tag: enum(u25) {
-            @"i32.const",
-            @"global.get",
-        },
-    },
+pub const ActiveData = struct {
+    memory: MemIdx,
     data: DataIdx,
-    offset: packed union {
-        @"i32.const": u32,
-        @"global.get": GlobalIdx,
-    },
+    offset: OffsetExpr,
+
+    pub fn offsetBytes(
+        data: *const ActiveData,
+        module: Module,
+    ) [:@intFromEnum(opcodes.ByteOpcode.end)]const u8 {
+        return data.offset.value.bytes(module.inner.raw.data_section, module);
+    }
 };
 
 pub const CustomSection = struct {
@@ -998,56 +810,58 @@ const Sections = struct {
     const id_fields = @typeInfo(Id).@"enum".fields;
 
     const Order: type = order: {
-        var fields: [id_fields.len + 1]Type.EnumField = undefined;
-
-        fields[0] = .{ .name = "any", .value = 0 };
-        for (id_fields, 1..) |f, i| {
-            fields[i] = .{ .name = f.name, .value = i };
-        }
-
-        break :order @Type(.{
-            .@"enum" = Type.Enum{
-                .tag_type = std.math.IntFittingRange(0, fields.len),
-                .is_exhaustive = true,
-                .decls = &[0]Type.Declaration{},
-                .fields = &fields,
+        const field_count = id_fields.len + 1;
+        const OrderInt = std.math.IntFittingRange(0, field_count);
+        break :order @Enum(
+            OrderInt,
+            .exhaustive,
+            names: {
+                var names: [field_count][]const u8 = undefined;
+                names[0] = "any";
+                for (id_fields, names[1..]) |f, *n| {
+                    n.* = f.name;
+                }
+                break :names &names;
             },
-        });
+            values: {
+                var values: [field_count]OrderInt = undefined;
+                for (&values, 1..) |*v, i| {
+                    v.* = @intCast(i);
+                }
+                break :values &values;
+            },
+        );
     };
 
     fn Struct(comptime FieldType: type, comptime default: ?FieldType) type {
-        return @Type(.{
-            .@"struct" = Type.Struct{
-                .layout = .auto,
-                .decls = &[0]Type.Declaration{},
-                .is_tuple = false,
-                .fields = fields: {
-                    var fields: [id_fields.len - 1]Type.StructField = undefined;
-                    for (id_fields[0..fields.len], &fields) |f, *dst| {
-                        std.debug.assert(!std.mem.eql(u8, f.name, "custom"));
-                        dst.* = Type.StructField{
-                            .name = f.name,
-                            .type = FieldType,
-                            .default_value_ptr = if (default) |default_val|
-                                @ptrCast(@as(*const FieldType, &default_val))
-                            else
-                                null,
-                            .is_comptime = false,
-                            .alignment = @alignOf(FieldType),
-                        };
-                    }
-
-                    break :fields &fields;
-                },
+        const field_count = id_fields.len - 1;
+        const attributes = std.builtin.Type.StructField.Attributes{
+            .default_value_ptr = if (default) |default_val|
+                @ptrCast(@as(*const FieldType, &default_val))
+            else
+                null,
+        };
+        return @Struct(
+            .auto,
+            null,
+            names: {
+                var names: [field_count][]const u8 = undefined;
+                for (id_fields[0..field_count], &names) |f, *n| {
+                    std.debug.assert(!std.mem.eql(u8, f.name, "custom"));
+                    n.* = f.name;
+                }
+                break :names &names;
             },
-        });
+            &(.{FieldType} ** field_count),
+            &(.{attributes} ** field_count),
+        );
     }
 
     fn parse(
         reader: Reader,
         known_sections: *Known,
         arena: *ArenaAllocator,
-        custom_sections: *std.SegmentedList(CustomSection, 2),
+        custom_sections: *std.ArrayList(CustomSection),
         options: *const ParseOptions,
     ) ParseError!Sections {
         var section_order = Order.any;
@@ -1163,6 +977,9 @@ pub fn parse(
     alloca: *ArenaAllocator,
     options: ParseOptions,
 ) ParseError!Module {
+    var coz_transaction = coz.begin("wasmstint.Module.parse");
+    defer coz_transaction.end();
+
     _ = alloca.reset(.retain_capacity);
     const diag = options.diagnostics;
     const original_wasm = wasm.*;
@@ -1183,7 +1000,7 @@ pub fn parse(
 
     defer _ = alloca.reset(.retain_capacity);
 
-    var custom_sections_buf = std.SegmentedList(CustomSection, 2){}; // in `alloca`
+    var custom_sections_buf = std.ArrayList(CustomSection).empty; // in `alloca`
 
     var known_sections: Sections.Known = undefined;
     var sections = sections: {
@@ -1199,7 +1016,7 @@ pub fn parse(
         );
     };
 
-    if (custom_sections_buf.len > std.math.maxInt(u32)) {
+    if (custom_sections_buf.items.len > std.math.maxInt(u32)) {
         return error.WasmImplementationLimit; // too many custom sections
     }
 
@@ -1215,7 +1032,7 @@ pub fn parse(
 
     var module_arena = ArenaAllocator.init(gpa);
     var module = allocator: {
-        var allocator = reservation_allocator.ReservationAllocator.zero;
+        var allocator = allocators.ReservationAllocator(.@"16").zero;
         try allocator.reserve(FuncType, counts.type);
         try allocator.reserve(ValType, sections.readers.type.bytes.len -| counts.type);
         try allocator.reserve(ImportName, counts.import);
@@ -1245,7 +1062,7 @@ pub fn parse(
         try allocator.reserve([*]const u8, counts.data);
         try allocator.reserve(Code.Entry, counts.code);
         try allocator.reserve(Code, counts.code);
-        try allocator.reserve(CustomSection, custom_sections_buf.len);
+        try allocator.reserve(CustomSection, custom_sections_buf.items.len);
 
         break :allocator try allocator.arenaFallbackAllocatorWithHeaderAligned(
             &module_arena,
@@ -1274,9 +1091,10 @@ pub fn parse(
         );
     };
 
-    var func_refs = FuncRefs{
-        .set = try .initEmpty(module.alloc.allocator(), import_sec.types.funcs.len),
-    };
+    var func_refs = try FuncRefs.init(
+        module.alloc.allocator(),
+        @intCast(import_sec.types.funcs.len),
+    );
     // Function imports can always be referenced
     func_refs.set.setRangeValue(.{ .start = 0, .end = import_sec.names.funcs.len }, true);
 
@@ -1293,7 +1111,9 @@ pub fn parse(
         try parseMemSec(&import_sec.types, counts.mem, &sections.readers, diag);
     }
 
-    const global_exprs = globals: {
+    var init_max_stack: u16 = 0;
+
+    const global_sec = globals: {
         errdefer wasm.* = sections.known.global;
         break :globals try parseGlobalSec(
             &module.alloc,
@@ -1302,6 +1122,8 @@ pub fn parse(
             &sections.readers,
             &func_refs,
             diag,
+            &scratch,
+            &init_max_stack,
         );
     };
     // const global_value_offsets = try module.alloc.allocator().alloc(u16, counts.global);
@@ -1320,11 +1142,10 @@ pub fn parse(
         );
     };
 
-    const custom_sections = try module.alloc.allocator().alloc(
+    const custom_sections = try module.alloc.allocator().dupe(
         CustomSection,
-        custom_sections_buf.len,
+        custom_sections_buf.items,
     );
-    custom_sections_buf.writeToSlice(custom_sections, 0);
 
     const start: Start = start: {
         errdefer wasm.* = sections.known.start;
@@ -1341,6 +1162,7 @@ pub fn parse(
             &func_refs,
             &scratch,
             diag,
+            &init_max_stack,
         );
     };
 
@@ -1363,6 +1185,7 @@ pub fn parse(
             &import_sec,
             &scratch,
             diag,
+            &init_max_stack,
         );
     };
 
@@ -1371,7 +1194,7 @@ pub fn parse(
             .types = type_sec.ptr,
             .types_count = counts.type,
 
-            .custom_sections_count = @intCast(custom_sections_buf.len),
+            .custom_sections_count = @intCast(custom_sections.len),
             .custom_sections = custom_sections.ptr,
 
             .func_types = import_sec.types.funcs.ptr,
@@ -1382,7 +1205,8 @@ pub fn parse(
             .code_entries = code_sec.entries.ptr,
             .code = code_sec.code.ptr,
 
-            .global_exprs = global_exprs.ptr,
+            .global_section = global_sec.start,
+            .global_exprs = global_sec.initializers.ptr,
             .global_types = import_sec.types.globals.ptr,
             .table_types = import_sec.types.tables.ptr,
             .mem_types = import_sec.types.mems.ptr,
@@ -1405,8 +1229,10 @@ pub fn parse(
             .export_section = export_sec.start,
             .exports = export_sec.descs.ptr,
             .export_count = @intCast(export_sec.descs.len),
+            .init_max_stack = init_max_stack,
             .has_data_count_section = has_data_count_section,
 
+            .elem_section = elem_sec.start,
             .elems = elem_sec.segments.ptr,
             .active_elems = elem_sec.active.ptr,
             .non_declarative_elems_mask = elem_sec.non_declarative_mask.ptr,
@@ -1414,6 +1240,7 @@ pub fn parse(
             .active_elems_count = @intCast(elem_sec.active.len),
 
             .datas_count = @intCast(data_sec.datas_lens.len),
+            .data_section = data_sec.start,
             .datas_ptrs = data_sec.datas_ptrs.ptr,
             .datas_lens = data_sec.datas_lens.ptr,
             .active_datas = data_sec.active_datas.ptr,
@@ -1432,7 +1259,7 @@ pub fn parse(
 }
 
 fn parseTypeSec(
-    arena: *reservation_allocator.ArenaFallbackAllocator,
+    arena: *ArenaFallbackAllocator,
     count: u32,
     readers: *const Sections.Readers,
     diag: ParseDiagnostics,
@@ -1506,18 +1333,17 @@ const ImportSec = struct {
 
         fn moveToBuffer(
             dst: *std.ArrayList(ImportName),
-            comptime prealloc_count: usize,
-            src: *std.SegmentedList(ImportName, prealloc_count),
+            src: []const ImportName,
         ) Allocator.Error![]const ImportName {
             const names = dst.addManyAsSliceAssumeCapacity(src.len);
-            src.writeToSlice(names, 0);
+            @memcpy(names, src);
             return names;
         }
     };
 };
 
 fn parseImportSec(
-    arena: *reservation_allocator.ArenaFallbackAllocator,
+    arena: *ArenaFallbackAllocator,
     type_sec: []const FuncType,
     counts: *const Sections.Counts,
     readers: *const Sections.Readers,
@@ -1529,17 +1355,17 @@ fn parseImportSec(
     const import_reader = readers.import;
 
     const TypesBuf = struct {
-        funcs: std.SegmentedList(TypeIdx, 8) = .{},
-        tables: std.SegmentedList(TableType, 1) = .{},
-        mems: std.SegmentedList(MemType, 1) = .{},
-        globals: std.SegmentedList(GlobalType, 4) = .{},
+        funcs: std.ArrayList(TypeIdx) = .empty,
+        tables: std.ArrayList(TableType) = .empty,
+        mems: std.ArrayList(MemType) = .empty,
+        globals: std.ArrayList(GlobalType) = .empty,
     };
 
     const NamesBuf = struct {
-        funcs: std.SegmentedList(ImportName, 8) = .{},
-        tables: std.SegmentedList(ImportName, 1) = .{},
-        mems: std.SegmentedList(ImportName, 1) = .{},
-        globals: std.SegmentedList(ImportName, 4) = .{},
+        funcs: std.ArrayList(ImportName) = .empty,
+        tables: std.ArrayList(ImportName) = .empty,
+        mems: std.ArrayList(ImportName) = .empty,
+        globals: std.ArrayList(ImportName) = .empty,
     };
 
     // Allocated in `scratch`.
@@ -1606,7 +1432,7 @@ fn parseImportSec(
         }
     }
 
-    if (counts.mem + @as(u32, @intCast(names.mems.len)) > 1) {
+    if (counts.mem + @as(u32, @intCast(names.mems.items.len)) > 1) {
         return diag.writeAll(.validation, "multiple memories are not yet supported");
     }
 
@@ -1614,58 +1440,61 @@ fn parseImportSec(
     import_reader.bytes.* = undefined;
 
     // Detect if code above accidentally added to the wrong name list.
-    std.debug.assert(import_types.funcs.len == names.funcs.len);
-    std.debug.assert(import_types.tables.len == names.tables.len);
-    std.debug.assert(import_types.mems.len == names.mems.len);
-    std.debug.assert(import_types.globals.len == names.globals.len);
+    std.debug.assert(import_types.funcs.items.len == names.funcs.items.len);
+    std.debug.assert(import_types.tables.items.len == names.tables.items.len);
+    std.debug.assert(import_types.mems.items.len == names.mems.items.len);
+    std.debug.assert(import_types.globals.items.len == names.globals.items.len);
 
     return ImportSec{
         .start = imports_start,
         .names = .{
-            .funcs = try ImportSec.Names.moveToBuffer(&names_buf, 8, &names.funcs),
-            .tables = try ImportSec.Names.moveToBuffer(&names_buf, 1, &names.tables),
-            .mems = try ImportSec.Names.moveToBuffer(&names_buf, 1, &names.mems),
-            .globals = try ImportSec.Names.moveToBuffer(&names_buf, 4, &names.globals),
+            .funcs = try ImportSec.Names.moveToBuffer(&names_buf, names.funcs.items),
+            .tables = try ImportSec.Names.moveToBuffer(&names_buf, names.tables.items),
+            .mems = try ImportSec.Names.moveToBuffer(&names_buf, names.mems.items),
+            .globals = try ImportSec.Names.moveToBuffer(&names_buf, names.globals.items),
         },
         .types = types: {
             var final_types: ImportSec.Types = undefined;
-            var types_size = reservation_allocator.ReservationAllocator.zero;
+            var types_size = allocators.ReservationAllocator(.@"16").zero;
             inline for (@typeInfo(ImportSec.Types).@"struct".fields) |f| {
                 try types_size.reserve(
                     @typeInfo(@FieldType(ImportSec.Types, f.name)).pointer.child,
                     std.math.add(
                         u32,
                         @field(counts, f.name[0 .. f.name.len - 1]),
-                        @intCast(@field(names, f.name).len),
+                        @intCast(@field(names, f.name).items.len),
                     ) catch return diag.writeAll(.parse, "too many " ++ f.name),
                 );
             }
 
-            var types_alloc = reservation_allocator.ArenaFallbackAllocator{
+            var types_alloc = ArenaFallbackAllocator{
                 .buffer = try types_size.bufferAllocator(arena.allocator()),
                 .arena = arena.arena,
             };
 
             inline for (@typeInfo(ImportSec.Types).@"struct".fields[1..]) |f| {
-                const src_types = &@field(import_types, f.name);
+                const TyElem = @typeInfo(@FieldType(ImportSec.Types, f.name)).pointer.child;
+                const src_types: []const TyElem = @field(import_types, f.name).items;
                 const dst_types = try types_alloc.allocator().alloc(
-                    @typeInfo(@FieldType(ImportSec.Types, f.name)).pointer.child,
+                    TyElem,
                     src_types.len + @field(counts, f.name[0 .. f.name.len - 1]),
                 );
 
-                src_types.writeToSlice(dst_types[0..src_types.len], 0);
-
+                @memcpy(dst_types[0..src_types.len], src_types);
                 @field(final_types, f.name) = dst_types;
             }
 
             {
                 const dst_types = try types_alloc.allocator().alloc(
                     *const FuncType,
-                    import_types.funcs.len + counts.func,
+                    import_types.funcs.items.len + counts.func,
                 );
 
-                for (dst_types[0..import_types.funcs.len], 0..) |*func_ty, i| {
-                    func_ty.* = &type_sec[@intFromEnum(import_types.funcs.at(i).*)];
+                for (
+                    dst_types[0..import_types.funcs.items.len],
+                    import_types.funcs.items,
+                ) |*func_ty, type_idx| {
+                    func_ty.* = &type_sec[@intFromEnum(type_idx)];
                 }
 
                 final_types.funcs = dst_types;
@@ -1756,20 +1585,36 @@ fn parseMemSec(
     readers.mem.bytes.* = undefined;
 }
 
+const GlobalSec = struct {
+    start: [*]const u8,
+    initializers: []const GlobalExpr,
+};
+
+const GlobalExpr = struct {
+    init: ConstExpr,
+
+    pub fn bytes(expr: GlobalExpr, module: Module) [:@intFromEnum(opcodes.ByteOpcode.end)]const u8 {
+        return expr.init.bytes(module.inner.raw.global_section, module);
+    }
+};
+
 fn parseGlobalSec(
-    arena: *reservation_allocator.ArenaFallbackAllocator,
+    arena: *ArenaFallbackAllocator,
     import_sec: *const ImportSec,
     count: u32,
     readers: *const Sections.Readers,
     func_refs: *FuncRefs,
     diag: ParseDiagnostics,
-) ![]const ConstExpr {
-    const global_reader = readers.global;
+    scratch: *ArenaAllocator,
+    init_max_stack: *u16,
+) !GlobalSec {
+    const global_reader: Reader = readers.global;
+    const start = global_reader.bytes.ptr;
     const global_types = import_sec.types.globals;
     const global_import_types = global_types[0..import_sec.names.globals.len];
     std.debug.assert(global_import_types.len + count == global_types.len);
 
-    const global_exprs = try arena.allocator().alloc(ConstExpr, count);
+    const global_exprs = try arena.allocator().alloc(GlobalExpr, count);
 
     if (global_types.len > std.math.maxInt(@typeInfo(GlobalIdx).@"enum".tag_type)) {
         return error.WasmImplementationLimit; // too many globals
@@ -1781,20 +1626,28 @@ fn parseGlobalSec(
         }
 
         ty.* = try GlobalType.parse(global_reader, diag);
-        expr.* = try ConstExpr.parse(
+        const init_expr = try ConstExpr.parse(
             global_reader,
+            start,
             ty.val_type,
             @intCast(import_sec.types.funcs.len),
             global_import_types,
             func_refs,
             diag,
             "global initializer",
+            scratch,
         );
+
+        expr.* = GlobalExpr{ .init = init_expr.expr };
+        init_max_stack.* = @max(init_max_stack.*, init_expr.max_stack);
     }
 
     try global_reader.expectEnd(diag, "global section size mismatch");
     readers.global.bytes.* = undefined;
-    return global_exprs;
+    return GlobalSec{
+        .start = start,
+        .initializers = global_exprs,
+    };
 }
 
 const ExportSec = struct {
@@ -1804,7 +1657,7 @@ const ExportSec = struct {
 
 fn parseExportSec(
     import_types: *const ImportSec.Types,
-    arena: *reservation_allocator.ArenaFallbackAllocator,
+    arena: *ArenaFallbackAllocator,
     count: u32,
     readers: *const Sections.Readers,
     rng_seed: u64,
@@ -1879,31 +1732,37 @@ fn parseExportSec(
                     );
 
                     func_refs.insert(func_idx);
-                    break :desc .{ .func = func_idx };
+                    break :desc .{ .func = .{ .idx = func_idx } };
                 },
                 .table => .{
-                    .table = try export_reader.readIdx(
-                        TableIdx,
-                        import_types.tables.len,
-                        diag,
-                        &.{ "table", "in export" },
-                    ),
+                    .table = .{
+                        .idx = try export_reader.readIdx(
+                            TableIdx,
+                            import_types.tables.len,
+                            diag,
+                            &.{ "table", "in export" },
+                        ),
+                    },
                 },
                 .mem => .{
-                    .mem = try export_reader.readIdx(
-                        MemIdx,
-                        import_types.mems.len,
-                        diag,
-                        &.{ "memory", "in export" },
-                    ),
+                    .mem = .{
+                        .idx = try export_reader.readIdx(
+                            MemIdx,
+                            import_types.mems.len,
+                            diag,
+                            &.{ "memory", "in export" },
+                        ),
+                    },
                 },
                 .global => .{
-                    .global = try export_reader.readIdx(
-                        GlobalIdx,
-                        import_types.globals.len,
-                        diag,
-                        &.{ "global", "in export" },
-                    ),
+                    .global = .{
+                        .idx = try export_reader.readIdx(
+                            GlobalIdx,
+                            import_types.globals.len,
+                            diag,
+                            &.{ "global", "in export" },
+                        ),
+                    },
                 },
             },
         };
@@ -1915,21 +1774,24 @@ fn parseExportSec(
 }
 
 const ElemSec = struct {
+    start: [*]const u8,
     segments: []const ElemSegment,
     active: []const ActiveElem,
     non_declarative_mask: []const u32,
 };
 
 fn parseElemSec(
-    arena: *reservation_allocator.ArenaFallbackAllocator,
+    arena: *ArenaFallbackAllocator,
     readers: *const Sections.Readers,
     count: u32,
     import_sec: *const ImportSec,
     func_refs: *FuncRefs,
     scratch: *ArenaAllocator,
     diag: ParseDiagnostics,
+    init_max_stack: *u16,
 ) !ElemSec {
-    const elems_reader = readers.elem;
+    const elems_reader: Reader = readers.elem;
+    const start = elems_reader.bytes.ptr;
 
     if (count > std.math.maxInt(@typeInfo(ElemIdx).@"enum".tag_type)) {
         return error.WasmImplementationLimit; // too many element element segments
@@ -1943,7 +1805,7 @@ fn parseElemSec(
     @memset(non_declarative_mask, 0);
 
     _ = scratch.reset(.retain_capacity);
-    var active_elems = std.SegmentedList(ActiveElem, 4){};
+    var active_elems = std.ArrayList(ActiveElem).empty;
     defer _ = scratch.reset(.retain_capacity);
 
     const global_types_in_const = import_sec.types.globals[0..import_sec.names.globals.len];
@@ -1974,6 +1836,7 @@ fn parseElemSec(
 
         const ElemKind = enum(u8) { funcref = 0x00 };
 
+        var expr_arena = std.heap.ArenaAllocator.init(scratch.allocator());
         const expected_ref_type = if (tag.kind == .active) active: {
             const table_idx: TableIdx = if (tag.bit_1.active_has_table_idx)
                 try elems_reader.readIdx(
@@ -1990,31 +1853,23 @@ fn parseElemSec(
             var dummy_func_refs = FuncRefs{ .set = .{} };
             const offset = try ConstExpr.parse(
                 elems_reader,
+                start,
                 .i32,
                 @intCast(import_sec.types.funcs.len),
                 global_types_in_const,
                 &dummy_func_refs, // Offsets cannot be `ref.func`
                 diag,
                 "offset in element segment",
+                &expr_arena,
             );
+            init_max_stack.* = @max(init_max_stack.*, offset.max_stack);
 
             try active_elems.append(
                 scratch.allocator(),
                 ActiveElem{
-                    .header = .{
-                        .offset_tag = switch (offset) {
-                            .@"global.get" => .@"global.get",
-                            .i32_or_f32 => .@"i32.const",
-                            else => unreachable,
-                        },
-                        .table = table_idx,
-                        .elements = elem_idx,
-                    },
-                    .offset = switch (offset) {
-                        .@"global.get" => |global_idx| .{ .@"global.get" = global_idx },
-                        .i32_or_f32 => |n| .{ .@"i32.const" = n },
-                        else => unreachable,
-                    },
+                    .table = table_idx,
+                    .elements = elem_idx,
+                    .offset = OffsetExpr{ .value = offset.expr },
                 },
             );
 
@@ -2092,26 +1947,54 @@ fn parseElemSec(
         );
         elem_segment.* = if (tag.use_elem_exprs) elem_exprs: {
             const exprs = try arena.allocator().alloc(ElemSegment.Expr, expr_count);
+            var elem_max_stack: u15 = 0;
+            var instruction_count: u15 = 0;
             for (exprs) |*e| {
-                e.* = try ElemSegment.Expr.init(
-                    try ConstExpr.parse(
-                        elems_reader,
-                        ref_type,
-                        @intCast(import_sec.types.funcs.len),
-                        global_types_in_const,
-                        func_refs,
-                        diag,
-                        "element segment expression",
-                    ),
+                const init_expr = try ConstExpr.parse(
+                    elems_reader,
+                    start,
+                    ref_type,
+                    @intCast(import_sec.types.funcs.len),
+                    global_types_in_const,
+                    func_refs,
                     diag,
+                    "element segment expression",
+                    &expr_arena,
                 );
+                e.* = ElemSegment.Expr{ .init = init_expr.expr };
+                elem_max_stack = @max(
+                    elem_max_stack,
+                    std.math.cast(
+                        u15,
+                        init_expr.max_stack,
+                    ) orelse return error.WasmImplementationLimit, // elem expr max stack too large
+                );
+                instruction_count = std.math.add(
+                    u15,
+                    instruction_count,
+                    std.math.cast(
+                        u15,
+                        init_expr.instr_count,
+                    ) orelse return error.WasmImplementationLimit, // elem expr instr # too large
+                ) catch return error.WasmImplementationLimit; // too many element expressions
             }
 
+            std.debug.assert(exprs.len <= instruction_count);
+            init_max_stack.* = @max(init_max_stack.*, elem_max_stack);
+
+            // if (tag.kind == .active) {
+            //     active_elems.items[active_elems.items.len - 1].elem_max_stack = elem_max_stack;
+            // }
+
             break :elem_exprs ElemSegment{
-                .tag = switch (ref_type) {
-                    .funcref => .func_expressions,
-                    .externref => .extern_expressions,
-                    else => unreachable,
+                .header = .{
+                    .tag = switch (ref_type) {
+                        .funcref => .func_expressions,
+                        .externref => .extern_expressions,
+                        else => unreachable,
+                    },
+                    .instruction_count = instruction_count,
+                    .elem_max_stack = elem_max_stack,
                 },
                 .len = expr_count,
                 .contents = .{ .expressions = exprs.ptr },
@@ -2130,7 +2013,11 @@ fn parseElemSec(
             }
 
             break :idx_exprs ElemSegment{
-                .tag = .func_indices,
+                .header = .{
+                    .tag = .func_indices,
+                    .instruction_count = 0,
+                    .elem_max_stack = 0,
+                },
                 .len = expr_count,
                 .contents = .{ .func_indices = func_indices.ptr },
             };
@@ -2145,13 +2032,10 @@ fn parseElemSec(
     readers.elem.bytes.* = undefined;
 
     return .{
+        .start = start,
         .segments = elems,
         .non_declarative_mask = non_declarative_mask,
-        .active = active: {
-            const active = try arena.allocator().alloc(ActiveElem, active_elems.len);
-            active_elems.writeToSlice(active, 0);
-            break :active active;
-        },
+        .active = try arena.allocator().dupe(ActiveElem, active_elems.items),
     };
 }
 
@@ -2162,7 +2046,7 @@ const CodeSec = struct {
 };
 
 pub fn parseCodeSec(
-    arena: *reservation_allocator.ArenaFallbackAllocator,
+    arena: *ArenaFallbackAllocator,
     readers: *const Sections.Readers,
     count: u32,
     diag: ParseDiagnostics,
@@ -2195,20 +2079,23 @@ pub fn parseCodeSec(
 }
 
 const DataSec = struct {
+    start: [*]const u8,
     datas_ptrs: []const [*]const u8,
     datas_lens: []const u32,
     active_datas: []const ActiveData,
 };
 
 fn parseDataSec(
-    arena: *reservation_allocator.ArenaFallbackAllocator,
+    arena: *ArenaFallbackAllocator,
     readers: *const Sections.Readers,
     count: u32,
     import_sec: *const ImportSec,
     scratch: *ArenaAllocator,
     diag: ParseDiagnostics,
+    init_max_stack: *u16,
 ) !DataSec {
-    const datas_reader = readers.data;
+    const datas_reader: Reader = readers.data;
+    const start = datas_reader.bytes.ptr;
 
     if (count > std.math.maxInt(@typeInfo(DataIdx).@"enum".tag_type)) {
         return error.WasmImplementationLimit; // too many data segments
@@ -2218,7 +2105,7 @@ fn parseDataSec(
     const data_lens = try arena.allocator().alloc(u32, count);
 
     _ = scratch.reset(.retain_capacity);
-    var active_datas = std.SegmentedList(ActiveData, 1){};
+    var active_datas = std.ArrayList(ActiveData).empty;
     defer _ = scratch.reset(.retain_capacity);
 
     for (data_ptrs, data_lens, 0..count) |*ptr, *len, i| {
@@ -2257,34 +2144,28 @@ fn parseDataSec(
             else
                 MemIdx.default;
 
+            var expr_arena = ArenaAllocator.init(scratch.allocator());
+
             var dummy_func_refs = FuncRefs{ .set = .{} };
             const offset = try ConstExpr.parse(
                 datas_reader,
+                start,
                 .i32,
                 @intCast(import_sec.types.funcs.len),
                 import_sec.types.globals[0..import_sec.names.globals.len],
                 &dummy_func_refs, // Offsets cannot be `ref.func`
                 diag,
                 "data segment offset",
+                &expr_arena,
             );
 
+            init_max_stack.* = @max(init_max_stack.*, offset.max_stack);
             try active_datas.append(
                 scratch.allocator(),
                 ActiveData{
-                    .header = .{
-                        .memory = memory,
-                        .offset_tag = switch (offset) {
-                            .i32_or_f32 => .@"i32.const",
-                            .@"global.get" => .@"global.get",
-                            else => unreachable,
-                        },
-                    },
+                    .memory = memory,
                     .data = data_idx,
-                    .offset = switch (offset) {
-                        .i32_or_f32 => |n| .{ .@"i32.const" = n },
-                        .@"global.get" => |global| .{ .@"global.get" = global },
-                        else => unreachable,
-                    },
+                    .offset = OffsetExpr{ .value = offset.expr },
                 },
             );
         }
@@ -2306,14 +2187,11 @@ fn parseDataSec(
 
     try datas_reader.expectEnd(diag, "data section size mismatch");
     readers.data.bytes.* = undefined;
-    return .{
+    return DataSec{
+        .start = start,
         .datas_ptrs = data_ptrs,
         .datas_lens = data_lens,
-        .active_datas = active: {
-            const active = try arena.allocator().alloc(ActiveData, active_datas.len);
-            active_datas.writeToSlice(active, 0);
-            break :active active;
-        },
+        .active_datas = try arena.allocator().dupe(ActiveData, active_datas.items),
     };
 }
 
@@ -2339,22 +2217,78 @@ pub fn finishCodeValidation(
     return all_validated;
 }
 
-// TODO: need separate allocator to free code entries
-pub fn deinit(module: Module, gpa: Allocator) void {
-    gpa.free(module.arena_data);
-    module.* = undefined;
+pub fn deinitLeakCodeEntries(module: Module, gpa: Allocator) void {
+    (ArenaAllocator{
+        .child_allocator = gpa,
+        .state = module.inner.arena,
+    }).deinit();
 }
+
+// pub fn deinit(
+//     module: Module,
+//     gpa: Allocator,
+//     code_deinit_ctx: anytype,
+//     code_deinit: fn (@TypeOf(code_deinit_ctx), *CodeEntry) void,
+// ) void {}
 
 const std = @import("std");
 const Type = std.builtin.Type;
 const Writer = std.Io.Writer;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
-const reservation_allocator = @import("reservation_allocator.zig");
+const allocators = @import("allocators");
+const ArenaFallbackAllocator = allocators.ArenaFallbackAllocator;
 const Reader = @import("Module/Reader.zig");
 const opcodes = @import("opcodes.zig");
 const validator = @import("Module/validator.zig");
+const coz = @import("coz");
 
 test {
     _ = Reader;
+}
+
+test parse {
+    const ParseFuzzer = struct {
+        fn parse(allocator: std.mem.Allocator, input: []const u8) !void {
+            var scratch = std.heap.ArenaAllocator.init(allocator);
+            defer scratch.deinit();
+
+            var diagnostic_writer = try std.Io.Writer.Allocating.initCapacity(allocator, 128);
+            defer diagnostic_writer.deinit();
+
+            var wasm = input;
+            const module = Module.parse(
+                allocator,
+                &wasm,
+                &scratch,
+                .{ .diagnostics = .init(&diagnostic_writer.writer) },
+            ) catch |e| switch (e) {
+                error.OutOfMemory => |oom| return oom,
+                error.InvalidWasm, error.MalformedWasm => {
+                    std.debug.assert(diagnostic_writer.written().len > 4);
+                    return;
+                },
+                error.WasmImplementationLimit => {
+                    std.debug.assert(diagnostic_writer.written().len == 0);
+                    return;
+                },
+            };
+            defer module.deinitLeakCodeEntries(allocator);
+
+            std.debug.assert(wasm.len == 0);
+        }
+
+        fn testOne(_: void, input: []const u8) !void {
+            try std.testing.checkAllAllocationFailures(
+                std.testing.allocator,
+                @This().parse,
+                .{input},
+            );
+        }
+    };
+
+    // TODO(zig): Fix crash in fuzz test runner
+    if (false) {
+        try std.testing.fuzz({}, ParseFuzzer.testOne, .{});
+    }
 }

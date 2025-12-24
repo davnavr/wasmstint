@@ -27,12 +27,13 @@ pub const Desc = union(std.meta.FieldEnum(Module.Export.Desc)) {
 };
 
 ctx: *anyopaque,
+/// Returns `null` to indicate that an import was unavailable or could not be provided.
 resolve: *const fn (
     ctx: *anyopaque,
     module: Module.Name,
     name: Module.Name,
     desc: Desc,
-) ?ExternVal,
+) anyerror!?ExternVal,
 
 pub const Error = error{
     /// The host did not provide an import with the given name or one with the expected type.
@@ -45,8 +46,9 @@ pub const FailedRequest = struct {
     desc: Desc,
     reason: Reason,
 
-    pub const Reason = enum {
+    pub const Reason = union(enum) {
         none_provided,
+        error_returned: anyerror,
         type_mismatch,
         wrong_desc,
     };
@@ -57,11 +59,12 @@ pub const FailedRequest = struct {
             .{ info.module, info.name, info.desc },
         );
 
-        try writer.writeAll(switch (info.reason) {
-            .none_provided => "no value provided",
-            .type_mismatch => "type mismatch",
-            .wrong_desc => "wrong kind",
-        });
+        switch (info.reason) {
+            .none_provided => try writer.writeAll("no value provided"),
+            .type_mismatch => try writer.writeAll("type mismatch"),
+            .error_returned => |err| try writer.print("error occurred: {t}", .{err}),
+            .wrong_desc => try writer.writeAll("wrong kind"),
+        }
     }
 };
 
@@ -85,31 +88,35 @@ pub fn resolveTyped(
             module,
             name,
             import_desc,
-        ) orelse break :failed_request .none_provided;
+        ) catch |e| {
+            break :failed_request .{ .error_returned = e };
+        } orelse {
+            break :failed_request .none_provided;
+        };
 
         switch (desc_tag) {
             .func => if (provided == .func) {
-                if (!provided.func.signature().matches(desc))
+                if (!provided.func.signature().matches(desc)) {
                     break :failed_request .type_mismatch;
-
+                }
                 return provided.func;
             },
             .table => if (provided == .table) {
-                if (!provided.table.tableType().matches(desc))
+                if (!provided.table.tableType().matches(desc)) {
                     break :failed_request .type_mismatch;
-
+                }
                 return provided.table;
             },
             .mem => if (provided == .mem) {
-                if (!provided.mem.memType().matches(desc))
+                if (!provided.mem.memType().matches(desc)) {
                     break :failed_request .type_mismatch;
-
+                }
                 return provided.mem;
             },
             .global => if (provided == .global) {
-                if (!provided.global.global_type.matches(desc))
+                if (!provided.global.global_type.matches(desc)) {
                     break :failed_request .type_mismatch;
-
+                }
                 return provided.global;
             },
         }
