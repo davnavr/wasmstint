@@ -921,7 +921,11 @@ fn buildWasiSamplePrograms(
         subprocess: Modules.Subprocess,
     },
 ) void {
-    const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .wasi,
+        .cpu_features_add = std.Target.wasm.featureSet(&.{ .simd128, .bulk_memory }),
+    });
 
     const tests_dir = b.path("tests/wasip1/zig");
     const tests_dir_handle = b.build_root.handle.openDir(
