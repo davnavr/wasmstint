@@ -211,7 +211,7 @@ pub fn testOne(
                 const results = mainLoop(
                     try interp.reset().awaiting_host.beginCall(
                         allocator,
-                        func,
+                        func.funcInst(),
                         params,
                         &fuel,
                     ),
@@ -264,9 +264,9 @@ const ImportProvider = struct {
         std.debug.print("resolving (import {f} {f} {f})\n", .{ module, name, desc });
         return switch (desc) {
             .func => |func_type| .{
-                .func = wasmstint.runtime.FuncAddr.init(.{
+                .func = wasmstint.runtime.FuncRef.init(.{
                     .host = func: {
-                        const func = try allocator.create(wasmstint.runtime.FuncAddr.Host);
+                        const func = try allocator.create(wasmstint.runtime.HostFunc);
                         func.* = .{ .signature = func_type.* };
                         break :func func;
                     },

@@ -374,7 +374,7 @@ const Execution = struct {
 
         fn toWasmstintValue(
             val: *const ArgumentVal,
-            func_imports: []const wasmstint.runtime.FuncAddr.Host,
+            func_imports: []const wasmstint.runtime.HostFunc,
         ) wasmstint.Interpreter.TaggedValue {
             return switch (val.tagged()) {
                 inline .i32, .i64, .f32, .f64 => |n, tag| @unionInit(
@@ -384,9 +384,9 @@ const Execution = struct {
                 ),
                 .externref => |r| .{ .externref = .{ .nat = r } },
                 .funcref => |f| .{ .funcref = if (f.id()) |idx|
-                    @bitCast(wasmstint.runtime.FuncAddr.init(.{ .host = &func_imports[idx.n] }))
+                    @bitCast(wasmstint.runtime.FuncRef.init(.{ .host = &func_imports[idx.n] }))
                 else
-                    wasmstint.runtime.FuncAddr.Nullable.null },
+                    wasmstint.runtime.FuncRef.Nullable.null },
                 .v128 => |v| .{ .v128 = v.convert() },
             };
         }
@@ -447,7 +447,7 @@ const Execution = struct {
                 .externref => |extern_ref| value.externref
                     .eql(wasmstint.runtime.ExternAddr{ .nat = extern_ref }),
                 .funcref => |pattern| eq: {
-                    const actual = value.funcref.funcInst();
+                    const actual = value.funcref.get();
                     if (pattern.arities()) |arities| {
                         if (actual) |func_addr| {
                             const signature = func_addr.signature();
@@ -575,7 +575,7 @@ const HostState = struct {
 
 const Exports = struct {
     memories: []const *const wasmstint.runtime.MemInst,
-    functions: []const wasmstint.runtime.FuncAddr,
+    functions: []const wasmstint.runtime.FuncRef,
 
     fn resolve(
         module: wasmstint.runtime.ModuleInst,
@@ -618,7 +618,7 @@ const Exports = struct {
             arena.allocator(),
             exports.len,
         );
-        var func_exports = try std.ArrayList(wasmstint.runtime.FuncAddr).initCapacity(
+        var func_exports = try std.ArrayList(wasmstint.runtime.FuncRef).initCapacity(
             arena.allocator(),
             execution.inner.func_export_count,
         );
@@ -746,7 +746,7 @@ pub fn testOne(
         .arena = &arena,
         .input = input,
         .global_import_vals = execution.globalImportVals(),
-        .functions = try std.ArrayList(wasmstint.runtime.FuncAddr.Host).initCapacity(
+        .functions = try std.ArrayList(wasmstint.runtime.HostFunc).initCapacity(
             arena.allocator(),
             parsed_module.funcImportTypes().len,
         ),
@@ -1021,7 +1021,12 @@ pub fn testOne(
                 }
 
                 const call_result = mainLoop(
-                    try interp.reset().awaiting_host.beginCall(allocator, target, args_buf, &fuel),
+                    try interp.reset().awaiting_host.beginCall(
+                        allocator,
+                        target.funcInst(),
+                        args_buf,
+                        &fuel,
+                    ),
                     execution,
                     &host_state,
                     scratch,
@@ -1150,7 +1155,7 @@ fn mainLoop(
     host: *HostState,
     /// Also used to allocate the result values.
     scratch: *std.heap.ArenaAllocator,
-    host_functions: []const wasmstint.runtime.FuncAddr.Host,
+    host_functions: []const wasmstint.runtime.HostFunc,
     fuel: *wasmstint.Interpreter.Fuel,
 ) !CallResult {
     var state = initial_state;
@@ -1173,7 +1178,7 @@ fn mainLoop(
                     // .n = @intCast(host_func - host_functions.ptr),
                     .n = @intCast(
                         @as(
-                            [*]const wasmstint.runtime.FuncAddr.Host,
+                            [*]const wasmstint.runtime.HostFunc,
                             host_func[0..1].ptr,
                         ) - host_functions.ptr,
                     ),
@@ -1325,7 +1330,7 @@ const ImportProvider = struct {
     input: *ffi.Input,
     global_import_vals: []const Execution.ArgumentVal,
     global_import_count: u32 = 0,
-    functions: std.ArrayList(wasmstint.runtime.FuncAddr.Host),
+    functions: std.ArrayList(wasmstint.runtime.HostFunc),
     memories: std.ArrayList(wasmstint.runtime.MemInst.Mapped),
     tables: std.ArrayList(wasmstint.runtime.TableInst.Allocated),
 
@@ -1342,7 +1347,7 @@ const ImportProvider = struct {
         std.debug.print("resolving (import {f} {f} {f})\n", .{ module, name, desc });
         return switch (desc) {
             .func => |func_type| .{
-                .func = wasmstint.runtime.FuncAddr.init(.{
+                .func = wasmstint.runtime.FuncRef.init(.{
                     .host = func: {
                         const func = provider.functions.addOneAssumeCapacity();
                         func.* = .{ .signature = func_type.* };
