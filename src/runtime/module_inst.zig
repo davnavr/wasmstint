@@ -31,11 +31,11 @@ pub const ModuleInst = packed struct(usize) {
 
             var size = allocators.ReservationAllocator(.@"16"){ .bytes = @sizeOf(Header) };
             try size.reserveAligned(
-                FuncAddr.Wasm.Block,
-                .fromByteUnits(@sizeOf(FuncAddr.Wasm.Block)),
+                FuncRef.Wasm.Block,
+                .fromByteUnits(@sizeOf(FuncRef.Wasm.Block)),
                 Header.funcBlockCount(module),
             );
-            try size.reserve(FuncAddr, info.func_import_count);
+            try size.reserve(FuncRef, info.func_import_count);
             try size.reserve(*TableInst, info.table_count);
             try size.reserve(*MemInst, info.mem_count);
             try size.reserve(*anyopaque, info.global_count);
@@ -66,9 +66,8 @@ pub const ModuleInst = packed struct(usize) {
         // /// Currently, the WASM specification focuses only on single-threaded usage, with
         // /// *shared* memories currently being the sole exception.
         // acquired_flag: std.atomic.Value(bool) = .{ .raw = false },
-        func_imports: [*]const FuncAddr,
-        // TODO: Use a hashmap, since only functions in element segments & exports can be turned into FuncAddr
-        func_blocks: [*]align(@sizeOf(FuncAddr.Wasm.Block)) const FuncAddr.Wasm.Block,
+        func_imports: [*]const FuncRef,
+        func_blocks: [*]align(@sizeOf(FuncRef.Wasm.Block)) const FuncRef.Wasm.Block,
         mems: [*]const *MemInst, // TODO: Could use comptime config to have specialized [1]MemInst (same for TableInst)
         tables: [*]const *TableInst,
         globals: [*]const *anyopaque,
@@ -88,58 +87,78 @@ pub const ModuleInst = packed struct(usize) {
         pub inline fn funcBlockCount(module: Module) u32 {
             return std.math.divCeil(
                 u32,
-                module.inner.raw.code_count,
-                FuncAddr.Wasm.Block.funcs_per_block,
+                @as(u32, @intCast(module.inner.func_refs.count())) -
+                    module.inner.raw.func_import_count,
+                FuncRef.Wasm.Block.funcs_per_block,
             ) catch unreachable;
         }
 
         fn funcBlocks(
             inst: *const Header,
-        ) []align(@sizeOf(FuncAddr.Wasm.Block)) const FuncAddr.Wasm.Block {
+        ) []align(@sizeOf(FuncRef.Wasm.Block)) const FuncRef.Wasm.Block {
             return inst.func_blocks[0..funcBlockCount(inst.module)];
         }
 
         /// Asserts that `idx` refers to a valid function within this module.
-        pub fn funcAddr(inst: *const Header, idx: Module.FuncIdx) FuncAddr {
+        pub fn funcInst(
+            inst: *align(std.atomic.cache_line) const Header,
+            idx: Module.FuncIdx,
+        ) FuncInst {
             const i: u32 = @intFromEnum(idx);
             const import_count = inst.module.inner.raw.func_import_count;
             std.debug.assert(i < inst.module.funcCount());
-            if (i < import_count) {
-                return inst.func_imports[i];
-            } else {
-                const rounded_idx: u32 =
-                    @divFloor(i - import_count, FuncAddr.Wasm.Block.funcs_per_block);
+            return if (i < import_count)
+                inst.func_imports[i].funcInst()
+            else
+                FuncInst.init(.{ .wasm = .init(.{ .inner = inst }, idx) });
+        }
 
-                const block: *align(@sizeOf(FuncAddr.Wasm.Block)) const FuncAddr.Wasm.Block =
+        /// Asserts that `idx` refers to a valid function within this module, and is either
+        /// a function import, or is referencable.
+        pub fn funcRef(inst: *const Header, idx: Module.FuncIdx) FuncRef {
+            const idx_as_int: u32 = @intFromEnum(idx);
+            const wasm_module = inst.module.inner;
+            const import_count = wasm_module.raw.func_import_count;
+            std.debug.assert(idx_as_int < inst.module.funcCount());
+            if (idx_as_int < import_count) {
+                return inst.func_imports[idx_as_int];
+            } else {
+                const entry_idx: u32 = @intCast(wasm_module.func_refs.getIndexContext(idx, .{}).?);
+                const rounded_idx: u32 =
+                    // entries in [0..import_count] are imports
+                    @divFloor(entry_idx - import_count, FuncRef.Wasm.Block.funcs_per_block);
+
+                const block: *align(@sizeOf(FuncRef.Wasm.Block)) const FuncRef.Wasm.Block =
                     &inst.funcBlocks()[rounded_idx];
 
-                const index_bits: FuncAddr.Wasm.IdxBits =
-                    @intCast((i - import_count) % FuncAddr.Wasm.Block.funcs_per_block);
+                const index_bits: FuncRef.Wasm.IdxBits =
+                    @intCast((entry_idx - import_count) % FuncRef.Wasm.Block.funcs_per_block);
 
-                std.debug.assert(i == block.starting_idx + index_bits);
+                std.debug.assert(entry_idx == block.starting_idx + index_bits);
 
-                const wasm = FuncAddr.Wasm{
+                const wasm = FuncRef.Wasm{
                     .idx_bits = index_bits,
                     .block_addr = @intCast(@shrExact(
                         @intFromPtr(block),
-                        comptime @bitSizeOf(FuncAddr.Wasm.IdxBits) + 1,
+                        comptime @bitSizeOf(FuncRef.Wasm.IdxBits) + 1,
                     )),
                 };
 
                 if (builtin.mode == .Debug) {
+                    std.debug.assert(@intFromPtr(wasm.block()) == @intFromPtr(block));
                     std.debug.assert(@intFromPtr(wasm.module().inner) == @intFromPtr(inst));
                     std.debug.assert(wasm.funcIdx() == idx);
                 }
 
-                return FuncAddr.init(.{ .wasm = wasm });
+                return FuncRef.init(.{ .wasm = wasm });
             }
         }
 
-        pub fn startFuncAddr(inst: *const Header) FuncAddr.Nullable {
+        pub fn startFuncInst(inst: *align(std.atomic.cache_line) const Header) ?FuncInst {
             return if (inst.module.inner.raw.start.get()) |start_idx|
-                @bitCast(inst.funcAddr(start_idx))
+                inst.funcInst(start_idx)
             else
-                FuncAddr.Nullable.null;
+                null;
         }
 
         pub inline fn tableInsts(inst: *const Header) []const *TableInst {
@@ -263,7 +282,7 @@ pub const ModuleInst = packed struct(usize) {
     fn exportVal(inst: ModuleInst, exp: *align(4) const Module.Export) ExternVal {
         const instance = inst.header();
         return switch (exp.desc_tag) {
-            .func => .{ .func = instance.funcAddr(exp.desc.func.idx) },
+            .func => .{ .func = inst.inner.funcRef(exp.desc.func.idx) },
             .table => .{ .table = instance.tableAddr(exp.desc.table.idx) },
             .mem => .{ .mem = instance.memAddr(exp.desc.mem.idx) },
             .global => .{ .global = instance.globalAddr(exp.desc.global.idx) },
@@ -350,6 +369,7 @@ const allocators = @import("allocators");
 const Module = @import("../Module.zig");
 const MemInst = @import("memory.zig").MemInst;
 const TableInst = @import("table.zig").TableInst;
-const FuncAddr = @import("value.zig").FuncAddr;
+const FuncRef = @import("value.zig").FuncRef;
+const FuncInst = @import("value.zig").FuncInst;
 const GlobalAddr = @import("value.zig").GlobalAddr;
 const ExternVal = @import("value.zig").ExternVal;

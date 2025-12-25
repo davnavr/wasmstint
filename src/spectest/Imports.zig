@@ -115,20 +115,20 @@ pub const PrintFunction = enum(u8) {
 
     pub const all = std.enums.values(PrintFunction);
 
-    pub const functions: [all.len]wasmstint.runtime.FuncAddr.Host = functions: {
-        var result: [all.len]wasmstint.runtime.FuncAddr.Host = undefined;
+    pub const functions: [all.len]wasmstint.runtime.HostFunc = functions: {
+        var result: [all.len]wasmstint.runtime.HostFunc = undefined;
         for (all) |func| {
             result[@intFromEnum(func)] = .{ .signature = func.signature() };
         }
         break :functions result;
     };
 
-    pub fn hostFunc(func: PrintFunction) *const wasmstint.runtime.FuncAddr.Host {
+    pub fn hostFunc(func: PrintFunction) *const wasmstint.runtime.HostFunc {
         return &functions[@intFromEnum(func)];
     }
 
-    pub fn addr(func: PrintFunction) wasmstint.runtime.FuncAddr {
-        return wasmstint.runtime.FuncAddr.init(.{ .host = func.hostFunc() });
+    pub fn ref(func: PrintFunction) wasmstint.runtime.FuncRef {
+        return wasmstint.runtime.FuncRef.init(.{ .host = func.hostFunc() });
     }
 };
 
@@ -200,7 +200,7 @@ pub fn init(
     for (PrintFunction.all) |func| {
         imports.lookup.putAssumeCapacityNoClobber(
             @tagName(func),
-            .{ .func = func.addr() },
+            .{ .func = func.ref() },
         );
     }
 

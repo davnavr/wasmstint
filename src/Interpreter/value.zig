@@ -7,7 +7,7 @@ pub const Value = extern union {
     f64: f64,
     ptr: ?*anyopaque,
     externref: runtime.ExternAddr,
-    funcref: runtime.FuncAddr.Nullable,
+    funcref: runtime.FuncRef.Nullable,
     v128: V128,
 
     pub const Tag = enum {
@@ -58,7 +58,7 @@ pub const TaggedValue = union(enum) {
     i64: i64,
     f64: f64,
     externref: runtime.ExternAddr,
-    funcref: runtime.FuncAddr.Nullable,
+    funcref: runtime.FuncRef.Nullable,
     v128: V128,
 
     comptime {
@@ -97,8 +97,8 @@ pub const TaggedValue = union(enum) {
             f32 => .{ .f32 = value },
             f64 => .{ .f64 = value },
             runtime.ExternAddr => .{ .externref = value },
-            runtime.FuncAddr.Nullable => .{ .funcref = value },
-            runtime.FuncAddr => .{ .funcref = @bitCast(value) },
+            runtime.FuncRef.Nullable => .{ .funcref = value },
+            runtime.FuncRef => .{ .funcref = @bitCast(value) },
             V128 => .{ .v128 = value },
             else => switch (@typeInfo(T)) {
                 .int => @compileError("unsupported integer value type " ++ @typeName(T)),

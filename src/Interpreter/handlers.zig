@@ -194,7 +194,7 @@ pub inline fn dispatchNextOpcode(
     if (builtin.mode == .Debug) {
         const current_frame: *const Stack.Frame = interp.stack.currentFrame().?;
         const wasm_func = current_frame.function.expanded().wasm;
-        std.debug.assert(@intFromPtr(module.inner) == @intFromPtr(wasm_func.module().inner));
+        std.debug.assert(@intFromPtr(module.inner) == @intFromPtr(wasm_func.module.inner));
 
         const vals_base: [*]align(@sizeOf(Value)) const Value = current_frame.valueStackBase();
         if (@intFromPtr(vals_base) > @intFromPtr(sp.ptr)) {
@@ -369,7 +369,7 @@ pub const Transition = packed struct {
         saved_sp: Stack.Saved,
         stp: Stp,
         interp: *Interpreter,
-        callee: runtime.FuncAddr,
+        callee: runtime.FuncInst,
     ) Transition {
         saved_sp.checkIntegrity();
         interp.stack_top = saved_sp.saved_top;
@@ -420,7 +420,7 @@ fn returnFromWasm(
     const popped = interp.stack.popFrame(old_sp, .from_stack_top);
     if (builtin.mode == .Debug) {
         std.debug.assert( // module mismatch
-            @intFromPtr(popped.info.callee.expanded().wasm.module().inner) ==
+            @intFromPtr(popped.info.callee.expanded().wasm.module.inner) ==
                 @intFromPtr(old_module.inner),
         );
         std.debug.assert(@intFromPtr(popped.info.wasm.eip) == @intFromPtr(old_eip));
@@ -442,7 +442,7 @@ fn returnFromWasm(
                     fuel,
                     frame.wasm.stp,
                     new_locals,
-                    wasm.module(),
+                    wasm.module,
                     interp,
                 );
             },
@@ -481,7 +481,7 @@ inline fn invokeWithinWasm(
     fuel: *Fuel,
     old_stp: Stp,
     interp: *Interpreter,
-    callee: runtime.FuncAddr,
+    callee: runtime.FuncInst,
 ) Transition {
     var coz_begin = coz.begin("wasmstint.Interpreter.invokeWithinWasm");
     defer coz_begin.end();
@@ -549,7 +549,7 @@ inline fn invokeWithinWasm(
                 fuel,
                 new_frame.frame.wasm.stp,
                 Locals{ .ptr = new_locals.ptr },
-                wasm.module(),
+                wasm.module,
                 interp,
             );
         },
@@ -588,7 +588,7 @@ inline fn performTailCall(
     fuel: *Fuel,
     old_stp: Stp,
     interp: *Interpreter,
-    callee: runtime.FuncAddr,
+    callee: runtime.FuncInst,
 ) Transition {
     var coz_begin = coz.begin("wasmstint.Interpreter.performTailCall");
     defer coz_begin.end();
@@ -638,7 +638,7 @@ inline fn performTailCall(
                 fuel,
                 new_frame.frame.wasm.stp,
                 Locals{ .ptr = new_frame_locals.ptr },
-                wasm.module(),
+                wasm.module,
                 interp,
             );
         },
@@ -1896,10 +1896,7 @@ const opcode_handlers = struct {
             const wasm_callee = current_frame.function.expanded().wasm;
             std.debug.assert(wasm_callee.code().isValidationFinished());
 
-            break :invalid Trap.init(
-                .lazy_validation_failure,
-                .{ .function = wasm_callee.funcIdx() },
-            );
+            break :invalid Trap.init(.lazy_validation_failure, .{ .function = wasm_callee.idx });
         } else Trap.init(.unreachable_code_reached, {});
 
         return Transition.trap(ip, .none, eip, sp, stp, interp, info);
@@ -2127,7 +2124,7 @@ const opcode_handlers = struct {
         var instr = Instr.init(ip, eip);
 
         const func_idx = instr.readIdx(Module.FuncIdx);
-        const callee = module.header().funcAddr(func_idx);
+        const callee = module.inner.funcInst(func_idx);
         const arg_count = callee.signature().param_count;
         const saved_sp = Stack.Saved.pop(
             Stack.Values.init(sp, &interp.stack, arg_count, arg_count),
@@ -2180,7 +2177,7 @@ const opcode_handlers = struct {
             return Transition.trap(ip, .none, eip, sp, stp, interp, info);
         }
 
-        const callee = table.base.func_ref[0..table.len][elem_index].funcInst() orelse {
+        const callee = table.base.func_ref[0..table.len][elem_index].get() orelse {
             const info = Trap.init(.indirect_call_to_null, .{ .index = elem_index });
             return Transition.trap(ip, .none, eip, sp, stp, interp, info);
         };
@@ -2197,7 +2194,7 @@ const opcode_handlers = struct {
 
         // std.debug.print(" - calling {f}\n - sp = {*}\n", .{ callee, vals.stack.ptr });
 
-        return invokeWithinWasm(instr, call_ip, saved_sp, fuel, stp, interp, callee);
+        return invokeWithinWasm(instr, call_ip, saved_sp, fuel, stp, interp, callee.funcInst());
     }
 
     pub fn return_call(
@@ -2217,7 +2214,7 @@ const opcode_handlers = struct {
         var instr = Instr.init(ip, eip);
 
         const func_idx = instr.readIdx(Module.FuncIdx);
-        const callee = module.header().funcAddr(func_idx);
+        const callee = module.inner.funcInst(func_idx);
         const arg_count = callee.signature().param_count;
         const saved_sp = Stack.Saved.pop(
             Stack.Values.init(sp, &interp.stack, arg_count, arg_count),
@@ -2270,7 +2267,7 @@ const opcode_handlers = struct {
             return Transition.trap(ip, .none, eip, sp, stp, interp, info);
         }
 
-        const callee = table.base.func_ref[0..table.len][elem_index].funcInst() orelse {
+        const callee = table.base.func_ref[0..table.len][elem_index].get() orelse {
             const info = Trap.init(.indirect_call_to_null, .{ .index = elem_index });
             return Transition.trap(ip, .none, eip, sp, stp, interp, info);
         };
@@ -2293,7 +2290,7 @@ const opcode_handlers = struct {
             fuel,
             stp,
             interp,
-            callee,
+            callee.funcInst(),
         );
     }
 
@@ -2912,7 +2909,7 @@ const opcode_handlers = struct {
         var vals = Stack.Values.init(sp, &interp.stack, 0, 1);
 
         const func_idx = instr.readIdx(Module.FuncIdx);
-        vals.pushTyped(&.{.funcref}, .{@bitCast(module.header().funcAddr(func_idx))});
+        vals.pushTyped(&.{.funcref}, .{@bitCast(module.inner.funcRef(func_idx))});
 
         return dispatchNextOpcode(instr, vals.top, fuel, stp, locals, module, interp);
     }

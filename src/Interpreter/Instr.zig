@@ -135,7 +135,7 @@ pub inline fn readNextOpcodeHandler(
     if (builtin.mode == .Debug) {
         const current_frame: *const Stack.Frame = interp.stack.currentFrame().?;
         const current_function = current_frame.function.expanded();
-        const stack_frame_module = current_function.wasm.module();
+        const stack_frame_module = current_function.wasm.module;
         if (@intFromPtr(module.inner) != @intFromPtr(stack_frame_module.inner)) {
             std.debug.panic( // module mismatch
                 "opcode handler receives module {X}, but stack frame says {X}" ++

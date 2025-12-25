@@ -755,11 +755,11 @@ fn realMain() Error!i32 {
     const fmt_entrypoint = std.unicode.fmtUtf8(arguments.invoke);
     const exports: struct {
         memory: *wasmstint.runtime.MemInst,
-        entrypoint: wasmstint.runtime.FuncAddr,
+        entrypoint: wasmstint.runtime.FuncRef,
     } = exports: {
         const all_exports = module.exports();
 
-        var entrypoint: ?wasmstint.runtime.FuncAddr = null;
+        var entrypoint: ?wasmstint.runtime.FuncRef = null;
         var memory: ?*wasmstint.runtime.MemInst = null;
 
         // Check that memory name != entrypoint name occurs earlier
@@ -842,7 +842,7 @@ fn realMain() Error!i32 {
             var starting_fuel = max_fuel;
             break :start_call interp.reset().awaiting_host.beginCall(
                 std.heap.page_allocator,
-                exports.entrypoint,
+                exports.entrypoint.funcInst(),
                 &.{},
                 &starting_fuel,
             ) catch |e| switch (e) {

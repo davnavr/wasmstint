@@ -312,7 +312,7 @@ pub fn pushFrameWithinCapacity(
     top: Top,
     instantiate_flag: *bool,
     comptime params: ParameterAllocation,
-    callee: FuncAddr,
+    callee: FuncInst,
 ) PushFrameError!PushedFrame {
     stack.assertPtrInBounds(top.ptr);
 
@@ -427,7 +427,7 @@ pub fn reserveFrame(
     top: *Top,
     alloca: Allocator,
     comptime params: ParameterAllocation,
-    callee: FuncAddr,
+    callee: FuncInst,
 ) Allocator.Error!void {
     defer coz.progressNamed("wasmstint.Interpreter.reserveFrame");
 
@@ -474,7 +474,7 @@ pub fn pushFrame(
     alloca: Allocator,
     instantiate_flag: *bool,
     comptime params: ParameterAllocation,
-    callee: FuncAddr,
+    callee: FuncInst,
 ) PushFrameError!PushedFrame {
     alloc_needed: {
         return stack.pushFrameWithinCapacity(
@@ -507,7 +507,7 @@ const PoppedFrame = struct {
     signature: *const Module.FuncType,
     top: Top,
     info: if (builtin.mode == .Debug) struct {
-        callee: FuncAddr,
+        callee: FuncInst,
         wasm: struct {
             eip: *const Module.Code.End,
         },
@@ -596,7 +596,7 @@ pub fn replaceFrameWithinCapacity(
     ///
     /// Below `top` are the arguments to pass to the function.
     top: Top,
-    callee: FuncAddr,
+    callee: FuncInst,
 ) PushFrameError!PushedFrame {
     const frame_to_replace = stack.frameAt(stack.current_frame).?;
     const new_signature = callee.signature();
@@ -722,7 +722,7 @@ pub const FrameSize = packed struct(u64) {
 
     /// Calculates the size of a stack frame that is being allocated.
     pub fn calculate(
-        callee: FuncAddr,
+        callee: FuncInst,
         comptime params: ParameterAllocation,
     ) error{ValidationNeeded}!FrameSize {
         const signature = callee.signature();
@@ -803,7 +803,7 @@ pub const Frame = extern struct {
     /// On function return, this is recalculated to determine if an OOB error occurred.
     checksum: (if (builtin.mode == .Debug) u128 else void) align(@sizeOf(Value)),
 
-    function: FuncAddr align(@sizeOf(Value)),
+    function: runtime.FuncInst align(@sizeOf(Value)),
 
     signature: *const Module.FuncType,
     /// Set to `true` when the function returns.
@@ -912,7 +912,7 @@ pub const Frame = extern struct {
         var hasher = std.hash.Fnv1a_128.init();
         hasher.update(std.mem.sliceAsBytes(locals));
         std.hash.autoHash(&hasher, frame.checksum);
-        frame.function.hash(&hasher);
+        std.hash.autoHash(&hasher, frame.function.expanded());
         std.hash.autoHash(&hasher, frame.signature);
         std.hash.autoHash(&hasher, frame.instantiate_flag);
         std.hash.autoHash(&hasher, @as(u32, frame.local_count.total));
@@ -1083,6 +1083,6 @@ const Writer = std.Io.Writer;
 const Value = @import("value.zig").Value;
 const SideTable = @import("side_table.zig").SideTable;
 const runtime = @import("../runtime.zig");
-const FuncAddr = runtime.FuncAddr;
+const FuncInst = runtime.FuncInst;
 const Module = @import("../Module.zig");
 const coz = @import("coz");

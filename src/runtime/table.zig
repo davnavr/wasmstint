@@ -26,7 +26,7 @@ pub const TableInst = extern struct {
     }
 
     pub const Base = packed union {
-        func_ref: [*]FuncAddr.Nullable,
+        func_ref: [*]FuncRef.Nullable,
         extern_ref: [*]ExternAddr,
         ptr: [*]?*anyopaque,
 
@@ -190,14 +190,14 @@ pub const TableInst = extern struct {
         // TODO: Fuel check for initializer expressions in `table.init`
         switch (table_inst.elem_type) {
             .funcref => {
-                const dst_elems: []FuncAddr.Nullable = table_inst.base
+                const dst_elems: []FuncRef.Nullable = table_inst.base
                     .func_ref[0..table_inst.len][dst_idx..dst_end_idx];
 
                 switch (src_elems.header.tag) {
                     .func_indices => {
                         const src_indices = src_elems.contents.func_indices[src_idx..src_end_idx];
                         for (src_indices, dst_elems) |i, *dst| {
-                            dst.* = @as(FuncAddr.Nullable, @bitCast(module_inst.funcAddr(i)));
+                            dst.* = @as(FuncRef.Nullable, @bitCast(module.inner.funcRef(i)));
                         }
                     },
                     .func_expressions => {
@@ -315,7 +315,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const const_eval = @import("../Interpreter/const_eval.zig");
 const Oom = std.mem.Allocator.Error;
-const FuncAddr = @import("value.zig").FuncAddr;
+const FuncRef = @import("value.zig").FuncRef;
 const ExternAddr = @import("value.zig").ExternAddr;
 const Module = @import("../Module.zig");
 const ModuleInst = @import("module_inst.zig").ModuleInst;

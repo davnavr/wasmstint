@@ -73,12 +73,12 @@ pub fn allocateWithDefinitions(
     const module_inst = ModuleInst{ .inner = header };
     // Order important to ensure consistent alignment, avoiding panic on OOM
     const func_blocks = arena.allocator().alignedAlloc(
-        value.FuncAddr.Wasm.Block,
-        .fromByteUnits(@sizeOf(value.FuncAddr.Wasm.Block)),
+        value.FuncRef.Wasm.Block,
+        .fromByteUnits(@sizeOf(value.FuncRef.Wasm.Block)),
         ModuleInst.Header.funcBlockCount(module),
     ) catch unreachable;
     const func_imports = arena.allocator().alloc(
-        value.FuncAddr,
+        value.FuncRef,
         module.inner.raw.func_import_count,
     ) catch unreachable;
     const tables =
@@ -160,10 +160,10 @@ pub fn allocateWithDefinitions(
     errdefer comptime unreachable;
 
     for (func_blocks, 0..) |*block, i| {
-        block.* = value.FuncAddr.Wasm.Block{
+        block.* = value.FuncRef.Wasm.Block{
             .module = module_inst,
             .starting_idx = module.inner.raw.func_import_count +
-                (@as(u32, @intCast(i)) * value.FuncAddr.Wasm.Block.funcs_per_block),
+                (@as(u32, @intCast(i)) * value.FuncRef.Wasm.Block.funcs_per_block),
         };
     }
 

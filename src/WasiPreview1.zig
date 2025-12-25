@@ -70,7 +70,7 @@ inode_hash_seed: types.INode.HashSeed,
 
 const WasiPreview1 = @This();
 
-pub fn function(state: *WasiPreview1, api: Api) wasmstint.runtime.FuncAddr {
+pub fn function(state: *WasiPreview1, api: Api) wasmstint.runtime.FuncRef {
     _ = state;
     return .init(.{ .host = @constCast(api.hostFunc()) });
 }

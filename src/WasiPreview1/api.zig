@@ -185,21 +185,21 @@ pub const Api = enum {
         break :max len;
     };
 
-    const host_func_table: [all.len]wasmstint.runtime.FuncAddr.Host = table: {
-        var host_funcs: [all.len]wasmstint.runtime.FuncAddr.Host = undefined;
+    const host_func_table: [all.len]wasmstint.runtime.HostFunc = table: {
+        var host_funcs: [all.len]wasmstint.runtime.HostFunc = undefined;
         for (&host_funcs, all) |*dst, api| {
             dst.* = .{ .signature = api.signature() };
         }
         break :table host_funcs;
     };
 
-    pub fn fromHostFunc(ptr: *const wasmstint.runtime.FuncAddr.Host) Api {
+    pub fn fromHostFunc(ptr: *const wasmstint.runtime.HostFunc) Api {
         return @enumFromInt(
-            ptr - @as([]const wasmstint.runtime.FuncAddr.Host, &host_func_table).ptr,
+            ptr - @as([]const wasmstint.runtime.HostFunc, &host_func_table).ptr,
         );
     }
 
-    pub fn hostFunc(api: Api) *const wasmstint.runtime.FuncAddr.Host {
+    pub fn hostFunc(api: Api) *const wasmstint.runtime.HostFunc {
         return &host_func_table[@intFromEnum(api)];
     }
 

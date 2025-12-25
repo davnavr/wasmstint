@@ -135,11 +135,6 @@ const RawInner = extern struct {
     datas_ptrs: [*]const [*]const u8,
     datas_lens: [*]const u32,
     active_datas: [*]const ActiveData,
-    /// Set of functions that are allowed to be used with `ref.func` in function bodies.
-    /// This is only used during validation.
-    ///
-    /// See: https://webassembly.github.io/spec/core/valid/conventions.html#context
-    func_refs: [*]std.DynamicBitSetUnmanaged.MaskInt,
 };
 
 const Inner = struct {
@@ -148,6 +143,10 @@ const Inner = struct {
     // export_lookups: Export.Lookups,
     arena: ArenaAllocator.State,
     runtime_shape: @import("runtime.zig").ModuleInst.Shape,
+    /// Set of functions that are allowed to be used with `ref.func` in function bodies.
+    ///
+    /// See: https://webassembly.github.io/spec/core/valid/conventions.html#context
+    func_refs: FuncRefs.Lookup,
 };
 
 inner: *align(std.atomic.cache_line) const Inner,
@@ -190,12 +189,9 @@ pub inline fn funcImportTypes(module: Module) []const *const FuncType {
     return module.funcTypes()[0..module.inner.raw.func_import_count];
 }
 
-pub fn funcIsReferenceable(module: Module, idx: FuncIdx) bool {
-    const set = std.DynamicBitSetUnmanaged{
-        .bit_length = module.funcTypes().len,
-        .masks = module.inner.raw.func_refs,
-    };
-    return set.isSet(@intFromEnum(idx));
+pub fn funcIsReferencable(module: Module, idx: FuncIdx) bool {
+    // @intFromEnum(idx) < module.inner.raw.func_import_count or
+    return module.inner.func_refs.containsContext(idx, .{});
 }
 
 pub inline fn tableTypes(module: Module) []const TableType {
@@ -778,7 +774,7 @@ pub const ParseOptions = struct {
     /// by calling `.customSections()`.
     keep_custom_sections: bool = false,
     // diagnostics: ?*ParserDiagnostics = null,
-    /// Random seed provided to a hash map used for ensuring all exports have unique
+    /// Random seed provided to hash maps, such as the one used for ensuring all exports have unique
     /// names.
     random_seed: u64 = 42,
     diagnostics: ParseDiagnostics = .none,
@@ -1091,12 +1087,7 @@ pub fn parse(
         );
     };
 
-    var func_refs = try FuncRefs.init(
-        module.alloc.allocator(),
-        @intCast(import_sec.types.funcs.len),
-    );
-    // Function imports can always be referenced
-    func_refs.set.setRangeValue(.{ .start = 0, .end = import_sec.names.funcs.len }, true);
+    var func_refs = try FuncRefs.init(alloca, @intCast(import_sec.names.funcs.len));
 
     {
         errdefer wasm.* = sections.known.func;
@@ -1189,6 +1180,7 @@ pub fn parse(
         );
     };
 
+    const func_refs_finished = try func_refs.finish(module_arena.allocator());
     module.inner.* = Inner{
         .raw = RawInner{
             .types = type_sec.ptr,
@@ -1245,12 +1237,11 @@ pub fn parse(
             .datas_lens = data_sec.datas_lens.ptr,
             .active_datas = data_sec.active_datas.ptr,
             .active_datas_count = @intCast(data_sec.active_datas.len),
-
-            .func_refs = func_refs.set.masks,
         },
         .arena = module_arena.state,
         .wasm = original_wasm,
         .runtime_shape = undefined,
+        .func_refs = func_refs_finished,
     };
 
     const final_module = Module{ .inner = module.inner };
@@ -1731,7 +1722,7 @@ fn parseExportSec(
                         &.{ "function", "in export" },
                     );
 
-                    func_refs.insert(func_idx);
+                    try func_refs.insert(func_idx);
                     break :desc .{ .func = .{ .idx = func_idx } };
                 },
                 .table => .{
@@ -1850,14 +1841,14 @@ fn parseElemSec(
             else
                 TableIdx.default;
 
-            var dummy_func_refs = FuncRefs{ .set = .{} };
+            var dummy_func_refs = FuncRefs.dummy;
             const offset = try ConstExpr.parse(
                 elems_reader,
                 start,
                 .i32,
                 @intCast(import_sec.types.funcs.len),
                 global_types_in_const,
-                &dummy_func_refs, // Offsets cannot be `ref.func`
+                &dummy_func_refs,
                 diag,
                 "offset in element segment",
                 &expr_arena,
@@ -2002,6 +1993,8 @@ fn parseElemSec(
         } else idx_exprs: {
             std.debug.assert(ref_type == .funcref);
             const func_indices = try arena.allocator().alloc(FuncIdx, expr_count);
+            // Assumes that most C, C++, Rust, Zig tables are filled with unique function indices
+            try func_refs.ensureUnusedCapacity(expr_count / 2);
             for (func_indices) |*idx| {
                 idx.* = try elems_reader.readIdx(
                     FuncIdx,
@@ -2009,7 +2002,7 @@ fn parseElemSec(
                     diag,
                     &.{ "function", "in element segment" },
                 );
-                func_refs.insert(idx.*);
+                try func_refs.insert(idx.*);
             }
 
             break :idx_exprs ElemSegment{
@@ -2146,14 +2139,14 @@ fn parseDataSec(
 
             var expr_arena = ArenaAllocator.init(scratch.allocator());
 
-            var dummy_func_refs = FuncRefs{ .set = .{} };
+            var dummy_func_refs = FuncRefs.dummy;
             const offset = try ConstExpr.parse(
                 datas_reader,
                 start,
                 .i32,
                 @intCast(import_sec.types.funcs.len),
                 import_sec.types.globals[0..import_sec.names.globals.len],
-                &dummy_func_refs, // Offsets cannot be `ref.func`
+                &dummy_func_refs,
                 diag,
                 "data segment offset",
                 &expr_arena,

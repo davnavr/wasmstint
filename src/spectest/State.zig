@@ -661,7 +661,7 @@ fn resultValueMatches(
             output,
         ),
         .funcref => {
-            const actual_ref = (try expectTypedValue(actual, .funcref, index, output)).funcInst();
+            const actual_ref = (try expectTypedValue(actual, .funcref, index, output)).get();
             if (actual_ref) |non_null| {
                 return failFmt(
                     output,
@@ -748,7 +748,7 @@ fn runToCompletion(
             .awaiting_host => |*host| if (host.currentHostFunction()) |callee| {
                 const print_func_idx = @divExact(
                     @intFromPtr(callee) - @intFromPtr(&Imports.PrintFunction.functions),
-                    @sizeOf(wasmstint.runtime.FuncAddr.Host),
+                    @sizeOf(wasmstint.runtime.HostFunc),
                 );
 
                 const print_func = Imports.PrintFunction.all[print_func_idx];
@@ -856,7 +856,7 @@ fn allocateFunctionArguments(
                 @tagName(tag),
                 @bitCast(c),
             ),
-            .funcref => .{ .funcref = wasmstint.runtime.FuncAddr.Nullable.null },
+            .funcref => .{ .funcref = wasmstint.runtime.FuncRef.Nullable.null },
             .externref => |extern_ref| .{
                 .externref = .{
                     .nat = if (extern_ref) |addr| .fromInt(addr) else .null,
@@ -898,7 +898,7 @@ fn processActionCommand(
 
             const invoke_state = state.interpreter.reset().awaiting_host.beginCall(
                 state.interpreter_allocator,
-                callee,
+                callee.funcInst(),
                 allocateFunctionArguments(invoke.args, scratch),
                 fuel,
             ) catch |e| switch (e) {
@@ -958,7 +958,7 @@ fn processActionCommand(
                 },
                 .funcref => .{
                     .funcref = @as(
-                        *const wasmstint.runtime.FuncAddr.Nullable,
+                        *const wasmstint.runtime.FuncRef.Nullable,
                         @ptrCast(@alignCast(global.value)),
                     ).*,
                 },

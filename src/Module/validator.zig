@@ -2117,7 +2117,7 @@ pub fn rawValidate(
                     &.{ "function", "in ref.func" },
                 );
 
-                if (!module.funcIsReferenceable(func_idx)) {
+                if (!module.funcIsReferencable(func_idx)) {
                     return diag.print(
                         .validation,
                         "undeclared function reference {} in ref.func",

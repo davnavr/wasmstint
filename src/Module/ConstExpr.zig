@@ -124,7 +124,7 @@ pub fn parse(
                     &.{ "function", desc },
                 );
 
-                func_refs.insert(func_idx);
+                try func_refs.insert(func_idx);
             },
             .@"global.get" => {
                 const global_idx = try reader.readIdx(

@@ -79,7 +79,7 @@ pub fn calculate(
             .@"ref.func" => {
                 const func_idx = instr.readIdx(Module.FuncIdx);
                 val_stack.appendAssumeCapacity(
-                    .{ .funcref = @bitCast(module.header().funcAddr(func_idx)) },
+                    .{ .funcref = @bitCast(module.header().funcRef(func_idx)) },
                 );
             },
             .end => {

@@ -133,7 +133,7 @@ const Status = union(State.Tag) {
     },
     awaiting_validation,
     call_stack_exhaustion: struct {
-        callee: runtime.FuncAddr,
+        callee: runtime.FuncInst,
     },
     interrupted: struct {
         cause: Interpreter.InterruptionCause,
@@ -233,12 +233,8 @@ pub const State = union(Tag) {
 
             var i = Instr.init(frame.wasm.ip, frame.wasm.eip);
             const locals = handlers.Locals{ .ptr = frame.localValues(&interp.stack).ptr };
-            const handler: *const handlers.OpcodeHandler = i.readNextOpcodeHandler(
-                fuel,
-                locals,
-                wasm_callee.module(),
-                interp,
-            );
+            const handler: *const handlers.OpcodeHandler =
+                i.readNextOpcodeHandler(fuel, locals, wasm_callee.module, interp);
 
             const transitioned = handler(
                 i.next,
@@ -246,7 +242,7 @@ pub const State = union(Tag) {
                 fuel,
                 frame.wasm.stp,
                 locals,
-                wasm_callee.module(),
+                wasm_callee.module,
                 interp,
                 i.end,
             );
@@ -421,7 +417,7 @@ pub const State = union(Tag) {
                         if (ty != .externref) return error.SignatureMismatch;
                         break :val src.externref.addr;
                     },
-                    runtime.FuncAddr.Nullable => {
+                    runtime.FuncRef.Nullable => {
                         if (ty != .funcref) return error.SignatureMismatch;
                         break :val src.funcref;
                     },
@@ -476,7 +472,7 @@ pub const State = union(Tag) {
             state: *const AwaitingHost,
             /// Used to allocate more space for the stack if necessary.
             alloca: Allocator,
-            callee: runtime.FuncAddr,
+            callee: runtime.FuncInst,
             arguments: []const TaggedValue,
             fuel: *Fuel,
         ) CallError!State {
@@ -553,9 +549,9 @@ pub const State = union(Tag) {
             }
 
             const interp: *Interpreter = state.inner.interpreter();
-            const start_func = module.requiring_instantiation.header().startFuncAddr();
+            const start_func = module.requiring_instantiation.inner.startFuncInst();
 
-            if (start_func.funcInst()) |start| {
+            if (start_func) |start| {
                 const signature = start.signature();
                 std.debug.assert(signature.param_count == 0);
                 std.debug.assert(signature.result_count == 0);
@@ -583,7 +579,7 @@ pub const State = union(Tag) {
                 });
             };
 
-            if (start_func.funcInst()) |start| {
+            if (start_func) |start| {
                 const start_frame = interp.stack.pushFrameWithinCapacity(
                     interp.stack_top,
                     &module.instantiated,
@@ -604,7 +600,7 @@ pub const State = union(Tag) {
         }
 
         /// Returns the current host function being called, or `null` if the call stack is empty.
-        pub fn currentHostFunction(state: *const AwaitingHost) ?*const runtime.FuncAddr.Host {
+        pub fn currentHostFunction(state: *const AwaitingHost) ?*const runtime.HostFunc {
             return if (state.inner.currentFrame()) |stack_frame|
                 stack_frame.function.expanded().host
             else

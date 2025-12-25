@@ -241,7 +241,7 @@ const Modules = struct {
             const tests = b.addTest(.{
                 .name = name,
                 .root_module = module,
-                .max_rss = ByteSize.mib(234).bytes,
+                .max_rss = ByteSize.mib(254).bytes,
                 .use_llvm = options.use_llvm.other,
             });
 
@@ -320,7 +320,7 @@ const Modules = struct {
                 .root_module = module,
                 // TODO(zig): https://github.com/ziglang/zig/issues/23423
                 .use_llvm = true,
-                .max_rss = ByteSize.mib(257).bytes,
+                .max_rss = ByteSize.mib(398).bytes,
             });
 
             const tests_run = &b.addRunArtifact(tests).step;
@@ -354,7 +354,7 @@ const Modules = struct {
                 .name = name,
                 .root_module = module,
                 .use_llvm = options.use_llvm.other,
-                .max_rss = ByteSize.mib(236).bytes,
+                .max_rss = ByteSize.mib(255).bytes,
             });
 
             const tests_run = &b.addRunArtifact(tests).step;
@@ -394,7 +394,7 @@ const Modules = struct {
             const tests = b.addTest(.{
                 .name = name,
                 .root_module = module,
-                .max_rss = ByteSize.mib(255).bytes,
+                .max_rss = ByteSize.mib(399).bytes,
                 .use_llvm = options.use_llvm.interpreter,
             });
 
@@ -740,7 +740,7 @@ fn buildFuzzers(
                 .target = options.project.target,
                 .optimize = options.project.optimize,
             }),
-            .max_rss = ByteSize.mib(127).bytes,
+            .max_rss = ByteSize.mib(253).bytes,
             .use_llvm = options.project.use_llvm.other,
         });
         const ffi_tests_run = &b.addRunArtifact(ffi_test).step;
@@ -941,7 +941,7 @@ fn buildWasiSamplePrograms(
             continue;
         }
 
-        const exe_max_rss = ByteSize.mib(176);
+        const exe_max_rss = ByteSize.mib(242);
         const sample_exe = b.addExecutable(.{
             .name = b.dupe(tests_entry.name[0 .. tests_entry.name.len - 4]),
             .root_module = b.createModule(.{
