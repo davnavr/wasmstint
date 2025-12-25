@@ -201,10 +201,11 @@ pub const State = union(Tag) {
             std.debug.assert(@intFromPtr(frame.wasm.ip) <= @intFromPtr(frame.wasm.eip));
 
             const wasm_callee = frame.function.expanded().wasm;
-            const code = wasm_callee.code();
-            std.debug.assert(code.isValidationFinished());
 
             if (builtin.mode == .Debug) {
+                const code = wasm_callee.code();
+                std.debug.assert(code.isValidationFinished());
+
                 std.debug.assert( // IP below bounds
                     @intFromPtr(code.inner.instructions_start) <= @intFromPtr(frame.wasm.ip),
                 );

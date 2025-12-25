@@ -139,24 +139,25 @@ pub const Values = struct {
     pub inline fn init(top: Top, stack: *const Stack, remaining: u16, max_height: u16) Values {
         if (bounds_checking) {
             std.debug.assert(remaining <= max_height);
-        }
-
-        if (stack.currentFrame()) |frame| {
-            const base = frame.valueStackBase();
-            std.debug.assert(@intFromPtr(base) <= @intFromPtr(top.ptr - remaining));
-            switch (frame.function.expanded()) {
-                .wasm => |wasm| {
-                    const code = wasm.code();
-                    std.debug.assert(code.isValidationFinished());
-                    std.debug.assert( // OOB max height
-                        @intFromPtr(top.ptr + max_height - remaining) <=
-                            @intFromPtr(base + code.inner.max_values),
-                    );
-                },
-                .host => {},
+            if (stack.currentFrame()) |frame| {
+                const base = frame.valueStackBase();
+                std.debug.assert(@intFromPtr(base) <= @intFromPtr(top.ptr - remaining));
+                switch (frame.function.expanded()) {
+                    .wasm => |wasm| if (builtin.mode == .Debug) {
+                        const code = wasm.code();
+                        // This is an atomic load, so check above ensures release modes don't
+                        // include the code
+                        std.debug.assert(code.isValidationFinished());
+                        std.debug.assert( // OOB max height
+                            @intFromPtr(top.ptr + max_height - remaining) <=
+                                @intFromPtr(base + code.inner.max_values),
+                        );
+                    },
+                    .host => {},
+                }
+            } else {
+                stack.assertPtrInBounds(top.ptr);
             }
-        } else {
-            stack.assertPtrInBounds(top.ptr);
         }
 
         return Values{

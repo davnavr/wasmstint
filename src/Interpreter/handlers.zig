@@ -1894,7 +1894,9 @@ const opcode_handlers = struct {
 
             const current_frame: *const Stack.Frame = interp.stack.currentFrame().?;
             const wasm_callee = current_frame.function.expanded().wasm;
-            std.debug.assert(wasm_callee.code().isValidationFinished());
+            if (builtin.mode == .Debug) {
+                std.debug.assert(wasm_callee.code().isValidationFinished());
+            }
 
             break :invalid Trap.init(.lazy_validation_failure, .{ .function = wasm_callee.idx });
         } else Trap.init(.unreachable_code_reached, {});
