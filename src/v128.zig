@@ -319,15 +319,11 @@ pub const V128 = extern union {
                 _ = src_idx.zero_padding;
             }
 
-            // TODO: See if branchless code here affects code generation
-            // const a_value = a[src_idx.index] & mask_away_a_or_something;
-            // const b_value = b[src_idx.index] & mask_away_b_or_something;
-            const a_value = a[src_idx.index];
-            const b_value = b[src_idx.index];
-            result[dst_idx] = switch (src_idx.source) {
-                .a => a_value,
-                .b => b_value,
-            };
+            const a_value = a[src_idx.index] &
+                ~@as(u8, @bitCast(@as(i8, @intFromEnum(src_idx.source))));
+            const b_value = b[src_idx.index] &
+                @as(u8, @bitCast(@as(i8, @intFromEnum(src_idx.source))));
+            result[dst_idx] = a_value | b_value;
         }
 
         return V128{ .u8x16 = result };
