@@ -1,7 +1,21 @@
 const portable = @import("handlers/portable.zig");
-//const x86_64 = @import("handlers/x86_64.zig");
+const x86_64_sysv = @import("handlers/x86_64_sysv.zig");
 
-const implementation = portable;
+const use_assembly: bool = @import("options").use_assembly_interpreter;
+
+const implementation = if (use_assembly)
+    switch (builtin.cpu.arch) {
+        .x86_64 => if (!std.Target.x86.featureSetHas(builtin.cpu.features, .sse2))
+            @compileError("SSE2 is required to use the x86-64 assembly interpreter")
+        else if (builtin.os.tag == .linux)
+            x86_64_sysv
+        else
+            @compileError("x86-64 assembly interpreter implementation cannot be used on " ++
+                @tagName(builtin.os.tag)),
+        else => |bad| @compileError("no assembly interpreter implementation for " ++ @tagName(bad)),
+    }
+else
+    portable;
 
 /// Use `callOpcodeHandler()`
 pub const OpcodeHandler = implementation.OpcodeHandler;
@@ -17,16 +31,27 @@ pub inline fn callOpcodeHandler(
     module: runtime.ModuleInst,
     interp: *Interpreter,
 ) Transition {
-    return handler(
-        instr.next,
-        interp.stack_top,
-        fuel,
-        stp,
-        locals,
-        module,
-        interp,
-        instr.end,
-    );
+    return if (use_assembly)
+        switch (builtin.cpu.arch) {
+            .x86_64 => asm (
+                \\callq %[trampoline:P]
+                : [ret] "={rax}" (-> Transition),
+                : [ip] "{rax}" (instr.next),
+                  [stp] "{rbx}" (stp),
+                  [fuel] "{rcx}" (fuel),
+                  [module] "{rdx}" (module),
+                  [sp] "{rsi}" (interp.stack_top),
+                  [locals] "{rdi}" (locals),
+                  [mems] "{r8}" (module.header().mems),
+                  [interp] "{r9}" (interp),
+                  [eip] "{r10}" (instr.end),
+                  [handler] "{r11}" (handler),
+                  [trampoline] "X" (&x86_64_sysv.opcodeHandlerTrampoline),
+                : x86_64_sysv.opcode_handler_clobbers),
+            else => comptime unreachable,
+        }
+    else
+        handler(instr.next, interp.stack_top, fuel, stp, locals, module, interp, instr.end);
 }
 
 pub const Locals = packed struct(usize) {
@@ -48,6 +73,43 @@ pub const Eip = *const Module.Code.End;
 /// The value Stack Pointer.
 pub const Sp = Stack.Top;
 pub const Stp = SideTable.Ptr;
+
+fn dispatchTableLength(comptime Opcode: type, comptime manual_len: usize) comptime_int {
+    var maximum = 0;
+    for (@typeInfo(Opcode).@"enum".fields) |op| {
+        maximum = @max(maximum, op.value);
+    }
+
+    const actual_len = maximum + 1;
+    std.debug.assert(actual_len <= manual_len);
+
+    return switch (builtin.mode) {
+        .ReleaseSafe => manual_len, // optimization should remove bounds checks
+        .Debug, .ReleaseFast, .ReleaseSmall => actual_len,
+    };
+}
+
+/// If the handler is not appearing in this table, make sure it is public first.
+pub fn dispatchTable(
+    comptime Opcode: type,
+    /// Namespace containing the opcode handler functions.
+    ///
+    /// Opcode handler functions should be marked `pub`.
+    comptime handler_namespace: type,
+    /// Must not be `undefined`, as this seems to cause a crash in the Zig compiler.
+    comptime invalid: OpcodeHandler,
+    comptime manual_length: usize,
+) [dispatchTableLength(Opcode, manual_length)]*const OpcodeHandler {
+    var table: [dispatchTableLength(Opcode, manual_length)]*const OpcodeHandler = @splat(invalid);
+    for (std.enums.values(Opcode)) |op| {
+        const name = @tagName(op);
+        // TODO: Remove this when x64 asm impl is done
+        if (!use_assembly or @hasDecl(handler_namespace, name)) {
+            table[@intFromEnum(op)] = @as(*const OpcodeHandler, @field(handler_namespace, name));
+        }
+    }
+    return table;
+}
 
 pub inline fn transition(
     interp: *Interpreter,
@@ -138,7 +200,7 @@ pub fn updateWasmFrameState(
 }
 
 /// Is a `packed struct` to work around https://github.com/ziglang/zig/issues/18189
-pub const Transition = packed struct {
+pub const Transition = packed struct(u32) {
     version: Version,
     // Can't use `u0` here
     // TODO(Zig): https://github.com/ziglang/zig/issues/25846

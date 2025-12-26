@@ -347,7 +347,7 @@ pub fn pushFrameWithinCapacity(
             .preallocated => signature.param_count,
         },
     };
-    const prev_frame_checksum = if (builtin.mode != .Debug) {
+    const prev_frame_checksum = if (!Frame.has_checksum) {
         // no checksum
     } else if (prev_frame_ptr) |prev|
         prev.calculateChecksum(stack, prev_frame_top)
@@ -565,7 +565,7 @@ pub fn popFrame(
     if (stack.currentFrame()) |current| {
         const current_func = current.function.expanded();
         switch (current_func) {
-            .wasm => if (builtin.mode == .Debug) {
+            .wasm => if (Frame.has_checksum) {
                 const prev_top = Top{ .ptr = results.ptr };
                 const actual_checksum = current.calculateChecksum(stack, prev_top);
                 if (expected_checksum != actual_checksum) {
@@ -621,7 +621,7 @@ pub fn replaceFrameWithinCapacity(
     const prev_frame_offset = frame_to_replace.prev_frame;
     const expected_checksum = frame_to_replace.checksum;
     const instantiate_flag = frame_to_replace.instantiate_flag;
-    if (builtin.mode == .Debug) {
+    if (Frame.has_checksum) {
         if (stack.frameAt(prev_frame_offset)) |prev_frame| {
             const actual_checksum = prev_frame.calculateChecksum(
                 stack,
@@ -793,6 +793,8 @@ pub const FrameSize = packed struct(u64) {
 /// |==============  top  ==============|
 /// ```
 pub const Frame = extern struct {
+    const has_checksum = builtin.mode == .Debug and !@import("options").use_assembly_interpreter;
+
     /// For every WASM stack frame, a checksum of the previous stack frame's data (its contents
     /// on the value stack and the `StackFrame` structure itself) is calculated. This is
     /// possible since WASM code only allows the function at the top of the stack to modify the
@@ -802,7 +804,7 @@ pub const Frame = extern struct {
     /// incorrectly modified.
     ///
     /// On function return, this is recalculated to determine if an OOB error occurred.
-    checksum: (if (builtin.mode == .Debug) u128 else void) align(@sizeOf(Value)),
+    checksum: (if (has_checksum) u128 else void) align(@sizeOf(Value)),
 
     function: runtime.FuncInst align(@sizeOf(Value)),
 

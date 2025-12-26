@@ -300,6 +300,11 @@ const Modules = struct {
 
         const name = "wasmstint";
 
+        const InterpreterBackend = enum {
+            portable,
+            assembly,
+        };
+
         fn build(
             b: *Build,
             steps: *const TopLevelSteps,
@@ -314,6 +319,22 @@ const Modules = struct {
             });
             addAsImportTo(Coz, imports.coz, module);
             addAsImportTo(Allocators, imports.allocators, module);
+
+            const use_assembly_interpreter = b.option(
+                InterpreterBackend,
+                "interpreter-backend",
+                "Set the interpreter implementation to use",
+            ) orelse switch (options.optimize_interpreter) {
+                .Debug, .ReleaseSafe => InterpreterBackend.portable,
+                .ReleaseFast, .ReleaseSmall => InterpreterBackend.assembly,
+            };
+            const wasmstint_options = b.addOptions();
+            wasmstint_options.addOption(
+                bool,
+                "use_assembly_interpreter",
+                use_assembly_interpreter == .assembly,
+            );
+            module.addOptions("options", wasmstint_options);
 
             const tests = b.addTest(.{
                 .name = name,
