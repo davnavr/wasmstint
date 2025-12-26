@@ -20,7 +20,7 @@ else
 /// Use `callOpcodeHandler()`
 pub const OpcodeHandler = implementation.OpcodeHandler;
 pub const outOfFuelHandler = implementation.outOfFuelHandler;
-pub const byte_dispatch_table = implementation.byte_dispatch_table;
+pub const byte_dispatch_table = &implementation.byte_dispatch_table;
 
 pub inline fn callOpcodeHandler(
     handler: *const OpcodeHandler,
@@ -31,10 +31,13 @@ pub inline fn callOpcodeHandler(
     module: runtime.ModuleInst,
     interp: *Interpreter,
 ) Transition {
+    std.log.debug("IP={*}", .{instr.next}); // TODO: remove
     return if (use_assembly)
         switch (builtin.cpu.arch) {
             .x86_64 => asm (
-                \\callq %[trampoline:P]
+            // LLVM backend fails with "inline assembly requires more registers than available"
+            //\\callq %[trampoline:P]
+                \\callq *%%r12
                 : [ret] "={rax}" (-> Transition),
                 : [ip] "{rax}" (instr.next),
                   [stp] "{rbx}" (stp),
@@ -46,7 +49,8 @@ pub inline fn callOpcodeHandler(
                   [interp] "{r9}" (interp),
                   [eip] "{r10}" (instr.end),
                   [handler] "{r11}" (handler),
-                  [trampoline] "X" (&x86_64_sysv.opcodeHandlerTrampoline),
+                  // [trampoline] "X" (x86_64_sysv.opcodeHandlerTrampoline),
+                  [trampoline] "{r12}" (x86_64_sysv.opcodeHandlerTrampoline),
                 : x86_64_sysv.opcode_handler_clobbers),
             else => comptime unreachable,
         }
@@ -97,7 +101,7 @@ pub fn dispatchTable(
     /// Opcode handler functions should be marked `pub`.
     comptime handler_namespace: type,
     /// Must not be `undefined`, as this seems to cause a crash in the Zig compiler.
-    comptime invalid: OpcodeHandler,
+    comptime invalid: *const OpcodeHandler,
     comptime manual_length: usize,
 ) [dispatchTableLength(Opcode, manual_length)]*const OpcodeHandler {
     var table: [dispatchTableLength(Opcode, manual_length)]*const OpcodeHandler = @splat(invalid);

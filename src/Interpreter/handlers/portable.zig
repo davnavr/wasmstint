@@ -35,7 +35,8 @@ pub const ohcc: CallingConvention = switch (dispatch_backend) {
         // registers and removes instructions for saving callee-saved registers, but is
         // currently not supported in Zig's x86-64 backend.
         //
-        // For more information see <https://reviews.llvm.org/D25022>.
+        // For more information see <https://reviews.llvm.org/D25022> and
+        // <https://www.intel.com/content/www/us/en/docs/dpcpp-cpp-compiler/developer-guide-reference/2023-0/c-c-sycl-calling-conventions.html>.
         .x86_64_sysv => .{ .x86_64_regcall_v3_sysv = .{} },
 
         // TODO(llvm): fix regcall on windows https://github.com/llvm/llvm-project/issues/51523

@@ -324,10 +324,7 @@ const Modules = struct {
                 InterpreterBackend,
                 "interpreter-backend",
                 "Set the interpreter implementation to use",
-            ) orelse switch (options.optimize_interpreter) {
-                .Debug, .ReleaseSafe => InterpreterBackend.portable,
-                .ReleaseFast, .ReleaseSmall => InterpreterBackend.assembly,
-            };
+            ) orelse InterpreterBackend.portable;
             const wasmstint_options = b.addOptions();
             wasmstint_options.addOption(
                 bool,
@@ -335,6 +332,32 @@ const Modules = struct {
                 use_assembly_interpreter == .assembly,
             );
             module.addOptions("options", wasmstint_options);
+
+            if (use_assembly_interpreter == .assembly and
+                options.target.result.cpu.arch == .x86_64)
+            {
+                const codegen_exe = b.addExecutable(.{
+                    .name = "wasmstint-codegen-x86_64_sysv",
+                    .root_module = b.createModule(.{
+                        .root_source_file = b.path("src/Interpreter/codegen/x86_64_sysv.zig"),
+                        .target = b.graph.host,
+                        .optimize = .Debug,
+                        .single_threaded = true,
+                    }),
+                    .max_rss = ByteSize.mib(116).bytes, // arbitrary amount
+                });
+
+                const run_codegen = b.addRunArtifact(codegen_exe);
+                run_codegen.step.max_rss = ByteSize.mib(2).bytes; // arbitrary amount
+                run_codegen.addArg("0.0.0");
+                run_codegen.addArg(b.fmt("{t}", .{options.optimize_interpreter}));
+                module.addAssemblyFile(run_codegen.addOutputFileArg("x86_64_sysv.s"));
+                module.addAnonymousImport("x86_64_sysv", .{
+                    .root_source_file = run_codegen.addOutputFileArg("x86_64_sys_decls.zig"),
+                    .target = options.target,
+                    .optimize = options.optimize_interpreter,
+                });
+            }
 
             const tests = b.addTest(.{
                 .name = name,
