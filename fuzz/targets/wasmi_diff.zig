@@ -934,7 +934,7 @@ pub fn testOne(
                 _ = scratch.reset(.retain_capacity);
             },
             .trapped => |trap_code| {
-                std.debug.print("start function trapped: {t}\n", .{trap_code});
+                std.debug.print("start function trapped: {f}\n", .{trap_code});
                 if (execution.trap()) |wasmi_trap| {
                     const expected_trap = wasmi_trap.toWasmstintTrapCode() catch |e| {
                         std.debug.panic("unexpected wasmi trap during instantiation: {t}", .{e});

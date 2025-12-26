@@ -392,28 +392,37 @@ fn mainLoop(
     input: *ffi.Input,
 ) ![]const wasmstint.Interpreter.TaggedValue {
     var state = initial_state;
+    var host_trap_code: ?u31 = null;
     while (true) {
         _ = scratch.reset(.retain_capacity);
         state = next: switch (state) {
-            .awaiting_host => |*host| if (host.currentHostFunction() != null) {
-                const result_types = host.hostSignature().results();
-                const results = try scratch.allocator().alloc(
-                    wasmstint.Interpreter.TaggedValue,
-                    result_types.len,
-                );
-                for (result_types, results) |result_ty, *dst| {
-                    dst.* = try generateTaggedValue(input, result_ty);
-                }
+            .awaiting_host => |*host| if (host.currentHostFunction()) |host_func| {
+                // 3/4 probability
+                if (try input.int(u8) & 0b1100_0000 == 0) {
+                    const result_types = host.hostSignature().results();
+                    const results = try scratch.allocator().alloc(
+                        wasmstint.Interpreter.TaggedValue,
+                        result_types.len,
+                    );
+                    for (result_types, results) |result_ty, *dst| {
+                        dst.* = try generateTaggedValue(input, result_ty);
+                    }
 
-                std.debug.print("host {f} returning {f}\n", .{
-                    host.currentHostFunction().?,
-                    wasmstint.Interpreter.TaggedValue.sliceFormatter(results),
-                });
-                break :next host.returnFromHost(results, fuel) catch unreachable;
+                    std.debug.print("host {f} returning {f}\n", .{
+                        host_func,
+                        wasmstint.Interpreter.TaggedValue.sliceFormatter(results),
+                    });
+                    break :next host.returnFromHost(results, fuel) catch
+                        @panic("signature mismatch");
+                } else {
+                    const trap_code = try input.int(u31);
+                    host_trap_code = trap_code;
+                    break :next host.trapWithHostCode(trap_code);
+                }
             } else {
                 return host.allocResults(scratch.allocator());
             },
-            .awaiting_validation => unreachable,
+            .awaiting_validation => @panic("awaiting validation"),
             .call_stack_exhaustion => return error.OutOfMemory,
             .interrupted => |*interrupt| {
                 switch (interrupt.cause().*) {
@@ -457,7 +466,17 @@ fn mainLoop(
                 break :next interrupt.resumeExecution(fuel);
             },
             .trapped => |*trapped| {
-                std.debug.print("trap {t}\n", .{trapped.trap().code});
+                if (host_trap_code) |expected| {
+                    const actual = trapped.trap().toHostCode();
+                    if (expected != actual) {
+                        std.debug.panic(
+                            "expected host trap code {d}, got {any}",
+                            .{ expected, actual },
+                        );
+                    }
+                }
+
+                std.debug.print("trap {f}\n", .{trapped.trap().code});
                 return error.Trapped;
             },
         };

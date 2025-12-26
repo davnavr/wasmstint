@@ -654,6 +654,7 @@ pub const State = union(Tag) {
             });
         }
 
+        /// Asserts that the call stack is not empty.
         pub fn returnFromHostTyped(
             state: *AwaitingHost,
             result_tuple: anytype,
@@ -680,8 +681,16 @@ pub const State = union(Tag) {
             return state.returnFromHost(&result_array, fuel);
         }
 
-        // pub fn trapWithHostCode(state: *AwaitingHost, code: u31) State {
-        // }
+        /// Asserts that the call stack is not empty.
+        pub fn trapWithHostCode(state: *AwaitingHost, code: u31) State {
+            _ = state.currentHostFunction();
+            return state.inner.transition(.{
+                .trapped = .{
+                    .source = State.Trapped.Source.function_call,
+                    .trap = Trap.initHostCode(code),
+                },
+            });
+        }
     };
 
     /// Indicates that a WASM function being called by WASM needs to be

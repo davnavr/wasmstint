@@ -27,7 +27,16 @@ pub const Code = enum(i32) {
     }
 
     pub fn host(code: Code) ?u31 {
-        return if (code < 0) @intCast(-(@intFromEnum(code) + 1)) else null;
+        const n: i32 = @intFromEnum(code);
+        return if (n < 0) @intCast(-(n + 1)) else null;
+    }
+
+    pub fn format(code: Code, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (code.host()) |host_code| {
+            try writer.print("host({d})", .{host_code});
+        } else {
+            try writer.writeAll(@tagName(code));
+        }
     }
 };
 
