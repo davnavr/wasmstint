@@ -52,12 +52,12 @@ const load_store = struct {
     }
 };
 
-pub const @"v128.load" = handlers.linearMemoryAccessor(
+pub const @"v128.load" = portable.linearMemoryAccessor(
     .@"16",
     .{ .fd = .@"v128.load" },
     .load,
     void,
-    handlers.nopBeforeMemoryAccess,
+    portable.nopBeforeMemoryAccess,
     load_store.performLoad,
 );
 
@@ -101,12 +101,12 @@ fn loadAndExtendHandler(
             return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
         }
 
-        const extendingLoad = handlers.linearMemoryAccessor(
+        const extendingLoad = portable.linearMemoryAccessor(
             .fromByteUnits(access_size),
             .{ .fd = opcode },
             .load,
             void,
-            handlers.nopBeforeMemoryAccess,
+            portable.nopBeforeMemoryAccess,
             performExtendingLoad,
         );
     }.extendingLoad;
@@ -142,12 +142,12 @@ fn loadAndSplatHandler(comptime opcode: FDPrefixOpcode, comptime To: type) Opcod
             return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
         }
 
-        const loadAndSplat = handlers.linearMemoryAccessor(
+        const loadAndSplat = portable.linearMemoryAccessor(
             .fromByteUnits(@sizeOf(To)),
             .{ .fd = opcode },
             .load,
             void,
-            handlers.nopBeforeMemoryAccess,
+            portable.nopBeforeMemoryAccess,
             performLoadAndSplat,
         );
     }.loadAndSplat;
@@ -158,7 +158,7 @@ pub const @"v128.load16_splat" = loadAndSplatHandler(.@"v128.load16_splat", u16)
 pub const @"v128.load32_splat" = loadAndSplatHandler(.@"v128.load32_splat", u32);
 pub const @"v128.load64_splat" = loadAndSplatHandler(.@"v128.load64_splat", u64);
 
-pub const @"v128.store" = handlers.linearMemoryAccessor(
+pub const @"v128.store" = portable.linearMemoryAccessor(
     .@"16",
     .{ .fd = .@"v128.store" },
     .store,
@@ -591,7 +591,7 @@ fn loadLaneHandler(
             return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
         }
 
-        const loadLane = handlers.linearMemoryAccessor(
+        const loadLane = portable.linearMemoryAccessor(
             .fromByteUnits(@sizeOf(T)),
             .{ .fd = opcode },
             .store, // actually a load, this ensures an assertion checks for 2 values on the stack
@@ -639,7 +639,7 @@ fn storeLaneHandler(
             return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
         }
 
-        const storeLane = handlers.linearMemoryAccessor(
+        const storeLane = portable.linearMemoryAccessor(
             .fromByteUnits(@sizeOf(T)),
             .{ .fd = opcode },
             .store,
@@ -682,12 +682,12 @@ fn loadAndZeroPadHandler(
             return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
         }
 
-        const loadAndZeroPad = handlers.linearMemoryAccessor(
+        const loadAndZeroPad = portable.linearMemoryAccessor(
             .fromByteUnits(@sizeOf(T)),
             .{ .fd = opcode },
             .load,
             void,
-            handlers.nopBeforeMemoryAccess,
+            portable.nopBeforeMemoryAccess,
             performLoadAndZeroPad,
         );
     }.loadAndZeroPad;
@@ -1573,22 +1573,26 @@ pub const @"f64x2.pmin" = f64x2_arith_ops.pmin;
 pub const @"f64x2.pmax" = f64x2_arith_ops.pmax;
 
 const std = @import("std");
-const Interpreter = @import("../../Interpreter.zig");
-const handlers = @import("../handlers.zig");
-const ohcc = handlers.ohcc;
-const OpcodeHandler = handlers.OpcodeHandler;
-const dispatchNextOpcode = handlers.dispatchNextOpcode;
+
+const runtime = @import("../../../runtime.zig");
+const Interpreter = @import("../../../Interpreter.zig");
+const Fuel = Interpreter.Fuel;
+const FDPrefixOpcode = @import("../../../opcodes.zig").FDPrefixOpcode;
+const V128 = @import("../../../v128.zig").V128;
+
+const portable = @import("../portable.zig");
+const ohcc = portable.ohcc;
+const dispatchNextOpcode = portable.dispatchNextOpcode;
+const MemArg = portable.MemArg;
+const OpcodeHandler = portable.OpcodeHandler;
+
+const handlers = @import("../../handlers.zig");
+const Locals = handlers.Locals;
 const Ip = handlers.Ip;
 const Eip = handlers.Eip;
 const Sp = handlers.Sp;
 const Stp = handlers.Stp;
-const Instr = @import("../Instr.zig");
-const Stack = @import("../Stack.zig");
-const Locals = handlers.Locals;
-const Fuel = Interpreter.Fuel;
 const Transition = handlers.Transition;
-const MemArg = handlers.MemArg;
-const Value = @import("../value.zig").Value;
-const V128 = @import("../../v128.zig").V128;
-const FDPrefixOpcode = @import("../../opcodes.zig").FDPrefixOpcode;
-const runtime = @import("../../runtime.zig");
+const Instr = @import("../../Instr.zig");
+const Stack = @import("../../Stack.zig");
+const Value = @import("../../value.zig").Value;

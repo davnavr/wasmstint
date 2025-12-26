@@ -232,20 +232,19 @@ pub const State = union(Tag) {
 
             // std.debug.print("ENTERING MAIN LOOP (ver = {})\n", .{interp.version.number});
 
-            var i = Instr.init(frame.wasm.ip, frame.wasm.eip);
+            var instr = Instr.init(frame.wasm.ip, frame.wasm.eip);
             const locals = handlers.Locals{ .ptr = frame.localValues(&interp.stack).ptr };
             const handler: *const handlers.OpcodeHandler =
-                i.readNextOpcodeHandler(fuel, locals, wasm_callee.module, interp);
+                instr.readNextOpcodeHandler(fuel, locals, wasm_callee.module, interp);
 
-            const transitioned = handler(
-                i.next,
-                interp.stack_top,
+            const transitioned = handlers.callOpcodeHandler(
+                handler,
+                instr,
                 fuel,
                 frame.wasm.stp,
                 locals,
                 wasm_callee.module,
                 interp,
-                i.end,
             );
 
             if (builtin.mode == .Debug) {
