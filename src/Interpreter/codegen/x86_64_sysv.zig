@@ -61,11 +61,11 @@ pub fn main() !void {
             \\.global "{[prefix]s}{[name]s}"
             \\.align 16
             \\"{[prefix]s}{[name]s}":
-            \\push rbp
-            \\mov rbp, rsp
-            \\lea {[dispatch]t}, "{[prefix]s}byte_dispatch_table"
-            \\jmp r11
-            \\ud2
+            \\    push rbp
+            \\    mov rbp, rsp
+            \\    lea {[dispatch]t}, "{[prefix]s}byte_dispatch_table"
+            \\    jmp r11
+            \\    ud2
             \\
         , .{
             .prefix = ctx.name_prefix,
@@ -83,11 +83,11 @@ pub fn main() !void {
             .Debug, .ReleaseSafe => try ctx.asm_out.print(
                 \\.align 16
                 \\"{[prefix]s}{[name]s}":
-                \\mov rdi, {[vip]t} #1
-                \\mov rsi, {[eip]t} #2
-                \\# doesn't `jmp`, so stack trace is better
-                \\call "{[prefix]s}panicInvalidByteOpcode"
-                \\ud2
+                \\    mov rdi, {[vip]t} #1
+                \\    mov rsi, {[eip]t} #2
+                \\    # doesn't `jmp`, so stack trace is better
+                \\    call "{[prefix]s}panicInvalidByteOpcode"
+                \\    ud2
                 \\
             , .{
                 .prefix = ctx.name_prefix,
@@ -97,7 +97,7 @@ pub fn main() !void {
             }),
             .ReleaseFast, .ReleaseSmall => try ctx.asm_out.print(
                 \\"{[prefix]s}{[name]s}":
-                \\ud2
+                \\    ud2
                 \\
             , .{ .prefix = ctx.name_prefix, .name = "invalidByteOpcode" }),
         }
@@ -108,16 +108,16 @@ pub fn main() !void {
             \\.global "{[prefix]s}{[name]s}"
             \\.align 16
             \\"{[prefix]s}{[name]s}":
-            \\mov rdi, {[vip]t} # 1st argument
-            \\mov rdx, {[vsp]t} # 3rd argument
-            \\mov rsi, {[eip]t} # 2nd argument
-            \\mov rcx, {[stp]t} # 4th argument
-            \\mov r8, {[interp]t} # 5th argument
-            \\# Perform a tail call
-            \\mov rsp, rbp
-            \\pop rbp
-            \\jmp "{[prefix]s}interruptOutOfFuel"
-            \\ud2
+            \\    mov rdi, {[vip]t} # 1st argument
+            \\    mov rdx, {[vsp]t} # 3rd argument
+            \\    mov rsi, {[eip]t} # 2nd argument
+            \\    mov rcx, {[stp]t} # 4th argument
+            \\    mov r8, {[interp]t} # 5th argument
+            \\    # Perform a tail call
+            \\    mov rsp, rbp
+            \\    pop rbp
+            \\    jmp "{[prefix]s}interruptOutOfFuel"
+            \\    ud2
             \\
         , .{
             .prefix = ctx.name_prefix,
@@ -185,7 +185,7 @@ const Reg64 = enum {
 
     const vip = Reg64.rax;
     const stp = Reg64.rbx;
-    const fuel = Reg64.rcx; // TODO: Store directly instead of via pointer, include fuel in return value
+    const fuel = Reg64.rcx;
     const module = Reg64.rdx;
     const vsp = Reg64.rsi;
     const locals = Reg64.rdi;
@@ -368,19 +368,30 @@ const Context = struct {
     }
 
     fn jmpToNextHandler(ctx: *Context, comptime temp: TempReg) !void {
-        // TODO: Need to implement fuel handling
+        // TODO: Store fuel directly instead of via pointer, include fuel in return value
+        // ^ needs Zig to support multiple results in inline assembly, or making a RegCall/SysV
+        // compliant ASM function that returns in two registers
+        const out_of_fuel = try Label.init(ctx, "out", "of-fuel");
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
-            \\    movzx {[temp]t}, byte ptr [{[ip]t}]
+            \\    movzx {[temp]t}, byte ptr [{[ip]t}] # Start reading next opcode byte
+            \\    sub qword ptr [{[fuel]t}], 1 # Fuel check
+            \\
+        , .{ .ip = Reg64.vip, .temp = temp, .fuel = Reg64.fuel }));
+        try ctx.asm_out.print("    jb {f}\n", .{out_of_fuel});
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    # Jump to handler
             \\    inc {[ip]t}
             \\    mov {[temp]t}, qword ptr [{[disp]t} + {[temp]t} * 8]
             \\    jmp {[temp]t}
             \\    ud2
             \\
-        , .{
-            .ip = Reg64.vip,
-            .temp = temp,
-            .disp = Reg64.disp,
-        }));
+        , .{ .ip = Reg64.vip, .temp = temp, .disp = Reg64.disp }));
+        try ctx.asm_out.print(
+            \\{[oof]f}:
+            \\    jmp "{[prefix]s}outOfFuelHandler"
+            \\    ud2
+            \\
+        , .{ .oof = out_of_fuel, .prefix = ctx.name_prefix });
     }
 };
 
