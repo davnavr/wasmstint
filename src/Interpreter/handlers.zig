@@ -12,7 +12,8 @@ const implementation = if (use_assembly)
         else
             @compileError("x86-64 assembly interpreter implementation cannot be used on " ++
                 @tagName(builtin.os.tag)),
-        else => |bad| @compileError("no assembly interpreter implementation for " ++ @tagName(bad)),
+        else => |bad| @compileError("no assembly interpreter implementation for " ++
+            @tagName(bad)),
     }
 else
     portable;
@@ -32,30 +33,26 @@ pub inline fn callOpcodeHandler(
     interp: *Interpreter,
 ) Transition {
     std.log.debug("IP={*}", .{instr.next}); // TODO: remove
-    return if (use_assembly)
-        switch (builtin.cpu.arch) {
-            .x86_64 => asm (
-            // LLVM backend fails with "inline assembly requires more registers than available"
-            //\\callq %[trampoline:P]
-                \\callq *%%r12
-                : [ret] "={rax}" (-> Transition),
-                : [ip] "{rax}" (instr.next),
-                  [stp] "{rbx}" (stp),
-                  [fuel] "{rcx}" (fuel),
-                  [module] "{rdx}" (module),
-                  [sp] "{rsi}" (interp.stack_top),
-                  [locals] "{rdi}" (locals),
-                  [mems] "{r8}" (module.header().mems),
-                  [interp] "{r9}" (interp),
-                  [eip] "{r10}" (instr.end),
-                  [handler] "{r11}" (handler),
-                  // [trampoline] "X" (x86_64_sysv.opcodeHandlerTrampoline),
-                  [trampoline] "{r12}" (x86_64_sysv.opcodeHandlerTrampoline),
-                : x86_64_sysv.opcode_handler_clobbers),
+    if (use_assembly) {
+        _ = implementation;
+        return switch (builtin.cpu.arch) {
+            .x86_64 => x86_64_sysv.opcodeHandlerTrampoline(
+                locals,
+                interp.stack_top,
+                module,
+                fuel,
+                module.header().mems,
+                interp,
+                instr.next,
+                stp,
+                instr.end,
+                handler,
+            ),
             else => comptime unreachable,
-        }
-    else
-        handler(instr.next, interp.stack_top, fuel, stp, locals, module, interp, instr.end);
+        };
+    } else {
+        return handler(instr.next, interp.stack_top, fuel, stp, locals, module, interp, instr.end);
+    }
 }
 
 pub const Locals = packed struct(usize) {

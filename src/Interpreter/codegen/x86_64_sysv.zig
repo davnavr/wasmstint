@@ -1,6 +1,8 @@
 //! Generates an assembly `.s` file and a `.zig` file containing `extern fn` definitions
 //! to individual opcode handlers.
 
+const stack_space_padding = 8;
+
 pub fn main() !void {
     var io_impl = std.Io.Threaded.init_single_threaded;
     const io = io_impl.ioBasic();
@@ -56,22 +58,46 @@ pub fn main() !void {
     );
 
     {
+        // TODO: Could detect if build script uses LLVM backend, meaning RegCall calling
+        // convention could be used instead of System V
         try ctx.asm_out.print(
             \\
             \\.global "{[prefix]s}{[name]s}"
-            \\.align 16
-            \\"{[prefix]s}{[name]s}":
+            \\.align 64
+            \\"{[prefix]s}{[name]s}": # System V calling convention
+            \\
+        , .{ .prefix = ctx.name_prefix, .name = "opcodeHandlerTrampoline" });
+        try ctx.asm_out.writeAll(
             \\    push rbp
             \\    mov rbp, rsp
-            \\    lea {[dispatch]t}, "{[prefix]s}byte_dispatch_table"
-            \\    jmp r11
-            \\    ud2
+            \\    # System V calling convention callee-saved registers
+            \\
+        );
+        for (Reg64.system_v_saved_registers) |save| {
+            try ctx.asm_out.print(
+                \\    push {t}
+                \\
+            , .{save});
+        }
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    sub rsp, {[stack_space_padding]d}
+            \\    # Move parameters to correct registers
+            \\    mov {[ip]t}, qword ptr [rbp + 16]
+            \\    mov {[stp]t}, qword ptr [rbp + 24]
+            \\    mov {[eip]t}, qword ptr [rbp + 32]
             \\
         , .{
-            .prefix = ctx.name_prefix,
-            .name = "opcodeHandlerTrampoline",
-            .dispatch = Reg64.disp,
-        });
+            .stack_space_padding = stack_space_padding,
+            .ip = Reg64.vip,
+            .stp = Reg64.stp,
+            .eip = Reg64.eip,
+        }));
+        try ctx.asm_out.print(
+            \\    lea {[dispatch]t}, "{[prefix]s}byte_dispatch_table"
+            \\    jmp qword ptr [rbp + 40]
+            \\    ud2
+            \\
+        , .{ .prefix = ctx.name_prefix, .dispatch = Reg64.disp });
     }
     {
         try ctx.asm_out.print(
@@ -114,10 +140,6 @@ pub fn main() !void {
             \\    mov rcx, {[stp]t} # 4th argument
             \\    mov r8, {[interp]t} # 5th argument
             \\    # Perform a tail call
-            \\    mov rsp, rbp
-            \\    pop rbp
-            \\    jmp "{[prefix]s}interruptOutOfFuel"
-            \\    ud2
             \\
         , .{
             .prefix = ctx.name_prefix,
@@ -128,6 +150,15 @@ pub fn main() !void {
             .stp = Reg64.stp,
             .interp = Reg64.interp,
         });
+        // This will make the called function restore the registers
+        try ctx.popSystemVSavedRegisters();
+        try ctx.asm_out.print(
+            \\    mov rsp, rbp
+            \\    pop rbp
+            \\    jmp "{[prefix]s}interruptOutOfFuel"
+            \\    ud2
+            \\
+        , .{ .prefix = ctx.name_prefix });
     }
 
     try ctx.zig_out.writeAll(
@@ -154,6 +185,23 @@ fn defineOpcodeHandlers(ctx: *Context) !void {
         try ctx.defineOpcodeHandler("nop", .@"16");
         try ctx.jmpToNextHandler(.r11);
     }
+
+    // {
+    //     try ctx.defineOpcodeHandler("end", .@"64");
+    //     const return_path = Context.Label.init(ctx, "return", "from-wasm");
+    //     try ctx.asm_out.print(
+    //         \\    test {[vip]t}, {[eip]t}
+    //         \\    jz {[return]f}
+    //         \\
+    //     , .{ .vip = Reg64.vip, .eip = Reg64.eip });
+    //     try ctx.jmpToNextHandler(.r13);
+    //     try ctx.asm_out.print(
+    //         \\    {[label]f}:
+    //         \\    # TODO: Call to Zig
+    //         \\    ud2
+    //         \\
+    //     , .{ .label = return_path });
+    // }
 
     {
         try ctx.defineOpcodeHandler("local.get", .@"64");
@@ -211,6 +259,9 @@ const Reg64 = enum {
     const eip = Reg64.r10;
 
     const disp = Reg64.r12;
+
+    /// Specifies the order the registers are `push`ed onto the stack.
+    const system_v_saved_registers = [5]Reg64{ .r15, .r14, .r13, .r12, .rbx };
 };
 const Reg32 = enum {
     eax,
@@ -261,6 +312,17 @@ const Context = struct {
     scratch: *ArenaAllocator,
     asm_out: *Writer,
     zig_out: *Writer,
+
+    fn popSystemVSavedRegisters(ctx: *Context) !void {
+        try ctx.asm_out.writeAll("    # Restore System V saved registers\n");
+        const restore_count = Reg64.system_v_saved_registers.len;
+        for (0..restore_count) |i| {
+            try ctx.asm_out.print(
+                "    pop {t}\n",
+                .{Reg64.system_v_saved_registers[restore_count - 1 - i]},
+            );
+        }
+    }
 
     fn concat(ctx: *Context, strings: []const []const u8) ![]const u8 {
         return try std.mem.concat(ctx.scratch.allocator(), u8, strings);
