@@ -138,10 +138,23 @@ pub fn main() !void {
         \\    return struct {
     );
 
+    try defineOpcodeHandlers(&ctx);
+
+    try ctx.zig_out.writeAll(
+        \\    };
+        \\}
+        \\
+    );
+    try ctx.asm_out.flush();
+    try ctx.zig_out.flush();
+}
+
+fn defineOpcodeHandlers(ctx: *Context) !void {
     {
         try ctx.defineOpcodeHandler("nop", .@"16");
         try ctx.jmpToNextHandler(.r11);
     }
+
     {
         try ctx.defineOpcodeHandler("local.get", .@"64");
         const idx_decode = try ctx.decodeUlebIdx(.r13, .r14, .r15, "idx");
@@ -154,17 +167,21 @@ pub fn main() !void {
         , .{ .locals = Reg64.locals, .vsp = Reg64.vsp }));
         // TODO: Actually copy local to top of stack
         try ctx.jmpToNextHandler(.r11);
-        try idx_decode.writeSlowPath(&ctx);
+        try idx_decode.writeSlowPath(ctx);
     }
 
-    try ctx.zig_out.writeAll(
-        \\    };
-        \\}
-        \\
-    );
-    try ctx.asm_out.flush();
-    try ctx.zig_out.flush();
+    {
+        try ctx.defineOpcodeHandler("i32.add", .@"64");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    mov r13d, dword ptr [{[vsp]t} - 16]
+            \\    add dword ptr [{[vsp]t} - 32], r13d 
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{ .vsp = Reg64.vsp }));
+        try ctx.jmpToNextHandler(.r11);
+    }
 }
+
 const Reg64 = enum {
     rax,
     rcx,
