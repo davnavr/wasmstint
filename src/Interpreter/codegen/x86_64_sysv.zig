@@ -241,6 +241,27 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         , .{ .vsp = Reg64.vsp }));
         try ctx.jmpToNextHandler(.r11);
     }
+    {
+        try ctx.defineOpcodeHandler("i32.sub", .@"64");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    mov r13d, dword ptr [{[vsp]t} - 16]
+            \\    sub dword ptr [{[vsp]t} - 32], r13d 
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{ .vsp = Reg64.vsp }));
+        try ctx.jmpToNextHandler(.r11);
+    }
+    {
+        try ctx.defineOpcodeHandler("i32.mul", .@"64");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    mov r13d, dword ptr [{[vsp]t} - 16]
+            \\    imul r13d, dword ptr [{[vsp]t} - 32]
+            \\    mov dword ptr [{[vsp]t} - 32], r13d
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{ .vsp = Reg64.vsp }));
+        try ctx.jmpToNextHandler(.r11);
+    }
 }
 
 const Reg64 = enum {
