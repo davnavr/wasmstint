@@ -215,6 +215,7 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
             \\    ud2
             \\
         , .{ .prefix = ctx.name_prefix });
+        ctx.skip_oof_handler -= 1;
     }
 
     {
@@ -262,83 +263,33 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         , .{ .vsp = Reg64.vsp }));
         try ctx.jmpToNextHandler(.r11);
     }
-    {
-        // TODO: This is basically an `i32.rem_s` implementation, except that `edx` stores remainder
-        try ctx.defineOpcodeHandler("i32.div_s", .@"64");
-        const division_by_zero = try Context.Label.init(ctx, "division-by-zero");
-        const overflow = try Context.Label.init(ctx, "overflow");
-        // Integer division on X86-64 only works with 'eax' as the dividend
-        try ctx.asm_out.print(
-            \\    mov r14, {[vip]t}
-            \\    mov r15, {[module]t}
-            \\    mov r13d, dword ptr [{[vsp]t} - 16] # divisor aka denominator
-            \\    mov eax, dword ptr [{[vsp]t} - 32] # dividend aka numerator
-            \\    test r13d, r13d # check for division by zero
-            \\    jz {[trap_zero]f}
-            \\    mov edx, eax
-            \\    xor edx, r13d # overflow check (0x8000_0000 ^ 0xFFFF_FFFF)
-            \\    xor edx, 0x7FFFFFFF
-            \\    je {[trap_overflow]f}
-            \\    cdq # clobbers edx
-            \\    idiv r13d
-            \\    mov dword ptr [{[vsp]t} - 32], eax
-            \\    sub {[vsp]t}, 16
-            \\    mov {[vip]t}, r14
-            \\    mov {[module]t}, r15
-            \\
-        , .{
-            .vip = Reg64.vip,
-            .vsp = Reg64.vsp,
-            .module = Reg64.module,
-            .trap_zero = division_by_zero,
-            .trap_overflow = overflow,
-        });
-        try ctx.jmpToNextHandler(.r11);
+    try ctx.defineI32DivRemOpcodeHandler(.signed, .div);
+    try ctx.defineI32DivRemOpcodeHandler(.unsigned, .div);
+    try ctx.defineI32DivRemOpcodeHandler(.signed, .rem);
+    try ctx.defineI32DivRemOpcodeHandler(.unsigned, .rem);
 
-        // TODO: Deduplicate division trap handlers
+    try ctx.asm_out.writeAll(".align 32\n");
+    for (@as(
+        []const []const u8,
+        &.{ Context.trap_integer_divide_by_zero, Context.trap_integer_overflow },
+    )) |name| {
         try ctx.asm_out.print(
-            \\.align 16
-            \\{[trap_zero]f}:
+            \\ # r12 is clobbered
+            \\"{[prefix]s}.jmp.{[name]s}":
             \\    mov rdi, r14 # vip
             \\    dec rdi
             \\    mov rdx, {[eip]t}
             \\    mov rcx, {[stp]t}
             \\
-        , .{
-            .eip = Reg64.eip,
-            .stp = Reg64.stp,
-            .trap_zero = division_by_zero,
-        });
+        , .{ .prefix = ctx.name_prefix, .name = name, .eip = Reg64.eip, .stp = Reg64.stp });
         try ctx.popSystemVSavedRegisters();
         try ctx.asm_out.print(
             \\    mov rsp, rbp
             \\    pop rbp
-            \\    jmp "{[prefix]s}trapIntegerDivisionByZero"
+            \\    jmp "{[prefix]s}{[name]s}"
             \\    ud2
             \\
-        , .{ .prefix = ctx.name_prefix });
-
-        try ctx.asm_out.print(
-            \\.align 16
-            \\{[trap_overflow]f}:
-            \\    mov rdi, r14 # vip
-            \\    dec rdi
-            \\    mov rdx, {[eip]t}
-            \\    mov rcx, {[stp]t}
-            \\
-        , .{
-            .eip = Reg64.eip,
-            .stp = Reg64.stp,
-            .trap_overflow = overflow,
-        });
-        try ctx.popSystemVSavedRegisters();
-        try ctx.asm_out.print(
-            \\    mov rsp, rbp
-            \\    pop rbp
-            \\    jmp "{[prefix]s}trapIntegerOverflow"
-            \\    ud2
-            \\
-        , .{ .prefix = ctx.name_prefix });
+        , .{ .prefix = ctx.name_prefix, .name = name });
     }
 }
 
@@ -375,6 +326,7 @@ const Reg64 = enum {
     /// Specifies the order the registers are `push`ed onto the stack.
     const system_v_saved_registers = [5]Reg64{ .r15, .r14, .r13, .r12, .rbx };
 };
+
 const Reg32 = enum {
     eax,
     ebx,
@@ -418,12 +370,33 @@ const TempReg = enum {
 //     xmm7,
 // };
 
+const Label = struct {
+    name: []const u8,
+
+    fn init(ctx: *Context, name: []const u8) !Label {
+        return Label{
+            .name = try ctx.concat(&.{ "\"", ctx.opcode_name, ".", name, "\"" }),
+        };
+    }
+
+    fn initWithSuffix(ctx: *Context, name: []const u8, suffix: []const u8) !Label {
+        return Label{
+            .name = try ctx.concat(&.{ "\"", ctx.opcode_name, ".", name, "-", suffix, "\"" }),
+        };
+    }
+
+    pub fn format(label: Label, writer: *Writer) Writer.Error!void {
+        try writer.writeAll(label.name);
+    }
+};
+
 const Context = struct {
     name_prefix: []const u8,
     opcode_name: []const u8 = undefined,
     scratch: *ArenaAllocator,
     asm_out: *Writer,
     zig_out: *Writer,
+    skip_oof_handler: u32 = 0,
 
     fn popSystemVSavedRegisters(ctx: *Context) !void {
         try ctx.asm_out.writeAll("    # Restore System V saved registers\n");
@@ -440,9 +413,139 @@ const Context = struct {
         return try std.mem.concat(ctx.scratch.allocator(), u8, strings);
     }
 
+    const trap_integer_divide_by_zero = "trapIntegerDivisionByZero";
+    const trap_integer_overflow = "trapIntegerOverflow";
+
+    fn defineI32DivRemOpcodeHandler(
+        ctx: *Context,
+        signedness: std.builtin.Signedness,
+        @"type": enum { div, rem },
+    ) !void {
+        var name_buf: [9]u8 = undefined;
+        try ctx.defineOpcodeHandler(
+            std.fmt.bufPrint(&name_buf, "i32.{t}_{c}", .{ @"type", switch (signedness) {
+                .unsigned => @as(u8, 'u'),
+                .signed => 's',
+            } }) catch unreachable,
+            .@"64",
+        );
+        // Integer division on X86-64 only works with 'eax' as the dividend
+        try ctx.asm_out.print(
+            \\    mov r14, {[vip]t}
+            \\    mov r15, {[module]t}
+            \\    mov r13d, dword ptr [{[vsp]t} - 16] # divisor aka denominator
+            \\    mov eax, dword ptr [{[vsp]t} - 32] # dividend aka numerator
+            \\    test r13d, r13d # check for division by zero
+            \\    jz "{[prefix]s}.jmp.{[trap_zero]s}"
+            \\
+        , .{
+            .vip = Reg64.vip,
+            .vsp = Reg64.vsp,
+            .module = Reg64.module,
+            .prefix = ctx.name_prefix,
+            .trap_zero = Context.trap_integer_divide_by_zero,
+        });
+
+        var signed_rem_overflow: Label = undefined;
+        switch (signedness) {
+            .signed => {
+                try ctx.asm_out.writeAll(
+                    \\    mov edx, eax
+                    \\    xor edx, r13d # overflow check (0x8000_0000 ^ 0xFFFF_FFFF)
+                    \\    xor edx, 0x7FFFFFFF
+                    \\
+                );
+
+                switch (@"type") {
+                    .div => try ctx.asm_out.print(
+                        \\    je "{[prefix]s}.jmp.{[trap_overflow]s}"
+                        \\
+                    , .{
+                        .prefix = ctx.name_prefix,
+                        .trap_overflow = Context.trap_integer_overflow,
+                    }),
+                    .rem => {
+                        signed_rem_overflow = try Label.init(ctx, "overflow");
+                        try ctx.asm_out.print(
+                            \\    jz {[overflow]f}
+                            \\    mov r12d, eax # clobbers dispatch table register
+                            \\
+                        , .{ .overflow = signed_rem_overflow });
+                    },
+                }
+
+                try ctx.asm_out.writeAll(
+                    \\    cdq # clobbers edx
+                    \\    idiv r13d
+                    \\
+                );
+                if (@"type" == .rem) {
+                    try ctx.asm_out.writeAll(
+                        \\    imul eax, r13d
+                        \\    sub r12d, eax
+                        \\
+                    );
+                }
+            },
+            .unsigned => try ctx.asm_out.writeAll(
+                \\    xor edx, edx
+                \\    div r13d
+                \\
+            ),
+        }
+
+        try ctx.asm_out.print(
+            \\    mov dword ptr [{[vsp]t} - 32], {[result]s}
+            \\    sub {[vsp]t}, 16
+            \\    mov {[vip]t}, r14
+            \\    mov {[module]t}, r15
+            \\
+        , .{
+            .result = switch (@"type") {
+                .div => "eax",
+                .rem => switch (signedness) {
+                    .signed => "r12d",
+                    .unsigned => "edx",
+                },
+            },
+            .vip = Reg64.vip,
+            .vsp = Reg64.vsp,
+            .module = Reg64.module,
+        });
+        if (@"type" == .rem and signedness == .signed) {
+            // Restores r12
+            try ctx.asm_out.print(
+                \\    lea {[dispatch]t}, "{[prefix]s}byte_dispatch_table"
+                \\
+            , .{ .prefix = ctx.name_prefix, .dispatch = Reg64.disp });
+            ctx.skip_oof_handler += 1;
+        }
+        try ctx.jmpToNextHandler(.r11);
+
+        if (@"type" == .rem and signedness == .signed) {
+            try ctx.asm_out.print(
+                \\.align 16
+                \\{[label]f}:
+                \\    mov dword ptr [{[vsp]t} - 32], edx
+                \\    sub {[vsp]t}, 16
+                \\    mov {[vip]t}, r14
+                \\    mov {[module]t}, r15
+                \\
+            , .{
+                .label = signed_rem_overflow,
+                .vip = Reg64.vip,
+                .vsp = Reg64.vsp,
+                .module = Reg64.module,
+            });
+            try ctx.jmpToNextHandler(.r11);
+        }
+    }
+
     fn defineOpcodeHandler(ctx: *Context, name: []const u8, align_to: std.mem.Alignment) !void {
         _ = ctx.scratch.reset(.retain_capacity);
         ctx.opcode_name = try ctx.concat(&.{ ctx.name_prefix, name });
+        std.debug.assert(ctx.skip_oof_handler == 0);
+        ctx.skip_oof_handler = 1;
         try ctx.zig_out.print(
             "        pub const @\"{s}\" = @extern(OpcodeHandler, .{{ .name = \"{s}\" }});\n",
             .{ name, ctx.opcode_name },
@@ -457,26 +560,6 @@ const Context = struct {
             .{ .name = ctx.opcode_name, .align_to = align_to.toByteUnits() },
         );
     }
-
-    const Label = struct {
-        name: []const u8,
-
-        fn init(ctx: *Context, name: []const u8) !Label {
-            return Label{
-                .name = try ctx.concat(&.{ "\"", ctx.opcode_name, ".", name, "\"" }),
-            };
-        }
-
-        fn initWithSuffix(ctx: *Context, name: []const u8, suffix: []const u8) !Label {
-            return Label{
-                .name = try ctx.concat(&.{ "\"", ctx.opcode_name, ".", name, "-", suffix, "\"" }),
-            };
-        }
-
-        pub fn format(label: Label, writer: *Writer) Writer.Error!void {
-            try writer.writeAll(label.name);
-        }
-    };
 
     const DecodeUlebIdx = struct {
         slow_path: Label,
@@ -583,12 +666,15 @@ const Context = struct {
             \\    ud2
             \\
         , .{ .ip = Reg64.vip, .temp = temp, .disp = Reg64.disp }));
-        try ctx.asm_out.print(
-            \\{[oof]f}:
-            \\    jmp "{[prefix]s}outOfFuelHandler"
-            \\    ud2
-            \\
-        , .{ .oof = out_of_fuel, .prefix = ctx.name_prefix });
+        ctx.skip_oof_handler -= 1;
+        if (ctx.skip_oof_handler == 0) {
+            try ctx.asm_out.print(
+                \\{[oof]f}:
+                \\    jmp "{[prefix]s}outOfFuelHandler"
+                \\    ud2
+                \\
+            , .{ .oof = out_of_fuel, .prefix = ctx.name_prefix });
+        }
     }
 };
 
