@@ -73,6 +73,7 @@ pub fn main() !void {
             \\    # System V calling convention callee-saved registers
             \\
         );
+        // TODO: Why not save 4 of the registers in the stack space for parameters?
         for (Reg64.system_v_saved_registers) |save| {
             try ctx.asm_out.print(
                 \\    push {t}
@@ -151,6 +152,7 @@ pub fn main() !void {
             .interp = Reg64.interp,
         });
         // This will make the called function restore the registers
+        // Seems to be no way to avoid doing this even, if a tail call doesn't occur here
         try ctx.popSystemVSavedRegisters();
         try ctx.asm_out.print(
             \\    mov rsp, rbp
@@ -169,7 +171,7 @@ pub fn main() !void {
         \\    return struct {
     );
 
-    try defineOpcodeHandlers(&ctx);
+    try defineAllOpcodeHandlers(&ctx);
 
     try ctx.zig_out.writeAll(
         \\    };
@@ -180,28 +182,40 @@ pub fn main() !void {
     try ctx.zig_out.flush();
 }
 
-fn defineOpcodeHandlers(ctx: *Context) !void {
+fn defineAllOpcodeHandlers(ctx: *Context) !void {
     {
         try ctx.defineOpcodeHandler("nop", .@"16");
         try ctx.jmpToNextHandler(.r11);
     }
 
-    // {
-    //     try ctx.defineOpcodeHandler("end", .@"64");
-    //     const return_path = Context.Label.init(ctx, "return", "from-wasm");
-    //     try ctx.asm_out.print(
-    //         \\    test {[vip]t}, {[eip]t}
-    //         \\    jz {[return]f}
-    //         \\
-    //     , .{ .vip = Reg64.vip, .eip = Reg64.eip });
-    //     try ctx.jmpToNextHandler(.r13);
-    //     try ctx.asm_out.print(
-    //         \\    {[label]f}:
-    //         \\    # TODO: Call to Zig
-    //         \\    ud2
-    //         \\
-    //     , .{ .label = return_path });
-    // }
+    {
+        try ctx.defineOpcodeHandler("end", .@"32");
+        // Could detect ReleaseSafe/ReleaseFast, and inline the call to `return` opcode handler
+        try ctx.asm_out.print(
+            \\    # Note that IP + 1 == EIP would indicate end of function
+            \\    cmp {[vip]t}, {[eip]t}
+            \\    ja "{[prefix]s}return" # Slow path is returning from the function
+            \\
+        , .{ .vip = Reg64.vip, .eip = Reg64.eip, .prefix = ctx.name_prefix });
+        try ctx.jmpToNextHandler(.r13);
+    }
+
+    {
+        try ctx.defineOpcodeHandler("return", .@"32");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    # No need to save every register, since this is returning
+            \\    mov rdi, {[eip]t} # Most parameters are already in the correct place
+            \\
+        , .{ .eip = Reg64.eip }));
+        try ctx.popSystemVSavedRegisters();
+        try ctx.asm_out.print(
+            \\    mov rsp, rbp
+            \\    pop rbp
+            \\    jmp "{[prefix]s}returnFromWasm"
+            \\    ud2
+            \\
+        , .{ .prefix = ctx.name_prefix });
+    }
 
     {
         try ctx.defineOpcodeHandler("local.get", .@"64");
@@ -213,7 +227,6 @@ fn defineOpcodeHandlers(ctx: *Context) !void {
             \\    add {[vsp]t}, 16
             \\
         , .{ .locals = Reg64.locals, .vsp = Reg64.vsp }));
-        // TODO: Actually copy local to top of stack
         try ctx.jmpToNextHandler(.r11);
         try idx_decode.writeSlowPath(ctx);
     }
@@ -237,8 +250,8 @@ const Reg64 = enum {
     rbx,
     rsi,
     rdi,
-    rsp,
-    rbp,
+    // rsp,
+    // rbp,
     r8,
     r9,
     r10,
@@ -349,7 +362,13 @@ const Context = struct {
     const Label = struct {
         name: []const u8,
 
-        fn init(ctx: *Context, name: []const u8, suffix: []const u8) !Label {
+        fn init(ctx: *Context, name: []const u8) !Label {
+            return Label{
+                .name = try ctx.concat(&.{ "\"", ctx.opcode_name, ".", name, "\"" }),
+            };
+        }
+
+        fn initWithSuffix(ctx: *Context, name: []const u8, suffix: []const u8) !Label {
             return Label{
                 .name = try ctx.concat(&.{ "\"", ctx.opcode_name, ".", name, "-", suffix, "\"" }),
             };
@@ -427,8 +446,8 @@ const Context = struct {
         clobber_1: TempReg,
         name: []const u8,
     ) !DecodeUlebIdx {
-        const fast_path = try Label.init(ctx, name, "fast");
-        const slow_path = try Label.init(ctx, name, "slow");
+        const fast_path = try Label.initWithSuffix(ctx, name, "fast");
+        const slow_path = try Label.initWithSuffix(ctx, name, "slow");
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
             \\    movzx {[temp]t}, byte ptr [{[ip]t}]
             \\    inc {[ip]t}
@@ -450,7 +469,7 @@ const Context = struct {
         // TODO: Store fuel directly instead of via pointer, include fuel in return value
         // ^ needs Zig to support multiple results in inline assembly, or making a RegCall/SysV
         // compliant ASM function that returns in two registers
-        const out_of_fuel = try Label.init(ctx, "out", "of-fuel");
+        const out_of_fuel = try Label.init(ctx, "out-of-fuel");
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
             \\    movzx {[temp]t}, byte ptr [{[ip]t}] # Start reading next opcode byte
             \\    sub qword ptr [{[fuel]t}], 1 # Fuel check

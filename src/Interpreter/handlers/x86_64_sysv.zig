@@ -24,7 +24,7 @@ pub const OpcodeHandler = fn () callconv(.naked) Transition;
 
 // Some functions are implemented in Zig, so this provides a stable calling convention that the
 // inline assembly can use.
-const sysv_cc = std.builtin.CallingConvention{ .x86_64_sysv = .{} };
+const sysvcc = std.builtin.CallingConvention{ .x86_64_sysv = .{} };
 
 /// Sets up a stack frame for the assembly opcode handler, before invoking it.
 ///
@@ -45,7 +45,7 @@ pub const opcodeHandlerTrampoline = @extern(
         stp: Stp, // `rbp + 24`
         eip: Eip, // `rbp + 32`
         handler: *const OpcodeHandler, // `rbp + 40`
-    ) callconv(sysv_cc) Transition,
+    ) callconv(sysvcc) Transition,
     .{ .name = generated.symbol_prefix ++ "opcodeHandlerTrampoline" },
 );
 
@@ -54,7 +54,7 @@ const invalidByteOpcode = @extern(
     .{ .name = generated.symbol_prefix ++ "invalidByteOpcode" },
 );
 
-fn panicInvalidByteOpcode(ip: Ip, eip: Eip) callconv(sysv_cc) noreturn {
+fn panicInvalidByteOpcode(ip: Ip, eip: Eip) callconv(sysvcc) noreturn {
     @branchHint(.cold);
     const bad_ip = ip - 1;
     const bad_opcode: u8 = bad_ip[0];
@@ -92,7 +92,7 @@ fn interruptOutOfFuel(
     sp: Sp,
     stp: Stp,
     interp: *Interpreter,
-) align(16) callconv(sysv_cc) Transition {
+) align(16) callconv(sysvcc) Transition {
     return Transition.interrupted(.init(ip, eip), sp, stp, interp, .out_of_fuel);
 }
 
@@ -101,6 +101,105 @@ comptime {
 }
 
 // TODO TODO: Don't forget to ensure layout of SideTableEntry is fine on .Debug mode
+
+/// Parameters are arranged such that some registers already contain the correct value.
+fn returnFromWasm(
+    old_eip: Eip, // r10 -> rdi (only used in debug mode)
+    old_sp: Sp, // stays in rsi
+    old_module: runtime.ModuleInst, // stays in rdx (only used in debug mode)
+    fuel: *Interpreter.Fuel, // stays in rcx
+    _: usize, // r8 (unused)
+    interp: *Interpreter, // stays in r9
+    // Stack space for parameters, same as in `opcodeHandlerTrampoline`
+    _: usize,
+    _: usize,
+    _: usize,
+    _: usize,
+) callconv(sysvcc) Transition {
+    const popped = interp.stack.popFrame(old_sp, .from_stack_top);
+    if (builtin.mode == .Debug) {
+        std.debug.assert( // module mismatch
+            @intFromPtr(popped.info.callee.expanded().wasm.module.inner) ==
+                @intFromPtr(old_module.inner),
+        );
+        const expected_eip = @intFromPtr(popped.info.wasm.eip);
+        const actual_eip = @intFromPtr(old_eip);
+        if (expected_eip != actual_eip) {
+            std.debug.panic("expected EIP={X}, got {X}", .{ expected_eip, actual_eip });
+        }
+    }
+
+    return_to_host: {
+        if (interp.stack.call_depth == 0) {
+            break :return_to_host;
+        }
+
+        const frame = interp.stack.frameAt(interp.stack.current_frame).?;
+        switch (frame.function.expanded()) {
+            .wasm => |wasm| {
+                var instr = Instr.init(frame.wasm.ip, frame.wasm.eip);
+                const new_locals = common.Locals{ .ptr = frame.localValues(&interp.stack).ptr };
+                const handler = instr.readNextOpcodeHandler(fuel, new_locals, wasm.module, interp);
+                const mems = wasm.module.header().mems;
+                return if (builtin.zig_backend == .stage2_x86_64)
+                    // Zig self-hosted backend does not yet support tail calls
+                    asm (
+                    // Perform the tail call after moving parameters to the correct places
+                    //
+                    // This can call the handler directly
+                    //
+                    // Writes to `rsp` mean the "stack engine" is not happy, but self-hosted
+                    // backend is currently only used in `Debug` builds anyway.
+                        \\movq %%rbp, %%rsp
+                        \\popq %%rbp
+                        \\jmp *%[handler]
+                        \\ud2
+                        \\
+                        : [ret] "={rax}" (-> Transition),
+                        : [handler] "{r11}" (handler),
+                          [ip] "{rax}" (@as(common.Ip, instr.next)),
+                          [stp] "{rbx}" (@as(common.Stp, frame.wasm.stp)),
+                          [fuel] "{rcx}" (@as(*Interpreter.Fuel, fuel)),
+                          [module] "{rdx}" (@as(runtime.ModuleInst, wasm.module)),
+                          [sp] "{rsi}" (@as(Sp, popped.top)),
+                          [locals] "{rdi}" (new_locals),
+                          [mems] "{r8}" (mems),
+                          [interp] "{r9}" (interp),
+                          [eip] "{r10}" (instr.end),
+                          [disp] "{r12}" (&byte_dispatch_table),
+                    )
+                else
+                    @call(.always_tail, opcodeHandlerTrampoline, .{
+                        new_locals,
+                        popped.top,
+                        wasm.module,
+                        fuel,
+                        mems,
+                        interp,
+                        instr.next,
+                        frame.wasm.stp,
+                        instr.end,
+                        handler,
+                    });
+            },
+            .host => break :return_to_host,
+        }
+
+        comptime unreachable;
+    }
+
+    return Transition.awaitingHost(
+        popped.top,
+        interp,
+        popped.signature,
+        .returning_to_host,
+        .wrote_ip_and_stp_to_the_current_stack_frame, // no need to save, since this returns to host
+    );
+}
+
+comptime {
+    @export(&returnFromWasm, .{ .name = generated.symbol_prefix ++ "returnFromWasm" });
+}
 
 const generated = @import("x86_64_sysv");
 
@@ -121,6 +220,8 @@ const opcodes = @import("../../opcodes.zig");
 
 const Interpreter = @import("../../Interpreter.zig");
 const runtime = @import("../../runtime.zig");
+
+const Instr = @import("../Instr.zig");
 
 const common = @import("../handlers.zig");
 const Transition = common.Transition;
