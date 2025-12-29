@@ -262,6 +262,84 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         , .{ .vsp = Reg64.vsp }));
         try ctx.jmpToNextHandler(.r11);
     }
+    {
+        // TODO: This is basically an `i32.rem_s` implementation, except that `edx` stores remainder
+        try ctx.defineOpcodeHandler("i32.div_s", .@"64");
+        const division_by_zero = try Context.Label.init(ctx, "division-by-zero");
+        const overflow = try Context.Label.init(ctx, "overflow");
+        // Integer division on X86-64 only works with 'eax' as the dividend
+        try ctx.asm_out.print(
+            \\    mov r14, {[vip]t}
+            \\    mov r15, {[module]t}
+            \\    mov r13d, dword ptr [{[vsp]t} - 16] # divisor aka denominator
+            \\    mov eax, dword ptr [{[vsp]t} - 32] # dividend aka numerator
+            \\    test r13d, r13d # check for division by zero
+            \\    jz {[trap_zero]f}
+            \\    mov edx, eax
+            \\    xor edx, r13d # overflow check (0x8000_0000 ^ 0xFFFF_FFFF)
+            \\    xor edx, 0x7FFFFFFF
+            \\    je {[trap_overflow]f}
+            \\    cdq # clobbers edx
+            \\    idiv r13d
+            \\    mov dword ptr [{[vsp]t} - 32], eax
+            \\    sub {[vsp]t}, 16
+            \\    mov {[vip]t}, r14
+            \\    mov {[module]t}, r15
+            \\
+        , .{
+            .vip = Reg64.vip,
+            .vsp = Reg64.vsp,
+            .module = Reg64.module,
+            .trap_zero = division_by_zero,
+            .trap_overflow = overflow,
+        });
+        try ctx.jmpToNextHandler(.r11);
+
+        // TODO: Deduplicate division trap handlers
+        try ctx.asm_out.print(
+            \\.align 16
+            \\{[trap_zero]f}:
+            \\    mov rdi, r14 # vip
+            \\    dec rdi
+            \\    mov rdx, {[eip]t}
+            \\    mov rcx, {[stp]t}
+            \\
+        , .{
+            .eip = Reg64.eip,
+            .stp = Reg64.stp,
+            .trap_zero = division_by_zero,
+        });
+        try ctx.popSystemVSavedRegisters();
+        try ctx.asm_out.print(
+            \\    mov rsp, rbp
+            \\    pop rbp
+            \\    jmp "{[prefix]s}trapIntegerDivisionByZero"
+            \\    ud2
+            \\
+        , .{ .prefix = ctx.name_prefix });
+
+        try ctx.asm_out.print(
+            \\.align 16
+            \\{[trap_overflow]f}:
+            \\    mov rdi, r14 # vip
+            \\    dec rdi
+            \\    mov rdx, {[eip]t}
+            \\    mov rcx, {[stp]t}
+            \\
+        , .{
+            .eip = Reg64.eip,
+            .stp = Reg64.stp,
+            .trap_overflow = overflow,
+        });
+        try ctx.popSystemVSavedRegisters();
+        try ctx.asm_out.print(
+            \\    mov rsp, rbp
+            \\    pop rbp
+            \\    jmp "{[prefix]s}trapIntegerOverflow"
+            \\    ud2
+            \\
+        , .{ .prefix = ctx.name_prefix });
+    }
 }
 
 const Reg64 = enum {

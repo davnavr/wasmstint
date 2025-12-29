@@ -211,6 +211,25 @@ pub const Transition = packed struct(u32) {
         wrote_ip_and_stp_to_the_current_stack_frame,
     };
 
+    pub fn trapAt(
+        trap_ip: Ip,
+        eip: Eip,
+        sp: Sp,
+        stp: Stp,
+        interp: *Interpreter,
+        info: Trap,
+    ) Transition {
+        @branchHint(.unlikely);
+        interp.stack_top = sp;
+        const current_frame = interp.stack.frameAt(interp.stack.current_frame).?;
+        return transition(
+            interp,
+            // Host might want to observe IP of trapping instruction
+            updateWasmFrameState(current_frame, Instr.init(trap_ip, eip), stp),
+            .{ .trapped = .{ .source = .function_call, .trap = info } },
+        );
+    }
+
     pub fn trap(
         base_ip: Ip,
         comptime opcode_prefix: OpcodePrefix,
@@ -221,15 +240,7 @@ pub const Transition = packed struct(u32) {
         info: Trap,
     ) Transition {
         @branchHint(.unlikely);
-        const trap_ip = calculateTrapIp(base_ip, opcode_prefix);
-        interp.stack_top = sp;
-        const current_frame = interp.stack.frameAt(interp.stack.current_frame).?;
-        return transition(
-            interp,
-            // Host might want to observe IP of trapping instruction
-            updateWasmFrameState(current_frame, Instr.init(trap_ip, eip), stp),
-            .{ .trapped = .{ .source = .function_call, .trap = info } },
-        );
+        return trapAt(calculateTrapIp(base_ip, opcode_prefix), eip, sp, stp, interp, info);
     }
 
     pub fn interrupted(

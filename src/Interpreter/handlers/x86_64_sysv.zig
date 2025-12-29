@@ -201,6 +201,42 @@ comptime {
     @export(&returnFromWasm, .{ .name = generated.symbol_prefix ++ "returnFromWasm" });
 }
 
+fn trapIntegerDivisionByZero(
+    trap_ip: Ip, // rdi
+    sp: Sp, // stays in rsi
+    eip: Eip, // r10 -> rdx
+    stp: Stp, // rbx -> rcx
+    _: usize, // r8 (unused)
+    interp: *Interpreter, // stays in r9
+) callconv(sysvcc) Transition {
+    return Transition.trapAt(trap_ip, eip, sp, stp, interp, .init(.integer_division_by_zero, {}));
+}
+
+comptime {
+    @export(
+        &trapIntegerDivisionByZero,
+        .{ .name = generated.symbol_prefix ++ "trapIntegerDivisionByZero" },
+    );
+}
+
+fn trapIntegerOverflow(
+    trap_ip: Ip, // rdi
+    sp: Sp, // stays in rsi
+    eip: Eip, // r10 -> rdx
+    stp: Stp, // rbx -> rcx
+    _: usize, // r8 (unused)
+    interp: *Interpreter, // stays in r9
+) callconv(sysvcc) Transition {
+    return Transition.trapAt(trap_ip, eip, sp, stp, interp, .init(.integer_overflow, {}));
+}
+
+comptime {
+    @export(
+        &trapIntegerOverflow,
+        .{ .name = generated.symbol_prefix ++ "trapIntegerOverflow" },
+    );
+}
+
 const generated = @import("x86_64_sysv");
 
 pub const byte_dispatch_table align(64) = common.dispatchTable(
