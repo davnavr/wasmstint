@@ -233,6 +233,7 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
     }
 
     try ctx.defineIntegerOpcodeHandlers(.i32);
+    try ctx.defineIntegerOpcodeHandlers(.i64);
 
     // Write handlers for traps
     try ctx.asm_out.writeAll(".align 32\n");
@@ -559,7 +560,7 @@ const Context = struct {
             try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
             try ctx.asm_out.print(
                 \\    mov {[r13]s}, {[size]s} ptr [{[vsp]t} - 16]
-                \\    mov {[r14]s}, dword ptr [{[vsp]t} - 32]
+                \\    mov {[r14]s}, {[size]s} ptr [{[vsp]t} - 32]
                 \\    xor r15d, r15d
                 \\    cmp {[r14]s}, {[r13]s}
                 \\    {[set_instr]s} r15b
@@ -831,6 +832,16 @@ const Context = struct {
                 \\    mov {[dst_size]s} ptr [{[vsp]t} - 16], {[r13]s}
                 \\
             , .{ .r13 = r13, .src_size = info[1], .dst_size = size, .vsp = Reg64.vsp });
+            try ctx.jmpToNextHandler(.r11);
+        }
+
+        if (int_type == .i64) {
+            try ctx.defineOpcodeHandler("i64.extend32_s", .@"32");
+            try ctx.asm_out.print(
+                \\    movsxd r13, dword ptr [{[vsp]t} - 16]
+                \\    mov qword ptr [{[vsp]t} - 16], r13
+                \\
+            , .{ .vsp = Reg64.vsp });
             try ctx.jmpToNextHandler(.r11);
         }
     }
