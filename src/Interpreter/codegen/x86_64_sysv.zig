@@ -312,6 +312,19 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try ctx.jmpToNextHandler(.r11);
     }
 
+    for (
+        @as([]const []const u8, &.{ "i32.extend8_s", "i32.extend16_s" }),
+        @as([]const []const u8, &.{ "byte", "word" }),
+    ) |opcode_name, size| {
+        try ctx.defineOpcodeHandler(opcode_name, .@"32");
+        try ctx.asm_out.print(
+            \\    movsx r13d, {[size]s} ptr [{[vsp]t} - 16]
+            \\    mov dword ptr [{[vsp]t} - 16], r13d
+            \\
+        , .{ .size = size, .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
     // Write handlers for traps
     try ctx.asm_out.writeAll(".align 32\n");
     for (@as(
