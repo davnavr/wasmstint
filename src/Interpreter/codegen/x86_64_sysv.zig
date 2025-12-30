@@ -232,9 +232,48 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try idx_decode.writeSlowPath(ctx);
     }
 
+    {
+        try ctx.defineOpcodeHandler("i32.eqz", .@"64");
+        try ctx.asm_out.print(
+            \\    mov r13d, dword ptr [{[vsp]t} - 16]
+            \\    xor r14d, r14d
+            \\    test r13d, r13d
+            \\    setz r14b
+            \\    mov dword ptr [{[vsp]t} - 16], r14d
+            \\
+        , .{ .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
+    for (&[_][2][]const u8{
+        .{ "i32.eq", "sete" },
+        .{ "i32.ne", "setne" },
+        .{ "i32.lt_s", "setl" },
+        .{ "i32.lt_u", "setb" },
+        .{ "i32.gt_s", "setg" },
+        .{ "i32.gt_u", "seta" },
+        .{ "i32.le_s", "setle" },
+        .{ "i32.le_u", "setbe" },
+        .{ "i32.ge_s", "setge" },
+        .{ "i32.ge_u", "setae" },
+    }) |info| {
+        try ctx.defineOpcodeHandler(info[0], .@"64");
+        try ctx.asm_out.print(
+            \\    mov r13d, dword ptr [{[vsp]t} - 16]
+            \\    mov r14d, dword ptr [{[vsp]t} - 32]
+            \\    xor r15d, r15d
+            \\    cmp r14d, r13d
+            \\    {[set_instr]s} r15b
+            \\    mov dword ptr [{[vsp]t} - 32], r15d
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{ .vsp = Reg64.vsp, .set_instr = info[1] });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
     for (
-        @as([]const []const u8, &.{ "i32.clz", "i32.ctz", "i32.popcnt" }),
-        @as([]const []const u8, &.{ "lzcnt", "tzcnt", "popcnt" }),
+        &[3][]const u8{ "i32.clz", "i32.ctz", "i32.popcnt" },
+        &[3][]const u8{ "lzcnt", "tzcnt", "popcnt" },
     ) |opcode_name, instr| {
         try ctx.defineOpcodeHandler(opcode_name, .@"64");
         try ctx.asm_out.print(
