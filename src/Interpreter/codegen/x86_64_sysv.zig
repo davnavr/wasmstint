@@ -267,6 +267,97 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
     try ctx.defineI32DivRemOpcodeHandler(.unsigned, .div);
     try ctx.defineI32DivRemOpcodeHandler(.signed, .rem);
     try ctx.defineI32DivRemOpcodeHandler(.unsigned, .rem);
+    {
+        try ctx.defineOpcodeHandler("i32.and", .@"64");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    mov r13d, dword ptr [{[vsp]t} - 16]
+            \\    and dword ptr [{[vsp]t} - 32], r13d 
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{ .vsp = Reg64.vsp }));
+        try ctx.jmpToNextHandler(.r11);
+    }
+    {
+        try ctx.defineOpcodeHandler("i32.or", .@"64");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    mov r13d, dword ptr [{[vsp]t} - 16]
+            \\    or dword ptr [{[vsp]t} - 32], r13d 
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{ .vsp = Reg64.vsp }));
+        try ctx.jmpToNextHandler(.r11);
+    }
+    {
+        try ctx.defineOpcodeHandler("i32.xor", .@"64");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    mov r13d, dword ptr [{[vsp]t} - 16]
+            \\    xor dword ptr [{[vsp]t} - 32], r13d 
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{ .vsp = Reg64.vsp }));
+        try ctx.jmpToNextHandler(.r11);
+    }
+    // Shift/Rotate instructions clobber fuel register (rcx)
+    {
+        try ctx.defineOpcodeHandler("i32.shl", .@"64");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    mov r13, {[fuel]t}
+            \\    mov ecx, dword ptr [{[vsp]t} - 16]
+            \\    shl dword ptr [{[vsp]t} - 32], cl
+            \\    sub {[vsp]t}, 16
+            \\    mov {[fuel]t}, r13
+            \\
+        , .{ .fuel = Reg64.fuel, .vsp = Reg64.vsp }));
+        try ctx.jmpToNextHandler(.r11);
+    }
+    {
+        try ctx.defineOpcodeHandler("i32.shr_s", .@"64");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    mov r13, {[fuel]t}
+            \\    mov ecx, dword ptr [{[vsp]t} - 16]
+            \\    sar dword ptr [{[vsp]t} - 32], cl
+            \\    sub {[vsp]t}, 16
+            \\    mov {[fuel]t}, r13
+            \\
+        , .{ .fuel = Reg64.fuel, .vsp = Reg64.vsp }));
+        try ctx.jmpToNextHandler(.r11);
+    }
+    {
+        try ctx.defineOpcodeHandler("i32.shr_u", .@"64");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    mov r13, {[fuel]t}
+            \\    mov ecx, dword ptr [{[vsp]t} - 16]
+            \\    shr dword ptr [{[vsp]t} - 32], cl
+            \\    sub {[vsp]t}, 16
+            \\    mov {[fuel]t}, r13
+            \\
+        , .{ .fuel = Reg64.fuel, .vsp = Reg64.vsp }));
+        try ctx.jmpToNextHandler(.r11);
+    }
+    {
+        try ctx.defineOpcodeHandler("i32.rotl", .@"64");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    mov r13, {[fuel]t}
+            \\    mov ecx, dword ptr [{[vsp]t} - 16]
+            \\    rol dword ptr [{[vsp]t} - 32], cl
+            \\    sub {[vsp]t}, 16
+            \\    mov {[fuel]t}, r13
+            \\
+        , .{ .fuel = Reg64.fuel, .vsp = Reg64.vsp }));
+        try ctx.jmpToNextHandler(.r11);
+    }
+    {
+        try ctx.defineOpcodeHandler("i32.rotr", .@"64");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    mov r13, {[fuel]t}
+            \\    mov ecx, dword ptr [{[vsp]t} - 16]
+            \\    ror dword ptr [{[vsp]t} - 32], cl
+            \\    sub {[vsp]t}, 16
+            \\    mov {[fuel]t}, r13
+            \\
+        , .{ .fuel = Reg64.fuel, .vsp = Reg64.vsp }));
+        try ctx.jmpToNextHandler(.r11);
+    }
 
     try ctx.asm_out.writeAll(".align 32\n");
     for (@as(
