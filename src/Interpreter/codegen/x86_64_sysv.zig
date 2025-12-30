@@ -271,16 +271,17 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try ctx.jmpToNextHandler(.r11);
     }
 
-    for (
-        &[3][]const u8{ "i32.clz", "i32.ctz", "i32.popcnt" },
-        &[3][]const u8{ "lzcnt", "tzcnt", "popcnt" },
-    ) |opcode_name, instr| {
-        try ctx.defineOpcodeHandler(opcode_name, .@"64");
+    for (&[_][2][]const u8{
+        .{ "i32.clz", "lzcnt" },
+        .{ "i32.ctz", "tzcnt" },
+        .{ "i32.popcnt", "popcnt" },
+    }) |info| {
+        try ctx.defineOpcodeHandler(info[0], .@"64");
         try ctx.asm_out.print(
             \\    {[instr]s} r13d, dword ptr [{[vsp]t} - 16]
             \\    mov dword ptr [{[vsp]t} - 16], r13d
             \\
-        , .{ .instr = instr, .vsp = Reg64.vsp });
+        , .{ .instr = info[1], .vsp = Reg64.vsp });
         try ctx.jmpToNextHandler(.r11);
     }
 
@@ -320,26 +321,26 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
     try ctx.defineI32DivRemOpcodeHandler(.signed, .rem);
     try ctx.defineI32DivRemOpcodeHandler(.unsigned, .rem);
 
-    for (
-        @as([]const []const u8, &.{ "i32.and", "i32.or", "i32.xor" }),
-        @as([]const []const u8, &.{ "and", "or", "xor" }),
-    ) |opcode_name, instr| {
-        try ctx.defineOpcodeHandler(opcode_name, .@"64");
+    for (&[_][]const u8{ "i32.and", "i32.or", "i32.xor" }) |name| {
+        try ctx.defineOpcodeHandler(name, .@"64");
         try ctx.asm_out.print(
             \\    mov r13d, dword ptr [{[vsp]t} - 16]
             \\    {[instr]s} dword ptr [{[vsp]t} - 32], r13d 
             \\    sub {[vsp]t}, 16
             \\
-        , .{ .vsp = Reg64.vsp, .instr = instr });
+        , .{ .vsp = Reg64.vsp, .instr = name[4..] });
         try ctx.jmpToNextHandler(.r11);
     }
 
     // Shift/Rotate instructions clobber fuel register (rcx)
-    for (
-        @as([]const []const u8, &.{ "i32.shl", "i32.shr_s", "i32.shr_u", "i32.rotl", "i32.rotr" }),
-        @as([]const []const u8, &.{ "shl", "sar", "shr", "rol", "ror" }),
-    ) |opcode_name, instr| {
-        try ctx.defineOpcodeHandler(opcode_name, .@"64");
+    for (&[_][2][]const u8{
+        .{ "i32.shl", "shl" },
+        .{ "i32.shr_s", "sar" },
+        .{ "i32.shr_u", "shr" },
+        .{ "i32.rotl", "rol" },
+        .{ "i32.rotr", "ror" },
+    }) |info| {
+        try ctx.defineOpcodeHandler(info[0], .@"64");
         try ctx.asm_out.print(
             \\    mov r13, {[fuel]t}
             \\    mov ecx, dword ptr [{[vsp]t} - 16]
@@ -347,29 +348,29 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
             \\    sub {[vsp]t}, 16
             \\    mov {[fuel]t}, r13
             \\
-        , .{ .instr = instr, .fuel = Reg64.fuel, .vsp = Reg64.vsp });
+        , .{ .instr = info[1], .fuel = Reg64.fuel, .vsp = Reg64.vsp });
         try ctx.jmpToNextHandler(.r11);
     }
 
-    for (
-        @as([]const []const u8, &.{ "i32.extend8_s", "i32.extend16_s" }),
-        @as([]const []const u8, &.{ "byte", "word" }),
-    ) |opcode_name, size| {
-        try ctx.defineOpcodeHandler(opcode_name, .@"32");
+    for (&[_][2][]const u8{
+        .{ "i32.extend8_s", "byte" },
+        .{ "i32.extend16_s", "word" },
+    }) |info| {
+        try ctx.defineOpcodeHandler(info[0], .@"32");
         try ctx.asm_out.print(
             \\    movsx r13d, {[size]s} ptr [{[vsp]t} - 16]
             \\    mov dword ptr [{[vsp]t} - 16], r13d
             \\
-        , .{ .size = size, .vsp = Reg64.vsp });
+        , .{ .size = info[1], .vsp = Reg64.vsp });
         try ctx.jmpToNextHandler(.r11);
     }
 
     // Write handlers for traps
     try ctx.asm_out.writeAll(".align 32\n");
-    for (@as(
-        []const []const u8,
-        &.{ Context.trap_integer_divide_by_zero, Context.trap_integer_overflow },
-    )) |name| {
+    for (&[_][]const u8{
+        Context.trap_integer_divide_by_zero,
+        Context.trap_integer_overflow,
+    }) |name| {
         try ctx.asm_out.print(
             \\ # r12 is clobbered
             \\"{[prefix]s}.jmp.{[name]s}":
