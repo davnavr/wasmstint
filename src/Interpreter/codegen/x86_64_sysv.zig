@@ -232,6 +232,19 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try idx_decode.writeSlowPath(ctx);
     }
 
+    for (
+        @as([]const []const u8, &.{ "i32.clz", "i32.ctz", "i32.popcnt" }),
+        @as([]const []const u8, &.{ "lzcnt", "tzcnt", "popcnt" }),
+    ) |opcode_name, instr| {
+        try ctx.defineOpcodeHandler(opcode_name, .@"64");
+        try ctx.asm_out.print(
+            \\    {[instr]s} r13d, dword ptr [{[vsp]t} - 16]
+            \\    mov dword ptr [{[vsp]t} - 16], r13d
+            \\
+        , .{ .instr = instr, .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
     {
         try ctx.defineOpcodeHandler("i32.add", .@"64");
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
