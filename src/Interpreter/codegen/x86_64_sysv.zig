@@ -232,6 +232,56 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try idx_decode.writeSlowPath(ctx);
     }
 
+    for (&[_]struct { []const u8, std.mem.Alignment, []const u8, []const u8 }{
+        .{ "i32.load", .@"4", "mov", "dword" },
+        .{ "f32.load", .@"4", "mov", "dword" }, // ReleaseSmall could deduplicate w/ i32.load
+        .{ "i32.load8_u", .@"1", "movzx", "byte" },
+        .{ "i32.load8_s", .@"1", "movsx", "byte" },
+        .{ "i32.load16_s", .@"2", "movsx", "word" },
+        .{ "i32.load16_u", .@"2", "movzx", "word" },
+    }) |info| {
+        const name, const access_size, const instr, const addr_size = info;
+        try ctx.defineOpcodeHandler(name, .@"64");
+        const access = try ctx.linearMemoryAccess(0, access_size);
+        try ctx.asm_out.print(
+            \\    {[instr]s} r13d, {[size]s} ptr [r13 + r15]
+            \\    mov dword ptr [{[vsp]t} - 16], r13d
+            \\
+        , .{ .vsp = Reg64.vsp, .instr = instr, .size = addr_size });
+        try access.finish(ctx);
+    }
+
+    for (&[_]struct { []const u8, std.mem.Alignment, []const u8, []const u8 }{
+        .{ "i64.load", .@"8", "mov", "qword" },
+        .{ "f64.load", .@"8", "mov", "qword" }, // ReleaseSmall could deduplicate w/ i64.load
+        .{ "i64.load8_u", .@"1", "movzx", "byte" },
+        .{ "i64.load8_s", .@"1", "movsx", "byte" },
+        .{ "i64.load16_s", .@"2", "movsx", "word" },
+        .{ "i64.load16_u", .@"2", "movzx", "word" },
+        .{ "i64.load32_s", .@"4", "movsxd", "dword" },
+    }) |info| {
+        const name, const access_size, const instr, const addr_size = info;
+        try ctx.defineOpcodeHandler(name, .@"64");
+        const access = try ctx.linearMemoryAccess(0, access_size);
+        try ctx.asm_out.print(
+            \\    {[instr]s} r13, {[size]s} ptr [r13 + r15]
+            \\    mov qword ptr [{[vsp]t} - 16], r13
+            \\
+        , .{ .vsp = Reg64.vsp, .instr = instr, .size = addr_size });
+        try access.finish(ctx);
+    }
+
+    {
+        try ctx.defineOpcodeHandler("i64.load32_u", .@"64");
+        const access = try ctx.linearMemoryAccess(0, .@"4");
+        try ctx.asm_out.print(
+            \\    mov r13d, dword ptr [r13 + r15]
+            \\    mov qword ptr [{[vsp]t} - 16], r13
+            \\
+        , .{ .vsp = Reg64.vsp });
+        try access.finish(ctx);
+    }
+
     try ctx.defineIntegerOpcodeHandlers(.i32);
     try ctx.defineIntegerOpcodeHandlers(.i64);
 
@@ -244,8 +294,7 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try ctx.asm_out.print(
             \\ # r12 is clobbered
             \\"{[prefix]s}jmp.{[name]s}":
-            \\    mov rdi, r14 # vip
-            \\    dec rdi
+            \\    lea rdi, [r14 - 1] # vip
             \\    mov rdx, {[eip]t}
             \\    mov rcx, {[stp]t}
             \\
@@ -869,6 +918,80 @@ const Context = struct {
             .result = result.toReg32(),
             .byte = clobber_0.toReg32(),
             .acc = clobber_1.toReg32(),
+        };
+    }
+
+    const LinearMemoryAccess = struct {
+        align_decode: DecodeUlebIdx,
+        offset_decode: DecodeUlebIdx,
+        oob: Label,
+        size: std.mem.Alignment,
+
+        fn finish(acc: *const LinearMemoryAccess, ctx: *Context) !void {
+            try ctx.jmpToNextHandler(.r11);
+            try ctx.asm_out.print(
+                \\.align 16
+                \\{[label]f}:
+                \\    lea rdi, [{[vip]t} - 1]
+                \\    mov rdx, {[eip]t}
+                \\    mov rcx, {[stp]t}
+                \\    mov r8, 0 # memidx
+                \\    # These parameters will be moved onto the stack
+                \\    mov r11d, r13d # address
+                \\    mov r10, r14 # *MemInst
+                \\
+            , .{ .label = acc.oob, .vip = Reg64.vip, .eip = Reg64.eip, .stp = Reg64.stp });
+            try ctx.popSystemVSavedRegisters();
+            try ctx.asm_out.print(
+                \\    mov rsp, rbp
+                \\    pop rbp
+                \\    # System V stack parameters, trampoline parameters ensure enough space
+                \\    mov dword ptr [rsp + 8], r11d # address
+                \\    mov dword ptr [rsp + 16], {[size]d} # size
+                \\    mov qword ptr [rsp + 24], r10 # *MemInst
+                \\    jmp "{[prefix]s}trapMemoryAccessOutOfBounds"
+                \\    ud2
+                \\
+            , .{ .size = @intFromEnum(acc.size), .prefix = ctx.name_prefix });
+
+            // TODO: Helper functions for align/offset decode
+            try acc.align_decode.writeSlowPath(ctx);
+            try acc.offset_decode.writeSlowPath(ctx);
+        }
+    };
+
+    fn linearMemoryAccess(
+        ctx: *Context,
+        /// Offset from value stack pointer to `i32` memory offset.
+        offset_loc: u1,
+        size: std.mem.Alignment,
+    ) !LinearMemoryAccess {
+        const oob = try Label.init(ctx, "oob");
+        const align_decode = try ctx.decodeUlebIdx(.r13, .r14, .r15, "align");
+        const offset_decode = try ctx.decodeUlebIdx(.r13, .r14, .r15, "offset");
+        try ctx.asm_out.print(
+            \\    mov r14, qword ptr [{[mems]t}] # Pointer to MemInst
+            \\    mov r15, qword ptr [r14] # Base pointer
+            \\    add r13d, dword ptr [{[vsp]t} - {[offset]d}] # offset
+            \\    jc {[oob]f} # target address overflowed
+            \\    lea r11, [r13 + {[access_size]d}]
+            \\    cmp r11, qword ptr [r14 + {[size_field]d}]
+            \\    ja {[oob]f} # exceeded memory bounds
+            \\    # Actually perform the access
+            \\
+        , .{
+            .mems = Reg64.mems,
+            .vsp = Reg64.vsp,
+            .size_field = 8,
+            .access_size = size.toByteUnits(),
+            .oob = oob,
+            .offset = 16 * (@as(u6, offset_loc) + 1),
+        });
+        return .{
+            .oob = oob,
+            .align_decode = align_decode,
+            .offset_decode = offset_decode,
+            .size = size,
         };
     }
 

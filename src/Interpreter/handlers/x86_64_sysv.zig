@@ -212,13 +212,6 @@ fn trapIntegerDivisionByZero(
     return Transition.trapAt(trap_ip, eip, sp, stp, interp, .init(.integer_division_by_zero, {}));
 }
 
-comptime {
-    @export(
-        &trapIntegerDivisionByZero,
-        .{ .name = generated.symbol_prefix ++ "trapIntegerDivisionByZero" },
-    );
-}
-
 fn trapIntegerOverflow(
     trap_ip: Ip, // rdi
     sp: Sp, // stays in rsi
@@ -230,11 +223,40 @@ fn trapIntegerOverflow(
     return Transition.trapAt(trap_ip, eip, sp, stp, interp, .init(.integer_overflow, {}));
 }
 
-comptime {
-    @export(
-        &trapIntegerOverflow,
-        .{ .name = generated.symbol_prefix ++ "trapIntegerOverflow" },
+fn trapMemoryAccessOutOfBounds(
+    trap_ip: Ip, // rdi
+    sp: Sp, // stays in rsi
+    eip: Eip, // r10 -> rdx
+    stp: Stp, // rbx -> rcx
+    mem_idx: usize, // r8
+    interp: *Interpreter, // stays in r9
+    address: u32,
+    size: u8,
+    memory: *const runtime.MemInst,
+) callconv(sysvcc) Transition {
+    std.log.debug("address={X}, size={X}, memory={*}", .{ address, size, memory });
+    return Transition.trapAt(
+        trap_ip,
+        eip,
+        sp,
+        stp,
+        interp,
+        .init(.memory_access_out_of_bounds, .init(
+            @enumFromInt(mem_idx),
+            .access,
+            .{ .address = address, .size = @enumFromInt(size), .maximum = memory.size },
+        )),
     );
+}
+
+comptime {
+    for (&[_][]const u8{
+        "trapIntegerDivisionByZero",
+        "trapIntegerOverflow",
+        "trapMemoryAccessOutOfBounds",
+    }) |name| {
+        @export(&@field(@This(), name), .{ .name = generated.symbol_prefix ++ name });
+    }
 }
 
 const generated = @import("x86_64_sysv");
