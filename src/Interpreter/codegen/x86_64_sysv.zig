@@ -282,6 +282,29 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try access.finish(ctx);
     }
 
+    {
+        try ctx.defineOpcodeHandler("f32.const", .@"64");
+        try ctx.asm_out.print(
+            \\    mov r13d, dword ptr [{[vip]t}] # unaligned
+            \\    add {[vip]t}, 4
+            \\    mov dword ptr [{[vsp]t}], r13d
+            \\    add {[vsp]t}, 16
+            \\
+        , .{ .vip = Reg64.vip, .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+    }
+    {
+        try ctx.defineOpcodeHandler("f64.const", .@"64");
+        try ctx.asm_out.print(
+            \\    mov r13, qword ptr [{[vip]t}] # unaligned
+            \\    add {[vip]t}, 8
+            \\    mov qword ptr [{[vsp]t}], r13
+            \\    add {[vsp]t}, 16
+            \\
+        , .{ .vip = Reg64.vip, .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
     try ctx.defineIntegerOpcodeHandlers(.i32);
     try ctx.defineIntegerOpcodeHandlers(.i64);
 
