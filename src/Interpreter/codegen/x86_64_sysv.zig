@@ -231,6 +231,19 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try ctx.jmpToNextHandler(.r11);
         try idx_decode.writeSlowPath(ctx);
     }
+    {
+        try ctx.defineOpcodeHandler("local.set", .@"64");
+        const idx_decode = try ctx.decodeUlebIdx(.r13, .r14, .r15, "idx");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    shl r13, 4
+            \\    movaps xmm0, xmmword ptr [{[vsp]t} - 16]
+            \\    sub {[vsp]t}, 16
+            \\    movaps xmmword ptr [{[locals]t} + r13], xmm0
+            \\
+        , .{ .locals = Reg64.locals, .vsp = Reg64.vsp }));
+        try ctx.jmpToNextHandler(.r11);
+        try idx_decode.writeSlowPath(ctx);
+    }
 
     for (&[_]struct { []const u8, std.mem.Alignment, []const u8, []const u8 }{
         .{ "i32.load", .@"4", "mov", "dword" },
