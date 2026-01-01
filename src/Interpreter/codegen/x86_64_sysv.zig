@@ -335,7 +335,7 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
             \\    movzx {[r11]s}, byte ptr [{[vip]t}]
             \\    inc {[vip]t}
             \\    test r11b, 0x80
-            \\    je {[two_bytes]f}
+            \\    jnz {[two_bytes]f}
             \\    shl {[r11]s}, {[shift]d}
             \\    sar {[r11]s}, {[shift]d}
             \\
