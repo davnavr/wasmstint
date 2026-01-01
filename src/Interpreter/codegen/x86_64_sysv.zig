@@ -674,6 +674,10 @@ const TempReg = enum {
             inline else => |r| @field(Reg32, @tagName(r) ++ "d"),
         };
     }
+
+    fn toReg8(reg: TempReg) Reg8 {
+        return reg.toReg32().toReg8();
+    }
 };
 
 // const XmmReg = enum {
@@ -792,16 +796,17 @@ const Context = struct {
                 try ctx.asm_out.print(
                     \\    movzx {[byte]t}, byte ptr [{[ip]t}]
                     \\    inc {[ip]t}
-                    \\    mov {[acc]t}, {[byte]t} 
+                    \\    mov {[acc]t}, {[byte]t}
                     \\    and {[acc]t}, 0x7F
                     \\    shl {[acc]t}, {[shift_by]d}
                     \\    or {[result]t}, {[acc]t}
-                    \\    test {[byte]t}, 0x80 # TODO: test against byte register
+                    \\    test {[byte_8]t}, 0x80
                     \\    jz {[fast_path]f}
                     \\
                 , .{
                     .result = decode.result,
                     .byte = decode.byte,
+                    .byte_8 = decode.byte.toReg8(),
                     .acc = decode.acc,
                     .shift_by = i * 7,
                     .ip = Reg64.vip,
@@ -1194,9 +1199,9 @@ const Context = struct {
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
             \\    movzx {[temp]t}, byte ptr [{[ip]t}]
             \\    inc {[ip]t}
-            \\    test {[temp]t}, 0x80  # TODO: test against byte register
+            \\    test {[temp_8]t}, 0x80
             \\
-        , .{ .temp = result, .ip = Reg64.vip }));
+        , .{ .temp = result, .temp_8 = comptime result.toReg8(), .ip = Reg64.vip }));
         try ctx.asm_out.print("    jnz {f}\n", .{slow_path});
         try ctx.asm_out.print("{f}:\n", .{fast_path});
         return DecodeUlebIdx{
