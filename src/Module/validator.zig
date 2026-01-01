@@ -32,9 +32,12 @@ pub const Code = extern struct {
     pub const End = enum(u8) { end = @intFromEnum(opcodes.ByteOpcode.end) };
     pub const Ip = [*:@intFromEnum(End.end)]const u8;
 
-    /// Describes the changes to interpreter state should occur if its corresponding branch is taken.
-    pub const SideTableEntry = packed struct(if (builtin.mode == .Debug) u128 else u64) {
+    const side_table_safety_checks = builtin.mode == .Debug and
+        !@import("options").use_assembly_interpreter;
+
+    const SideTableEntryInner = packed struct(u64) {
         delta_ip: packed union {
+            /// Amount to adjust the IP by when the branch is taken.
             done: i32,
             /// Offset from the first byte of the first instruction to the first byte of the
             /// branch instruction.
@@ -43,13 +46,37 @@ pub const Code = extern struct {
         delta_stp: i16,
         copy_count: u8,
         pop_count: u8,
+    };
+
+    // Zig x86-64 backend currently hates zero-sized types (e.g. `u0`)
+    const DebugSideTableEntry = packed struct(u128) {
+        inner: SideTableEntryInner,
         /// Set to the same value as `fixup_origin` to catch bugs during side table construction.
-        origin: if (builtin.mode == .Debug) u32 else void,
-        safety_flags: if (builtin.mode == .Debug) packed struct(u32) {
+        origin: u32,
+        safety_flags: packed struct(u32) {
             finished: bool = false,
             padding: enum(u31) { padding } = .padding,
-        } else u0 = if (builtin.mode == .Debug) .{} else 0,
+        } = .{},
+
+        fn init(inner: SideTableEntryInner, origin: u32) DebugSideTableEntry {
+            return .{ .inner = inner, .origin = origin };
+        }
     };
+
+    const ReleaseSideTableEntry = packed struct(u64) {
+        inner: SideTableEntryInner,
+
+        fn init(inner: SideTableEntryInner, origin: u32) ReleaseSideTableEntry {
+            _ = origin;
+            return .{ .inner = inner };
+        }
+    };
+
+    /// Describes the changes to interpreter state should occur if its corresponding branch is taken.
+    pub const SideTableEntry = if (side_table_safety_checks)
+        DebugSideTableEntry
+    else
+        ReleaseSideTableEntry;
 
     pub const Inner = extern struct {
         instructions_start: Ip,
@@ -877,13 +904,12 @@ const SideTableBuilder = struct {
         errdefer comptime unreachable;
 
         fixup.* = .{ .entry_idx = idx };
-        entry.* = Entry{
+        entry.* = Entry.init(.{
             .delta_ip = .{ .fixup_origin = origin },
             .delta_stp = undefined,
             .copy_count = copy_count,
             .pop_count = pop_count,
-            .origin = if (builtin.mode == .Debug) origin else {},
-        };
+        }, origin);
 
         // std.debug.print(" PLACED ALT FIXUP #{} originating from 0x{X}\n", .{ idx, origin });
     }
@@ -908,23 +934,25 @@ const SideTableBuilder = struct {
         const idx = try table.nextEntryIdx();
         const entry = try table.entries.addOne(arena.allocator());
         errdefer _ = table.entries.pop().?;
-        entry.copy_count = copy_count;
-        entry.pop_count = pop_count;
-        entry.origin = if (builtin.mode == .Debug) origin else {};
+        entry.inner.copy_count = copy_count;
+        entry.inner.pop_count = pop_count;
+        if (Code.side_table_safety_checks) {
+            entry.origin = origin;
+        }
 
         if (known_target) |target| {
             const delta_ip = std.math.negateCast(origin - target.instr_offset) catch
                 return Error.WasmImplementationLimit;
 
-            entry.delta_ip = .{ .done = delta_ip };
-            if (builtin.mode == .Debug) {
+            entry.inner.delta_ip = .{ .done = delta_ip };
+            if (Code.side_table_safety_checks) {
                 entry.safety_flags.finished = true;
             }
 
             const delta_stp = std.math.negateCast(idx - target.side_table_idx) catch
                 return Error.WasmImplementationLimit;
 
-            entry.delta_stp = std.math.cast(i16, delta_stp) orelse
+            entry.inner.delta_stp = std.math.cast(i16, delta_stp) orelse
                 return Error.WasmImplementationLimit;
         } else {
             // std.debug.print(
@@ -932,8 +960,8 @@ const SideTableBuilder = struct {
             //     .{ idx, origin, block_offset, copy_count, pop_count },
             // );
 
-            entry.delta_ip = .{ .fixup_origin = origin };
-            entry.delta_stp = undefined;
+            entry.inner.delta_ip = .{ .fixup_origin = origin };
+            entry.inner.delta_stp = undefined;
 
             const current_list: *ActiveList =
                 &table.active.items[table.active.items.len - 1 - target_depth];
@@ -954,19 +982,21 @@ const SideTableBuilder = struct {
         defer coz_begin.end();
 
         const entry: *Entry = &table.entries.items[fixup_entry.entry_idx];
-        const origin = entry.delta_ip.fixup_origin;
+        const origin = entry.inner.delta_ip.fixup_origin;
 
-        entry.delta_ip = .{
+        entry.inner.delta_ip = .{
             .done = std.math.cast(i32, end_offset - origin) orelse
                 return error.WasmImplementationLimit,
         };
 
-        if (builtin.mode == .Debug) {
+        if (Code.side_table_safety_checks) {
             entry.safety_flags.finished = true;
         }
 
-        entry.delta_stp = std.math.cast(i16, target_side_table_idx - fixup_entry.entry_idx) orelse
-            return error.WasmImplementationLimit;
+        entry.inner.delta_stp = std.math.cast(
+            i16,
+            target_side_table_idx - fixup_entry.entry_idx,
+        ) orelse return error.WasmImplementationLimit;
 
         // std.debug.print(
         //     "FIXUP #{} targeting 0x{X} originating from 0x{X} (dip = {}, dstp = {}, target STP={})\n",
@@ -2696,7 +2726,7 @@ pub fn rawValidate(
     errdefer comptime unreachable;
 
     for (final_side_table, 0..) |*entry, i| {
-        if (builtin.mode == .Debug and !entry.safety_flags.finished) {
+        if (Code.side_table_safety_checks and !entry.safety_flags.finished) {
             std.debug.panic("entry #{} was not fixed up", .{i});
         }
 
