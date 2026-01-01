@@ -38,6 +38,7 @@ pub fn main() !void {
     var ctx = Context{
         .name_prefix = name_prefix,
         .scratch = &scratch,
+        .optimize = optimize,
         .asm_out = &asm_writer.interface,
         .zig_out = &zig_writer.interface,
     };
@@ -634,6 +635,7 @@ const Label = struct {
 const Context = struct {
     name_prefix: []const u8,
     opcode_name: []const u8 = undefined,
+    optimize: std.builtin.OptimizeMode,
     scratch: *ArenaAllocator,
     asm_out: *Writer,
     zig_out: *Writer,
@@ -1255,11 +1257,40 @@ const Context = struct {
         fn writeSlowPath(branch: *const TakeBranch, ctx: *Context) !void {
             // TODO: See if AVX is enabled to use ymm registers
             try ctx.asm_out.print(
-                \\    .align 16
+                \\.align 16
                 \\{[begin_label]f}:
+                \\    add {[vsp]t}, 16
+                \\    lea r13, [r14 + 16]  # pointer for results destination
+                \\
+            , .{ .begin_label = branch.begin, .vsp = Reg64.vsp });
+
+            const loop_start = try Label.init(ctx, "copy-results-loop");
+            try ctx.asm_out.print(
+                \\{[loop_start]f}:
+                \\
+            , .{ .loop_start = loop_start });
+
+            const unroll_count: usize = switch (ctx.optimize) {
+                .Debug, .ReleaseSmall => 1,
+                .ReleaseSafe, .ReleaseFast => 4,
+            };
+            for (0..unroll_count) |_| {
+                try ctx.asm_out.print(
+                    \\    movaps xmm0, xmmword ptr [{[vsp]t}]
+                    \\    movaps xmmword ptr [r13], xmm0
+                    \\    add {[vsp]t}, 16
+                    \\    add r13, 16
+                    \\    cmp r13, r15
+                    \\    je {[finish]f}
+                    \\
+                , .{ .vsp = Reg64.vsp, .finish = branch.finish });
+            }
+
+            try ctx.asm_out.print(
+                \\    jmp {[loop_start]f}
                 \\    ud2
                 \\
-            , .{ .begin_label = branch.begin });
+            , .{ .loop_start = loop_start });
         }
     };
 
@@ -1281,9 +1312,8 @@ const Context = struct {
             \\    sub {[vsp]t}, r11 # base pointer for results source
             \\    movaps xmm0, xmmword ptr [{[vsp]t}] # copy single result
             \\    movaps xmmword ptr [r14], xmm0
-            \\    add {[vsp]t}, 16
             \\    cmp r13, 0x20
-            \\    jae {[cpy_many_results]f}
+            \\    jae {[cpy_many_results]f} # clobbers r13
             \\{[finish_cpy_results]f}:
             \\    lea {[vsp]t}, [r14 + r11]
             \\    movsx r11, word ptr [{[stp]t} + {[delta_stp_off]d}] # delta_stp
