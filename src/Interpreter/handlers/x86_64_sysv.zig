@@ -189,7 +189,7 @@ fn returnFromWasm(
                 else
                     // ABI of the functions are the same, so this call is fine.
                     // Optimizer seems to emit a direct `jmp` despite function pointers here.
-                    @call(.always_tail, @as(@TypeOf(&returnFromWasm), @ptrCast(&opcodeHandlerTrampoline)), .{
+                    @call(.always_tail, @as(@TypeOf(&returnFromWasm), @ptrCast(opcodeHandlerTrampoline)), .{
                         @as(Eip, @ptrCast(new_locals.ptr)),
                         @as(Sp, @bitCast(popped.top)),
                         wasm.module,
@@ -233,7 +233,7 @@ inline fn resumeAfterInvokeWithinWasm(
         inlineAsmTailCallToHandler(instr, stp, fuel, module, sp, locals, interp, handler)
     else
         // TODO: inlineLlvmTailCallToHandler()
-        @call(.always_tail, @as(@TypeOf(&invokeWithinWasm), @ptrCast(&opcodeHandlerTrampoline)), .{
+        @call(.always_tail, @as(@TypeOf(&invokeWithinWasm), @ptrCast(opcodeHandlerTrampoline)), .{
             locals,
             sp,
             module,
