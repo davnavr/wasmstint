@@ -287,39 +287,39 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try idx_decode.writeSlowPath(ctx);
     }
 
-    for (&[_]struct { []const u8, std.mem.Alignment, []const u8, []const u8 }{
-        .{ "i32.load", .@"4", "mov", "dword" },
-        .{ "f32.load", .@"4", "mov", "dword" }, // ReleaseSmall could deduplicate w/ i32.load
-        .{ "i32.load8_u", .@"1", "movzx", "byte" },
-        .{ "i32.load8_s", .@"1", "movsx", "byte" },
-        .{ "i32.load16_s", .@"2", "movsx", "word" },
-        .{ "i32.load16_u", .@"2", "movzx", "word" },
+    for (&[_]struct { []const u8, std.mem.Alignment, []const u8, RegSize }{
+        .{ "i32.load", .@"4", "mov", .dword },
+        .{ "f32.load", .@"4", "mov", .dword }, // ReleaseSmall could deduplicate w/ i32.load
+        .{ "i32.load8_u", .@"1", "movzx", .byte },
+        .{ "i32.load8_s", .@"1", "movsx", .byte },
+        .{ "i32.load16_s", .@"2", "movsx", .word },
+        .{ "i32.load16_u", .@"2", "movzx", .word },
     }) |info| {
         const name, const access_size, const instr, const addr_size = info;
         try ctx.defineOpcodeHandler(name, .@"64");
         const access = try ctx.linearMemoryAccess(0, access_size);
         try ctx.asm_out.print(
-            \\    {[instr]s} r13d, {[size]s} ptr [r13 + r15]
+            \\    {[instr]s} r13d, {[size]t} ptr [r13 + r15]
             \\    mov dword ptr [{[vsp]t} - 16], r13d
             \\
         , .{ .vsp = Reg64.vsp, .instr = instr, .size = addr_size });
         try access.finish(ctx);
     }
 
-    for (&[_]struct { []const u8, std.mem.Alignment, []const u8, []const u8 }{
-        .{ "i64.load", .@"8", "mov", "qword" },
-        .{ "f64.load", .@"8", "mov", "qword" }, // ReleaseSmall could deduplicate w/ i64.load
-        .{ "i64.load8_u", .@"1", "movzx", "byte" },
-        .{ "i64.load8_s", .@"1", "movsx", "byte" },
-        .{ "i64.load16_s", .@"2", "movsx", "word" },
-        .{ "i64.load16_u", .@"2", "movzx", "word" },
-        .{ "i64.load32_s", .@"4", "movsxd", "dword" },
+    for (&[_]struct { []const u8, std.mem.Alignment, []const u8, RegSize }{
+        .{ "i64.load", .@"8", "mov", .qword },
+        .{ "f64.load", .@"8", "mov", .qword }, // ReleaseSmall could deduplicate w/ i64.load
+        .{ "i64.load8_u", .@"1", "movzx", .byte },
+        .{ "i64.load8_s", .@"1", "movsx", .byte },
+        .{ "i64.load16_s", .@"2", "movsx", .word },
+        .{ "i64.load16_u", .@"2", "movzx", .word },
+        .{ "i64.load32_s", .@"4", "movsxd", .dword },
     }) |info| {
         const name, const access_size, const instr, const addr_size = info;
         try ctx.defineOpcodeHandler(name, .@"64");
         const access = try ctx.linearMemoryAccess(0, access_size);
         try ctx.asm_out.print(
-            \\    {[instr]s} r13, {[size]s} ptr [r13 + r15]
+            \\    {[instr]s} r13, {[size]t} ptr [r13 + r15]
             \\    mov qword ptr [{[vsp]t} - 16], r13
             \\
         , .{ .vsp = Reg64.vsp, .instr = instr, .size = addr_size });
@@ -337,19 +337,26 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try access.finish(ctx);
     }
 
-    for (&[_]struct { []const u8, std.mem.Alignment, []const u8, []const u8, []const u8 }{
-        .{ "i32.store", .@"4", "mov", "dword", "d" },
-        .{ "f32.store", .@"4", "mov", "dword", "d" }, // ReleaseSmall could deduplicate w/ i32.store
+    for (&[_]struct { []const u8, std.mem.Alignment, RegSize, []const u8, RegSize }{
+        .{ "i32.store", .@"4", .dword, "mov", .dword },
+        .{ "f32.store", .@"4", .dword, "mov", .dword }, // ReleaseSmall could deduplicate w/ i32.store
     }) |info| {
-        const name, const access_size, const instr, const addr_size, const store_reg = info;
+        const name, const access_size, const load_size, const instr, const store_size = info;
         try ctx.defineOpcodeHandler(name, .@"64");
         const access = try ctx.linearMemoryAccess(1, access_size);
         try ctx.asm_out.print(
-            \\    mov r14d, dword ptr [{[vsp]t} - 16] 
-            \\    {[instr]s} {[size]s} ptr [r13 + r15], r14{[store_reg]s}
-            \\    sub {[vsp]t}, 16
+            \\    mov {[load_reg]s}, {[load_size]t} ptr [{[vsp]t} - 16] 
+            \\    {[instr]s} {[store_size]t} ptr [r13 + r15], {[store_reg]s}
+            \\    sub {[vsp]t}, 16 # TODO: Shouldn't this be 32?
             \\
-        , .{ .vsp = Reg64.vsp, .instr = instr, .size = addr_size, .store_reg = store_reg });
+        , .{
+            .vsp = Reg64.vsp,
+            .load_reg = Reg64.r14.nameResized(load_size),
+            .load_size = load_size,
+            .instr = instr,
+            .store_reg = Reg64.r14.nameResized(store_size),
+            .store_size = store_size,
+        });
         try access.finish(ctx);
     }
 
@@ -393,14 +400,14 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         // This falls through to the actual storing of the constant
         try ctx.asm_out.print(
             \\{[label]f}:
-            \\    mov {[store_size]s} ptr [{[vsp]t}], {[r11]s}
+            \\    mov {[store_size]t} ptr [{[vsp]t}], {[r11]s}
             \\    add {[vsp]t}, 16
             \\
         , .{
             .label = finished,
             .store_size = switch (int_type) {
-                .i32 => "dword",
-                .i64 => "qword",
+                .i32 => RegSize.dword,
+                .i64 => RegSize.qword,
             },
             .vsp = Reg64.vsp,
             .r11 = r11,
@@ -570,6 +577,19 @@ const Reg64 = enum {
             => |r| return @field(Reg32, @tagName(r) ++ "d"),
         }
     }
+
+    fn toReg8(reg: Reg64) Reg8 {
+        return reg.toReg32().toReg8();
+    }
+
+    fn nameResized(reg: Reg64, size: RegSize) []const u8 {
+        return switch (size) {
+            .qword => @tagName(reg),
+            .dword => @tagName(reg.toReg32()),
+            .word => unreachable,
+            .byte => @tagName(reg.toReg8()),
+        };
+    }
 };
 
 const Reg32 = enum {
@@ -609,6 +629,13 @@ const Reg32 = enum {
             },
         }
     }
+};
+
+const RegSize = enum {
+    qword,
+    dword,
+    word,
+    byte,
 };
 
 /// Low 8-bits
@@ -828,18 +855,18 @@ const Context = struct {
         const r13 = int_type.register(.r13);
         const r14 = int_type.register(.r14);
         const r15 = int_type.register(.r15);
-        const size = switch (int_type) {
-            .i32 => "dword",
-            .i64 => "qword",
+        const size: RegSize = switch (int_type) {
+            .i32 => .dword,
+            .i64 => .qword,
         };
         {
             try ctx.defineOpcodeHandler(opcode_name.name(".eqz"), .@"64");
             try ctx.asm_out.print(
-                \\    mov {[r13]s}, {[size]s} ptr [{[vsp]t} - 16]
+                \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
                 \\    xor r14d, r14d
                 \\    test {[r13]s}, {[r13]s}
                 \\    setz r14b
-                \\    mov {[size]s} ptr [{[vsp]t} - 16], {[r14]s}
+                \\    mov {[size]t} ptr [{[vsp]t} - 16], {[r14]s}
                 \\
             , .{ .r13 = r13, .r14 = r14, .size = size, .vsp = Reg64.vsp });
             try ctx.jmpToNextHandler(.r11);
@@ -859,12 +886,12 @@ const Context = struct {
         }) |info| {
             try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
             try ctx.asm_out.print(
-                \\    mov {[r13]s}, {[size]s} ptr [{[vsp]t} - 16]
-                \\    mov {[r14]s}, {[size]s} ptr [{[vsp]t} - 32]
+                \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
+                \\    mov {[r14]s}, {[size]t} ptr [{[vsp]t} - 32]
                 \\    xor r15d, r15d
                 \\    cmp {[r14]s}, {[r13]s}
                 \\    {[set_instr]s} r15b
-                \\    mov {[size]s} ptr [{[vsp]t} - 32], {[r15]s}
+                \\    mov {[size]t} ptr [{[vsp]t} - 32], {[r15]s}
                 \\    sub {[vsp]t}, 16
                 \\
             , .{
@@ -885,8 +912,8 @@ const Context = struct {
         }) |info| {
             try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
             try ctx.asm_out.print(
-                \\    {[instr]s} {[r13]s}, {[size]s} ptr [{[vsp]t} - 16]
-                \\    mov {[size]s} ptr [{[vsp]t} - 16], {[r13]s}
+                \\    {[instr]s} {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
+                \\    mov {[size]t} ptr [{[vsp]t} - 16], {[r13]s}
                 \\
             , .{ .r13 = r13, .size = size, .instr = info[1], .vsp = Reg64.vsp });
             try ctx.jmpToNextHandler(.r11);
@@ -895,8 +922,8 @@ const Context = struct {
         {
             try ctx.defineOpcodeHandler(opcode_name.name(".add"), .@"64");
             try ctx.asm_out.print(
-                \\    mov {[r13]s}, {[size]s} ptr [{[vsp]t} - 16]
-                \\    add {[size]s} ptr [{[vsp]t} - 32], {[r13]s}
+                \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
+                \\    add {[size]t} ptr [{[vsp]t} - 32], {[r13]s}
                 \\    sub {[vsp]t}, 16
                 \\
             , .{ .r13 = r13, .size = size, .vsp = Reg64.vsp });
@@ -905,8 +932,8 @@ const Context = struct {
         {
             try ctx.defineOpcodeHandler(opcode_name.name(".sub"), .@"64");
             try ctx.asm_out.print(
-                \\    mov {[r13]s}, {[size]s} ptr [{[vsp]t} - 16]
-                \\    sub {[size]s} ptr [{[vsp]t} - 32], {[r13]s}
+                \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
+                \\    sub {[size]t} ptr [{[vsp]t} - 32], {[r13]s}
                 \\    sub {[vsp]t}, 16
                 \\
             , .{ .r13 = r13, .size = size, .vsp = Reg64.vsp });
@@ -915,9 +942,9 @@ const Context = struct {
         {
             try ctx.defineOpcodeHandler(opcode_name.name(".mul"), .@"64");
             try ctx.asm_out.print(
-                \\    mov {[r13]s}, {[size]s} ptr [{[vsp]t} - 16]
-                \\    imul {[r13]s}, {[size]s} ptr [{[vsp]t} - 32]
-                \\    mov {[size]s} ptr [{[vsp]t} - 32], {[r13]s}
+                \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
+                \\    imul {[r13]s}, {[size]t} ptr [{[vsp]t} - 32]
+                \\    mov {[size]t} ptr [{[vsp]t} - 32], {[r13]s}
                 \\    sub {[vsp]t}, 16
                 \\
             , .{ .r13 = r13, .size = size, .vsp = Reg64.vsp });
@@ -939,8 +966,8 @@ const Context = struct {
             try ctx.asm_out.print(
                 \\    mov r14, {[vip]t} # save IP
                 \\    mov r15, {[module]t} # save module
-                \\    mov {[r13]s}, {[size]s} ptr [{[vsp]t} - 16] # divisor aka denominator
-                \\    mov {[rax]s}, {[size]s} ptr [{[vsp]t} - 32] # dividend aka numerator
+                \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16] # divisor aka denominator
+                \\    mov {[rax]s}, {[size]t} ptr [{[vsp]t} - 32] # dividend aka numerator
                 \\    test {[r13]s}, {[r13]s} # check for division by zero
                 \\    jz "{[prefix]s}jmp.{[trap_zero]s}"
                 \\
@@ -1035,7 +1062,7 @@ const Context = struct {
             }
 
             try ctx.asm_out.print(
-                \\    mov {[size]s} ptr [{[vsp]t} - 32], {[result]s}
+                \\    mov {[size]t} ptr [{[vsp]t} - 32], {[result]s}
                 \\    sub {[vsp]t}, 16
                 \\    mov {[vip]t}, r14 # restore IP
                 \\    mov {[module]t}, r15 # restore module
@@ -1067,7 +1094,7 @@ const Context = struct {
                 try ctx.asm_out.print(
                     \\.align 16
                     \\{[label]f}:
-                    \\    mov {[size]s} ptr [{[vsp]t} - 32], {[rdx]s}
+                    \\    mov {[size]t} ptr [{[vsp]t} - 32], {[rdx]s}
                     \\    sub {[vsp]t}, 16
                     \\    mov {[vip]t}, r14 # restore IP
                     \\    mov {[module]t}, r15 # restore module
@@ -1087,8 +1114,8 @@ const Context = struct {
         for (&[_][]const u8{ ".and", ".or", ".xor" }) |name| {
             try ctx.defineOpcodeHandler(opcode_name.name(name), .@"64");
             try ctx.asm_out.print(
-                \\    mov {[r13]s}, {[size]s} ptr [{[vsp]t} - 16]
-                \\    {[instr]s} {[size]s} ptr [{[vsp]t} - 32], {[r13]s} 
+                \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
+                \\    {[instr]s} {[size]t} ptr [{[vsp]t} - 32], {[r13]s} 
                 \\    sub {[vsp]t}, 16
                 \\
             , .{ .r13 = r13, .size = size, .vsp = Reg64.vsp, .instr = name[1..] });
@@ -1107,8 +1134,8 @@ const Context = struct {
             try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
             try ctx.asm_out.print(
                 \\    mov r13, {[fuel]t}
-                \\    mov {[rcx]s}, {[size]s} ptr [{[vsp]t} - 16]
-                \\    {[instr]s} {[size]s} ptr [{[vsp]t} - 32], cl
+                \\    mov {[rcx]s}, {[size]t} ptr [{[vsp]t} - 16]
+                \\    {[instr]s} {[size]t} ptr [{[vsp]t} - 32], cl
                 \\    sub {[vsp]t}, 16
                 \\    mov {[fuel]t}, r13
                 \\
@@ -1122,14 +1149,14 @@ const Context = struct {
             try ctx.jmpToNextHandler(.r11);
         }
 
-        for (&[_][2][]const u8{
-            .{ ".extend8_s", "byte" },
-            .{ ".extend16_s", "word" },
+        for (&[_]struct { []const u8, RegSize }{
+            .{ ".extend8_s", .byte },
+            .{ ".extend16_s", .word },
         }) |info| {
             try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"32");
             try ctx.asm_out.print(
-                \\    movsx {[r13]s}, {[src_size]s} ptr [{[vsp]t} - 16]
-                \\    mov {[dst_size]s} ptr [{[vsp]t} - 16], {[r13]s}
+                \\    movsx {[r13]s}, {[src_size]t} ptr [{[vsp]t} - 16]
+                \\    mov {[dst_size]t} ptr [{[vsp]t} - 16], {[r13]s}
                 \\
             , .{ .r13 = r13, .src_size = info[1], .dst_size = size, .vsp = Reg64.vsp });
             try ctx.jmpToNextHandler(.r11);
