@@ -340,6 +340,8 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
     for (&[_]struct { []const u8, std.mem.Alignment, RegSize, []const u8, RegSize }{
         .{ "i32.store", .@"4", .dword, "mov", .dword },
         .{ "f32.store", .@"4", .dword, "mov", .dword }, // ReleaseSmall could deduplicate w/ i32.store
+        .{ "i64.store", .@"8", .qword, "mov", .qword },
+        .{ "f64.store", .@"8", .qword, "mov", .qword }, // ReleaseSmall could deduplicate w/ i64.store
     }) |info| {
         const name, const access_size, const load_size, const instr, const store_size = info;
         try ctx.defineOpcodeHandler(name, .@"64");
