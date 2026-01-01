@@ -141,7 +141,7 @@ fn returnFromWasm(
                 const new_locals = common.Locals{ .ptr = frame.localValues(&interp.stack).ptr };
                 const handler = instr.readNextOpcodeHandler(fuel, new_locals, wasm.module, interp);
                 const mems = wasm.module.header().mems;
-                return if (builtin.zig_backend == .stage2_x86_64)
+                return if (true or builtin.zig_backend == .stage2_x86_64)
                     // Zig self-hosted backend does not yet support tail calls
                     asm (
                     // Perform the tail call after moving parameters to the correct places
@@ -169,7 +169,9 @@ fn returnFromWasm(
                           [disp] "{r12}" (&byte_dispatch_table),
                     )
                 else
-                    @call(.always_tail, opcodeHandlerTrampoline, .{
+                    // ABI of the functions are the same, so this call is fine.
+                    // Optimizer seems to emit a direct `jmp` despite function pointers here.
+                    @call(.always_tail, @as(@TypeOf(&returnFromWasm), @ptrCast(&opcodeHandlerTrampoline)), .{
                         new_locals,
                         popped.top,
                         wasm.module,
