@@ -347,7 +347,7 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try ctx.asm_out.print(
             \\    mov {[load_reg]s}, {[load_size]t} ptr [{[vsp]t} - 16] 
             \\    {[instr]s} {[store_size]t} ptr [r13 + r15], {[store_reg]s}
-            \\    sub {[vsp]t}, 16 # TODO: Shouldn't this be 32?
+            \\    sub {[vsp]t}, 32
             \\
         , .{
             .vsp = Reg64.vsp,
@@ -612,7 +612,10 @@ const Reg32 = enum {
 
     fn toReg8(reg: Reg32) Reg8 {
         switch (reg) {
-            inline .eax, .ebx, .ecx, .edx => |r| return @field(Reg8, &[2]u8{ @tagName(r)[1], 'l' }),
+            inline .eax, .ebx, .ecx, .edx => |r| return @field(
+                Reg8,
+                &[2]u8{ @tagName(r)[1], 'l' },
+            ),
             .esi => return .sil,
             .edi => return .dil,
             inline .r8d,
@@ -729,7 +732,11 @@ const Context = struct {
     const trap_integer_divide_by_zero = "trapIntegerDivisionByZero";
     const trap_integer_overflow = "trapIntegerOverflow";
 
-    fn defineOpcodeHandlerWithAliases(ctx: *Context, names: []const []const u8, align_to: std.mem.Alignment) !void {
+    fn defineOpcodeHandlerWithAliases(
+        ctx: *Context,
+        names: []const []const u8,
+        align_to: std.mem.Alignment,
+    ) !void {
         _ = ctx.scratch.reset(.retain_capacity);
         const first_name = names[0];
         ctx.opcode_name = try ctx.concat(&.{ ctx.name_prefix, first_name });
