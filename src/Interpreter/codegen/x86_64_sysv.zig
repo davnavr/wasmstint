@@ -206,6 +206,13 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         , .{ .vip = Reg64.vip, .eip = Reg64.eip, .prefix = ctx.name_prefix });
         try ctx.jmpToNextHandler(.r13);
     }
+    {
+        try ctx.defineOpcodeHandler("br", .@"32");
+        try ctx.asm_out.writeAll("    # Skip reading label idx\n");
+        const branch = try ctx.takeBranch();
+        try ctx.jmpToNextHandler(.r11);
+        try branch.writeSlowPath(ctx);
+    }
 
     {
         try ctx.defineOpcodeHandler("return", .@"32");
@@ -1239,6 +1246,59 @@ const Context = struct {
             .offset_decode = offset_decode,
             .size = size,
         };
+    }
+
+    const TakeBranch = struct {
+        begin: Label,
+        finish: Label,
+
+        fn writeSlowPath(branch: *const TakeBranch, ctx: *Context) !void {
+            // TODO: See if AVX is enabled to use ymm registers
+            try ctx.asm_out.print(
+                \\    .align 16
+                \\{[begin_label]f}:
+                \\    ud2
+                \\
+            , .{ .begin_label = branch.begin });
+        }
+    };
+
+    fn takeBranch(ctx: *Context) !TakeBranch {
+        const cpy_many_results = try Label.init(ctx, "copy-results");
+        const finish_cpy_results = try Label.init(ctx, "adjust-stp");
+        try ctx.asm_out.print(
+            \\    movsxd r11, dword ptr [{[stp]t}] # delta_ip
+            \\    add {[vip]t}, r11
+            \\    movzx r11, byte ptr [{[stp]t} + {[copy_count_off]d}] # copy_count
+            \\    shl r11, 4
+            \\    movzx r13, byte ptr [{[stp]t} + {[pop_count_off]d}] # pop_count
+            \\    mov r14, {[vsp]t}
+            \\    sub r14, r13 # base pointer for results destination
+            \\    test r11, r11
+            \\    jz {[finish_cpy_results]f}
+            \\    mov r15, {[vsp]t} # copying stops at this address
+            \\    sub {[vsp]t}, r11 # base pointer for results source
+            \\    movaps xmm0, xmmword ptr [{[vsp]t}] # copy single result
+            \\    movaps xmmword ptr [r14], xmm0
+            \\    add {[vsp]t}, 16
+            \\    cmp r13, 2
+            \\    jae {[cpy_many_results]f}
+            \\{[finish_cpy_results]f}:
+            \\    lea {[vsp]t}, [r14 + r11]
+            \\    movsx r11, word ptr [{[stp]t} + {[delta_stp_off]d}] # delta_stp
+            \\    add {[stp]t}, r11
+            \\
+        , .{
+            .vip = Reg64.vip,
+            .vsp = Reg64.vsp,
+            .stp = Reg64.stp,
+            .delta_stp_off = 4,
+            .copy_count_off = 6,
+            .pop_count_off = 7,
+            .cpy_many_results = cpy_many_results,
+            .finish_cpy_results = finish_cpy_results,
+        });
+        return .{ .begin = cpy_many_results, .finish = finish_cpy_results };
     }
 
     fn jmpToNextHandler(ctx: *Context, comptime temp: TempReg) !void {
