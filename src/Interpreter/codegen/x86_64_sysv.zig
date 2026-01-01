@@ -1272,6 +1272,7 @@ const Context = struct {
             \\    movzx r11, byte ptr [{[stp]t} + {[copy_count_off]d}] # copy_count
             \\    shl r11, 4
             \\    movzx r13, byte ptr [{[stp]t} + {[pop_count_off]d}] # pop_count
+            \\    shl r13, 4
             \\    mov r14, {[vsp]t}
             \\    sub r14, r13 # base pointer for results destination
             \\    test r11, r11
@@ -1281,7 +1282,7 @@ const Context = struct {
             \\    movaps xmm0, xmmword ptr [{[vsp]t}] # copy single result
             \\    movaps xmmword ptr [r14], xmm0
             \\    add {[vsp]t}, 16
-            \\    cmp r13, 2
+            \\    cmp r13, 0x20
             \\    jae {[cpy_many_results]f}
             \\{[finish_cpy_results]f}:
             \\    lea {[vsp]t}, [r14 + r11]
