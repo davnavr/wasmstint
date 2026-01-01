@@ -187,6 +187,13 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try ctx.defineOpcodeHandler("nop", .@"16");
         try ctx.jmpToNextHandler(.r11);
     }
+    {
+        try ctx.asm_out.writeAll("\n");
+        try ctx.defineOpcodeHandlerWithAliases(&.{ "block", "loop" }, .@"32");
+        const block_type = try ctx.skipBlockType(.r11);
+        try ctx.jmpToNextHandler(.r13);
+        try block_type.writeSlowPath(ctx);
+    }
 
     {
         try ctx.defineOpcodeHandler("end", .@"32");
@@ -531,6 +538,46 @@ const Reg32 = enum {
     r13d,
     r14d,
     r15d,
+
+    fn toReg8(reg: Reg32) Reg8 {
+        switch (reg) {
+            inline .eax, .ebx, .ecx, .edx => |r| return @field(Reg8, &[2]u8{ @tagName(r)[1], 'l' }),
+            .esi => return .sil,
+            .edi => return .dil,
+            inline .r8d,
+            .r9d,
+            .r10d,
+            .r11d,
+            .r12d,
+            .r13d,
+            .r14d,
+            .r15d,
+            => |r| {
+                const name = comptime @tagName(r);
+                return @field(Reg8, name[0..(name.len - 1)] ++ "b");
+            },
+        }
+    }
+};
+
+/// Low 8-bits
+const Reg8 = enum {
+    al,
+    bl,
+    cl,
+    dl,
+    sil,
+    dil,
+    //spl,
+    //bpl
+    r8b,
+    r9b,
+    r10b,
+    r11b,
+    r12b,
+    r13b,
+    r14b,
+    r15b,
 };
 
 const TempReg = enum {
@@ -603,24 +650,36 @@ const Context = struct {
     const trap_integer_divide_by_zero = "trapIntegerDivisionByZero";
     const trap_integer_overflow = "trapIntegerOverflow";
 
-    fn defineOpcodeHandler(ctx: *Context, name: []const u8, align_to: std.mem.Alignment) !void {
+    fn defineOpcodeHandlerWithAliases(ctx: *Context, names: []const []const u8, align_to: std.mem.Alignment) !void {
         _ = ctx.scratch.reset(.retain_capacity);
-        ctx.opcode_name = try ctx.concat(&.{ ctx.name_prefix, name });
+        const first_name = names[0];
+        ctx.opcode_name = try ctx.concat(&.{ ctx.name_prefix, first_name });
         std.debug.assert(ctx.skip_oof_handler == 0);
         ctx.skip_oof_handler = 1;
-        try ctx.zig_out.print(
-            "        pub const @\"{s}\" = @extern(OpcodeHandler, .{{ .name = \"{s}\" }});\n",
-            .{ name, ctx.opcode_name },
-        );
         try ctx.asm_out.print(
             \\
-            \\.global "{[name]s}"
             \\.align {[align_to]d}
-            \\"{[name]s}":
             \\
         ,
-            .{ .name = ctx.opcode_name, .align_to = align_to.toByteUnits() },
+            .{ .align_to = align_to.toByteUnits() },
         );
+
+        for (names) |n| {
+            const args = .{ .prefix = ctx.name_prefix, .name = n };
+            try ctx.zig_out.print(
+                \\        pub const @"{[name]s}" = @extern(OpcodeHandler, .{{ .name = "{[prefix]s}{[name]s}" }});
+                \\
+            , args);
+            try ctx.asm_out.print(
+                \\.global "{[prefix]s}{[name]s}"
+                \\"{[prefix]s}{[name]s}":
+                \\
+            , args);
+        }
+    }
+
+    fn defineOpcodeHandler(ctx: *Context, name: []const u8, align_to: std.mem.Alignment) !void {
+        try ctx.defineOpcodeHandlerWithAliases(&.{name}, align_to);
     }
 
     const DecodeUlebIdx = struct {
@@ -1059,6 +1118,53 @@ const Context = struct {
             .byte = clobber_0.toReg32(),
             .acc = clobber_1.toReg32(),
         };
+    }
+
+    const SkipBlockType = struct {
+        type_idx: Label,
+        fast_path: Label,
+        clobber: Reg32,
+
+        fn writeSlowPath(skip: SkipBlockType, ctx: *Context) !void {
+            try ctx.asm_out.print(
+                \\.align 16
+                \\{[skip_type_idx]f}:
+                \\    movzx {[temp]t}, byte ptr [{[vip]t}]
+                \\    inc {[vip]t}
+                \\    test {[temp_b]t}, 0x80
+                \\    jz {[fast_path]f}
+                \\    jmp {[skip_type_idx]f}
+                \\    ud2
+                \\
+            , .{
+                .temp = skip.clobber,
+                .temp_b = skip.clobber.toReg8(),
+                .vip = Reg64.vip,
+                .skip_type_idx = skip.type_idx,
+                .fast_path = skip.fast_path,
+            });
+        }
+    };
+
+    fn skipBlockType(ctx: *Context, clobber: TempReg) !SkipBlockType {
+        const skip_type_idx = try Label.init(ctx, "skip-type-idx");
+        const fast_path = try Label.init(ctx, "after-block-type");
+        const clobber_32 = clobber.toReg32();
+        try ctx.asm_out.print(
+            \\    movzx {[temp]t}, byte ptr [{[vip]t}]
+            \\    inc {[vip]t}
+            \\    test {[temp_b]t}, 0x80
+            \\    jnz {[skip_type_idx]f}
+            \\{[fast_path]f}:
+            \\
+        , .{
+            .temp = clobber,
+            .temp_b = clobber_32.toReg8(),
+            .vip = Reg64.vip,
+            .skip_type_idx = skip_type_idx,
+            .fast_path = fast_path,
+        });
+        return .{ .type_idx = skip_type_idx, .fast_path = fast_path, .clobber = clobber_32 };
     }
 
     const LinearMemoryAccess = struct {
