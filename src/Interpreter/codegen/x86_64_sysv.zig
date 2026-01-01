@@ -211,7 +211,7 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try ctx.defineOpcodeHandler("br", .@"32");
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
             \\    # Skip reading label idx
-            \\    lea r15, [{[vip]t} - 1]
+            \\    lea r15, [{[vip]t} - 1] # save ip to br byte
             \\
         , .{ .vip = Reg64.vip }));
         const branch = try ctx.takeBranch();
@@ -338,15 +338,15 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
     }
 
     for (&[_]struct { []const u8, std.mem.Alignment, []const u8, []const u8, []const u8 }{
-        .{ "i32.store", .@"4", "mov", "dword", "r13d" },
-        .{ "f32.store", .@"4", "mov", "dword", "r13d" }, // ReleaseSmall could deduplicate w/ i32.store
+        .{ "i32.store", .@"4", "mov", "dword", "d" },
+        .{ "f32.store", .@"4", "mov", "dword", "d" }, // ReleaseSmall could deduplicate w/ i32.store
     }) |info| {
         const name, const access_size, const instr, const addr_size, const store_reg = info;
         try ctx.defineOpcodeHandler(name, .@"64");
         const access = try ctx.linearMemoryAccess(1, access_size);
         try ctx.asm_out.print(
-            \\    mov r13d, dword ptr [{[vsp]t} - 16] 
-            \\    {[instr]s} {[size]s} ptr [r13 + r15], {[store_reg]s}
+            \\    mov r14d, dword ptr [{[vsp]t} - 16] 
+            \\    {[instr]s} {[size]s} ptr [r13 + r15], r14{[store_reg]s}
             \\    sub {[vsp]t}, 16
             \\
         , .{ .vsp = Reg64.vsp, .instr = instr, .size = addr_size, .store_reg = store_reg });
@@ -1363,6 +1363,7 @@ const Context = struct {
             \\{[finish_cpy_results]f}:
             \\    lea {[vsp]t}, [r14 + r11]
             \\    movsx r11, word ptr [{[stp]t} + {[delta_stp_off]d}] # delta_stp
+            \\    shl r11, 3
             \\    add {[stp]t}, r11
             \\
         , .{
