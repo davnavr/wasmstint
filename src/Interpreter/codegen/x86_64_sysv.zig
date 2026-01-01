@@ -214,6 +214,28 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try ctx.jmpToNextHandler(.r11);
         try branch.writeSlowPath(ctx);
     }
+    // br_if
+    {
+        try ctx.defineOpcodeHandler("br_table", .@"32");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    mov r15d, dword ptr [{[vsp]t} - 16]
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{ .vsp = Reg64.vsp }));
+        const label_count = try ctx.decodeUlebIdx(.r11, .r13, .r14, "label-count");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    # No need to actually read the labels
+            \\    cmp r15d, r11d
+            \\    cmovb r15d, r11d
+            \\    shl r15d, 4
+            \\    add {[stp]t}, r15
+            \\
+        , .{ .stp = Reg64.stp }));
+        const branch = try ctx.takeBranch();
+        try ctx.jmpToNextHandler(.r11);
+        try label_count.writeSlowPath(ctx);
+        try branch.writeSlowPath(ctx);
+    }
 
     {
         try ctx.defineOpcodeHandler("return", .@"32");
@@ -1294,6 +1316,7 @@ const Context = struct {
         }
     };
 
+    /// Branch to take is stored in `Reg64.stp`.
     fn takeBranch(ctx: *Context) !TakeBranch {
         const cpy_many_results = try Label.init(ctx, "copy-results");
         const finish_cpy_results = try Label.init(ctx, "adjust-stp");
