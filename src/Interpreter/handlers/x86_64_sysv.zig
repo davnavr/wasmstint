@@ -96,11 +96,43 @@ fn interruptOutOfFuel(
     return Transition.interrupted(.init(ip, eip), sp, stp, interp, .out_of_fuel);
 }
 
-comptime {
-    @export(&interruptOutOfFuel, .{ .name = generated.symbol_prefix ++ "interruptOutOfFuel" });
+/// Perform the tail call after moving parameters to the correct places
+///
+/// Zig self-hosted backend does not yet support tail calls
+inline fn inlineAsmTailCallToHandler(
+    instr: Instr,
+    stp: common.Stp,
+    fuel: *Interpreter.Fuel,
+    module: runtime.ModuleInst,
+    sp: Sp,
+    new_locals: common.Locals,
+    interp: *Interpreter,
+    handler: *const OpcodeHandler,
+) Transition {
+    return asm (
+    // This can call the handler directly
+    //
+    // Writes to `rsp` mean the CPU's "stack engine" is not happy, but self-hosted
+    // backend is currently only used in `Debug` builds anyway.
+        \\movq %%rbp, %%rsp
+        \\popq %%rbp
+        \\jmp *%[handler]
+        \\ud2
+        \\
+        : [ret] "={rax}" (-> Transition),
+        : [handler] "{r11}" (handler),
+          [ip] "{rax}" (@as(common.Ip, instr.next)),
+          [stp] "{rbx}" (@as(common.Stp, stp)),
+          [fuel] "{rcx}" (@as(*Interpreter.Fuel, fuel)),
+          [module] "{rdx}" (@as(runtime.ModuleInst, module)),
+          [sp] "{rsi}" (@as(Sp, sp)),
+          [locals] "{rdi}" (new_locals),
+          [mems] "{r8}" (module.header().mems),
+          [interp] "{r9}" (interp),
+          [eip] "{r10}" (instr.end),
+          [disp] "{r12}" (&byte_dispatch_table),
+    );
 }
-
-// TODO TODO: Don't forget to ensure layout of SideTableEntry is fine on .Debug mode
 
 /// Parameters are arranged such that some registers already contain the correct value.
 fn returnFromWasm(
@@ -140,48 +172,31 @@ fn returnFromWasm(
                 var instr = Instr.init(frame.wasm.ip, frame.wasm.eip);
                 const new_locals = common.Locals{ .ptr = frame.localValues(&interp.stack).ptr };
                 const handler = instr.readNextOpcodeHandler(fuel, new_locals, wasm.module, interp);
-                const mems = wasm.module.header().mems;
-                return if (true or builtin.zig_backend == .stage2_x86_64)
-                    // Zig self-hosted backend does not yet support tail calls
-                    asm (
-                    // Perform the tail call after moving parameters to the correct places
-                    //
-                    // This can call the handler directly
-                    //
-                    // Writes to `rsp` mean the "stack engine" is not happy, but self-hosted
-                    // backend is currently only used in `Debug` builds anyway.
-                        \\movq %%rbp, %%rsp
-                        \\popq %%rbp
-                        \\jmp *%[handler]
-                        \\ud2
-                        \\
-                        : [ret] "={rax}" (-> Transition),
-                        : [handler] "{r11}" (handler),
-                          [ip] "{rax}" (@as(common.Ip, instr.next)),
-                          [stp] "{rbx}" (@as(common.Stp, frame.wasm.stp)),
-                          [fuel] "{rcx}" (@as(*Interpreter.Fuel, fuel)),
-                          [module] "{rdx}" (@as(runtime.ModuleInst, wasm.module)),
-                          [sp] "{rsi}" (@as(Sp, popped.top)),
-                          [locals] "{rdi}" (new_locals),
-                          [mems] "{r8}" (mems),
-                          [interp] "{r9}" (interp),
-                          [eip] "{r10}" (instr.end),
-                          [disp] "{r12}" (&byte_dispatch_table),
+                return if (builtin.zig_backend == .stage2_x86_64)
+                    inlineAsmTailCallToHandler(
+                        instr,
+                        frame.wasm.stp,
+                        fuel,
+                        wasm.module,
+                        popped.top,
+                        new_locals,
+                        interp,
+                        handler,
                     )
                 else
                     // ABI of the functions are the same, so this call is fine.
                     // Optimizer seems to emit a direct `jmp` despite function pointers here.
                     @call(.always_tail, @as(@TypeOf(&returnFromWasm), @ptrCast(&opcodeHandlerTrampoline)), .{
-                        new_locals,
-                        popped.top,
+                        @as(Eip, @ptrCast(new_locals.ptr)),
+                        @as(Sp, @bitCast(popped.top)),
                         wasm.module,
                         fuel,
-                        mems,
+                        @as(usize, @intFromPtr(wasm.module.header().mems)),
                         interp,
-                        instr.next,
-                        frame.wasm.stp,
-                        instr.end,
-                        handler,
+                        @as(usize, @intFromPtr(instr.next)),
+                        @as(usize, @intFromPtr(frame.wasm.stp)),
+                        @as(usize, @intFromPtr(instr.end)),
+                        @as(usize, @intFromPtr(handler)),
                     });
             },
             .host => break :return_to_host,
@@ -199,8 +214,30 @@ fn returnFromWasm(
     );
 }
 
-comptime {
-    @export(&returnFromWasm, .{ .name = generated.symbol_prefix ++ "returnFromWasm" });
+fn invokeWithinWasm(
+    locals: common.Locals, // rdi
+    sp: Sp, // rsi
+    module: runtime.ModuleInst, // rdx,
+    fuel: *const Interpreter.Fuel, // rcx
+    memories: [*]const *runtime.MemInst, // r8
+    interpreter: *Interpreter, // r9
+    // These parameters are passed on the stack
+    ip: Ip, // `rbp + 16`
+    stp: Stp, // `rbp + 24`
+    eip: Eip, // `rbp + 32`
+    func_idx: u32, // `rbp + 40`
+) callconv(sysvcc) Transition {
+    _ = locals;
+    _ = sp;
+    _ = module;
+    _ = fuel;
+    _ = memories;
+    _ = interpreter;
+    _ = ip;
+    _ = stp;
+    _ = eip;
+    _ = func_idx;
+    unreachable; // TODO:
 }
 
 fn trapIntegerDivisionByZero(
@@ -251,16 +288,6 @@ fn trapMemoryAccessOutOfBounds(
     );
 }
 
-comptime {
-    for (&[_][]const u8{
-        "trapIntegerDivisionByZero",
-        "trapIntegerOverflow",
-        "trapMemoryAccessOutOfBounds",
-    }) |name| {
-        @export(&@field(@This(), name), .{ .name = generated.symbol_prefix ++ name });
-    }
-}
-
 const generated = @import("x86_64_sysv");
 
 pub const byte_dispatch_table align(64) = common.dispatchTable(
@@ -271,7 +298,17 @@ pub const byte_dispatch_table align(64) = common.dispatchTable(
 );
 
 comptime {
-    @export(&byte_dispatch_table, .{ .name = generated.symbol_prefix ++ "byte_dispatch_table" });
+    for (&[_][]const u8{
+        "interruptOutOfFuel",
+        "returnFromWasm",
+        "invokeWithinWasm",
+        "trapIntegerDivisionByZero",
+        "trapIntegerOverflow",
+        "trapMemoryAccessOutOfBounds",
+        "byte_dispatch_table",
+    }) |name| {
+        @export(&@field(@This(), name), .{ .name = generated.symbol_prefix ++ name });
+    }
 }
 
 const std = @import("std");
