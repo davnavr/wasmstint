@@ -45,6 +45,7 @@ pub const opcodeHandlerTrampoline = @extern(
         stp: Stp, // `rbp + 24`
         eip: Eip, // `rbp + 32`
         handler: *const OpcodeHandler, // `rbp + 40`
+        _: usize, // `rbp + 48`
     ) callconv(sysvcc) Transition,
     .{ .name = generated.symbol_prefix ++ "opcodeHandlerTrampoline" },
 );
@@ -96,9 +97,9 @@ fn interruptOutOfFuel(
     return Transition.interrupted(.init(ip, eip), sp, stp, interp, .out_of_fuel);
 }
 
-/// Perform the tail call after moving parameters to the correct places
+/// Performs a tail call to the given opcode handler after moving parameters to the correct places.
 ///
-/// Zig self-hosted backend does not yet support tail calls
+/// Workaround for Zig's self-hosted backend not yet supporting tail calls.
 inline fn inlineAsmTailCallToHandler(
     instr: Instr,
     stp: common.Stp,
@@ -131,7 +132,7 @@ inline fn inlineAsmTailCallToHandler(
           [interp] "{r9}" (interp),
           [eip] "{r10}" (instr.end),
           [disp] "{r12}" (&byte_dispatch_table),
-    );
+        : .{ .r11 = true, .r12 = true, .r13 = true, .r14 = true, .r15 = true });
 }
 
 /// Parameters are arranged such that some registers already contain the correct value.
@@ -143,6 +144,7 @@ fn returnFromWasm(
     _: usize, // r8 (unused)
     interp: *Interpreter, // stays in r9
     // Stack space for parameters, same as in `opcodeHandlerTrampoline`
+    _: usize,
     _: usize,
     _: usize,
     _: usize,
@@ -197,6 +199,7 @@ fn returnFromWasm(
                         @as(usize, @intFromPtr(frame.wasm.stp)),
                         @as(usize, @intFromPtr(instr.end)),
                         @as(usize, @intFromPtr(handler)),
+                        undefined,
                     });
             },
             .host => break :return_to_host,
@@ -214,30 +217,86 @@ fn returnFromWasm(
     );
 }
 
+inline fn resumeAfterInvokeWithinWasm(
+    old_instr: Instr,
+    sp: Sp,
+    fuel: *Interpreter.Fuel,
+    stp: Stp,
+    locals: common.Locals,
+    module: runtime.ModuleInst,
+    interp: *Interpreter,
+) Transition {
+    var instr = old_instr;
+    const handler = instr.readNextOpcodeHandler(fuel, locals, module, interp);
+    return if (builtin.zig_backend == .stage2_x86_64)
+        inlineAsmTailCallToHandler(instr, stp, fuel, module, sp, locals, interp, handler)
+    else
+        // TODO: inlineLlvmTailCallToHandler()
+        @call(.always_tail, @as(@TypeOf(&invokeWithinWasm), @ptrCast(&opcodeHandlerTrampoline)), .{
+            locals,
+            sp,
+            module,
+            fuel,
+            module.header().mems,
+            interp,
+            instr.next,
+            stp,
+            instr.end,
+            handler,
+            undefined,
+        });
+}
+
 fn invokeWithinWasm(
     locals: common.Locals, // rdi
     sp: Sp, // rsi
     module: runtime.ModuleInst, // rdx,
-    fuel: *const Interpreter.Fuel, // rcx
+    fuel: *Interpreter.Fuel, // rcx
     memories: [*]const *runtime.MemInst, // r8
-    interpreter: *Interpreter, // r9
+    interp: *Interpreter, // r9
     // These parameters are passed on the stack
     ip: Ip, // `rbp + 16`
     stp: Stp, // `rbp + 24`
     eip: Eip, // `rbp + 32`
     func_idx: u32, // `rbp + 40`
+    call_ip: Ip, // `rbp + 48`
 ) callconv(sysvcc) Transition {
-    _ = locals;
-    _ = sp;
-    _ = module;
-    _ = fuel;
-    _ = memories;
-    _ = interpreter;
-    _ = ip;
-    _ = stp;
-    _ = eip;
-    _ = func_idx;
-    unreachable; // TODO:
+    switch (@as(opcodes.ByteOpcode, @enumFromInt(call_ip[0]))) {
+        .call => {},
+        else => |bad| switch (builtin.mode) {
+            .Debug, .ReleaseSafe => std.debug.panic(
+                "{t} (0x{X:0>2}) is not a valid call instruction",
+                .{ bad, @intFromEnum(bad) },
+            ),
+            .ReleaseFast, .ReleaseSmall => unreachable,
+        },
+    }
+
+    if (builtin.mode == .Debug) {
+        std.debug.assert(@intFromPtr(module.header().memInsts().ptr) == @intFromPtr(memories));
+        std.debug.assert( // bad locals ptr
+            @intFromPtr(interp.stack.currentFrame().?.localValues(&interp.stack).ptr) ==
+                @intFromPtr(locals.ptr),
+        );
+    }
+
+    const callee = module.inner.funcInst(@enumFromInt(func_idx));
+    const arg_count = callee.signature().param_count;
+    const saved_sp = Stack.Saved.pop(
+        Stack.Values.init(sp, &interp.stack, arg_count, arg_count),
+        arg_count,
+    );
+
+    return common.invokeWithinWasm(
+        Instr.init(ip, eip),
+        call_ip,
+        saved_sp,
+        fuel,
+        stp,
+        interp,
+        callee,
+        resumeAfterInvokeWithinWasm,
+    );
 }
 
 fn trapIntegerDivisionByZero(
@@ -319,6 +378,7 @@ const Interpreter = @import("../../Interpreter.zig");
 const runtime = @import("../../runtime.zig");
 
 const Instr = @import("../Instr.zig");
+const Stack = @import("../Stack.zig");
 
 const common = @import("../handlers.zig");
 const Transition = common.Transition;

@@ -958,7 +958,8 @@ pub fn frameAt(stack: Stack, offset: Frame.Offset) ?*Frame {
 /// Allows restoring the stack to a previous state after popping values, and asserts that popped
 /// values have not been modified.
 pub const Saved = struct {
-    pub const has_checksum = builtin.mode == .Debug;
+    pub const has_checksum = builtin.mode == .Debug and
+        !@import("options").use_assembly_interpreter;
 
     saved_top: Top,
     /// Tracks how many values are being restored.

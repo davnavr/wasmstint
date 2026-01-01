@@ -287,6 +287,32 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         , .{ .prefix = ctx.name_prefix });
         ctx.skip_oof_handler -= 1;
     }
+    {
+        try ctx.defineOpcodeHandler("call", .@"32");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    lea r15, [{[vip]t} - 1] # save ip to call byte
+            \\
+        , .{ .vip = Reg64.vip }));
+        const idx_decode = try ctx.decodeUlebIdx(.r11, .r13, .r14, "idx");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    mov qword ptr [rbp + 16], {[vip]t} # ip
+            \\    mov qword ptr [rbp + 24], {[stp]t} # stp
+            \\    mov qword ptr [rbp + 32], {[eip]t} # eip
+            \\    mov qword ptr [rbp + 40], r11 # func_idx
+            \\    mov qword ptr [rbp + 48], r15 # call_ip
+            \\
+        , .{ .stp = Reg64.stp, .eip = Reg64.eip, .vip = Reg64.vip }));
+        try ctx.popSystemVSavedRegisters();
+        try ctx.asm_out.print(
+            \\    mov rsp, rbp
+            \\    pop rbp
+            \\    jmp "{[prefix]s}invokeWithinWasm"
+            \\    ud2
+            \\
+        , .{ .prefix = ctx.name_prefix });
+        try idx_decode.writeSlowPath(ctx);
+        ctx.skip_oof_handler -= 1;
+    }
 
     {
         try ctx.defineOpcodeHandler("local.get", .@"64");
@@ -1269,19 +1295,19 @@ const Context = struct {
 
     fn decodeUlebIdx(
         ctx: *Context,
-        comptime result: TempReg,
+        result: Reg64,
         clobber_0: TempReg,
         clobber_1: TempReg,
         name: []const u8,
     ) !DecodeUlebIdx {
         const fast_path = try Label.initWithSuffix(ctx, name, "fast");
         const slow_path = try Label.initWithSuffix(ctx, name, "slow");
-        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+        try ctx.asm_out.print(
             \\    movzx {[temp]t}, byte ptr [{[ip]t}]
             \\    inc {[ip]t}
             \\    test {[temp_8]t}, 0x80
             \\
-        , .{ .temp = result, .temp_8 = comptime result.toReg8(), .ip = Reg64.vip }));
+        , .{ .temp = result, .temp_8 = result.toReg8(), .ip = Reg64.vip });
         try ctx.asm_out.print("    jnz {f}\n", .{slow_path});
         try ctx.asm_out.print("{f}:\n", .{fast_path});
         return DecodeUlebIdx{

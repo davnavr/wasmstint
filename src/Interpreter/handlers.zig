@@ -47,6 +47,7 @@ pub inline fn callOpcodeHandler(
                 stp,
                 instr.end,
                 handler,
+                undefined,
             ),
             else => comptime unreachable,
         };
@@ -200,6 +201,124 @@ pub fn updateWasmFrameState(
     return .wrote_ip_and_stp_to_the_current_stack_frame;
 }
 
+/// Attempts to allocate a stack frame for the `target_function`, with arguments expected to be on
+/// top of the value stack, and then resumes execution.
+///
+/// To ensure the interpreter cannot overflow the stack, opcode handlers must ensure this function
+/// is called inline.
+///
+/// If enough stack space is not available, then the interpreter is interrupted and the IP is set to
+/// `call_ip`, which is a pointer to the call instruction to restart.
+pub inline fn invokeWithinWasm(
+    old_instr: Instr,
+    /// Pointer to the byte containing the call opcode.
+    call_ip: Ip,
+    /// Stores the stack before the `call` instruction was executed. Parameters to pass to the
+    /// `callee` begin at the bottom at index `0`.
+    ///
+    /// Restored if a `.call_stack_exhausted` interrupt occurred.
+    saved_sp: Stack.Saved,
+    fuel: *Interpreter.Fuel,
+    old_stp: Stp,
+    interp: *Interpreter,
+    callee: runtime.FuncInst,
+    comptime dispatchNextOpcode: fn (
+        Instr,
+        Stack.Top,
+        *Interpreter.Fuel,
+        Stp,
+        Locals,
+        runtime.ModuleInst,
+        *Interpreter,
+    ) callconv(.@"inline") Transition,
+) Transition {
+    var coz_begin = coz.begin("wasmstint.Interpreter.invokeWithinWasm");
+    defer coz_begin.end();
+
+    const signature = callee.signature();
+
+    // Overlap trick to avoid copying arguments.
+    const args: []align(@sizeOf(Value)) Value = @constCast(
+        saved_sp.poppedValues()[0..signature.param_count],
+    );
+    const current_frame = interp.stack.frameAt(interp.stack.current_frame).?;
+
+    const saved_token = updateWasmFrameState(current_frame, old_instr, old_stp);
+    // std.debug.print(
+    //     "WASM {f} WANTS TO CALL {f} (call_depth = {}, args @ {*}, fuel = {})\n",
+    //     .{ current_frame.function, callee, interp.stack.call_depth, args, fuel.remaining },
+    // );
+
+    const args_top = Stack.Top{ .ptr = args.ptr + args.len };
+    const new_frame = interp.stack.pushFrameWithinCapacity(
+        args_top,
+        &interp.dummy_instantiate_flag,
+        .preallocated,
+        callee,
+    ) catch |e| switch (e) {
+        error.OutOfMemory => {
+            // std.debug.print(
+            //     "WASM CALL EXHAUSTED STACK (depth = {}, ver = {})\n",
+            //     .{ interp.call_depth, interp.version.number },
+            // );
+            return Transition.callStackExhaustion(
+                call_ip,
+                old_instr.end,
+                saved_sp,
+                old_stp,
+                interp,
+                callee,
+            );
+        },
+        error.ValidationNeeded => @panic("TODO: awaiting_validation"),
+    };
+
+    // std.log.debug(
+    //     "CALLING {f} @ {*} called by {f}",
+    //     .{ callee, new_frame.frame, current_frame.function },
+    // );
+
+    std.debug.assert(@intFromPtr(current_frame) != @intFromPtr(new_frame.frame));
+    std.debug.assert(interp.stack.current_frame == new_frame.offset);
+    std.debug.assert(@intFromPtr(old_instr.end) == @intFromPtr(current_frame.wasm.eip));
+
+    const new_locals: []align(@sizeOf(Value)) Value = new_frame.frame.localValues(&interp.stack);
+    std.debug.assert(@intFromPtr(new_locals.ptr) == @intFromPtr(args.ptr));
+    std.debug.assert(args.len <= new_locals.len);
+
+    switch (callee.expanded()) {
+        .wasm => |wasm| {
+            // std.debug.print(
+            //     "AFTER CALL args={*}, sp={*}\n",
+            //     .{ args.ptr, new_frame.top().ptr },
+            // );
+            return dispatchNextOpcode(
+                Instr.init(new_frame.frame.wasm.ip, new_frame.frame.wasm.eip),
+                new_frame.top(),
+                fuel,
+                new_frame.frame.wasm.stp,
+                Locals{ .ptr = new_locals.ptr },
+                wasm.module,
+                interp,
+            );
+        },
+        .host => |host| {
+            // std.debug.print("GOING TO AWAIT HOST TRANSITION\n", .{});
+            // std.log.debug(
+            //     "new_frame.top() = {*}, args = {*}",
+            //     .{ new_frame.top().ptr, args.ptr },
+            // );
+            return Transition.awaitingHost(
+                new_frame.top(),
+                interp,
+                &host.signature,
+                .calling_host,
+                saved_token,
+            );
+        },
+    }
+}
+
 /// Is a `packed struct` to work around https://github.com/ziglang/zig/issues/18189
 pub const Transition = packed struct(u32) {
     version: Version,
@@ -306,6 +425,7 @@ pub const Transition = packed struct(u32) {
 
 const std = @import("std");
 const builtin = @import("builtin");
+const coz = @import("coz");
 
 const Instr = @import("Instr.zig");
 const Interpreter = @import("../Interpreter.zig");
