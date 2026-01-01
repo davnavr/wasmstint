@@ -295,6 +295,110 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try access.finish(ctx);
     }
 
+    for (&[_]struct { []const u8, u5, Context.IntType, u7 }{
+        .{ "i32.const", 5, .i32, 32 },
+        .{ "i64.const", 10, .i64, 64 },
+    }) |info| {
+        const name, const max_byte_len, const int_type, const bit_size = info;
+        try ctx.defineOpcodeHandler(name, .@"64");
+        const finished = try Label.init(ctx, "finished");
+        var continuation_buf: [9]Label = undefined;
+        const continuation = continuation_buf[0..(max_byte_len - 1)];
+        for (continuation, 0..) |*cont_label, i| {
+            var cont_label_name_buf: [7]u8 = undefined;
+            cont_label.* = try Label.init(
+                ctx,
+                std.fmt.bufPrint(&cont_label_name_buf, "byte-{d}", .{1 + i}) catch unreachable,
+            );
+        }
+
+        const r11 = int_type.register(.r11);
+        const r13 = int_type.register(.r13);
+        const r14 = int_type.register(.r14);
+
+        // Fast path is single-byte constant
+        try ctx.asm_out.print(
+            \\    movzx {[r11]s}, byte ptr [{[vip]t}]
+            \\    inc {[vip]t}
+            \\    test r11b, 0x80
+            \\    je {[two_bytes]f}
+            \\    shl {[r11]s}, {[shift]d}
+            \\    sar {[r11]s}, {[shift]d}
+            \\
+        , .{
+            .r11 = r11,
+            .vip = Reg64.vip,
+            .shift = bit_size - 7,
+            .two_bytes = continuation[0],
+        });
+
+        // This falls through to the actual storing of the constant
+        try ctx.asm_out.print(
+            \\{[label]f}:
+            \\    mov {[store_size]s} ptr [{[vsp]t}], {[r11]s}
+            \\    add {[vsp]t}, 16
+            \\
+        , .{
+            .label = finished,
+            .store_size = switch (int_type) {
+                .i32 => "dword",
+                .i64 => "qword",
+            },
+            .vsp = Reg64.vsp,
+            .r11 = r11,
+        });
+        try ctx.jmpToNextHandler(.r11);
+
+        for (continuation[0 .. continuation.len - 1], 0..) |label, i| {
+            try ctx.asm_out.print(
+                \\.align 16
+                \\{[label]f}:
+                \\    movzx {[r14]s}, byte ptr [{[vip]t}]
+                \\    mov {[r13]s}, {[r14]s}
+                \\    inc {[vip]t}
+                \\    and r13b, 0x7F
+                \\    shl {[r13]s}, {[byte_shift]d}
+                \\    or {[r11]s}, {[r13]s}
+                \\    test r14b, 0x80
+                \\    je {[next]f}
+                \\    shl {[r11]s}, {[final_shift]d}
+                \\    sar {[r11]s}, {[final_shift]d}
+                \\    jmp {[finished]f}
+                \\    ud2
+                \\
+            , .{
+                .label = label,
+                .r11 = r11,
+                .r13 = r13,
+                .r14 = r14,
+                .vip = Reg64.vip,
+                .next = continuation[i + 1],
+                .byte_shift = 7 * (i + 1),
+                .final_shift = @as(usize, bit_size) - (7 * (i + 2)),
+                .finished = finished,
+            });
+        }
+
+        try ctx.asm_out.print(
+            \\.align 8
+            \\{[label]f}:
+            \\    movzx {[r13]s}, byte ptr [{[vip]t}]
+            \\    inc {[vip]t}
+            \\    shl {[r13]s}, {[final_shift]d}
+            \\    or {[r11]s}, {[r13]s}
+            \\    jmp {[finished]f}
+            \\    ud2
+            \\
+        , .{
+            .label = continuation[continuation.len - 1],
+            .r11 = r11,
+            .r13 = r13,
+            .vip = Reg64.vip,
+            .final_shift = bit_size - (7 * continuation.len),
+            .finished = finished,
+        });
+    }
+
     {
         try ctx.defineOpcodeHandler("f32.const", .@"64");
         try ctx.asm_out.print(
@@ -545,7 +649,7 @@ const Context = struct {
                     \\    and {[acc]t}, 0x7F
                     \\    shl {[acc]t}, {[shift_by]d}
                     \\    or {[result]t}, {[acc]t}
-                    \\    test {[byte]t}, 0x80
+                    \\    test {[byte]t}, 0x80 # TODO: test against byte register
                     \\    jz {[fast_path]f}
                     \\
                 , .{
@@ -943,7 +1047,7 @@ const Context = struct {
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
             \\    movzx {[temp]t}, byte ptr [{[ip]t}]
             \\    inc {[ip]t}
-            \\    test {[temp]t}, 0x80
+            \\    test {[temp]t}, 0x80  # TODO: test against byte register
             \\
         , .{ .temp = result, .ip = Reg64.vip }));
         try ctx.asm_out.print("    jnz {f}\n", .{slow_path});
