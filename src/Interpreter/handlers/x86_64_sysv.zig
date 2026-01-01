@@ -111,6 +111,7 @@ inline fn inlineAsmTailCallToHandler(
     handler: *const OpcodeHandler,
 ) Transition {
     return asm (
+    // TODO: Problem could be here, what happens to callee-save registers?
     // This can call the handler directly
     //
     // Writes to `rsp` mean the CPU's "stack engine" is not happy, but self-hosted
@@ -242,7 +243,7 @@ inline fn resumeAfterInvokeWithinWasm(
             instr.next,
             stp,
             instr.end,
-            handler,
+            @intFromPtr(handler),
             undefined,
         });
 }
@@ -258,7 +259,7 @@ fn invokeWithinWasm(
     ip: Ip, // `rbp + 16`
     stp: Stp, // `rbp + 24`
     eip: Eip, // `rbp + 32`
-    func_idx: u32, // `rbp + 40`
+    func_idx: usize, // `rbp + 40`
     call_ip: Ip, // `rbp + 48`
 ) callconv(sysvcc) Transition {
     switch (@as(opcodes.ByteOpcode, @enumFromInt(call_ip[0]))) {

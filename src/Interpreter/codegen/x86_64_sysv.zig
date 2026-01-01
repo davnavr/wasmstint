@@ -827,7 +827,11 @@ const Context = struct {
     skip_oof_handler: u32 = 0,
 
     fn popSystemVSavedRegisters(ctx: *Context) !void {
-        try ctx.asm_out.writeAll("    # Restore System V saved registers\n");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    # Restore System V saved registers
+            \\    add rsp, {[stack_space_padding]d}
+            \\
+        , .{ .stack_space_padding = stack_space_padding }));
         const restore_count = Reg64.system_v_saved_registers.len;
         for (0..restore_count) |i| {
             try ctx.asm_out.print(
