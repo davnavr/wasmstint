@@ -209,7 +209,11 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
     }
     {
         try ctx.defineOpcodeHandler("br", .@"32");
-        try ctx.asm_out.writeAll("    # Skip reading label idx\n");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    # Skip reading label idx
+            \\    lea r15, [{[vip]t} - 1]
+            \\
+        , .{ .vip = Reg64.vip }));
         const branch = try ctx.takeBranch();
         try ctx.jmpToNextHandler(.r11);
         try branch.writeSlowPath(ctx);
@@ -218,19 +222,20 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
     {
         try ctx.defineOpcodeHandler("br_table", .@"32");
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
-            \\    mov r15d, dword ptr [{[vsp]t} - 16]
-            \\    sub {[vsp]t}, 16
+            \\    lea r15, [{[vip]t} - 1] # save ip to br_table byte
             \\
-        , .{ .vsp = Reg64.vsp }));
+        , .{ .vip = Reg64.vip }));
         const label_count = try ctx.decodeUlebIdx(.r11, .r13, .r14, "label-count");
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
             \\    # No need to actually read the labels
-            \\    cmp r15d, r11d
-            \\    cmovb r15d, r11d
-            \\    shl r15d, 4
-            \\    add {[stp]t}, r15
+            \\    mov r13d, dword ptr [{[vsp]t} - 16]
+            \\    sub {[vsp]t}, 16
+            \\    cmp r11d, r13d 
+            \\    cmovb r13d, r11d # prevent exceeding label count
+            \\    shl r13d, 3
+            \\    add {[stp]t}, r13
             \\
-        , .{ .stp = Reg64.stp }));
+        , .{ .vsp = Reg64.vsp, .stp = Reg64.stp }));
         const branch = try ctx.takeBranch();
         try ctx.jmpToNextHandler(.r11);
         try label_count.writeSlowPath(ctx);
@@ -332,19 +337,19 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try access.finish(ctx);
     }
 
-    for (&[_]struct { []const u8, std.mem.Alignment, []const u8, []const u8 }{
-        .{ "i32.store", .@"4", "mov", "dword" },
-        .{ "f32.store", .@"4", "mov", "dword" }, // ReleaseSmall could deduplicate w/ i32.store
+    for (&[_]struct { []const u8, std.mem.Alignment, []const u8, []const u8, []const u8 }{
+        .{ "i32.store", .@"4", "mov", "dword", "r13d" },
+        .{ "f32.store", .@"4", "mov", "dword", "r13d" }, // ReleaseSmall could deduplicate w/ i32.store
     }) |info| {
-        const name, const access_size, const instr, const addr_size = info;
+        const name, const access_size, const instr, const addr_size, const store_reg = info;
         try ctx.defineOpcodeHandler(name, .@"64");
         const access = try ctx.linearMemoryAccess(1, access_size);
         try ctx.asm_out.print(
             \\    mov r13d, dword ptr [{[vsp]t} - 16] 
-            \\    {[instr]s} {[size]s} ptr [r13 + r15], r13d
+            \\    {[instr]s} {[size]s} ptr [r13 + r15], {[store_reg]s}
             \\    sub {[vsp]t}, 16
             \\
-        , .{ .vsp = Reg64.vsp, .instr = instr, .size = addr_size });
+        , .{ .vsp = Reg64.vsp, .instr = instr, .size = addr_size, .store_reg = store_reg });
         try access.finish(ctx);
     }
 
@@ -1333,12 +1338,14 @@ const Context = struct {
     };
 
     /// Branch to take is stored in `Reg64.stp`.
+    ///
+    /// IP to first byte of branch instruction is stored at `r15`.
     fn takeBranch(ctx: *Context) !TakeBranch {
         const cpy_many_results = try Label.init(ctx, "copy-results");
         const finish_cpy_results = try Label.init(ctx, "adjust-stp");
         try ctx.asm_out.print(
             \\    movsxd r11, dword ptr [{[stp]t}] # delta_ip
-            \\    add {[vip]t}, r11
+            \\    lea {[vip]t}, [r15 + r11]
             \\    movzx r11, byte ptr [{[stp]t} + {[copy_count_off]d}] # copy_count
             \\    shl r11, 4
             \\    movzx r13, byte ptr [{[stp]t} + {[pop_count_off]d}] # pop_count
