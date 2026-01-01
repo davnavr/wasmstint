@@ -189,11 +189,39 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try ctx.jmpToNextHandler(.r11);
     }
     {
-        try ctx.asm_out.writeAll("\n");
         try ctx.defineOpcodeHandlerWithAliases(&.{ "block", "loop" }, .@"32");
         const block_type = try ctx.skipBlockType(.r11);
         try ctx.jmpToNextHandler(.r13);
         try block_type.writeSlowPath(ctx);
+    }
+    {
+        try ctx.defineOpcodeHandler("if", .@"32");
+        const false_branch = try Label.init(ctx, "false");
+        try ctx.asm_out.print(
+            \\    mov r13d, dword ptr [{[vsp]t} - 16] # load condition from top of stack
+            \\    sub {[vsp]t}, 16
+            \\    test r13d, r13d
+            \\    jz {[false_branch]f}
+            \\
+        , .{ .vsp = Reg64.vsp, .false_branch = false_branch });
+        const block_type = try ctx.skipBlockType(.r11);
+        try ctx.asm_out.print(
+            \\    add {[stp]t}, 8 # increment STP
+            \\
+        , .{ .stp = Reg64.stp });
+        ctx.skip_oof_handler += 1;
+        try ctx.jmpToNextHandler(.r13);
+        try block_type.writeSlowPath(ctx);
+
+        try ctx.asm_out.print(
+            \\{[false_branch]f}:
+            \\    # Avoids reading the block type
+            \\    lea r15, [{[vip]t} - 1] # save ip to if byte
+            \\
+        , .{ .false_branch = false_branch, .vip = Reg64.vip });
+        const branch = try ctx.takeBranch();
+        try ctx.jmpToNextHandler(.r11);
+        try branch.writeSlowPath(ctx);
     }
 
     {
@@ -340,8 +368,13 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
     for (&[_]struct { []const u8, std.mem.Alignment, RegSize, []const u8, RegSize }{
         .{ "i32.store", .@"4", .dword, "mov", .dword },
         .{ "f32.store", .@"4", .dword, "mov", .dword }, // ReleaseSmall could deduplicate w/ i32.store
+        .{ "i32.store8", .@"1", .dword, "mov", .byte },
+        .{ "i32.store16", .@"2", .dword, "mov", .word },
         .{ "i64.store", .@"8", .qword, "mov", .qword },
         .{ "f64.store", .@"8", .qword, "mov", .qword }, // ReleaseSmall could deduplicate w/ i64.store
+        .{ "i64.store8", .@"1", .qword, "mov", .byte },
+        .{ "i64.store16", .@"2", .qword, "mov", .word },
+        .{ "i64.store32", .@"4", .qword, "mov", .dword },
     }) |info| {
         const name, const access_size, const load_size, const instr, const store_size = info;
         try ctx.defineOpcodeHandler(name, .@"64");
@@ -580,6 +613,10 @@ const Reg64 = enum {
         }
     }
 
+    fn toReg16(reg: Reg64) Reg16 {
+        return reg.toReg32().toReg16();
+    }
+
     fn toReg8(reg: Reg64) Reg8 {
         return reg.toReg32().toReg8();
     }
@@ -588,10 +625,29 @@ const Reg64 = enum {
         return switch (size) {
             .qword => @tagName(reg),
             .dword => @tagName(reg.toReg32()),
-            .word => unreachable,
+            .word => @tagName(reg.toReg16()),
             .byte => @tagName(reg.toReg8()),
         };
     }
+};
+
+const Reg16 = enum {
+    ax,
+    bx,
+    cx,
+    dx,
+    si,
+    di,
+    //sp,
+    //bp,
+    r8w,
+    r9w,
+    r10w,
+    r11w,
+    r12w,
+    r13w,
+    r14w,
+    r15w,
 };
 
 const Reg32 = enum {
@@ -631,6 +687,30 @@ const Reg32 = enum {
             => |r| {
                 const name = comptime @tagName(r);
                 return @field(Reg8, name[0..(name.len - 1)] ++ "b");
+            },
+        }
+    }
+
+    fn toReg16(reg: Reg32) Reg16 {
+        switch (reg) {
+            inline .eax,
+            .ebx,
+            .ecx,
+            .edx,
+            .esi,
+            .edi,
+            => |r| return @field(Reg16, @tagName(r)[1..]),
+            inline .r8d,
+            .r9d,
+            .r10d,
+            .r11d,
+            .r12d,
+            .r13d,
+            .r14d,
+            .r15d,
+            => |r| {
+                const name = comptime @tagName(r);
+                return @field(Reg16, name[0..(name.len - 1)] ++ "w");
             },
         }
     }
