@@ -344,7 +344,7 @@ const Modules = struct {
                         .optimize = .Debug,
                         .single_threaded = true,
                     }),
-                    .max_rss = ByteSize.mib(118).bytes,
+                    .max_rss = ByteSize.mib(123).bytes,
                 });
 
                 const run_codegen = b.addRunArtifact(codegen_exe);

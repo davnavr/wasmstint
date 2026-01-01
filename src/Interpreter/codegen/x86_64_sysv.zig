@@ -332,6 +332,22 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try access.finish(ctx);
     }
 
+    for (&[_]struct { []const u8, std.mem.Alignment, []const u8, []const u8 }{
+        .{ "i32.store", .@"4", "mov", "dword" },
+        .{ "f32.store", .@"4", "mov", "dword" }, // ReleaseSmall could deduplicate w/ i32.store
+    }) |info| {
+        const name, const access_size, const instr, const addr_size = info;
+        try ctx.defineOpcodeHandler(name, .@"64");
+        const access = try ctx.linearMemoryAccess(1, access_size);
+        try ctx.asm_out.print(
+            \\    mov r13d, dword ptr [{[vsp]t} - 16] 
+            \\    {[instr]s} {[size]s} ptr [r13 + r15], r13d
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{ .vsp = Reg64.vsp, .instr = instr, .size = addr_size });
+        try access.finish(ctx);
+    }
+
     for (&[_]struct { []const u8, u5, Context.IntType, u7 }{
         .{ "i32.const", 5, .i32, 32 },
         .{ "i64.const", 10, .i64, 64 },
