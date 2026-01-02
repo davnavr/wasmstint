@@ -257,7 +257,35 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try ctx.jmpToNextHandler(.r11);
         try branch.writeSlowPath(ctx);
     }
-    // br_if
+    {
+        try ctx.defineOpcodeHandler("br_if", .@"32");
+        const false_branch = try Label.init(ctx, "false");
+        try ctx.asm_out.print(
+            \\    mov r13d, dword ptr [{[vsp]t} - 0x10]
+            \\    sub {[vsp]t}, 0x10 # pop condition
+            \\    test r13d, r13d
+            \\    jz {[false]f}
+            \\    lea r15, [{[vip]t} - 1] # save ip to br_if byte
+            \\
+        , .{ .vsp = Reg64.vsp, .vip = Reg64.vip, .false = false_branch });
+        const branch = try ctx.takeBranch();
+        ctx.skip_oof_handler += 1;
+        try ctx.jmpToNextHandler(.r11);
+        try branch.writeSlowPath(ctx);
+
+        try ctx.asm_out.print(
+            \\.align 16
+            \\{[false]f}:
+            \\
+        , .{ .false = false_branch });
+        const label_idx = try ctx.decodeUlebIdx(.r11, .r13, .r14, "label-idx"); // TODO: Helper to SKIP uleb128 indices
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    inc {[stp]t} # stp
+            \\
+        , .{ .stp = Reg64.stp }));
+        try ctx.jmpToNextHandler(.r11);
+        try label_idx.writeSlowPath(ctx);
+    }
     {
         try ctx.defineOpcodeHandler("br_table", .@"32");
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
