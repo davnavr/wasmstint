@@ -223,6 +223,17 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try ctx.jmpToNextHandler(.r11);
         try branch.writeSlowPath(ctx);
     }
+    {
+        try ctx.defineOpcodeHandler("else", .@"32");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    # end of true branch of if, jump to end
+            \\    lea r15, [{[vip]t} - 1] # save ip to else byte
+            \\
+        , .{ .vip = Reg64.vip }));
+        const branch = try ctx.takeBranch();
+        try ctx.jmpToNextHandler(.r11);
+        try branch.writeSlowPath(ctx);
+    }
 
     {
         try ctx.defineOpcodeHandler("end", .@"32");
