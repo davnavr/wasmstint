@@ -333,6 +333,25 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         , .{ .vsp = Reg64.vsp }));
         try ctx.jmpToNextHandler(.r11);
     }
+    // TODO: "select t" handler to fallthrough to "select" handler
+    {
+        try ctx.defineOpcodeHandler("select", .@"16");
+        const true_label = try Label.init(ctx, "true");
+        // select without type requires numeric or vector type, so this must
+        // assume vector (xmmword) to be safe
+        try ctx.asm_out.print(
+            \\    xor r14, r14
+            \\    mov r13d, dword ptr [{[vsp]t} - 0x10]
+            \\    test r13d, r13d
+            \\    jnz {[true]f}
+            \\    movaps xmm0, xmmword ptr [{[vsp]t} - 0x20]
+            \\    movaps xmmword ptr [{[vsp]t} - 0x30], xmm0
+            \\    {[true]f}:
+            \\    sub {[vsp]t}, 0x20
+            \\
+        , .{ .vsp = Reg64.vsp, .true = true_label });
+        try ctx.jmpToNextHandler(.r11);
+    }
 
     {
         try ctx.defineOpcodeHandler("local.get", .@"64");
