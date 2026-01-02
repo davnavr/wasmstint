@@ -580,6 +580,84 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try access.finish(ctx);
     }
 
+    // memory.size
+
+    {
+        try ctx.defineOpcodeHandler("memory.grow", .@"64");
+        const mem_idx_decode = try ctx.decodeUlebIdx(.r11, .r13, .r14, "idx");
+        const fail = try Label.init(ctx, "fail");
+        const within_capacity = try Label.init(ctx, "within-capacity");
+        try ctx.asm_out.print(
+            \\    mov r13d, dword ptr [{[vsp]t} - 0x10] # delta, in pages
+            \\    shl r13d, 16 # go from page size to bytes
+            \\    # ^ assumes 32-bit memories/indices
+            \\    jc {[fail]f}
+            \\    mov r11, [{[mems]t} + r11*8] # ptr to memory, clobbers memidx
+            \\    mov r14, qword ptr [r11 + {[mem_size_off]d}] # memory size
+            \\    add r13, r14 # memory size + delta = desired size
+            \\    cmp r13, qword ptr [r11 + {[mem_limit_off]d}] # check against limit 
+            \\    ja {[fail]f}
+            \\    cmp r13, qword ptr [r11 + {[mem_cap_off]d}] # check against capacity
+            \\    jna {[within_capacity]f}
+            \\    mov dword ptr [{[vsp]t} - 0x10], -1 # assume growth failure
+            \\    # Setup parameters
+            \\    mov rdi, r13 #1 clobbers locals
+            \\    #2 vsp is already in rsi
+            \\    mov rdx, {[vip]t} #3 clobbers module
+            \\    mov rcx, {[eip]t} #4 clobbers fuel
+            \\    mov r8, r11 #5 clobbers mems
+            \\    #6 is already in r9
+            \\    mov qword ptr [rbp + 16], {[stp]t} # stp
+            \\
+        , .{
+            .vsp = Reg64.vsp,
+            .vip = Reg64.vip,
+            .eip = Reg64.eip,
+            .stp = Reg64.stp,
+            .mems = Reg64.mems,
+            .fail = fail,
+            .within_capacity = within_capacity,
+            // .mem_base_off = 0,
+            .mem_size_off = 8,
+            .mem_cap_off = 16,
+            .mem_limit_off = 24,
+        });
+        try ctx.popSystemVSavedRegisters();
+        try ctx.asm_out.print(
+            \\    mov rsp, rbp
+            \\    pop rbp
+            \\    jmp "{[prefix]s}memoryGrowReallocate"
+            \\    ud2
+            \\
+        , .{ .prefix = ctx.name_prefix });
+
+        const to_next = try Label.init(ctx, "next-opcode");
+        try ctx.asm_out.print(
+            \\.align 16
+            \\{[within_capacity]f}:
+            \\    # TODO: only fill with zeroes if allocator says it doesn't fill w/ zeroes
+            \\    # OS pages are zeroed
+            \\    # Assuming 65536 page size, could memset with rep stosb (apparently not as good on AMD)
+            \\    mov dword ptr [{[vsp]t} - 0x10], r14d # store old size
+            \\    mov qword ptr [r11 + {[mem_size_off]d}], r13 # store new size
+            \\{[to_next]f}:
+            \\
+        , .{
+            .within_capacity = within_capacity,
+            .to_next = to_next,
+            .vsp = Reg64.vsp,
+            .mem_size_off = 8,
+        });
+        try ctx.jmpToNextHandler(.r11);
+        try ctx.asm_out.print(
+            \\{[fail]f}:
+            \\    mov dword ptr [{[vsp]t} - 0x10], -1
+            \\    jmp {[to_next]f}
+            \\
+        , .{ .fail = fail, .vsp = Reg64.vsp, .to_next = to_next });
+        try mem_idx_decode.writeSlowPath(ctx);
+    }
+
     for (&[_]struct { []const u8, u5, Context.IntType, u7 }{
         .{ "i32.const", 5, .i32, 32 },
         .{ "i64.const", 10, .i64, 64 },

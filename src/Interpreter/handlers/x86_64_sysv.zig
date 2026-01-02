@@ -426,6 +426,34 @@ fn invokeWithinWasmIndirect(
     );
 }
 
+fn memoryGrowReallocate(
+    new_size: usize, // rdi
+    /// `sp - 1` refers to `(i32.const -1)`, indicating growth failure.
+    sp: Sp, // rsi
+    ip: Ip, // rdx,
+    eip: Eip, // rcx
+    /// Pointer to memory to grow
+    mem: *runtime.MemInst, // r8
+    interp: *Interpreter, // r9
+    // These parameters are passed on the stack
+    stp: Stp, // `rbp + 16`
+    _: usize, // `rbp + 24`
+    _: usize, // `rbp + 32`
+    _: usize, // `rbp + 40`
+    _: usize, // `rbp + 48`
+) callconv(sysvcc) Transition {
+    const result = &(sp.ptr - 1)[0];
+    std.debug.assert(result.i32 == -1);
+    return Transition.interrupted(.init(ip, eip), sp, stp, interp, .{
+        .memory_grow = .{
+            .old_size = @intCast(mem.size),
+            .new_size = new_size,
+            .memory = mem,
+            .result = result,
+        },
+    });
+}
+
 fn trapTableAccessOob(
     trap_ip: Ip, // rdi
     sp: Sp, // stays in rsi
@@ -517,6 +545,7 @@ comptime {
         "returnFromWasm",
         "invokeWithinWasm",
         "invokeWithinWasmIndirect",
+        "memoryGrowReallocate",
         "trapIntegerDivisionByZero",
         "trapIntegerOverflow",
         "trapMemoryAccessOutOfBounds",
