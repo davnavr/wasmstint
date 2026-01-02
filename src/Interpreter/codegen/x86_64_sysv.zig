@@ -326,6 +326,15 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
     }
 
     {
+        try ctx.defineOpcodeHandler("drop", .@"16");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{ .vsp = Reg64.vsp }));
+        try ctx.jmpToNextHandler(.r11);
+    }
+
+    {
         try ctx.defineOpcodeHandler("local.get", .@"64");
         const idx_decode = try ctx.decodeUlebIdx(.r13, .r14, .r15, "idx");
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
