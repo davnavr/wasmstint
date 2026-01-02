@@ -352,6 +352,98 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try idx_decode.writeSlowPath(ctx);
         ctx.skip_oof_handler -= 1;
     }
+    {
+        try ctx.defineOpcodeHandler("call_indirect", .@"32");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    lea rdi, [{[vip]t} - 1] # save ip to call_indirect byte, clobbers locals
+            \\    # clobber mems
+            \\
+        , .{ .vip = Reg64.vip }));
+        const type_idx_decode = try ctx.decodeUlebIdx(.r8, .r13, .r14, "type");
+        const table_idx_decode = try ctx.decodeUlebIdx(.r13, .r14, .r15, "table");
+        const oob = try Label.init(ctx, "oob");
+        const null_elem = try Label.init(ctx, "null_elem");
+        try ctx.asm_out.print(
+            \\    # load expected signature
+            \\    mov r11, qword ptr [{[module]t} + {[module_info_off]d}] # ptr to info
+            \\    mov r11, qword ptr [r11 + {[info_types_off]d}] # ptr to func types
+            \\    shl r8, 4 # size of func type is two qwords
+            \\    lea r8, qword ptr [r11 + r8] # ptr to func type, clobbers type idx
+            \\    # load funcref from table
+            \\    mov r14d, dword ptr [{[vsp]t} - 0x10] # element index
+            \\    mov rdx, qword ptr [{[module]t} + {[module_tables_off]d}] # ptr to module's tables, clobbers module
+            \\    mov rdx, qword ptr [rdx + r13 * 8] # ptr to table
+            \\    cmp r14d, dword ptr [rdx + {[table_len_off]d}] # bounds check
+            \\    ja {[oob]f}
+            \\    mov rdx, qword ptr [rdx] # ptr to elems, clobbers ptr to table
+            \\    mov rdx, qword ptr [rdx + r14 * 8] # funcref, clobbers ptr to elems
+            \\    test rdx, rdx # check for null
+            \\    jz {[null_elem]f}
+            \\    mov qword ptr [rbp + 16], {[vip]t} # ip
+            \\    mov qword ptr [rbp + 24], {[stp]t} # stp
+            \\    mov qword ptr [rbp + 32], {[eip]t} # eip
+            \\
+        , .{
+            .vsp = Reg64.vsp,
+            .module = Reg64.module,
+            .module_info_off = 8,
+            .info_types_off = 0, // Assumes offset of RawInner in Module.Inner is 0
+            .module_tables_off = 40,
+            .table_len_off = 12,
+            .oob = oob,
+            .null_elem = null_elem,
+            .vip = Reg64.vip,
+            .stp = Reg64.stp,
+            .eip = Reg64.eip,
+        });
+        try ctx.popSystemVSavedRegisters();
+        try ctx.asm_out.print(
+            \\    mov rsp, rbp
+            \\    pop rbp
+            \\    jmp "{[prefix]s}invokeWithinWasmIndirect"
+            \\    ud2
+            \\
+        , .{ .prefix = ctx.name_prefix });
+        try type_idx_decode.writeSlowPath(ctx);
+        try table_idx_decode.writeSlowPath(ctx);
+        ctx.skip_oof_handler -= 1;
+
+        try ctx.asm_out.print(
+            \\.align 16
+            \\{[oob]f}:
+            \\    # rdi has trap_ip
+            \\    mov rdx, {[eip]t}
+            \\    mov rcx, {[stp]t}
+            \\    mov r8, r13 # table index
+            \\
+        , .{ .oob = oob, .eip = Reg64.eip, .stp = Reg64.stp });
+        try ctx.popSystemVSavedRegisters();
+        try ctx.asm_out.print(
+            \\    mov rsp, rbp
+            \\    pop rbp
+            \\    jmp "{[prefix]s}trapTableAccessOob"
+            \\    ud2
+            \\
+        , .{ .prefix = ctx.name_prefix });
+
+        try ctx.asm_out.print(
+            \\.align 16
+            \\{[null_elem]f}:
+            \\    # rdi has trap_ip
+            \\    mov rdx, {[eip]t}
+            \\    mov rcx, {[stp]t}
+            \\    mov r8, r14 # elem index
+            \\
+        , .{ .null_elem = null_elem, .eip = Reg64.eip, .stp = Reg64.stp });
+        try ctx.popSystemVSavedRegisters();
+        try ctx.asm_out.print(
+            \\    mov rsp, rbp
+            \\    pop rbp
+            \\    jmp "{[prefix]s}trapIndirectCallToNull"
+            \\    ud2
+            \\
+        , .{ .prefix = ctx.name_prefix });
+    }
 
     {
         try ctx.defineOpcodeHandler("drop", .@"16");

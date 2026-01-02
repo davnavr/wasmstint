@@ -26,6 +26,16 @@ pub const OpcodeHandler = fn () callconv(.naked) Transition;
 // inline assembly can use.
 const sysvcc = std.builtin.CallingConvention{ .x86_64_sysv = .{} };
 
+comptime {
+    // TODO: Move these checks to generated Zig
+    const ModuleInner = @typeInfo(@FieldType(Module, "inner")).pointer.child;
+    std.debug.assert(@offsetOf(ModuleInner, "raw") == 0);
+    std.debug.assert(@offsetOf(@FieldType(ModuleInner, "raw"), "types") == 0);
+    std.debug.assert(@offsetOf(runtime.ModuleInst.Header, "tables") == 40);
+    std.debug.assert(@offsetOf(runtime.TableInst, "base") == 0);
+    std.debug.assert(@offsetOf(runtime.TableInst, "len") == 12);
+}
+
 /// Sets up a stack frame for the assembly opcode handler, before invoking it.
 ///
 /// Parameters are passed such that the trampoline has to move less parameters around to the
@@ -285,6 +295,7 @@ inline fn resumeAfterInvokeWithinWasm(
     }
 }
 
+// TODO: Don't need to pass `locals` or `memories`
 fn invokeWithinWasm(
     locals: common.Locals, // rdi
     sp: Sp, // rsi
@@ -335,6 +346,112 @@ fn invokeWithinWasm(
         callee,
         resumeAfterInvokeWithinWasm,
     );
+}
+
+inline fn resumeAfterInvokeWithinWasmIndirect(
+    old_instr: Instr,
+    sp: Sp,
+    fuel: *Interpreter.Fuel,
+    stp: Stp,
+    locals: common.Locals,
+    module: runtime.ModuleInst,
+    interp: *Interpreter,
+) Transition {
+    if (builtin.zig_backend == .stage2_x86_64) {
+        // trampoline continues execution
+        return Transition.interrupted(old_instr, sp, stp, interp, .out_of_fuel);
+    } else {
+        var instr = old_instr;
+        const handler = instr.readNextOpcodeHandler(fuel, locals, module, interp);
+        // TODO: inlineLlvmTailCallToHandler()
+        return @call(
+            .always_tail,
+            @as(@TypeOf(&invokeWithinWasm), @ptrCast(opcodeHandlerTrampoline)),
+            .{
+                @as(usize, @bitCast(locals)),
+                sp,
+                @as(runtime.FuncRef, @bitCast(module)),
+                fuel,
+                @as(*const Module.FuncType, @ptrCast(module.header().mems)),
+                interp,
+                instr.next,
+                stp,
+                instr.end,
+                @intFromPtr(handler),
+                undefined,
+            },
+        );
+    }
+}
+
+fn invokeWithinWasmIndirect(
+    call_ip: Ip, // rdi
+    /// Does not have the `i32` index popped.
+    sp: Sp, // rsi
+    callee: runtime.FuncRef, // rdx,
+    fuel: *Interpreter.Fuel, // rcx
+    expected_signature: *const Module.FuncType, // r8
+    interp: *Interpreter, // r9
+    ip: Ip, // `rbp + 16`
+    stp: Stp, // `rbp + 24`
+    eip: Eip, // `rbp + 32`
+    _: usize, // `rbp + 40`
+    _: usize, // `rbp + 48`
+) callconv(sysvcc) Transition {
+    const pop_count = 1 + expected_signature.param_count;
+    const saved_sp = Stack.Saved.pop(
+        Stack.Values.init(sp, &interp.stack, pop_count, pop_count),
+        pop_count,
+    );
+
+    const actual_signature = callee.signature();
+    if (!expected_signature.matches(actual_signature)) {
+        const info = Interpreter.Trap.init(
+            .indirect_call_signature_mismatch,
+            .{ .expected = expected_signature, .actual = actual_signature },
+        );
+
+        return Transition.trap(ip, .none, eip, sp, stp, interp, info);
+    }
+
+    return common.invokeWithinWasm(
+        Instr.init(ip, eip),
+        call_ip,
+        saved_sp,
+        fuel,
+        stp,
+        interp,
+        callee.funcInst(),
+        resumeAfterInvokeWithinWasmIndirect,
+    );
+}
+
+fn trapTableAccessOob(
+    trap_ip: Ip, // rdi
+    sp: Sp, // stays in rsi
+    eip: Eip, // r10 -> rdx
+    stp: Stp, // rbx -> rcx
+    table_idx: usize, // r8
+    interp: *Interpreter, // stays in r9
+) callconv(sysvcc) Transition {
+    const info = Interpreter.Trap.init(
+        .table_access_out_of_bounds,
+        .init(@enumFromInt(table_idx), .call_indirect),
+    );
+
+    return Transition.trap(trap_ip, .none, eip, sp, stp, interp, info);
+}
+
+fn trapIndirectCallToNull(
+    trap_ip: Ip, // rdi
+    sp: Sp, // stays in rsi
+    eip: Eip, // r10 -> rdx
+    stp: Stp, // rbx -> rcx
+    elem_idx: usize, // r8
+    interp: *Interpreter, // stays in r9
+) callconv(sysvcc) Transition {
+    const info = Interpreter.Trap.init(.indirect_call_to_null, .{ .index = @intCast(elem_idx) });
+    return Transition.trap(trap_ip, .none, eip, sp, stp, interp, info);
 }
 
 fn trapIntegerDivisionByZero(
@@ -399,9 +516,12 @@ comptime {
         "interruptOutOfFuel",
         "returnFromWasm",
         "invokeWithinWasm",
+        "invokeWithinWasmIndirect",
         "trapIntegerDivisionByZero",
         "trapIntegerOverflow",
         "trapMemoryAccessOutOfBounds",
+        "trapTableAccessOob",
+        "trapIndirectCallToNull",
         "byte_dispatch_table",
     }) |name| {
         @export(&@field(@This(), name), .{ .name = generated.symbol_prefix ++ name });
@@ -412,6 +532,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const opcodes = @import("../../opcodes.zig");
 
+const Module = @import("../../Module.zig");
 const Interpreter = @import("../../Interpreter.zig");
 const runtime = @import("../../runtime.zig");
 
