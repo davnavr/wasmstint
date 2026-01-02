@@ -22,39 +22,7 @@ else
 pub const OpcodeHandler = implementation.OpcodeHandler;
 pub const outOfFuelHandler = implementation.outOfFuelHandler;
 pub const byte_dispatch_table = &implementation.byte_dispatch_table;
-
-pub inline fn callOpcodeHandler(
-    handler: *const OpcodeHandler,
-    instr: Instr,
-    fuel: *Interpreter.Fuel,
-    stp: Stp,
-    locals: Locals,
-    module: runtime.ModuleInst,
-    interp: *Interpreter,
-) Transition {
-    std.log.debug("IP={*}", .{instr.next}); // TODO: remove
-    if (use_assembly) {
-        _ = implementation;
-        return switch (builtin.cpu.arch) {
-            .x86_64 => x86_64_sysv.opcodeHandlerTrampoline(
-                locals,
-                interp.stack_top,
-                module,
-                fuel,
-                module.header().mems,
-                interp,
-                instr.next,
-                stp,
-                instr.end,
-                handler,
-                undefined,
-            ),
-            else => comptime unreachable,
-        };
-    } else {
-        return handler(instr.next, interp.stack_top, fuel, stp, locals, module, interp, instr.end);
-    }
-}
+pub const callOpcodeHandler = implementation.callOpcodeHandler;
 
 pub const Locals = packed struct(usize) {
     ptr: [*]align(@sizeOf(Value)) Value,

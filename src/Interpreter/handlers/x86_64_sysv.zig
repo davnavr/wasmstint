@@ -31,8 +31,11 @@ const sysvcc = std.builtin.CallingConvention{ .x86_64_sysv = .{} };
 /// Parameters are passed such that the trampoline has to move less parameters around to the
 /// correct registers expected by `OpcodeHandler`s.
 ///
+/// This also should allocate enough parameters on the stack to be usably for all
+/// tail-callable functions defined here.
+///
 /// TODO: Ideally would use `.x86_64_regcall_v3_sysv`, but only LLVM backend supports it.
-pub const opcodeHandlerTrampoline = @extern(
+const opcodeHandlerTrampoline = @extern(
     *align(16) const fn (
         locals: common.Locals, // rdi
         sp: Sp, // rsi
@@ -49,6 +52,61 @@ pub const opcodeHandlerTrampoline = @extern(
     ) callconv(sysvcc) Transition,
     .{ .name = generated.symbol_prefix ++ "opcodeHandlerTrampoline" },
 );
+
+pub inline fn callOpcodeHandler(
+    handler: *const OpcodeHandler,
+    instr: Instr,
+    fuel: *Interpreter.Fuel,
+    stp: Stp,
+    locals: common.Locals,
+    module: runtime.ModuleInst,
+    interp: *Interpreter,
+) Transition {
+    std.log.debug("IP={*}", .{instr.next}); // TODO: remove
+    var transition = opcodeHandlerTrampoline(
+        locals,
+        interp.stack_top,
+        module,
+        fuel,
+        module.header().mems,
+        interp,
+        instr.next,
+        stp,
+        instr.end,
+        handler,
+        undefined,
+    );
+
+    // Zig x86-64 backend does not support tail calls, and tail calls cannot be emulated with
+    // inline `asm` due to the need to preserve callee-saved registers.
+    while (builtin.zig_backend == .stage2_x86_64 and
+        interp.current_state == .interrupted and
+        interp.current_state.interrupted.cause == .out_of_fuel and
+        fuel.remaining > 0)
+    {
+        const current_frame = interp.stack.frameAt(interp.stack.current_frame).?;
+        const wasm_func = current_frame.function.expanded().wasm;
+        const new_module = wasm_func.module;
+        var new_instr = Instr.init(current_frame.wasm.ip, current_frame.wasm.eip);
+        const new_locals = common.Locals{ .ptr = current_frame.localValues(&interp.stack).ptr };
+        const new_handler = new_instr.readNextOpcodeHandler(fuel, new_locals, new_module, interp);
+        transition = opcodeHandlerTrampoline(
+            new_locals,
+            interp.stack_top,
+            new_module,
+            fuel,
+            new_module.header().mems,
+            interp,
+            new_instr.next,
+            current_frame.wasm.stp,
+            new_instr.end,
+            new_handler,
+            undefined,
+        );
+    }
+
+    return transition;
+}
 
 const invalidByteOpcode = @extern(
     *align(16) const OpcodeHandler,
@@ -82,6 +140,7 @@ comptime {
     }
 }
 
+/// Invokes `interruptOutOfFuel()`.
 pub const outOfFuelHandler = @extern(
     *align(16) const OpcodeHandler,
     .{ .name = generated.symbol_prefix ++ "outOfFuelHandler" },
@@ -95,45 +154,6 @@ fn interruptOutOfFuel(
     interp: *Interpreter,
 ) align(16) callconv(sysvcc) Transition {
     return Transition.interrupted(.init(ip, eip), sp, stp, interp, .out_of_fuel);
-}
-
-/// Performs a tail call to the given opcode handler after moving parameters to the correct places.
-///
-/// Workaround for Zig's self-hosted backend not yet supporting tail calls.
-inline fn inlineAsmTailCallToHandler(
-    instr: Instr,
-    stp: common.Stp,
-    fuel: *Interpreter.Fuel,
-    module: runtime.ModuleInst,
-    sp: Sp,
-    new_locals: common.Locals,
-    interp: *Interpreter,
-    handler: *const OpcodeHandler,
-) Transition {
-    return asm (
-    // TODO: Are callee-saved registers properly reserved here?
-    // This can call the handler directly
-    //
-    // Writes to `rsp` mean the CPU's "stack engine" is not happy, but self-hosted
-    // backend is currently only used in `Debug` builds anyway.
-        \\movq %%rbp, %%rsp
-        \\popq %%rbp
-        \\jmp *%[handler]
-        \\ud2
-        \\
-        : [ret] "={rax}" (-> Transition),
-        : [handler] "{r11}" (handler),
-          [ip] "{rax}" (@as(common.Ip, instr.next)),
-          [stp] "{rbx}" (@as(common.Stp, stp)),
-          [fuel] "{rcx}" (@as(*Interpreter.Fuel, fuel)),
-          [module] "{rdx}" (@as(runtime.ModuleInst, module)),
-          [sp] "{rsi}" (@as(Sp, sp)),
-          [locals] "{rdi}" (new_locals),
-          [mems] "{r8}" (module.header().mems),
-          [interp] "{r9}" (interp),
-          [eip] "{r10}" (instr.end),
-          [disp] "{r12}" (&byte_dispatch_table),
-        : .{ .r11 = true, .r12 = true, .r13 = true, .r14 = true, .r15 = true });
 }
 
 /// Parameters are arranged such that some registers already contain the correct value.
@@ -173,35 +193,46 @@ fn returnFromWasm(
         switch (frame.function.expanded()) {
             .wasm => |wasm| {
                 var instr = Instr.init(frame.wasm.ip, frame.wasm.eip);
-                const new_locals = common.Locals{ .ptr = frame.localValues(&interp.stack).ptr };
-                const handler = instr.readNextOpcodeHandler(fuel, new_locals, wasm.module, interp);
-                return if (builtin.zig_backend == .stage2_x86_64)
-                    inlineAsmTailCallToHandler(
+                if (builtin.zig_backend == .stage2_x86_64) {
+                    // trampoline continues execution
+                    return Transition.interrupted(
                         instr,
-                        frame.wasm.stp,
-                        fuel,
-                        wasm.module,
                         popped.top,
-                        new_locals,
+                        frame.wasm.stp,
                         interp,
-                        handler,
-                    )
-                else
+                        .out_of_fuel,
+                    );
+                } else {
+                    const new_locals = common.Locals{
+                        .ptr = frame.localValues(&interp.stack).ptr,
+                    };
+                    const handler = instr.readNextOpcodeHandler(
+                        fuel,
+                        new_locals,
+                        wasm.module,
+                        interp,
+                    );
+
                     // ABI of the functions are the same, so this call is fine.
                     // Optimizer seems to emit a direct `jmp` despite function pointers here.
-                    @call(.always_tail, @as(@TypeOf(&returnFromWasm), @ptrCast(opcodeHandlerTrampoline)), .{
-                        @as(Eip, @ptrCast(new_locals.ptr)),
-                        @as(Sp, @bitCast(popped.top)),
-                        wasm.module,
-                        fuel,
-                        @as(usize, @intFromPtr(wasm.module.header().mems)),
-                        interp,
-                        @as(usize, @intFromPtr(instr.next)),
-                        @as(usize, @intFromPtr(frame.wasm.stp)),
-                        @as(usize, @intFromPtr(instr.end)),
-                        @as(usize, @intFromPtr(handler)),
-                        undefined,
-                    });
+                    return @call(
+                        .always_tail,
+                        @as(@TypeOf(&returnFromWasm), @ptrCast(opcodeHandlerTrampoline)),
+                        .{
+                            @as(Eip, @ptrCast(new_locals.ptr)),
+                            @as(Sp, @bitCast(popped.top)),
+                            wasm.module,
+                            fuel,
+                            @as(usize, @intFromPtr(wasm.module.header().mems)),
+                            interp,
+                            @as(usize, @intFromPtr(instr.next)),
+                            @as(usize, @intFromPtr(frame.wasm.stp)),
+                            @as(usize, @intFromPtr(instr.end)),
+                            @as(usize, @intFromPtr(handler)),
+                            undefined,
+                        },
+                    );
+                }
             },
             .host => break :return_to_host,
         }
@@ -227,25 +258,31 @@ inline fn resumeAfterInvokeWithinWasm(
     module: runtime.ModuleInst,
     interp: *Interpreter,
 ) Transition {
-    var instr = old_instr;
-    const handler = instr.readNextOpcodeHandler(fuel, locals, module, interp);
-    return if (builtin.zig_backend == .stage2_x86_64)
-        inlineAsmTailCallToHandler(instr, stp, fuel, module, sp, locals, interp, handler)
-    else
+    if (builtin.zig_backend == .stage2_x86_64) {
+        // trampoline continues execution
+        return Transition.interrupted(old_instr, sp, stp, interp, .out_of_fuel);
+    } else {
+        var instr = old_instr;
+        const handler = instr.readNextOpcodeHandler(fuel, locals, module, interp);
         // TODO: inlineLlvmTailCallToHandler()
-        @call(.always_tail, @as(@TypeOf(&invokeWithinWasm), @ptrCast(opcodeHandlerTrampoline)), .{
-            locals,
-            sp,
-            module,
-            fuel,
-            module.header().mems,
-            interp,
-            instr.next,
-            stp,
-            instr.end,
-            @intFromPtr(handler),
-            undefined,
-        });
+        return @call(
+            .always_tail,
+            @as(@TypeOf(&invokeWithinWasm), @ptrCast(opcodeHandlerTrampoline)),
+            .{
+                locals,
+                sp,
+                module,
+                fuel,
+                module.header().mems,
+                interp,
+                instr.next,
+                stp,
+                instr.end,
+                @intFromPtr(handler),
+                undefined,
+            },
+        );
+    }
 }
 
 fn invokeWithinWasm(

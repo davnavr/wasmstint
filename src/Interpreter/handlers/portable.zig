@@ -62,6 +62,18 @@ pub const OpcodeHandler = fn (
     // `x86_64_regcall_v3_sysv` and `x86_64_regcall_v4_win` pass all parameters in registers
 ) callconv(ohcc) Transition;
 
+pub inline fn callOpcodeHandler(
+    handler: *const OpcodeHandler,
+    instr: Instr,
+    fuel: *Interpreter.Fuel,
+    stp: Stp,
+    locals: Locals,
+    module: runtime.ModuleInst,
+    interp: *Interpreter,
+) Transition {
+    return handler(instr.next, interp.stack_top, fuel, stp, locals, module, interp, instr.end);
+}
+
 /// Helper function to perform a tail call on an `OpcodeHandler`.
 ///
 /// Due to limitations in LLVM and the Zig compiler, the signature of the calling function must
