@@ -478,8 +478,8 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         const idx_decode = try ctx.decodeUlebIdx(.r13, .r14, .r15, "idx");
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
             \\    shl r13, 4
-            \\    movaps xmm0, xmmword ptr [{[locals]t} + r13]
-            \\    movaps xmmword ptr [{[vsp]t}], xmm0
+            \\    movaps xmm0, xmmword ptr [{[locals]t} + r13] # load value from locals
+            \\    movaps xmmword ptr [{[vsp]t}], xmm0 # store into value stack
             \\    add {[vsp]t}, 16
             \\
         , .{ .locals = Reg64.locals, .vsp = Reg64.vsp }));
@@ -491,9 +491,22 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         const idx_decode = try ctx.decodeUlebIdx(.r13, .r14, .r15, "idx");
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
             \\    shl r13, 4
-            \\    movaps xmm0, xmmword ptr [{[vsp]t} - 16]
+            \\    movaps xmm0, xmmword ptr [{[vsp]t} - 16] # load value to copy from value stack
             \\    sub {[vsp]t}, 16
-            \\    movaps xmmword ptr [{[locals]t} + r13], xmm0
+            \\    movaps xmmword ptr [{[locals]t} + r13], xmm0 # store into locals
+            \\
+        , .{ .locals = Reg64.locals, .vsp = Reg64.vsp }));
+        try ctx.jmpToNextHandler(.r11);
+        try idx_decode.writeSlowPath(ctx);
+    }
+    {
+        try ctx.defineOpcodeHandler("local.tee", .@"64");
+        const idx_decode = try ctx.decodeUlebIdx(.r13, .r14, .r15, "idx");
+        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+            \\    shl r13, 4
+            \\    movaps xmm0, xmmword ptr [{[vsp]t} - 16] # load value to copy from value stack
+            \\    movaps xmmword ptr [{[locals]t} + r13], xmm0 # store into locals
+            \\    # argument is still at the top of the value stack
             \\
         , .{ .locals = Reg64.locals, .vsp = Reg64.vsp }));
         try ctx.jmpToNextHandler(.r11);
