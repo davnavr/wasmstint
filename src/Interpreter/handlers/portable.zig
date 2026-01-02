@@ -1671,8 +1671,6 @@ const opcode_handlers = struct {
         var instr = Instr.init(ip, eip);
         var side_table = SideTable.init(stp, &interp.stack);
 
-        std.log.debug("entry={*}{any}", .{ stp, stp[0].inner });
-
         // No need to read LEB128 branch target
         const br_ptr: Ip = ip - 1;
         std.debug.assert(br_ptr[0] == @intFromEnum(opcodes.ByteOpcode.br));
