@@ -148,10 +148,19 @@ pub const Values = struct {
                         // This is an atomic load, so check above ensures release modes don't
                         // include the code
                         std.debug.assert(code.isValidationFinished());
-                        std.debug.assert( // OOB max height
-                            @intFromPtr(top.ptr + max_height - remaining) <=
-                                @intFromPtr(base + code.inner.max_values),
-                        );
+
+                        const current_top = top.ptr + max_height - remaining;
+                        const max_top = base + code.inner.max_values;
+                        if (@intFromPtr(current_top) > @intFromPtr(max_top)) {
+                            std.debug.panic(
+                                "top of value stack 0x{X} exceeds max height 0x{X} by {d} values",
+                                .{
+                                    @intFromPtr(current_top),
+                                    @intFromPtr(max_top),
+                                    current_top - max_top,
+                                },
+                            );
+                        }
                     },
                     .host => {},
                 }

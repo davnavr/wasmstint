@@ -111,7 +111,7 @@ inline fn inlineAsmTailCallToHandler(
     handler: *const OpcodeHandler,
 ) Transition {
     return asm (
-    // TODO: Problem could be here, what happens to callee-save registers?
+    // TODO: Are callee-saved registers properly reserved here?
     // This can call the handler directly
     //
     // Writes to `rsp` mean the CPU's "stack engine" is not happy, but self-hosted

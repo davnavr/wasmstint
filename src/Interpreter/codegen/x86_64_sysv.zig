@@ -479,6 +479,16 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
             try ctx.asm_out.print(
                 \\.align 16
                 \\{[label]f}:
+                \\
+            , .{ .label = label });
+            if (i == 0) {
+                try ctx.asm_out.writeAll(
+                    \\    and r11b, 0x7F
+                    \\
+                );
+            }
+
+            try ctx.asm_out.print(
                 \\    movzx {[r14]s}, byte ptr [{[vip]t}]
                 \\    mov {[r13]s}, {[r14]s}
                 \\    inc {[vip]t}
@@ -486,14 +496,13 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
                 \\    shl {[r13]s}, {[byte_shift]d}
                 \\    or {[r11]s}, {[r13]s}
                 \\    test r14b, 0x80
-                \\    je {[next]f}
+                \\    jnz {[next]f}
                 \\    shl {[r11]s}, {[final_shift]d}
                 \\    sar {[r11]s}, {[final_shift]d}
                 \\    jmp {[finished]f}
                 \\    ud2
                 \\
             , .{
-                .label = label,
                 .r11 = r11,
                 .r13 = r13,
                 .r14 = r14,
