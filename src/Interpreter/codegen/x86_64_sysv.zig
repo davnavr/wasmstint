@@ -198,6 +198,8 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
     try defineConstOpcodeHandlers(ctx);
     try defineIntegerOpcodeHandlers(ctx, .i32);
     try defineIntegerOpcodeHandlers(ctx, .i64);
+    try defineFloatOpcodeHandlers(ctx, .f32);
+    try defineFloatOpcodeHandlers(ctx, .f64);
 
     // Write handlers for traps
     try ctx.asm_out.writeAll(".align 32\n");
@@ -1110,9 +1112,9 @@ fn defineIntegerOpcodeHandlers(ctx: *Context, int_type: IntType) !void {
             \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
             \\    mov {[r14]s}, {[size]t} ptr [{[vsp]t} - 32]
             \\    xor r15d, r15d
-            \\    cmp {[r14]s}, {[r13]s}
+            \\    cmp {[r14]s}, {[r13]s} # TODO: 2nd operand of cmp can be memory
             \\    {[set_instr]s} r15b
-            \\    mov {[size]t} ptr [{[vsp]t} - 32], {[r15]s}
+            \\    mov {[size]t} ptr [{[vsp]t} - 32], {[r15]s} # TODO: Oops, this should be a dword
             \\    sub {[vsp]t}, 16
             \\
         , .{
@@ -1390,6 +1392,64 @@ fn defineIntegerOpcodeHandlers(ctx: *Context, int_type: IntType) !void {
             \\    mov qword ptr [{[vsp]t} - 16], r13
             \\
         , .{ .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+    }
+}
+
+const FloatType = enum {
+    f32,
+    f64,
+
+    fn regSize(ty: FloatType) RegSize {
+        return switch (ty) {
+            .f32 => .dword,
+            .f64 => .qword,
+        };
+    }
+};
+
+fn defineFloatOpcodeHandlers(ctx: *Context, float_type: FloatType) !void {
+    var opcode_name_buf: [16]u8 = undefined;
+    var opcode_name = OpcodeNamePrefix.init(@tagName(float_type), &opcode_name_buf);
+    const size = float_type.regSize();
+    const suffix: u8 = switch (float_type) {
+        .f32 => 's',
+        .f64 => 'd',
+    };
+
+    // Zig/LLVM uses vmovs(s|d) when targeting x86_64_v3
+
+    // Zig/LLVM uses vucomis(s|d) when targeting x86_64_v3
+    for (&[_][2][]const u8{
+        .{ ".gt", "seta" },
+    }) |info| {
+        try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
+        try ctx.asm_out.print(
+            \\    movs{[suffix]c} xmm0, {[size]t} ptr [{[vsp]t} - 0x10]
+            \\    xor r15, r15
+            \\    ucomis{[suffix]c} xmm0, {[size]t} ptr [{[vsp]t} - 0x20]
+            \\    {[set_instr]s} r15b
+            \\    mov dword ptr [{[vsp]t} - 0x20], r15d
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{ .suffix = suffix, .size = size, .vsp = Reg64.vsp, .set_instr = info[1] });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
+    for (&[_][2][]const u8{
+        .{ ".add", "adds" },
+        .{ ".sub", "subs" },
+        .{ ".mul", "muls" },
+        .{ ".div", "divs" },
+    }) |info| {
+        try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
+        try ctx.asm_out.print(
+            \\    movs{[suffix]c} xmm0, {[size]t} ptr [{[vsp]t} - 0x20]
+            \\    {[instr]s}{[suffix]c} xmm0, {[size]t} ptr [{[vsp]t} - 0x10]
+            \\    movs{[suffix]c} {[size]t} ptr [{[vsp]t} - 0x20], xmm0
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{ .suffix = suffix, .size = size, .vsp = Reg64.vsp, .instr = info[1] });
         try ctx.jmpToNextHandler(.r11);
     }
 }
