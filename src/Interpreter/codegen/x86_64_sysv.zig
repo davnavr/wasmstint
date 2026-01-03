@@ -512,6 +512,185 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try ctx.jmpToNextHandler(.r11);
         try idx_decode.writeSlowPath(ctx);
     }
+    {
+        try ctx.defineOpcodeHandler("global.get", .@"64");
+        const jump_table = try Label.init(ctx, "jump-table");
+        const load_4 = try Label.init(ctx, "load-4");
+        const load_8 = try Label.init(ctx, "load-8");
+        const load_16 = try Label.init(ctx, "load-16");
+        const idx_decode = try ctx.decodeUlebIdx(.r11, .r13, .r14, "idx");
+        try ctx.asm_out.print(
+            \\    mov r13, qword ptr [{[module]t} + {[module_info_off]d}] # ptr to info
+            \\    mov r13, qword ptr [r13 + {[info_types_off]d}] # ptr to global types
+            \\    xor r14, r14
+            \\    mov r14b, byte ptr [r13 + r11 * {[global_type_size]d}] # global type
+            \\    # r14b contains valtype byte
+            \\    sub r14b, 0x6F # index into jump table
+            \\    mov r15, qword ptr [{[module]t} + {[module_globals_off]d}] # ptr to globals
+            \\    mov r15, qword ptr [r15 + r11*8] # ptr to value
+            \\    jmp qword ptr [{[jump_table]f} + r14*8]
+            \\    ud2
+            \\
+        , .{
+            .module = Reg64.module,
+            .module_info_off = 8,
+            .module_globals_off = 48,
+            .info_types_off = 80, // Assumes offset of RawInner in Module.Inner is 0
+            .global_type_size = 2,
+            .jump_table = jump_table,
+        });
+        try idx_decode.writeSlowPath(ctx);
+
+        ctx.skip_oof_handler += 2;
+
+        try ctx.asm_out.print(
+            \\.align 8
+            \\{[load_4]f}:
+            \\    mov r11d, dword ptr [r15] # get value to load
+            \\    mov dword ptr [{[vsp]t}], r11d
+            \\    add {[vsp]t}, 0x10
+            \\
+        , .{ .load_4 = load_4, .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+
+        // TODO
+        try ctx.asm_out.print(
+            \\.align 16
+            \\{[load_8]f}:
+            \\    mov r11, qword ptr [r15] # get value to load
+            \\    mov qword ptr [{[vsp]t}], r11
+            \\    add {[vsp]t}, 0x10
+            \\
+        , .{ .load_8 = load_8, .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+
+        try ctx.asm_out.print(
+            \\.align 32
+            \\{[load_16]f}:
+            \\    movaps xmm0, xmmword ptr [r15] # get value to load
+            \\    movaps xmmword ptr [{[vsp]t}], xmm0
+            \\    add {[vsp]t}, 0x10
+            \\
+        , .{ .load_16 = load_16, .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+
+        try ctx.asm_out.print(
+            \\.section .rodata
+            \\.align 64
+            \\{[label]f}:
+            \\    .quad {[load_8]f} # externref
+            \\    .quad {[load_8]f} # funcref
+            \\
+        , .{ .label = jump_table, .load_8 = load_8 });
+        for (0..10) |_| {
+            try ctx.asm_out.writeAll(
+                \\    .quad 0xAAAAAAAAAAAAAAAA
+                \\
+            );
+        }
+        try ctx.asm_out.print(
+            \\    .quad {[load_16]f} # v128
+            \\    .quad {[load_8]f} # f64
+            \\    .quad {[load_4]f} # f32
+            \\    .quad {[load_8]f} # i64
+            \\    .quad {[load_4]f} # i32
+            \\.text
+            \\
+        , .{ .load_4 = load_4, .load_8 = load_8, .load_16 = load_16 });
+    }
+    {
+        try ctx.defineOpcodeHandler("global.set", .@"64");
+        const jump_table = try Label.init(ctx, "jump-table");
+        const store_4 = try Label.init(ctx, "store-4");
+        const store_8 = try Label.init(ctx, "store-8");
+        const store_16 = try Label.init(ctx, "store-16");
+        const idx_decode = try ctx.decodeUlebIdx(.r11, .r13, .r14, "idx");
+        try ctx.asm_out.print(
+            \\    mov r13, qword ptr [{[module]t} + {[module_info_off]d}] # ptr to info
+            \\    mov r13, qword ptr [r13 + {[info_types_off]d}] # ptr to global types
+            \\    xor r14, r14
+            \\    mov r14b, byte ptr [r13 + r11 * {[global_type_size]d}] # global type
+            \\    # r14b contains valtype byte
+            \\    # i32       = 7F
+            \\    # i64       = 7E
+            \\    # f32       = 7D
+            \\    # f64       = 7C
+            \\    # v128      = 7B
+            \\    #             71..7A
+            \\    # funcref   = 70
+            \\    # externref = 6F
+            \\    sub r14b, 0x6F # index into jump table
+            \\    mov r15, qword ptr [{[module]t} + {[module_globals_off]d}] # ptr to globals
+            \\    mov r15, qword ptr [r15 + r11*8] # ptr to value
+            \\    jmp qword ptr [{[jump_table]f} + r14*8]
+            \\    ud2
+            \\
+        , .{
+            .module = Reg64.module,
+            .module_info_off = 8,
+            .module_globals_off = 48,
+            .info_types_off = 80, // Assumes offset of RawInner in Module.Inner is 0
+            .global_type_size = 2,
+            .jump_table = jump_table,
+        });
+        try idx_decode.writeSlowPath(ctx);
+
+        ctx.skip_oof_handler += 2;
+
+        try ctx.asm_out.print(
+            \\.align 8
+            \\{[store_4]f}:
+            \\    mov r11d, dword ptr [{[vsp]t} - 0x10] # get value to store
+            \\    mov dword ptr [r15], r11d
+            \\    sub {[vsp]t}, 0x10
+            \\
+        , .{ .store_4 = store_4, .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+
+        try ctx.asm_out.print(
+            \\.align 16
+            \\{[store_8]f}:
+            \\    mov r11, qword ptr [{[vsp]t} - 0x10] # get value to store
+            \\    mov qword ptr [r15], r11
+            \\    sub {[vsp]t}, 0x10
+            \\
+        , .{ .store_8 = store_8, .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+
+        try ctx.asm_out.print(
+            \\.align 32
+            \\{[store_16]f}:
+            \\    movaps xmm0, xmmword ptr [{[vsp]t} - 0x10] # get value to store
+            \\    movaps xmmword ptr [r15], xmm0
+            \\    sub {[vsp]t}, 0x10
+            \\
+        , .{ .store_16 = store_16, .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+
+        try ctx.asm_out.print(
+            \\.section .rodata
+            \\.align 64
+            \\{[label]f}:
+            \\    .quad {[store_8]f} # externref
+            \\    .quad {[store_8]f} # funcref
+            \\
+        , .{ .label = jump_table, .store_8 = store_8 });
+        for (0..10) |_| {
+            try ctx.asm_out.writeAll(
+                \\    .quad 0xAAAAAAAAAAAAAAAA
+                \\
+            );
+        }
+        try ctx.asm_out.print(
+            \\    .quad {[store_16]f} # v128
+            \\    .quad {[store_8]f} # f64
+            \\    .quad {[store_4]f} # f32
+            \\    .quad {[store_8]f} # i64
+            \\    .quad {[store_4]f} # i32
+            \\.text
+            \\
+        , .{ .store_4 = store_4, .store_8 = store_8, .store_16 = store_16 });
+    }
 
     for (&[_]struct { []const u8, std.mem.Alignment, []const u8, RegSize }{
         .{ "i32.load", .@"4", "mov", .dword },
