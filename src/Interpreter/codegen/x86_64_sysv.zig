@@ -65,6 +65,7 @@ pub fn main() !void {
             \\
             \\.global "{[prefix]s}{[name]s}"
             \\.align 64
+            \\.type "{[prefix]s}{[name]s}", @function
             \\"{[prefix]s}{[name]s}": # System V calling convention
             \\
         , .{ .prefix = ctx.name_prefix, .name = "opcodeHandlerTrampoline" });
@@ -105,6 +106,7 @@ pub fn main() !void {
         try ctx.asm_out.print(
             \\
             \\.global "{[prefix]s}{[name]s}"
+            \\.type "{[prefix]s}{[name]s}", @function
             \\
         , .{ .prefix = ctx.name_prefix, .name = "invalidByteOpcode" });
         switch (optimize) {
@@ -135,6 +137,7 @@ pub fn main() !void {
             \\
             \\.global "{[prefix]s}{[name]s}"
             \\.align 16
+            \\.type "{[prefix]s}{[name]s}", @function
             \\"{[prefix]s}{[name]s}":
             \\    mov rdi, {[vip]t} # 1st argument
             \\    mov rdx, {[vsp]t} # 3rd argument
@@ -1240,13 +1243,13 @@ const Label = struct {
 
     fn init(ctx: *Context, name: []const u8) !Label {
         return Label{
-            .name = try ctx.concat(&.{ "\"", ctx.opcode_name, ".", name, "\"" }),
+            .name = try ctx.concat(&.{ "\".L", ctx.opcode_name, ".", name, "\"" }),
         };
     }
 
     fn initWithSuffix(ctx: *Context, name: []const u8, suffix: []const u8) !Label {
         return Label{
-            .name = try ctx.concat(&.{ "\"", ctx.opcode_name, ".", name, "-", suffix, "\"" }),
+            .name = try ctx.concat(&.{ "\".L", ctx.opcode_name, ".", name, "-", suffix, "\"" }),
         };
     }
 
@@ -1312,6 +1315,7 @@ const Context = struct {
             , args);
             try ctx.asm_out.print(
                 \\.global "{[prefix]s}{[name]s}"
+                \\.type "{[prefix]s}{[name]s}", @function
                 \\"{[prefix]s}{[name]s}":
                 \\
             , args);
