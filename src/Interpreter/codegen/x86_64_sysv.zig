@@ -1412,9 +1412,42 @@ fn defineFloatOpcodeHandlers(ctx: *Context, float_type: FloatType) !void {
     var opcode_name_buf: [16]u8 = undefined;
     var opcode_name = OpcodeNamePrefix.init(@tagName(float_type), &opcode_name_buf);
     const size = float_type.regSize();
-    const suffix: u8 = switch (float_type) {
+    const float_suffix: u8 = switch (float_type) {
         .f32 => 's',
         .f64 => 'd',
+    };
+    const int_suffix: u8 = switch (float_type) {
+        .f32 => 'd',
+        .f64 => 'q',
+    };
+    const r13 = Reg64.r13.nameResized(size);
+    // const exponent_width: u5 = switch (float_type) {
+    //     .f32 => 8,
+    //     .f64 => 11,
+    // };
+    // const mantissa_width: u6 = switch (float_type) {
+    //     .f32 => 23,
+    //     .f64 => 52,
+    // };
+    // const non_sign_mask = switch (float_type) {
+    //     .f32 => "0x7FFF" ++ "FFFF",
+    //     .f64 => "0x7FFF" ++ "FFFF" ++ "FFFF" ++ "FFFF",
+    // };
+    // const exponent_mask = switch (float_type) {
+    //     .f32 => "0x7F80" ++ "0000",
+    //     .f64 => "0x7FF0" ++ "0000" ++ "0000" ++ "0000",
+    // };
+    // const mantissa_mask = switch (float_type) {
+    //     .f32 => "0x007F" ++ "FFFF",
+    //     .f64 => "0x000F" ++ "FFFF" ++ "FFFF" ++ "FFFF",
+    // };
+    const canonical_nan_mask = switch (float_type) {
+        .f32 => "0xFFC0" ++ "0000",
+        .f64 => "0xFFF8" ++ "0000" ++ "0000" ++ "0000",
+    };
+    const canonical_nan_bit = switch (float_type) {
+        .f32 => "0x0040" ++ "0000",
+        .f64 => "0x0008" ++ "0000" ++ "0000" ++ "0000",
     };
 
     // Zig/LLVM uses vmovs(s|d) when targeting x86_64_v3
@@ -1432,7 +1465,7 @@ fn defineFloatOpcodeHandlers(ctx: *Context, float_type: FloatType) !void {
             \\    mov dword ptr [{[vsp]t} - 0x20], r15d
             \\    sub {[vsp]t}, 16
             \\
-        , .{ .suffix = suffix, .size = size, .vsp = Reg64.vsp, .set_instr = info[1] });
+        , .{ .suffix = float_suffix, .size = size, .vsp = Reg64.vsp, .set_instr = info[1] });
         try ctx.jmpToNextHandler(.r11);
     }
 
@@ -1449,7 +1482,51 @@ fn defineFloatOpcodeHandlers(ctx: *Context, float_type: FloatType) !void {
             \\    movs{[suffix]c} {[size]t} ptr [{[vsp]t} - 0x20], xmm0
             \\    sub {[vsp]t}, 16
             \\
-        , .{ .suffix = suffix, .size = size, .vsp = Reg64.vsp, .instr = info[1] });
+        , .{ .suffix = float_suffix, .size = size, .vsp = Reg64.vsp, .instr = info[1] });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
+    {
+        // Cranelift and Wizard implement `f32.min` with two `minss`
+        // - https://github.com/llvm/llvm-project/pull/170069
+        // - https://github.com/rust-lang/rust/issues/91079
+        try ctx.defineOpcodeHandler(opcode_name.name(".min"), .@"64");
+        try ctx.asm_out.print(
+            \\    mov{[int_suffix]c} xmm0, {[size]t} ptr [{[vsp]t} - 0x10] # first
+            \\    mov{[int_suffix]c} xmm1, {[size]t} ptr [{[vsp]t} - 0x20] # second
+            \\    movaps xmm2, xmm0
+            \\    movaps xmm3, xmm1
+            \\    movaps xmm4, xmm0
+            \\    mins{[float_suffix]c} xmm2, xmm1
+            \\    mins{[float_suffix]c} xmm3, xmm0
+            \\    orp{[float_suffix]c} xmm2, xmm3 # handles non-NaN case correctly
+            //
+            \\    mov {[r13]s}, {[canonical_nan_mask]s}
+            \\    mov{[int_suffix]c} xmm3, {[r13]s} # canonical NaN mask
+            //
+            \\    cmpords{[float_suffix]c} xmm4, xmm1 # all 1's if NaN was NOT present
+            \\    # mask of all 1's if no NaN, canonical_nan_mask if there is NaN
+            \\    orp{[float_suffix]c} xmm3, xmm4
+            \\    andp{[float_suffix]c} xmm2, xmm3 # If NaN, mask away non-canonical NaN bits
+            //
+            \\    mov {[r13]s}, {[canonical_nan_bit]s}
+            \\    mov{[int_suffix]c} xmm3, {[r13]s} # canonical NaN bit
+            \\    andnp{[float_suffix]c} xmm4, xmm3 # canonical NaN bit if NaN is present
+            \\    # If NaNs are present, set the canonical NaN bit
+            \\    orp{[float_suffix]c} xmm2, xmm4
+            //
+            \\    mov{[int_suffix]c} {[size]t} ptr [{[vsp]t} - 0x20], xmm2 # write result
+            \\    sub {[vsp]t}, 0x10 # vsp
+            \\
+        , .{
+            .r13 = r13,
+            .canonical_nan_mask = canonical_nan_mask,
+            .canonical_nan_bit = canonical_nan_bit,
+            .int_suffix = int_suffix,
+            .float_suffix = float_suffix,
+            .size = size,
+            .vsp = Reg64.vsp,
+        });
         try ctx.jmpToNextHandler(.r11);
     }
 }
