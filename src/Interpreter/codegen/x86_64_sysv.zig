@@ -1453,6 +1453,39 @@ fn defineFloatOpcodeHandlers(ctx: *Context, float_type: FloatType) !void {
         try ctx.jmpToNextHandler(.r11);
     }
 
+    // When only SSE2 is available, LLVM calls libc functions via @PLT
+    for (&[_]struct { []const u8, u2 }{
+        .{ ".ceil", 0b10 }, // ceilf/ceill
+        .{ ".floor", 0b01 }, // floorf/floorl
+        .{ ".trunc", 0b11 }, // trunc/truncl?
+        .{ ".nearest", 0b00 }, // roundevenf/roundeevenl
+    }) |info| {
+        try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
+        try ctx.asm_out.print(
+            \\    rounds{[suffix]c} xmm0, {[size]t} ptr [{[vsp]t} - 0x10], 0x{[rounding_mode]X} # TODO: Requires SSE4.1
+            \\    movs{[suffix]c} {[size]t} ptr [{[vsp]t} - 0x10], xmm0
+            \\
+        , .{
+            .suffix = float_suffix,
+            .size = size,
+            .vsp = Reg64.vsp,
+            .rounding_mode = 0b1000 | @as(u8, info[1]),
+        });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
+    for (&[_][2][]const u8{
+        .{ ".sqrt", "sqrts" },
+    }) |info| {
+        try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
+        try ctx.asm_out.print(
+            \\    {[instr]s}{[suffix]c} xmm0, {[size]t} ptr [{[vsp]t} - 0x10]
+            \\    movs{[suffix]c} {[size]t} ptr [{[vsp]t} - 0x10], xmm0
+            \\
+        , .{ .instr = info[1], .suffix = float_suffix, .size = size, .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
     for (&[_][2][]const u8{
         .{ ".add", "adds" },
         .{ ".sub", "subs" },
