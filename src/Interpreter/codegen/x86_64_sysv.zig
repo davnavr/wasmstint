@@ -187,6 +187,44 @@ pub fn main() !void {
 }
 
 fn defineAllOpcodeHandlers(ctx: *Context) !void {
+    try defineControlOpcodeHandlers(ctx);
+    try defineCallOpcodeHandlers(ctx);
+    try defineParametericOpcodeHandlers(ctx);
+    try defineLocalOpcodeHandlers(ctx);
+    try defineGlobalOpcodeHandlers(ctx);
+    try defineMemoryLoadOpcodeHandlers(ctx);
+    try defineMemoryStoreOpcodeHandlers(ctx);
+    try defineMemoryManagementOpcodeHandlers(ctx);
+    try defineConstOpcodeHandlers(ctx);
+    try defineIntegerOpcodeHandlers(ctx, .i32);
+    try defineIntegerOpcodeHandlers(ctx, .i64);
+
+    // Write handlers for traps
+    try ctx.asm_out.writeAll(".align 32\n");
+    for (&[_][]const u8{
+        Context.trap_integer_divide_by_zero,
+        Context.trap_integer_overflow,
+    }) |name| {
+        try ctx.asm_out.print(
+            \\ # r12 is clobbered
+            \\"{[prefix]s}jmp.{[name]s}":
+            \\    lea rdi, [r14 - 1] # vip
+            \\    mov rdx, {[eip]t}
+            \\    mov rcx, {[stp]t}
+            \\
+        , .{ .prefix = ctx.name_prefix, .name = name, .eip = Reg64.eip, .stp = Reg64.stp });
+        try ctx.popSystemVSavedRegisters();
+        try ctx.asm_out.print(
+            \\    mov rsp, rbp
+            \\    pop rbp
+            \\    jmp "{[prefix]s}{[name]s}"
+            \\    ud2
+            \\
+        , .{ .prefix = ctx.name_prefix, .name = name });
+    }
+}
+
+fn defineControlOpcodeHandlers(ctx: *Context) !void {
     {
         try ctx.defineOpcodeHandler("nop", .@"16");
         try ctx.jmpToNextHandler(.r11);
@@ -237,7 +275,6 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try ctx.jmpToNextHandler(.r11);
         try branch.writeSlowPath(ctx);
     }
-
     {
         try ctx.defineOpcodeHandler("end", .@"32");
         // Could detect ReleaseSafe/ReleaseFast, and inline the call to `return` opcode handler
@@ -311,7 +348,6 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try label_count.writeSlowPath(ctx);
         try branch.writeSlowPath(ctx);
     }
-
     {
         try ctx.defineOpcodeHandler("return", .@"32");
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
@@ -329,6 +365,9 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         , .{ .prefix = ctx.name_prefix });
         ctx.skip_oof_handler -= 1;
     }
+}
+
+fn defineCallOpcodeHandlers(ctx: *Context) !void {
     {
         try ctx.defineOpcodeHandler("call", .@"32");
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
@@ -447,7 +486,9 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
             \\
         , .{ .prefix = ctx.name_prefix });
     }
+}
 
+fn defineParametericOpcodeHandlers(ctx: *Context) !void {
     {
         try ctx.defineOpcodeHandler("drop", .@"16");
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
@@ -475,7 +516,9 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         , .{ .vsp = Reg64.vsp, .true = true_label });
         try ctx.jmpToNextHandler(.r11);
     }
+}
 
+fn defineLocalOpcodeHandlers(ctx: *Context) !void {
     {
         try ctx.defineOpcodeHandler("local.get", .@"64");
         const idx_decode = try ctx.decodeUlebIdx(.r13, .r14, .r15, "idx");
@@ -515,6 +558,9 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         try ctx.jmpToNextHandler(.r11);
         try idx_decode.writeSlowPath(ctx);
     }
+}
+
+fn defineGlobalOpcodeHandlers(ctx: *Context) !void {
     {
         try ctx.defineOpcodeHandler("global.get", .@"64");
         const jump_table = try Label.init(ctx, "jump-table");
@@ -556,7 +602,6 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         , .{ .load_4 = load_4, .vsp = Reg64.vsp });
         try ctx.jmpToNextHandler(.r11);
 
-        // TODO
         try ctx.asm_out.print(
             \\.align 16
             \\{[load_8]f}:
@@ -694,7 +739,9 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
             \\
         , .{ .store_4 = store_4, .store_8 = store_8, .store_16 = store_16 });
     }
+}
 
+fn defineMemoryLoadOpcodeHandlers(ctx: *Context) !void {
     for (&[_]struct { []const u8, std.mem.Alignment, []const u8, RegSize }{
         .{ "i32.load", .@"4", "mov", .dword },
         .{ "f32.load", .@"4", "mov", .dword }, // ReleaseSmall could deduplicate w/ i32.load
@@ -744,7 +791,9 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         , .{ .vsp = Reg64.vsp });
         try access.finish(ctx);
     }
+}
 
+fn defineMemoryStoreOpcodeHandlers(ctx: *Context) !void {
     for (&[_]struct { []const u8, std.mem.Alignment, RegSize, []const u8, RegSize }{
         .{ "i32.store", .@"4", .dword, "mov", .dword },
         .{ "f32.store", .@"4", .dword, "mov", .dword }, // ReleaseSmall could deduplicate w/ i32.store
@@ -774,9 +823,10 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         });
         try access.finish(ctx);
     }
+}
 
+fn defineMemoryManagementOpcodeHandlers(ctx: *Context) !void {
     // memory.size
-
     {
         try ctx.defineOpcodeHandler("memory.grow", .@"64");
         const mem_idx_decode = try ctx.decodeUlebIdx(.r11, .r13, .r14, "idx");
@@ -852,8 +902,10 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         , .{ .fail = fail, .vsp = Reg64.vsp, .to_next = to_next });
         try mem_idx_decode.writeSlowPath(ctx);
     }
+}
 
-    for (&[_]struct { []const u8, u5, Context.IntType, u7 }{
+fn defineConstOpcodeHandlers(ctx: *Context) !void {
+    for (&[_]struct { []const u8, u5, IntType, u7 }{
         .{ "i32.const", 5, .i32, 32 },
         .{ "i64.const", 10, .i64, 64 },
     }) |info| {
@@ -988,32 +1040,357 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
         , .{ .vip = Reg64.vip, .vsp = Reg64.vsp });
         try ctx.jmpToNextHandler(.r11);
     }
+}
 
-    try ctx.defineIntegerOpcodeHandlers(.i32);
-    try ctx.defineIntegerOpcodeHandlers(.i64);
+const OpcodeNamePrefix = struct {
+    buf: []u8,
+    prefix_len: usize,
 
-    // Write handlers for traps
-    try ctx.asm_out.writeAll(".align 32\n");
-    for (&[_][]const u8{
-        Context.trap_integer_divide_by_zero,
-        Context.trap_integer_overflow,
-    }) |name| {
+    fn init(prefix: []const u8, buf: []u8) OpcodeNamePrefix {
+        @memcpy(buf[0..prefix.len], prefix);
+        return .{ .buf = buf, .prefix_len = prefix.len };
+    }
+
+    fn name(prefix: *const OpcodeNamePrefix, s: []const u8) []const u8 {
+        const final_len = prefix.prefix_len + s.len;
+        @memcpy(prefix.buf[prefix.prefix_len..final_len], s);
+        return prefix.buf[0..final_len];
+    }
+};
+
+const IntType = enum {
+    i32,
+    i64,
+
+    fn register(ty: IntType, reg: Reg64) []const u8 {
+        return switch (ty) {
+            .i32 => @tagName(reg.toReg32()),
+            .i64 => @tagName(reg),
+        };
+    }
+};
+
+fn defineIntegerOpcodeHandlers(ctx: *Context, int_type: IntType) !void {
+    var opcode_name_buf: [16]u8 = undefined;
+    var opcode_name = OpcodeNamePrefix.init(@tagName(int_type), &opcode_name_buf);
+    const r13 = int_type.register(.r13);
+    const r14 = int_type.register(.r14);
+    const r15 = int_type.register(.r15);
+    const size: RegSize = switch (int_type) {
+        .i32 => .dword,
+        .i64 => .qword,
+    };
+    {
+        try ctx.defineOpcodeHandler(opcode_name.name(".eqz"), .@"64");
         try ctx.asm_out.print(
-            \\ # r12 is clobbered
-            \\"{[prefix]s}jmp.{[name]s}":
-            \\    lea rdi, [r14 - 1] # vip
-            \\    mov rdx, {[eip]t}
-            \\    mov rcx, {[stp]t}
+            \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
+            \\    xor r14d, r14d
+            \\    test {[r13]s}, {[r13]s}
+            \\    setz r14b
+            \\    mov {[size]t} ptr [{[vsp]t} - 16], {[r14]s}
             \\
-        , .{ .prefix = ctx.name_prefix, .name = name, .eip = Reg64.eip, .stp = Reg64.stp });
-        try ctx.popSystemVSavedRegisters();
+        , .{ .r13 = r13, .r14 = r14, .size = size, .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
+    for (&[_][2][]const u8{
+        .{ ".eq", "sete" },
+        .{ ".ne", "setne" },
+        .{ ".lt_s", "setl" },
+        .{ ".lt_u", "setb" },
+        .{ ".gt_s", "setg" },
+        .{ ".gt_u", "seta" },
+        .{ ".le_s", "setle" },
+        .{ ".le_u", "setbe" },
+        .{ ".ge_s", "setge" },
+        .{ ".ge_u", "setae" },
+    }) |info| {
+        try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
         try ctx.asm_out.print(
-            \\    mov rsp, rbp
-            \\    pop rbp
-            \\    jmp "{[prefix]s}{[name]s}"
-            \\    ud2
+            \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
+            \\    mov {[r14]s}, {[size]t} ptr [{[vsp]t} - 32]
+            \\    xor r15d, r15d
+            \\    cmp {[r14]s}, {[r13]s}
+            \\    {[set_instr]s} r15b
+            \\    mov {[size]t} ptr [{[vsp]t} - 32], {[r15]s}
+            \\    sub {[vsp]t}, 16
             \\
-        , .{ .prefix = ctx.name_prefix, .name = name });
+        , .{
+            .r13 = r13,
+            .r14 = r14,
+            .r15 = r15,
+            .size = size,
+            .vsp = Reg64.vsp,
+            .set_instr = info[1],
+        });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
+    for (&[_][2][]const u8{
+        .{ ".clz", "lzcnt" },
+        .{ ".ctz", "tzcnt" },
+        .{ ".popcnt", "popcnt" },
+    }) |info| {
+        try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
+        try ctx.asm_out.print(
+            \\    {[instr]s} {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
+            \\    mov {[size]t} ptr [{[vsp]t} - 16], {[r13]s}
+            \\
+        , .{ .r13 = r13, .size = size, .instr = info[1], .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
+    {
+        try ctx.defineOpcodeHandler(opcode_name.name(".add"), .@"64");
+        try ctx.asm_out.print(
+            \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
+            \\    add {[size]t} ptr [{[vsp]t} - 32], {[r13]s}
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{ .r13 = r13, .size = size, .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+    }
+    {
+        try ctx.defineOpcodeHandler(opcode_name.name(".sub"), .@"64");
+        try ctx.asm_out.print(
+            \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
+            \\    sub {[size]t} ptr [{[vsp]t} - 32], {[r13]s}
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{ .r13 = r13, .size = size, .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+    }
+    {
+        try ctx.defineOpcodeHandler(opcode_name.name(".mul"), .@"64");
+        try ctx.asm_out.print(
+            \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
+            \\    imul {[r13]s}, {[size]t} ptr [{[vsp]t} - 32]
+            \\    mov {[size]t} ptr [{[vsp]t} - 32], {[r13]s}
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{ .r13 = r13, .size = size, .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
+    const rax = int_type.register(.rax);
+    const rdx = int_type.register(.rdx);
+    const r12 = int_type.register(.r12);
+    for (&[_]struct { []const u8, enum { div, rem }, enum { signed, unsigned } }{
+        .{ ".div_s", .div, .signed },
+        .{ ".div_u", .div, .unsigned },
+        .{ ".rem_s", .rem, .signed },
+        .{ ".rem_u", .rem, .unsigned },
+    }) |info| {
+        _, const kind, const signedness = info;
+        try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
+        // Integer division on X86-64 only works with eax/rax as the dividend
+        try ctx.asm_out.print(
+            \\    mov r14, {[vip]t} # save IP
+            \\    mov r15, {[module]t} # save module
+            \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16] # divisor aka denominator
+            \\    mov {[rax]s}, {[size]t} ptr [{[vsp]t} - 32] # dividend aka numerator
+            \\    test {[r13]s}, {[r13]s} # check for division by zero
+            \\    jz "{[prefix]s}jmp.{[trap_zero]s}"
+            \\
+        , .{
+            .r13 = r13,
+            .rax = rax,
+            .size = size,
+            .vip = Reg64.vip,
+            .vsp = Reg64.vsp,
+            .module = Reg64.module,
+            .prefix = ctx.name_prefix,
+            .trap_zero = Context.trap_integer_divide_by_zero,
+        });
+
+        var signed_rem_overflow: Label = undefined;
+        switch (signedness) {
+            .signed => {
+                try ctx.asm_out.print(
+                    \\    mov {[rdx]s}, {[rax]s}
+                    \\    xor {[rdx]s}, {[r13]s} # overflow check ({[min_int]s} ^ {[neg_one]s})
+                    \\
+                , .{
+                    .rdx = rdx,
+                    .rax = rax,
+                    .r13 = r13,
+                    .min_int = switch (int_type) {
+                        .i32 => "0x8000_0000",
+                        .i64 => "0x8000_0000_0000_0000",
+                    },
+                    .neg_one = switch (int_type) {
+                        .i32 => "0xFFFF_FFFF",
+                        .i64 => "0xFFFF_FFFF_FFFF_FFFF",
+                    },
+                });
+
+                switch (int_type) {
+                    .i32 => try ctx.asm_out.writeAll(
+                        \\    xor edx, 0x7FFFFFFF
+                        \\
+                    ),
+                    .i64 => try ctx.asm_out.writeAll(
+                        \\    movabs r11, 0x7FFFFFFFFFFFFFFF
+                        \\    xor rdx, r11
+                        \\
+                    ),
+                }
+
+                switch (kind) {
+                    .div => try ctx.asm_out.print(
+                        \\    je "{[prefix]s}jmp.{[trap_overflow]s}"
+                        \\
+                    , .{
+                        .prefix = ctx.name_prefix,
+                        .trap_overflow = Context.trap_integer_overflow,
+                    }),
+                    .rem => {
+                        signed_rem_overflow = try Label.init(ctx, "overflow");
+                        try ctx.asm_out.print(
+                            \\    jz {[overflow]f}
+                            \\    mov {[r12]s}, {[rax]s} # clobbers dispatch table register
+                            \\
+                        , .{ .overflow = signed_rem_overflow, .r12 = r12, .rax = rax });
+                    },
+                }
+
+                switch (int_type) {
+                    .i32 => try ctx.asm_out.writeAll(
+                        \\    cdq # clobbers edx
+                        \\    idiv r13d
+                        \\
+                    ),
+                    .i64 => try ctx.asm_out.writeAll(
+                        \\    cqo # clobbers rdx
+                        \\    idiv r13
+                        \\
+                    ),
+                }
+
+                if (kind == .rem) {
+                    try ctx.asm_out.print(
+                        \\    imul {[rax]s}, {[r13]s}
+                        \\    sub {[r12]s}, {[rax]s}
+                        \\
+                    , .{ .rax = rax, .r12 = r12, .r13 = r13 });
+                }
+            },
+            .unsigned => try ctx.asm_out.print(
+                \\    xor {[rdx]s}, {[rdx]s}
+                \\    div {[r13]s}
+                \\
+            , .{ .rdx = rdx, .r13 = r13 }),
+        }
+
+        try ctx.asm_out.print(
+            \\    mov {[size]t} ptr [{[vsp]t} - 32], {[result]s}
+            \\    sub {[vsp]t}, 16
+            \\    mov {[vip]t}, r14 # restore IP
+            \\    mov {[module]t}, r15 # restore module
+            \\
+        , .{
+            .result = switch (kind) {
+                .div => rax,
+                .rem => switch (signedness) {
+                    .signed => r12,
+                    .unsigned => rdx,
+                },
+            },
+            .size = size,
+            .vip = Reg64.vip,
+            .vsp = Reg64.vsp,
+            .module = Reg64.module,
+        });
+        if (kind == .rem and signedness == .signed) {
+            // Restores r12
+            try ctx.asm_out.print(
+                \\    lea {[dispatch]t}, "{[prefix]s}byte_dispatch_table"
+                \\
+            , .{ .prefix = ctx.name_prefix, .dispatch = Reg64.disp });
+            ctx.skip_oof_handler += 1;
+        }
+        try ctx.jmpToNextHandler(.r11);
+
+        if (kind == .rem and signedness == .signed) {
+            try ctx.asm_out.print(
+                \\.align 16
+                \\{[label]f}:
+                \\    mov {[size]t} ptr [{[vsp]t} - 32], {[rdx]s}
+                \\    sub {[vsp]t}, 16
+                \\    mov {[vip]t}, r14 # restore IP
+                \\    mov {[module]t}, r15 # restore module
+                \\
+            , .{
+                .size = size,
+                .rdx = rdx,
+                .label = signed_rem_overflow,
+                .vip = Reg64.vip,
+                .vsp = Reg64.vsp,
+                .module = Reg64.module,
+            });
+            try ctx.jmpToNextHandler(.r11);
+        }
+    }
+
+    for (&[_][]const u8{ ".and", ".or", ".xor" }) |name| {
+        try ctx.defineOpcodeHandler(opcode_name.name(name), .@"64");
+        try ctx.asm_out.print(
+            \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
+            \\    {[instr]s} {[size]t} ptr [{[vsp]t} - 32], {[r13]s} 
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{ .r13 = r13, .size = size, .vsp = Reg64.vsp, .instr = name[1..] });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
+    // Shift/Rotate instructions clobber fuel register (rcx)
+    const rcx = int_type.register(.rcx);
+    for (&[_][2][]const u8{
+        .{ ".shl", "shl" },
+        .{ ".shr_s", "sar" },
+        .{ ".shr_u", "shr" },
+        .{ ".rotl", "rol" },
+        .{ ".rotr", "ror" },
+    }) |info| {
+        try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
+        try ctx.asm_out.print(
+            \\    mov r13, {[fuel]t}
+            \\    mov {[rcx]s}, {[size]t} ptr [{[vsp]t} - 16]
+            \\    {[instr]s} {[size]t} ptr [{[vsp]t} - 32], cl
+            \\    sub {[vsp]t}, 16
+            \\    mov {[fuel]t}, r13
+            \\
+        , .{
+            .rcx = rcx,
+            .size = size,
+            .instr = info[1],
+            .fuel = Reg64.fuel,
+            .vsp = Reg64.vsp,
+        });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
+    for (&[_]struct { []const u8, RegSize }{
+        .{ ".extend8_s", .byte },
+        .{ ".extend16_s", .word },
+    }) |info| {
+        try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"32");
+        try ctx.asm_out.print(
+            \\    movsx {[r13]s}, {[src_size]t} ptr [{[vsp]t} - 16]
+            \\    mov {[dst_size]t} ptr [{[vsp]t} - 16], {[r13]s}
+            \\
+        , .{ .r13 = r13, .src_size = info[1], .dst_size = size, .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
+    if (int_type == .i64) {
+        try ctx.defineOpcodeHandler("i64.extend32_s", .@"32");
+        try ctx.asm_out.print(
+            \\    movsxd r13, dword ptr [{[vsp]t} - 16]
+            \\    mov qword ptr [{[vsp]t} - 16], r13
+            \\
+        , .{ .vsp = Reg64.vsp });
+        try ctx.jmpToNextHandler(.r11);
     }
 }
 
@@ -1386,358 +1763,6 @@ const Context = struct {
             });
         }
     };
-
-    const OpcodeNamePrefix = struct {
-        buf: []u8,
-        prefix_len: usize,
-
-        fn init(prefix: []const u8, buf: []u8) OpcodeNamePrefix {
-            @memcpy(buf[0..prefix.len], prefix);
-            return .{ .buf = buf, .prefix_len = prefix.len };
-        }
-
-        fn name(prefix: *const OpcodeNamePrefix, s: []const u8) []const u8 {
-            const final_len = prefix.prefix_len + s.len;
-            @memcpy(prefix.buf[prefix.prefix_len..final_len], s);
-            return prefix.buf[0..final_len];
-        }
-    };
-
-    const IntType = enum {
-        i32,
-        i64,
-
-        fn register(ty: IntType, reg: Reg64) []const u8 {
-            return switch (ty) {
-                .i32 => @tagName(reg.toReg32()),
-                .i64 => @tagName(reg),
-            };
-        }
-    };
-
-    fn defineIntegerOpcodeHandlers(ctx: *Context, int_type: IntType) !void {
-        var opcode_name_buf: [16]u8 = undefined;
-        var opcode_name = OpcodeNamePrefix.init(@tagName(int_type), &opcode_name_buf);
-        const r13 = int_type.register(.r13);
-        const r14 = int_type.register(.r14);
-        const r15 = int_type.register(.r15);
-        const size: RegSize = switch (int_type) {
-            .i32 => .dword,
-            .i64 => .qword,
-        };
-        {
-            try ctx.defineOpcodeHandler(opcode_name.name(".eqz"), .@"64");
-            try ctx.asm_out.print(
-                \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
-                \\    xor r14d, r14d
-                \\    test {[r13]s}, {[r13]s}
-                \\    setz r14b
-                \\    mov {[size]t} ptr [{[vsp]t} - 16], {[r14]s}
-                \\
-            , .{ .r13 = r13, .r14 = r14, .size = size, .vsp = Reg64.vsp });
-            try ctx.jmpToNextHandler(.r11);
-        }
-
-        for (&[_][2][]const u8{
-            .{ ".eq", "sete" },
-            .{ ".ne", "setne" },
-            .{ ".lt_s", "setl" },
-            .{ ".lt_u", "setb" },
-            .{ ".gt_s", "setg" },
-            .{ ".gt_u", "seta" },
-            .{ ".le_s", "setle" },
-            .{ ".le_u", "setbe" },
-            .{ ".ge_s", "setge" },
-            .{ ".ge_u", "setae" },
-        }) |info| {
-            try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
-            try ctx.asm_out.print(
-                \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
-                \\    mov {[r14]s}, {[size]t} ptr [{[vsp]t} - 32]
-                \\    xor r15d, r15d
-                \\    cmp {[r14]s}, {[r13]s}
-                \\    {[set_instr]s} r15b
-                \\    mov {[size]t} ptr [{[vsp]t} - 32], {[r15]s}
-                \\    sub {[vsp]t}, 16
-                \\
-            , .{
-                .r13 = r13,
-                .r14 = r14,
-                .r15 = r15,
-                .size = size,
-                .vsp = Reg64.vsp,
-                .set_instr = info[1],
-            });
-            try ctx.jmpToNextHandler(.r11);
-        }
-
-        for (&[_][2][]const u8{
-            .{ ".clz", "lzcnt" },
-            .{ ".ctz", "tzcnt" },
-            .{ ".popcnt", "popcnt" },
-        }) |info| {
-            try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
-            try ctx.asm_out.print(
-                \\    {[instr]s} {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
-                \\    mov {[size]t} ptr [{[vsp]t} - 16], {[r13]s}
-                \\
-            , .{ .r13 = r13, .size = size, .instr = info[1], .vsp = Reg64.vsp });
-            try ctx.jmpToNextHandler(.r11);
-        }
-
-        {
-            try ctx.defineOpcodeHandler(opcode_name.name(".add"), .@"64");
-            try ctx.asm_out.print(
-                \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
-                \\    add {[size]t} ptr [{[vsp]t} - 32], {[r13]s}
-                \\    sub {[vsp]t}, 16
-                \\
-            , .{ .r13 = r13, .size = size, .vsp = Reg64.vsp });
-            try ctx.jmpToNextHandler(.r11);
-        }
-        {
-            try ctx.defineOpcodeHandler(opcode_name.name(".sub"), .@"64");
-            try ctx.asm_out.print(
-                \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
-                \\    sub {[size]t} ptr [{[vsp]t} - 32], {[r13]s}
-                \\    sub {[vsp]t}, 16
-                \\
-            , .{ .r13 = r13, .size = size, .vsp = Reg64.vsp });
-            try ctx.jmpToNextHandler(.r11);
-        }
-        {
-            try ctx.defineOpcodeHandler(opcode_name.name(".mul"), .@"64");
-            try ctx.asm_out.print(
-                \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
-                \\    imul {[r13]s}, {[size]t} ptr [{[vsp]t} - 32]
-                \\    mov {[size]t} ptr [{[vsp]t} - 32], {[r13]s}
-                \\    sub {[vsp]t}, 16
-                \\
-            , .{ .r13 = r13, .size = size, .vsp = Reg64.vsp });
-            try ctx.jmpToNextHandler(.r11);
-        }
-
-        const rax = int_type.register(.rax);
-        const rdx = int_type.register(.rdx);
-        const r12 = int_type.register(.r12);
-        for (&[_]struct { []const u8, enum { div, rem }, enum { signed, unsigned } }{
-            .{ ".div_s", .div, .signed },
-            .{ ".div_u", .div, .unsigned },
-            .{ ".rem_s", .rem, .signed },
-            .{ ".rem_u", .rem, .unsigned },
-        }) |info| {
-            _, const kind, const signedness = info;
-            try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
-            // Integer division on X86-64 only works with eax/rax as the dividend
-            try ctx.asm_out.print(
-                \\    mov r14, {[vip]t} # save IP
-                \\    mov r15, {[module]t} # save module
-                \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16] # divisor aka denominator
-                \\    mov {[rax]s}, {[size]t} ptr [{[vsp]t} - 32] # dividend aka numerator
-                \\    test {[r13]s}, {[r13]s} # check for division by zero
-                \\    jz "{[prefix]s}jmp.{[trap_zero]s}"
-                \\
-            , .{
-                .r13 = r13,
-                .rax = rax,
-                .size = size,
-                .vip = Reg64.vip,
-                .vsp = Reg64.vsp,
-                .module = Reg64.module,
-                .prefix = ctx.name_prefix,
-                .trap_zero = Context.trap_integer_divide_by_zero,
-            });
-
-            var signed_rem_overflow: Label = undefined;
-            switch (signedness) {
-                .signed => {
-                    try ctx.asm_out.print(
-                        \\    mov {[rdx]s}, {[rax]s}
-                        \\    xor {[rdx]s}, {[r13]s} # overflow check ({[min_int]s} ^ {[neg_one]s})
-                        \\
-                    , .{
-                        .rdx = rdx,
-                        .rax = rax,
-                        .r13 = r13,
-                        .min_int = switch (int_type) {
-                            .i32 => "0x8000_0000",
-                            .i64 => "0x8000_0000_0000_0000",
-                        },
-                        .neg_one = switch (int_type) {
-                            .i32 => "0xFFFF_FFFF",
-                            .i64 => "0xFFFF_FFFF_FFFF_FFFF",
-                        },
-                    });
-
-                    switch (int_type) {
-                        .i32 => try ctx.asm_out.writeAll(
-                            \\    xor edx, 0x7FFFFFFF
-                            \\
-                        ),
-                        .i64 => try ctx.asm_out.writeAll(
-                            \\    movabs r11, 0x7FFFFFFFFFFFFFFF
-                            \\    xor rdx, r11
-                            \\
-                        ),
-                    }
-
-                    switch (kind) {
-                        .div => try ctx.asm_out.print(
-                            \\    je "{[prefix]s}jmp.{[trap_overflow]s}"
-                            \\
-                        , .{
-                            .prefix = ctx.name_prefix,
-                            .trap_overflow = Context.trap_integer_overflow,
-                        }),
-                        .rem => {
-                            signed_rem_overflow = try Label.init(ctx, "overflow");
-                            try ctx.asm_out.print(
-                                \\    jz {[overflow]f}
-                                \\    mov {[r12]s}, {[rax]s} # clobbers dispatch table register
-                                \\
-                            , .{ .overflow = signed_rem_overflow, .r12 = r12, .rax = rax });
-                        },
-                    }
-
-                    switch (int_type) {
-                        .i32 => try ctx.asm_out.writeAll(
-                            \\    cdq # clobbers edx
-                            \\    idiv r13d
-                            \\
-                        ),
-                        .i64 => try ctx.asm_out.writeAll(
-                            \\    cqo # clobbers rdx
-                            \\    idiv r13
-                            \\
-                        ),
-                    }
-
-                    if (kind == .rem) {
-                        try ctx.asm_out.print(
-                            \\    imul {[rax]s}, {[r13]s}
-                            \\    sub {[r12]s}, {[rax]s}
-                            \\
-                        , .{ .rax = rax, .r12 = r12, .r13 = r13 });
-                    }
-                },
-                .unsigned => try ctx.asm_out.print(
-                    \\    xor {[rdx]s}, {[rdx]s}
-                    \\    div {[r13]s}
-                    \\
-                , .{ .rdx = rdx, .r13 = r13 }),
-            }
-
-            try ctx.asm_out.print(
-                \\    mov {[size]t} ptr [{[vsp]t} - 32], {[result]s}
-                \\    sub {[vsp]t}, 16
-                \\    mov {[vip]t}, r14 # restore IP
-                \\    mov {[module]t}, r15 # restore module
-                \\
-            , .{
-                .result = switch (kind) {
-                    .div => rax,
-                    .rem => switch (signedness) {
-                        .signed => r12,
-                        .unsigned => rdx,
-                    },
-                },
-                .size = size,
-                .vip = Reg64.vip,
-                .vsp = Reg64.vsp,
-                .module = Reg64.module,
-            });
-            if (kind == .rem and signedness == .signed) {
-                // Restores r12
-                try ctx.asm_out.print(
-                    \\    lea {[dispatch]t}, "{[prefix]s}byte_dispatch_table"
-                    \\
-                , .{ .prefix = ctx.name_prefix, .dispatch = Reg64.disp });
-                ctx.skip_oof_handler += 1;
-            }
-            try ctx.jmpToNextHandler(.r11);
-
-            if (kind == .rem and signedness == .signed) {
-                try ctx.asm_out.print(
-                    \\.align 16
-                    \\{[label]f}:
-                    \\    mov {[size]t} ptr [{[vsp]t} - 32], {[rdx]s}
-                    \\    sub {[vsp]t}, 16
-                    \\    mov {[vip]t}, r14 # restore IP
-                    \\    mov {[module]t}, r15 # restore module
-                    \\
-                , .{
-                    .size = size,
-                    .rdx = rdx,
-                    .label = signed_rem_overflow,
-                    .vip = Reg64.vip,
-                    .vsp = Reg64.vsp,
-                    .module = Reg64.module,
-                });
-                try ctx.jmpToNextHandler(.r11);
-            }
-        }
-
-        for (&[_][]const u8{ ".and", ".or", ".xor" }) |name| {
-            try ctx.defineOpcodeHandler(opcode_name.name(name), .@"64");
-            try ctx.asm_out.print(
-                \\    mov {[r13]s}, {[size]t} ptr [{[vsp]t} - 16]
-                \\    {[instr]s} {[size]t} ptr [{[vsp]t} - 32], {[r13]s} 
-                \\    sub {[vsp]t}, 16
-                \\
-            , .{ .r13 = r13, .size = size, .vsp = Reg64.vsp, .instr = name[1..] });
-            try ctx.jmpToNextHandler(.r11);
-        }
-
-        // Shift/Rotate instructions clobber fuel register (rcx)
-        const rcx = int_type.register(.rcx);
-        for (&[_][2][]const u8{
-            .{ ".shl", "shl" },
-            .{ ".shr_s", "sar" },
-            .{ ".shr_u", "shr" },
-            .{ ".rotl", "rol" },
-            .{ ".rotr", "ror" },
-        }) |info| {
-            try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
-            try ctx.asm_out.print(
-                \\    mov r13, {[fuel]t}
-                \\    mov {[rcx]s}, {[size]t} ptr [{[vsp]t} - 16]
-                \\    {[instr]s} {[size]t} ptr [{[vsp]t} - 32], cl
-                \\    sub {[vsp]t}, 16
-                \\    mov {[fuel]t}, r13
-                \\
-            , .{
-                .rcx = rcx,
-                .size = size,
-                .instr = info[1],
-                .fuel = Reg64.fuel,
-                .vsp = Reg64.vsp,
-            });
-            try ctx.jmpToNextHandler(.r11);
-        }
-
-        for (&[_]struct { []const u8, RegSize }{
-            .{ ".extend8_s", .byte },
-            .{ ".extend16_s", .word },
-        }) |info| {
-            try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"32");
-            try ctx.asm_out.print(
-                \\    movsx {[r13]s}, {[src_size]t} ptr [{[vsp]t} - 16]
-                \\    mov {[dst_size]t} ptr [{[vsp]t} - 16], {[r13]s}
-                \\
-            , .{ .r13 = r13, .src_size = info[1], .dst_size = size, .vsp = Reg64.vsp });
-            try ctx.jmpToNextHandler(.r11);
-        }
-
-        if (int_type == .i64) {
-            try ctx.defineOpcodeHandler("i64.extend32_s", .@"32");
-            try ctx.asm_out.print(
-                \\    movsxd r13, dword ptr [{[vsp]t} - 16]
-                \\    mov qword ptr [{[vsp]t} - 16], r13
-                \\
-            , .{ .vsp = Reg64.vsp });
-            try ctx.jmpToNextHandler(.r11);
-        }
-    }
 
     fn decodeUlebIdx(
         ctx: *Context,
