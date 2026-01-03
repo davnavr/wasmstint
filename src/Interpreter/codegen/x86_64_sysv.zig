@@ -1421,26 +1421,10 @@ fn defineFloatOpcodeHandlers(ctx: *Context, float_type: FloatType) !void {
         .f64 => 'q',
     };
     const r13 = Reg64.r13.nameResized(size);
-    // const exponent_width: u5 = switch (float_type) {
-    //     .f32 => 8,
-    //     .f64 => 11,
-    // };
-    // const mantissa_width: u6 = switch (float_type) {
-    //     .f32 => 23,
-    //     .f64 => 52,
-    // };
-    // const non_sign_mask = switch (float_type) {
-    //     .f32 => "0x7FFF" ++ "FFFF",
-    //     .f64 => "0x7FFF" ++ "FFFF" ++ "FFFF" ++ "FFFF",
-    // };
-    // const exponent_mask = switch (float_type) {
-    //     .f32 => "0x7F80" ++ "0000",
-    //     .f64 => "0x7FF0" ++ "0000" ++ "0000" ++ "0000",
-    // };
-    // const mantissa_mask = switch (float_type) {
-    //     .f32 => "0x007F" ++ "FFFF",
-    //     .f64 => "0x000F" ++ "FFFF" ++ "FFFF" ++ "FFFF",
-    // };
+    const sign_bit = switch (float_type) {
+        .f32 => "0x8000" ++ "0000",
+        .f64 => "0x8000" ++ "0000" ++ "0000" ++ "0000",
+    };
     const canonical_nan_mask = switch (float_type) {
         .f32 => "0xFFC0" ++ "0000",
         .f64 => "0xFFF8" ++ "0000" ++ "0000" ++ "0000",
@@ -1520,6 +1504,58 @@ fn defineFloatOpcodeHandlers(ctx: *Context, float_type: FloatType) !void {
             \\
         , .{
             .r13 = r13,
+            .canonical_nan_mask = canonical_nan_mask,
+            .canonical_nan_bit = canonical_nan_bit,
+            .int_suffix = int_suffix,
+            .float_suffix = float_suffix,
+            .size = size,
+            .vsp = Reg64.vsp,
+        });
+        try ctx.jmpToNextHandler(.r11);
+    }
+    {
+        try ctx.defineOpcodeHandler(opcode_name.name(".max"), .@"64");
+        try ctx.asm_out.print(
+            \\    mov{[int_suffix]c} xmm0, {[size]t} ptr [{[vsp]t} - 0x10] # first
+            \\    mov{[int_suffix]c} xmm1, {[size]t} ptr [{[vsp]t} - 0x20] # second
+            \\    movaps xmm2, xmm0
+            \\    movaps xmm3, xmm1
+            \\    movaps xmm4, xmm0
+            \\    maxs{[float_suffix]c} xmm2, xmm1
+            \\    maxs{[float_suffix]c} xmm3, xmm0
+            \\    orp{[float_suffix]c} xmm2, xmm3 # almost handles non-NaN case correctly, sign may be wrong
+            //
+            \\    mov {[r13]s}, {[sign_bit]s}
+            \\    mov{[int_suffix]c} xmm3, {[r13]s} # sign bit
+            \\    movaps xmm5, xmm3
+            \\    andnp{[float_suffix]c} xmm3, xmm2 # remove sign bit
+            //
+            \\    andp{[float_suffix]c} xmm4, xmm5 # sign of first input
+            \\    andp{[float_suffix]c} xmm5, xmm1 # sign of second input
+            \\    andp{[float_suffix]c} xmm4, xmm5 # final sign
+            \\    orp{[float_suffix]c} xmm3, xmm4 # apply correct sign bit
+            //
+            \\    mov {[r13]s}, {[canonical_nan_mask]s}
+            \\    mov{[int_suffix]c} xmm2, {[r13]s} # canonical NaN mask
+            //
+            \\    movaps xmm4, xmm0
+            \\    cmpords{[float_suffix]c} xmm4, xmm1 # all 1's if NaN was NOT present
+            \\    # mask of all 1's if no NaN, canonical_nan_mask if there is NaN
+            \\    orp{[float_suffix]c} xmm2, xmm4
+            \\    andp{[float_suffix]c} xmm3, xmm2 # If NaN, mask away non-canonical NaN bits
+            //
+            \\    mov {[r13]s}, {[canonical_nan_bit]s}
+            \\    mov{[int_suffix]c} xmm2, {[r13]s} # canonical NaN bit
+            \\    andnp{[float_suffix]c} xmm4, xmm2 # canonical NaN bit if NaN is present
+            \\    # If NaNs are present, set the canonical NaN bit
+            \\    orp{[float_suffix]c} xmm3, xmm4
+            //
+            \\    mov{[int_suffix]c} {[size]t} ptr [{[vsp]t} - 0x20], xmm3 # write result
+            \\    sub {[vsp]t}, 0x10 # vsp
+            \\
+        , .{
+            .r13 = r13,
+            .sign_bit = sign_bit,
             .canonical_nan_mask = canonical_nan_mask,
             .canonical_nan_bit = canonical_nan_bit,
             .int_suffix = int_suffix,
