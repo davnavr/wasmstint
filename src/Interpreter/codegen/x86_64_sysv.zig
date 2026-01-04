@@ -1436,20 +1436,62 @@ fn defineFloatOpcodeHandlers(ctx: *Context, float_type: FloatType) !void {
 
     // Zig/LLVM uses vmovs(s|d) when targeting x86_64_v3
 
-    // Zig/LLVM uses vucomis(s|d) when targeting x86_64_v3
     for (&[_][2][]const u8{
-        .{ ".gt", "seta" },
+        .{ ".eq", "cmpeqs" },
+        .{ ".ne", "cmpneqs" },
     }) |info| {
         try ctx.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
         try ctx.asm_out.print(
-            \\    movs{[suffix]c} xmm0, {[size]t} ptr [{[vsp]t} - 0x10]
+            \\    movs{[float_suffix]c} xmm0, {[size]t} ptr [{[vsp]t} - 0x10]
+            \\    xor r13, r13
+            \\    {[instr]s}{[float_suffix]c} xmm0, {[size]t} ptr [{[vsp]t} - 0x20]
+            \\    mov{[int_suffix]c} {[r13]s}, xmm0
+            \\    and {[r13]s}, 1
+            \\    mov {[size]t} ptr [{[vsp]t} - 0x20], {[r13]s}
+            \\    sub {[vsp]t}, 16
+            \\
+        , .{
+            .float_suffix = float_suffix,
+            .int_suffix = int_suffix,
+            .r13 = r13,
+            .size = size,
+            .vsp = Reg64.vsp,
+            .instr = info[1],
+        });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
+    // Zig/LLVM uses vucomis(s|d) when targeting x86_64_v3
+    for (&[_]struct { []const u8, []const u8, u1 }{
+        .{ ".lt", "seta", 0 },
+        .{ ".le", "setae", 0 },
+        .{ ".gt", "seta", 1 },
+        .{ ".ge", "setae", 1 },
+    }) |info| {
+        const name, const set_instr, const order = info;
+        try ctx.defineOpcodeHandler(opcode_name.name(name), .@"64");
+        try ctx.asm_out.print(
+            \\    movs{[suffix]c} xmm0, {[size]t} ptr [{[vsp]t} - 0x{[op_1]X}]
             \\    xor r15, r15
-            \\    ucomis{[suffix]c} xmm0, {[size]t} ptr [{[vsp]t} - 0x20]
+            \\    ucomis{[suffix]c} xmm0, {[size]t} ptr [{[vsp]t} - 0x{[op_2]X}]
             \\    {[set_instr]s} r15b
             \\    mov dword ptr [{[vsp]t} - 0x20], r15d
             \\    sub {[vsp]t}, 16
             \\
-        , .{ .suffix = float_suffix, .size = size, .vsp = Reg64.vsp, .set_instr = info[1] });
+        , .{
+            .suffix = float_suffix,
+            .size = size,
+            .vsp = Reg64.vsp,
+            .set_instr = set_instr,
+            .op_1 = @as(u8, switch (order) {
+                0 => 0x10,
+                1 => 0x20,
+            }),
+            .op_2 = @as(u8, switch (order) {
+                0 => 0x20,
+                1 => 0x10,
+            }),
+        });
         try ctx.jmpToNextHandler(.r11);
     }
 
