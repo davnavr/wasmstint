@@ -333,31 +333,47 @@ const Modules = struct {
             );
             module.addOptions("options", wasmstint_options);
 
+            const codegen_zig_writer = b.createModule(.{
+                .root_source_file = b.path("src/Interpreter/codegen/ZigWriter.zig"),
+                .target = b.graph.host,
+                .optimize = .Debug,
+                .single_threaded = true,
+                .pic = false,
+            });
+
             const codegen_x64_sysv_exe = b.addExecutable(.{
                 .name = "wasmstint-codegen-x86_64_sysv",
                 .root_module = b.createModule(.{
-                    .root_source_file = b.path("src/Interpreter/codegen/x86_64_sysv.zig"),
+                    .root_source_file = b.path("src/Interpreter/codegen/x86_64/main.zig"),
                     .target = b.graph.host,
                     .optimize = .Debug,
                     .single_threaded = true,
+                    .pic = false,
+                    // .code_model = .small, // Forces usage of LLVM backend
                 }),
                 .max_rss = ByteSize.mib(123).bytes,
             });
+            codegen_x64_sysv_exe.root_module.addImport("ZigWriter", codegen_zig_writer);
+
+            const x64_asm_interp_symbol_prefix = "wasmstint.x86_64_sysv.";
 
             if (use_assembly_interpreter == .assembly and
                 options.target.result.cpu.arch == .x86_64)
             {
                 const run_codegen = b.addRunArtifact(codegen_x64_sysv_exe);
                 run_codegen.step.max_rss = ByteSize.mib(2).bytes; // arbitrary amount
-                run_codegen.addArg("0.0.0"); // TODO: Fixed "wasmstint.x86_64_sysv." prefix
-                // TODO: pass `options.target.query.serializeCpu` to indicate CPU flags
+                run_codegen.addArg(x64_asm_interp_symbol_prefix);
+                // TODO: cpu and flags info
+                //run_codegen.addArg(options.target.query.zigTriple(b.allocator) catch @panic("oom"));
+                //run_codegen.addArg(options.target.query.serializeCpuAlloc(b.allocator) catch @panic("oom"));
                 run_codegen.addArg(b.fmt("{t}", .{options.optimize_interpreter}));
                 module.addAssemblyFile(run_codegen.addOutputFileArg("x86_64_sysv.s"));
-                module.addAnonymousImport("x86_64_sysv", .{
+                module.addAnonymousImport("asm_generated", .{
                     .root_source_file = run_codegen.addOutputFileArg("x86_64_sys_decls.zig"),
                     .target = options.target,
                     .optimize = options.optimize_interpreter,
                 });
+                wasmstint_options.addOption([]const u8, "symbol_prefix", x64_asm_interp_symbol_prefix);
             }
 
             const tests = b.addTest(.{

@@ -1,193 +1,172 @@
 //! Generates an assembly `.s` file and a `.zig` file containing `extern fn` definitions
 //! to individual opcode handlers.
 
-const stack_space_padding = 8;
-
-pub fn main() !void {
+pub fn main() noreturn {
     var io_impl = std.Io.Threaded.init_single_threaded;
     const io = io_impl.ioBasic();
 
-    var arena = ArenaAllocator.init(std.heap.page_allocator);
-    var scratch = ArenaAllocator.init(std.heap.page_allocator);
+    // Never reset
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 
-    var cli_args = try std.process.ArgIterator.initWithAllocator(scratch.allocator());
+    var cli_args = std.process.ArgIterator.initWithAllocator(scratch.allocator()) catch
+        @panic("oom");
     _ = cli_args.next().?;
 
-    const cwd = std.Io.Dir.cwd();
-    const name_prefix = try std.mem.concat(
-        arena.allocator(),
-        u8,
-        &.{ "wasmstint-", cli_args.next().?, ".handlers." },
-    );
+    const symbol_prefix = arena.allocator().dupe(u8, cli_args.next().?) catch @panic("oom");
     const optimize = std.meta.stringToEnum(std.builtin.OptimizeMode, cli_args.next().?).?;
 
+    const cwd = std.Io.Dir.cwd();
     const file_flags = std.Io.File.CreateFlags{ .exclusive = true };
-    const asm_file = try cwd.createFile(io, cli_args.next().?, file_flags);
-    const zig_file = try cwd.createFile(io, cli_args.next().?, file_flags);
+    const asm_file = file: {
+        const path = cli_args.next().?;
+        break :file cwd.createFile(io, path, file_flags) catch |e|
+            std.debug.panic("cannot open {s}: {t}", .{ path, e });
+    };
+    const zig_file = file: {
+        const path = cli_args.next().?;
+        break :file cwd.createFile(io, path, file_flags) catch |e|
+            std.debug.panic("cannot open {s}: {t}", .{ path, e });
+    };
 
     _ = scratch.reset(.retain_capacity);
 
     const writer_buf_size = std.heap.pageSize() * 2;
-    var asm_writer = std.fs.File.adaptFromNewApi(asm_file).writerStreaming(
-        try std.heap.page_allocator.alloc(u8, writer_buf_size),
+    var asm_writer = Assembler.init(
+        std.fs.File.adaptFromNewApi(asm_file).writerStreaming(
+            std.heap.page_allocator.alloc(u8, writer_buf_size) catch @panic("oom"),
+        ),
+        symbol_prefix,
+        scratch,
     );
-    var zig_writer = std.fs.File.adaptFromNewApi(zig_file).writerStreaming(
-        try std.heap.page_allocator.alloc(u8, writer_buf_size),
-    );
-
-    var ctx = Context{
-        .name_prefix = name_prefix,
-        .scratch = &scratch,
-        .optimize = optimize,
-        .asm_out = &asm_writer.interface,
-        .zig_out = &zig_writer.interface,
-    };
-
-    try ctx.asm_out.writeAll(
-        \\# WASM opcodes implemented in x86-64 assembly, used in the wasmstint interpreter
-        \\#
-        \\# This file is generated.
-        \\
-        \\.intel_syntax noprefix
-        \\
+    var zig_writer = ZigWriter.init(
+        std.fs.File.adaptFromNewApi(zig_file).writerStreaming(
+            std.heap.page_allocator.alloc(u8, writer_buf_size) catch @panic("oom"),
+        ),
+        symbol_prefix,
     );
 
-    try ctx.zig_out.print(
-        "//! This file is generated.\n\n" ++
-            "pub const symbol_prefix = \"{s}\";\n\n",
-        .{name_prefix},
-    );
+    defineSupportRoutines(&asm_writer, optimize);
+    defineControlOpcodeHandlers(&asm_writer, &zig_writer);
 
+    asm_writer.finish();
+    zig_writer.finish();
+    std.process.exit(0);
+}
+
+fn defineSupportRoutines(
+    as: *Assembler,
+    optimize: std.builtin.OptimizeMode,
+) void {
     {
+        const system_v_callee_saved = Assembler.Gpr.Tag.system_v_callee_saved;
         // TODO: Could detect if build script uses LLVM backend, meaning RegCall calling
         // convention could be used instead of System V
-        try ctx.asm_out.print(
-            \\
-            \\.global "{[prefix]s}{[name]s}"
-            \\.align 64
-            \\.type "{[prefix]s}{[name]s}", @function
-            \\"{[prefix]s}{[name]s}": # System V calling convention
-            \\
-        , .{ .prefix = ctx.name_prefix, .name = "opcodeHandlerTrampoline" });
-        try ctx.asm_out.writeAll(
-            \\    push rbp
-            \\    mov rbp, rsp
-            \\    # System V calling convention callee-saved registers
-            \\
+        const trampoline = as.startFunction("opcodeHandlerTrampoline", .@"64");
+        as.writeComment("System V calling convention");
+        as.push(.{ .gpr = .rbp }, "");
+        as.mov(.{ .gpr = .rbp }, .{ .gpr = .rsp }, "");
+        as.writeComment("move parameters to correct registers and save callee-save registers");
+
+        const entry_preserved_registers = comptime std.EnumSet(Assembler.Gpr.Tag).initMany(
+            &(system_v_callee_saved ++ Assembler.Gpr.Tag.system_v_parameters),
         );
-        // TODO: Why not save 4 of the registers in the stack space for parameters?
-        for (Reg64.system_v_saved_registers) |save| {
-            try ctx.asm_out.print(
-                \\    push {t}
-                \\
-            , .{save});
+        as.markInitialized(entry_preserved_registers);
+        as.preventClobbering(entry_preserved_registers.unionWith(.initMany(&.{ .stack, .base })));
+
+        const temp = Assembler.Operand{ .gpr = .r13 };
+        const handler = Assembler.Gpr.r14;
+        for (
+            system_v_callee_saved[0..4],
+            &[_]Assembler.Gpr{ .vip, .stp, .eip, handler },
+            &[_][]const u8{ "vip", "stp", "eip", "opcode handler" },
+            0..,
+        ) |saved_tag, param, comment, i| {
+            as.allowClobbering(.initMany(&.{ param.tag, saved_tag }));
+            const saved = Assembler.Operand{ .gpr = .qword(saved_tag) };
+            const slot = Assembler.Operand.paramFromRbp(i, .qword);
+            if (saved.gpr == param) {
+                as.mov(temp, saved, "swap callee saved");
+                as.mov(.{ .gpr = param }, slot, comment);
+                as.mov(slot, temp, "callee-saved");
+            } else {
+                as.mov(.{ .gpr = param }, slot, comment);
+                as.mov(slot, saved, "callee-saved");
+            }
         }
-        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
-            \\    sub rsp, {[stack_space_padding]d}
-            \\    # Move parameters to correct registers
-            \\    mov {[ip]t}, qword ptr [rbp + 16]
-            \\    mov {[stp]t}, qword ptr [rbp + 24]
-            \\    mov {[eip]t}, qword ptr [rbp + 32]
-            \\
-        , .{
-            .stack_space_padding = stack_space_padding,
-            .ip = Reg64.vip,
-            .stp = Reg64.stp,
-            .eip = Reg64.eip,
-        }));
-        try ctx.asm_out.print(
-            \\    lea {[dispatch]t}, "{[prefix]s}byte_dispatch_table"
-            \\    jmp qword ptr [rbp + 40]
-            \\    ud2
-            \\
-        , .{ .prefix = ctx.name_prefix, .dispatch = Reg64.disp });
+
+        as.mov(
+            .paramFromRbp(4, .qword),
+            .{ .gpr = .qword(system_v_callee_saved[4]) },
+            "callee-saved",
+        );
+
+        as.lea(.disp, .{ .symbol = .byte_dispatch_table }, "");
+        as.jmp(.{ .gpr = handler }, "jump to opcode handler");
+        as.ud2();
+        trampoline.end(as);
     }
     {
-        try ctx.asm_out.print(
-            \\
-            \\.global "{[prefix]s}{[name]s}"
-            \\.type "{[prefix]s}{[name]s}", @function
-            \\
-        , .{ .prefix = ctx.name_prefix, .name = "invalidByteOpcode" });
-        switch (optimize) {
-            .Debug, .ReleaseSafe => try ctx.asm_out.print(
-                \\.align 16
-                \\"{[prefix]s}{[name]s}":
-                \\    mov rdi, {[vip]t} #1
-                \\    mov rsi, {[eip]t} #2
-                \\    # doesn't `jmp`, so stack trace is better
-                \\    call "{[prefix]s}panicInvalidByteOpcode"
-                \\    ud2
-                \\
-            , .{
-                .prefix = ctx.name_prefix,
-                .name = "invalidByteOpcode",
-                .vip = Reg64.vip,
-                .eip = Reg64.eip,
-            }),
-            .ReleaseFast, .ReleaseSmall => try ctx.asm_out.print(
-                \\"{[prefix]s}{[name]s}":
-                \\    ud2
-                \\
-            , .{ .prefix = ctx.name_prefix, .name = "invalidByteOpcode" }),
+        const handler = as.startFunction(
+            Assembler.Symbol.out_of_fuel_handler.nameUnprefixed(),
+            .@"16",
+        );
+
+        const state_params = [_]Assembler.Gpr{ .vip, .vsp, .eip, .stp, .interp };
+        as.markInitialized(Assembler.Gpr.sliceToTagSet(&state_params));
+
+        for (
+            &[_]Assembler.Gpr{ .rdi, .rdx, .rsi, .rcx, .r8 },
+            &state_params,
+            &[_]u3{ 1, 3, 2, 4, 5 },
+        ) |param, src, n| {
+            std.debug.assert(param.tag != src.tag);
+            var comment_buf = "argument #n".*;
+            comment_buf[comment_buf.len - 1] = n;
+            as.mov(.{ .gpr = param }, .{ .gpr = src }, &comment_buf);
+            as.preventClobbering(.initOne(param.tag));
         }
-    }
-    {
-        try ctx.asm_out.print(
-            \\
-            \\.global "{[prefix]s}{[name]s}"
-            \\.align 16
-            \\.type "{[prefix]s}{[name]s}", @function
-            \\"{[prefix]s}{[name]s}":
-            \\    mov rdi, {[vip]t} # 1st argument
-            \\    mov rdx, {[vsp]t} # 3rd argument
-            \\    mov rsi, {[eip]t} # 2nd argument
-            \\    mov rcx, {[stp]t} # 4th argument
-            \\    mov r8, {[interp]t} # 5th argument
-            \\    # Perform a tail call
-            \\
-        , .{
-            .prefix = ctx.name_prefix,
-            .name = "outOfFuelHandler",
-            .vip = Reg64.vip,
-            .eip = Reg64.eip,
-            .vsp = Reg64.vsp,
-            .stp = Reg64.stp,
-            .interp = Reg64.interp,
-        });
+
+        as.writeComment("perform a tail call");
         // This will make the called function restore the registers
-        // Seems to be no way to avoid doing this even, if a tail call doesn't occur here
-        try ctx.popSystemVSavedRegisters();
-        try ctx.asm_out.print(
-            \\    mov rsp, rbp
-            \\    pop rbp
-            \\    jmp "{[prefix]s}interruptOutOfFuel"
-            \\    ud2
-            \\
-        , .{ .prefix = ctx.name_prefix });
+        // Seems to be no way to avoid doing this, even if a normal `call` is used instead
+        as.restoreSystemVSavedRegisters();
+        as.mov(.{ .gpr = .rsp }, .{ .gpr = .rbp }, "");
+        as.pop(.{ .gpr = .rbp }, "");
+        as.jmp(.{ .symbol = .interrupt_out_of_fuel }, "");
+        as.ud2();
+        handler.end(as);
     }
+    {
+        const handler = as.startFunction("invalidByteOpcode", switch (optimize) {
+            .Debug, .ReleaseSafe => .@"16",
+            .ReleaseFast, .ReleaseSmall => .@"1",
+        });
+        switch (optimize) {
+            .Debug, .ReleaseSafe => {
+                as.markInitialized(Assembler.Gpr.sliceToTagSet(&Assembler.Gpr.interpreter_state));
+                as.mov(.{ .gpr = Assembler.Gpr.system_v_parameters[0] }, .{ .gpr = .vip }, "1");
+                as.mov(.{ .gpr = Assembler.Gpr.system_v_parameters[1] }, .{ .gpr = .eip }, "2");
+                as.writeComment("doesn't jmp so stack trace is better");
+                as.instr("call", &.{.{ .symbol = .initPrefixed("panicInvalidByteOpcode") }}, "");
+            },
+            .ReleaseFast, .ReleaseSmall => {},
+        }
+        as.ud2();
+        handler.end(as);
+    }
+}
 
-    try ctx.zig_out.writeAll(
-        \\/// Generates references to the individual opcode handlers in the generated assembly."
-        \\/// TODO: Organize wasmstint into modules so this doesn't need to be a function
-        \\/// TODO: Write comptime checks for layout of runtime structures
-        \\pub fn handlers(comptime OpcodeHandler: type) type {
-        \\    return struct {
-    );
-
-    try defineAllOpcodeHandlers(&ctx);
-
-    try ctx.zig_out.writeAll(
-        \\    };
-        \\}
-        \\
-    );
-    try ctx.asm_out.flush();
-    try ctx.zig_out.flush();
+fn defineControlOpcodeHandlers(as: *Assembler, zig: *ZigWriter) void {
+    {
+        var nop = as.defineOpcodeHandler(zig, "nop", .@"16");
+        nop.jmpToNextHandler(as, .r11);
+        nop.end(as);
+    }
 }
 
 fn defineAllOpcodeHandlers(ctx: *Context) !void {
-    try defineControlOpcodeHandlers(ctx);
+    try defineControlOpcodeHandlers2(ctx);
     try defineCallOpcodeHandlers(ctx);
     try defineParametericOpcodeHandlers(ctx);
     try defineLocalOpcodeHandlers(ctx);
@@ -226,7 +205,7 @@ fn defineAllOpcodeHandlers(ctx: *Context) !void {
     }
 }
 
-fn defineControlOpcodeHandlers(ctx: *Context) !void {
+fn defineControlOpcodeHandlers2(ctx: *Context) !void {
     {
         try ctx.defineOpcodeHandler("nop", .@"16");
         try ctx.jmpToNextHandler(.r11);
@@ -1924,7 +1903,7 @@ const Label = struct {
         };
     }
 
-    pub fn format(label: Label, writer: *Writer) Writer.Error!void {
+    pub fn format(label: Label, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.writeAll(label.name);
     }
 };
@@ -1933,9 +1912,9 @@ const Context = struct {
     name_prefix: []const u8,
     opcode_name: []const u8 = undefined,
     optimize: std.builtin.OptimizeMode,
-    scratch: *ArenaAllocator,
-    asm_out: *Writer,
-    zig_out: *Writer,
+    scratch: *std.heap.ArenaAllocator,
+    asm_out: *std.Io.Writer,
+    zig_out: *std.Io.Writer,
     skip_oof_handler: u32 = 0,
 
     fn popSystemVSavedRegisters(ctx: *Context) !void {
@@ -1943,7 +1922,7 @@ const Context = struct {
             \\    # Restore System V saved registers
             \\    add rsp, {[stack_space_padding]d}
             \\
-        , .{ .stack_space_padding = stack_space_padding }));
+        , .{ .stack_space_padding = 8 }));
         const restore_count = Reg64.system_v_saved_registers.len;
         for (0..restore_count) |i| {
             try ctx.asm_out.print(
@@ -2292,24 +2271,22 @@ const Context = struct {
     }
 
     fn jmpToNextHandler(ctx: *Context, comptime temp: TempReg) !void {
-        // TODO: Store fuel directly instead of via pointer, include fuel in return value
-        // ^ needs Zig to support multiple results in inline assembly, or making a RegCall/SysV
-        // compliant ASM function that returns in two registers
         const out_of_fuel = try Label.init(ctx, "out-of-fuel");
-        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
-            \\    movzx {[temp]t}, byte ptr [{[ip]t}] # Start reading next opcode byte
-            \\    sub qword ptr [{[fuel]t}], 1 # Fuel check
-            \\
-        , .{ .ip = Reg64.vip, .temp = temp, .fuel = Reg64.fuel }));
-        try ctx.asm_out.print("    jb {f}\n", .{out_of_fuel});
-        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
-            \\    # Jump to handler
-            \\    inc {[ip]t}
-            \\    mov {[temp]t}, qword ptr [{[disp]t} + {[temp]t} * 8]
-            \\    jmp {[temp]t}
-            \\    ud2
-            \\
-        , .{ .ip = Reg64.vip, .temp = temp, .disp = Reg64.disp }));
+        _ = temp;
+        // try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+        //     \\    movzx {[temp]t}, byte ptr [{[ip]t}] # Start reading next opcode byte
+        //     \\    sub qword ptr [{[fuel]t}], 1 # Fuel check
+        //     \\
+        // , .{ .ip = Reg64.vip, .temp = temp, .fuel = Reg64.fuel }));
+        // try ctx.asm_out.print("    jb {f}\n", .{out_of_fuel});
+        // try ctx.asm_out.writeAll(std.fmt.comptimePrint(
+        //     // \\    # Jump to handler
+        //     // \\    inc {[ip]t}
+        //     \\    mov {[temp]t}, qword ptr [{[disp]t} + {[temp]t} * 8]
+        //     \\    jmp {[temp]t}
+        //     \\    ud2
+        //     \\
+        // , .{ .ip = Reg64.vip, .temp = temp, .disp = Reg64.disp }));
         ctx.skip_oof_handler -= 1;
         if (ctx.skip_oof_handler == 0) {
             try ctx.asm_out.print(
@@ -2323,5 +2300,5 @@ const Context = struct {
 };
 
 const std = @import("std");
-const ArenaAllocator = std.heap.ArenaAllocator;
-const Writer = std.Io.Writer;
+const Assembler = @import("Assembler.zig");
+const ZigWriter = @import("ZigWriter");

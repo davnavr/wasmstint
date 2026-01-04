@@ -1,5 +1,11 @@
 //! X86-64 assembly implementation of WebAssembly opcode handlers.
 
+// TODO: restructure handlers
+// handlers/zig
+// handlers/portable.zig
+// handlers/portable/simd.zig
+// handlers/x86_64_sysv.zig
+
 /// - %rax - `Ip`, `Transition`
 /// - %rbx - `Stp`
 /// - %rcx - `*Fuel`
@@ -40,6 +46,8 @@ comptime {
     std.debug.assert(@offsetOf(runtime.TableInst, "len") == 12);
 }
 
+const symbol_prefix = @import("options").symbol_prefix;
+
 /// Sets up a stack frame for the assembly opcode handler, before invoking it.
 ///
 /// Parameters are passed such that the trampoline has to move less parameters around to the
@@ -58,13 +66,13 @@ const opcodeHandlerTrampoline = @extern(
         memories: [*]const *runtime.MemInst, // r8
         interpreter: *Interpreter, // r9
         // These parameters are passed on the stack
-        ip: Ip, // `rbp + 16`
-        stp: Stp, // `rbp + 24`
-        eip: Eip, // `rbp + 32`
+        ip: Ip, // `rbp + 16` -> rax
+        stp: Stp, // `rbp + 24` -> rbx
+        eip: Eip, // `rbp + 32` -> r10
         handler: *const OpcodeHandler, // `rbp + 40`
         _: usize, // `rbp + 48`
     ) callconv(sysvcc) Transition,
-    .{ .name = generated.symbol_prefix ++ "opcodeHandlerTrampoline" },
+    .{ .name = symbol_prefix ++ "opcodeHandlerTrampoline" },
 );
 
 pub inline fn callOpcodeHandler(
@@ -124,7 +132,7 @@ pub inline fn callOpcodeHandler(
 
 const invalidByteOpcode = @extern(
     *align(16) const OpcodeHandler,
-    .{ .name = generated.symbol_prefix ++ "invalidByteOpcode" },
+    .{ .name = symbol_prefix ++ "invalidByteOpcode" },
 );
 
 fn panicInvalidByteOpcode(ip: Ip, eip: Eip) callconv(sysvcc) noreturn {
@@ -148,7 +156,7 @@ comptime {
     switch (builtin.mode) {
         .Debug, .ReleaseSafe => @export(
             &panicInvalidByteOpcode,
-            .{ .name = generated.symbol_prefix ++ "panicInvalidByteOpcode" },
+            .{ .name = symbol_prefix ++ "panicInvalidByteOpcode" },
         ),
         .ReleaseFast, .ReleaseSmall => {},
     }
@@ -157,7 +165,7 @@ comptime {
 /// Invokes `interruptOutOfFuel()`.
 pub const outOfFuelHandler = @extern(
     *align(16) const OpcodeHandler,
-    .{ .name = generated.symbol_prefix ++ "outOfFuelHandler" },
+    .{ .name = symbol_prefix ++ "outOfFuelHandler" },
 );
 
 fn interruptOutOfFuel(
@@ -534,7 +542,7 @@ fn trapMemoryAccessOutOfBounds(
     );
 }
 
-const generated = @import("x86_64_sysv");
+const generated = @import("asm_generated");
 
 pub const byte_dispatch_table align(64) = common.dispatchTable(
     opcodes.ByteOpcode,
@@ -557,7 +565,7 @@ comptime {
         "trapIndirectCallToNull",
         "byte_dispatch_table",
     }) |name| {
-        @export(&@field(@This(), name), .{ .name = generated.symbol_prefix ++ name });
+        @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
     }
 }
 
