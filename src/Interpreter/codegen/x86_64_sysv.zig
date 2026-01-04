@@ -1421,9 +1421,14 @@ fn defineFloatOpcodeHandlers(ctx: *Context, float_type: FloatType) !void {
         .f64 => 'q',
     };
     const r13 = Reg64.r13.nameResized(size);
+    const r14 = Reg64.r14.nameResized(size);
     const sign_bit = switch (float_type) {
         .f32 => "0x8000" ++ "0000",
         .f64 => "0x8000" ++ "0000" ++ "0000" ++ "0000",
+    };
+    const non_sign_mask = switch (float_type) {
+        .f32 => "0x7FFF" ++ "FFFF",
+        .f64 => "0x7FFF" ++ "FFFF" ++ "FFFF" ++ "FFFF",
     };
     const canonical_nan_mask = switch (float_type) {
         .f32 => "0xFFC0" ++ "0000",
@@ -1492,6 +1497,25 @@ fn defineFloatOpcodeHandlers(ctx: *Context, float_type: FloatType) !void {
                 1 => 0x10,
             }),
         });
+        try ctx.jmpToNextHandler(.r11);
+    }
+
+    {
+        try ctx.defineOpcodeHandler(opcode_name.name(".abs"), .@"32");
+        try ctx.asm_out.print(
+            \\    mov {[r13]s}, {[mask]s}
+            \\    and {[size]t} ptr [{[vsp]t} - 16], {[r13]s} # clear sign bit
+            \\
+        , .{ .r13 = r13, .size = size, .vsp = Reg64.vsp, .mask = non_sign_mask });
+        try ctx.jmpToNextHandler(.r11);
+    }
+    {
+        try ctx.defineOpcodeHandler(opcode_name.name(".neg"), .@"32");
+        try ctx.asm_out.print(
+            \\    mov {[r13]s}, {[mask]s}
+            \\    xor {[size]t} ptr [{[vsp]t} - 16], {[r13]s} # clear sign bit
+            \\
+        , .{ .r13 = r13, .size = size, .vsp = Reg64.vsp, .mask = sign_bit });
         try ctx.jmpToNextHandler(.r11);
     }
 
@@ -1637,6 +1661,28 @@ fn defineFloatOpcodeHandlers(ctx: *Context, float_type: FloatType) !void {
             .float_suffix = float_suffix,
             .size = size,
             .vsp = Reg64.vsp,
+        });
+        try ctx.jmpToNextHandler(.r11);
+    }
+    {
+        try ctx.defineOpcodeHandler(opcode_name.name(".copysign"), .@"64");
+        // Could use ANDN from BMI1 here
+        try ctx.asm_out.print(
+            \\    mov {[r13]s}, {[sign_bit]s} # sign bit
+            \\    mov {[r14]s}, {[r13]s}
+            \\    not {[r14]s} # non-sign mask
+            \\    and {[r13]s}, {[size]t} ptr [{[vsp]t} - 0x10] # get sign
+            \\    and {[r14]s}, {[size]t} ptr [{[vsp]t} - 0x20] # get other bits
+            \\    or {[r13]s}, {[r14]s} # combine them
+            \\    mov {[size]t} ptr [{[vsp]t} - 0x20], {[r13]s}
+            \\    sub {[vsp]t}, 0x10
+            \\
+        , .{
+            .r13 = r13,
+            .r14 = r14,
+            .sign_bit = sign_bit,
+            .vsp = Reg64.vsp,
+            .size = size,
         });
         try ctx.jmpToNextHandler(.r11);
     }
