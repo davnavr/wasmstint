@@ -5,9 +5,8 @@ pub fn main() noreturn {
     var io_impl = std.Io.Threaded.init_single_threaded;
     const io = io_impl.ioBasic();
 
-    // Never reset
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var arena = ArenaAllocator.init(std.heap.page_allocator); // never reset
+    var scratch = ArenaAllocator.init(std.heap.page_allocator);
 
     var cli_args = std.process.ArgIterator.initWithAllocator(scratch.allocator()) catch
         @panic("oom");
@@ -47,7 +46,10 @@ pub fn main() noreturn {
     );
 
     defineSupportRoutines(&asm_writer, optimize);
-    defineControlOpcodeHandlers(&asm_writer, &zig_writer);
+    defineControlOpcodeHandlers(&asm_writer, &zig_writer, optimize);
+    // defineCallOpcodeHandlers(&asm_writer, &zig_writer);
+    // defineParametericOpcodeHandlers(&asm_writer, &zig_writer);
+    defineLocalOpcodeHandlers(&asm_writer, &zig_writer);
 
     asm_writer.finish();
     zig_writer.finish();
@@ -157,94 +159,311 @@ fn defineSupportRoutines(
     }
 }
 
-fn defineControlOpcodeHandlers(as: *Assembler, zig: *ZigWriter) void {
+const DecodeUlebIdx = struct {
+    slow_path: Assembler.Label,
+    fast_path: Assembler.Label,
+    result: Assembler.Gpr64,
+    byte: Assembler.Gpr64,
+    accumulator: Assembler.Gpr64,
+
+    fn fastPath(
+        as: *Assembler,
+        result: Assembler.Gpr64,
+        /// `clobbers[1]` is only cloberred in the slow path.
+        clobbers: [2]Assembler.Gpr64,
+        name: []const u8,
+    ) DecodeUlebIdx {
+        var fast_path = as.label(&.{ "index_", name, "_done" });
+        const slow_path = as.label(&.{ "index_", name, "_slow" });
+        const byte, const accumulator = clobbers;
+
+        as.movzx(result.toGpr(), .{ .mem = .{ .size = .byte, .base = .vip } }, "first byte");
+        as.inc(.{ .gpr = .vip }, "");
+        as.@"test"(
+            .{ .gpr = result.toGpr().withSize(.byte) },
+            .{ .raw = "0x80" },
+            "check for multi-byte",
+        );
+        as.jcc(.nz, .{ .label = &fast_path }, "");
+        fast_path.place(as);
+
+        return DecodeUlebIdx{
+            .slow_path = slow_path,
+            .fast_path = fast_path,
+            .result = result,
+            .byte = byte,
+            .accumulator = accumulator,
+        };
+    }
+
+    fn writeSlowPath(decode: *DecodeUlebIdx, as: *Assembler) void {
+        as.p2align(.@"16");
+        decode.slow_path.place(as);
+        as.@"and"(.gpr64(decode.result), .{ .raw = "0x7F" }, "keep lower 7 bits");
+        as.writeComment("a loop would probably work better here");
+        const byte = decode.byte.toGpr();
+        const accumulator = Assembler.Operand.gpr64(decode.accumulator);
+        for (1..4) |i| {
+            var comment_buf = "length is _ bytes".*;
+            comment_buf[comment_buf.len - 1] = '1' + @as(u8, @intCast(i));
+            as.movzx(byte, .{ .mem = .{ .size = .byte, .base = .vip } }, &comment_buf);
+            as.inc(.{ .gpr = .vip }, "vip");
+            as.mov(accumulator, .gpr64(decode.byte), "");
+            as.@"and"(accumulator, .{ .raw = "0x7F" }, "");
+            as.shl(accumulator, .{ .amount = @as(u6, @intCast(i)) * 7 }, "");
+            as.@"or"(.gpr64(decode.result), accumulator, "");
+            as.@"test"(.{ .gpr = byte.withSize(.byte) }, .{ .raw = "0x80" }, "check for continuation");
+            as.jcc(.z, .{ .label = &decode.fast_path }, "");
+        }
+
+        // Assume max length (5 bytes) ULEB128
+        as.movzx(
+            decode.byte.toGpr(),
+            .{ .mem = .{ .size = .byte, .base = .vip } },
+            "length is maximum of 5 bytes",
+        );
+        as.inc(.{ .gpr = .vip }, "vip");
+        as.mov(accumulator, .gpr64(decode.byte), "");
+        as.@"and"(accumulator, .{ .raw = "0x7F" }, "");
+        as.shl(accumulator, .{ .amount = 28 }, "");
+        as.@"or"(.gpr64(decode.result), accumulator, "");
+        as.jmp(.{ .label = &decode.fast_path }, "");
+        as.ud2();
+
+        decode.* = undefined;
+    }
+};
+
+const SkipUlebIdx = struct {
+    skip_idx: Assembler.Label,
+    fast_path: Assembler.Label,
+    byte: Assembler.Gpr64,
+
+    fn writeDecodeByte(skip: *const SkipUlebIdx, as: *Assembler, first_comment: []const u8) void {
+        as.movzx(
+            skip.byte.toGpr(),
+            .{ .mem = .{ .size = .byte, .base = .vip } },
+            first_comment,
+        );
+        as.inc(.{ .gpr = .vip }, "vip");
+        as.@"test"(
+            .{ .gpr = skip.byte.toGpr().withSize(.byte) },
+            .{ .raw = "0x80" },
+            "check for longer index",
+        );
+    }
+
+    fn fastPath(as: *Assembler, clobber: Assembler.Gpr64, name: []const u8) SkipUlebIdx {
+        var skip = SkipUlebIdx{
+            .skip_idx = as.label(&.{ "skip_idx_", name }),
+            .fast_path = as.label(&.{ "after_idx_", name }),
+            .byte = clobber,
+        };
+        skip.writeDecodeByte(as, "first byte of index");
+        as.jcc(.nz, .{ .label = &skip.skip_idx }, "");
+        skip.fast_path.place(as);
+        return skip;
+    }
+
+    fn writeSlowPath(skip: *SkipUlebIdx, as: *Assembler) void {
+        as.p2align(.@"16");
+        skip.skip_idx.place(as);
+        skip.writeDecodeByte(as, "next byte of index");
+        as.jcc(.z, .{ .label = &skip.fast_path }, "check for end");
+        as.jmp(.{ .label = &skip.skip_idx }, "loop");
+        as.ud2();
+        skip.* = undefined;
+    }
+};
+
+const TakeBranch = struct {
+    cpy_many_results: Assembler.Label,
+    finish: Assembler.Label,
+
+    const pop_count = Assembler.Gpr.r13;
+    const starting_results_dst = Assembler.Gpr.r14;
+    const stop_copying_at = Assembler.Gpr.r15;
+
+    /// Branch to take is stored in `Reg64.stp`.
+    ///
+    /// The IP to the first byte of the branch instruction is stored in `r15`.
+    fn fastPath(as: *Assembler) TakeBranch {
+        const cpy_many_results = as.label(&.{"branch_copy_results"});
+        var finish_cpy_results = as.label(&.{"branch_adjust_stp"});
+
+        as.allowClobbering(.initOne(Assembler.Gpr.stp.tag));
+
+        const saved_ip = stop_copying_at;
+        as.preventClobbering(.initOne(saved_ip.tag));
+
+        const delta_ip = Assembler.Gpr.r11;
+        as.movsxd(delta_ip, .{ .mem = .{ .size = .dword, .base = .stp } }, "delta_ip");
+        as.lea(.vip, .{ .mem = .{ .base = saved_ip, .index = delta_ip } }, "set IP to target");
+
+        const copy_count = delta_ip;
+        as.movzx(
+            delta_ip,
+            .{ .mem = .{ .size = .byte, .base = .stp, .disp = .{ .literal = 6 } } },
+            "copy_count",
+        );
+        as.shl(.{ .gpr = copy_count }, .{ .amount = 4 }, "in units of 16-byte values");
+        as.preventClobbering(.initOne(copy_count.tag));
+
+        as.movzx(
+            pop_count,
+            .{ .mem = .{ .size = .byte, .base = .stp, .disp = .{ .literal = 7 } } },
+            "pop_count",
+        );
+        as.shl(.{ .gpr = pop_count }, .{ .amount = 4 }, "in units of 16-byte values");
+        as.preventClobbering(.initOne(pop_count.tag));
+        as.mov(.{ .gpr = starting_results_dst }, .{ .gpr = .vsp }, "copy VSP");
+        as.sub(
+            .{ .gpr = starting_results_dst },
+            .{ .gpr = pop_count },
+            "base pointer for results destination",
+        );
+        as.allowClobberingStrict(.initOne(copy_count.tag));
+        as.@"test"(.{ .gpr = copy_count }, .{ .gpr = copy_count }, "check for results to copy");
+        as.jcc(.z, .{ .label = &finish_cpy_results }, "");
+
+        as.allowClobberingStrict(.initOne(saved_ip.tag));
+        as.mov(
+            .{ .gpr = stop_copying_at },
+            .{ .mem = .{ .base = .vsp } },
+            "copying stops at this address",
+        );
+        as.sub(.{ .gpr = .vsp }, .{ .gpr = copy_count }, "base pointer for results source");
+        as.movaps(
+            .{ .xmm = .xmm0 },
+            .{ .mem = .{ .size = .xmmword, .base = .vsp } },
+            "copy single result",
+        );
+        as.movaps(
+            .{ .mem = .{ .size = .xmmword, .base = starting_results_dst } },
+            .{ .xmm = .xmm0 },
+            "",
+        );
+        as.allowClobberingStrict(.initOne(pop_count.tag));
+        as.cmp(.{ .gpr = pop_count }, .{ .raw = "0x20" }, "check for more results");
+        as.jcc(.ae, .{ .label = &cpy_many_results }, "clobbers pop count");
+
+        finish_cpy_results.place(as);
+        as.lea(
+            .vsp,
+            .{ .mem = .{ .base = starting_results_dst, .index = copy_count } },
+            "adjust VSP to point after results",
+        );
+        const delta_stp = copy_count;
+        as.movsx(
+            delta_stp,
+            .{ .mem = .{ .size = .word, .base = .stp, .disp = .{ .literal = 4 } } },
+            "delta_stp",
+        );
+        as.shl(.{ .gpr = delta_stp }, .{ .amount = 3 }, "side table entries are 8 bytes each");
+        as.add(.{ .gpr = .stp }, .{ .gpr = delta_stp }, "adjust STP");
+        as.preventClobbering(.initOne(Assembler.Gpr.stp.tag));
+        return .{ .cpy_many_results = cpy_many_results, .finish = finish_cpy_results };
+    }
+
+    fn writeSlowPath(
+        branch: *TakeBranch,
+        as: *Assembler,
+        optimize: std.builtin.OptimizeMode,
+    ) void {
+        as.allowClobbering(.initOne(pop_count.tag));
+        as.allowClobbering(.initMany(&.{ starting_results_dst.tag, stop_copying_at.tag }));
+
+        // TODO: See if AVX is enabled to use ymm registers
+
+        as.p2align(.@"16");
+        branch.cpy_many_results.place(as);
+        as.add(.{ .gpr = .vsp }, .{ .raw = "0x10" }, "# one result already copied");
+        const results_dst = pop_count;
+        as.lea(
+            results_dst,
+            .{ .mem = .{ .base = starting_results_dst, .disp = .{ .literal = 0x10 } } },
+            "pointer to results destination",
+        );
+
+        var loop_start = as.label(&.{"copy_results_loop"});
+        loop_start.place(as);
+
+        const unroll_count: usize = switch (optimize) {
+            .Debug, .ReleaseSmall => 1,
+            .ReleaseSafe, .ReleaseFast => 4,
+        };
+        for (0..unroll_count) |_| {
+            as.movaps(.{ .xmm = .xmm0 }, .{ .mem = .{ .size = .xmmword, .base = .vsp } }, "");
+            as.movaps(
+                .{ .mem = .{ .size = .xmmword, .base = results_dst } },
+                .{ .xmm = .xmm0 },
+                "",
+            );
+            as.add(.{ .gpr = .vsp }, .{ .raw = "0x10" }, "");
+            as.add(.{ .gpr = results_dst }, .{ .raw = "0x10" }, "");
+            as.cmp(.{ .gpr = results_dst }, .{ .gpr = stop_copying_at }, "check if done");
+            as.jcc(.e, .{ .label = &branch.finish }, "");
+        }
+
+        as.jmp(.{ .label = &loop_start }, "");
+        as.ud2();
+    }
+};
+
+fn defineControlOpcodeHandlers(
+    as: *Assembler,
+    zig: *ZigWriter,
+    optimize: std.builtin.OptimizeMode,
+) void {
     {
         var nop = as.defineOpcodeHandler(zig, "nop", .@"16");
         nop.jmpToNextHandler(as, .r11);
         nop.end(as);
     }
-}
-
-fn defineAllOpcodeHandlers(ctx: *Context) !void {
-    try defineControlOpcodeHandlers2(ctx);
-    try defineCallOpcodeHandlers(ctx);
-    try defineParametericOpcodeHandlers(ctx);
-    try defineLocalOpcodeHandlers(ctx);
-    try defineGlobalOpcodeHandlers(ctx);
-    try defineMemoryLoadOpcodeHandlers(ctx);
-    try defineMemoryStoreOpcodeHandlers(ctx);
-    try defineMemoryManagementOpcodeHandlers(ctx);
-    try defineConstOpcodeHandlers(ctx);
-    try defineIntegerOpcodeHandlers(ctx, .i32);
-    try defineIntegerOpcodeHandlers(ctx, .i64);
-    try defineFloatOpcodeHandlers(ctx, .f32);
-    try defineFloatOpcodeHandlers(ctx, .f64);
-
-    // Write handlers for traps
-    try ctx.asm_out.writeAll(".align 32\n");
-    for (&[_][]const u8{
-        Context.trap_integer_divide_by_zero,
-        Context.trap_integer_overflow,
-    }) |name| {
-        try ctx.asm_out.print(
-            \\ # r12 is clobbered
-            \\"{[prefix]s}jmp.{[name]s}":
-            \\    lea rdi, [r14 - 1] # vip
-            \\    mov rdx, {[eip]t}
-            \\    mov rcx, {[stp]t}
-            \\
-        , .{ .prefix = ctx.name_prefix, .name = name, .eip = Reg64.eip, .stp = Reg64.stp });
-        try ctx.popSystemVSavedRegisters();
-        try ctx.asm_out.print(
-            \\    mov rsp, rbp
-            \\    pop rbp
-            \\    jmp "{[prefix]s}{[name]s}"
-            \\    ud2
-            \\
-        , .{ .prefix = ctx.name_prefix, .name = name });
-    }
-}
-
-fn defineControlOpcodeHandlers2(ctx: *Context) !void {
     {
-        try ctx.defineOpcodeHandler("nop", .@"16");
-        try ctx.jmpToNextHandler(.r11);
+        var block = as.defineOpcodeHandler(zig, "block", .@"32");
+        zig.defineOpcodeHandlerAlias("block", "loop");
+        var block_type = SkipUlebIdx.fastPath(as, .r11, "type");
+        block.jmpToNextHandler(as, .r13);
+        block_type.writeSlowPath(as);
+        block.end(as);
     }
     {
-        try ctx.defineOpcodeHandlerWithAliases(&.{ "block", "loop" }, .@"32");
-        const block_type = try ctx.skipBlockType(.r11);
-        try ctx.jmpToNextHandler(.r13);
-        try block_type.writeSlowPath(ctx);
-    }
-    {
-        try ctx.defineOpcodeHandler("if", .@"32");
-        const false_branch = try Label.init(ctx, "false");
-        try ctx.asm_out.print(
-            \\    mov r13d, dword ptr [{[vsp]t} - 16] # load condition from top of stack
-            \\    sub {[vsp]t}, 16
-            \\    test r13d, r13d
-            \\    jz {[false_branch]f}
-            \\
-        , .{ .vsp = Reg64.vsp, .false_branch = false_branch });
-        const block_type = try ctx.skipBlockType(.r11);
-        try ctx.asm_out.print(
-            \\    add {[stp]t}, 8 # increment STP
-            \\
-        , .{ .stp = Reg64.stp });
-        ctx.skip_oof_handler += 1;
-        try ctx.jmpToNextHandler(.r13);
-        try block_type.writeSlowPath(ctx);
+        var @"if" = as.defineOpcodeHandler(zig, "if", .@"32");
+        var false_branch = as.label(&.{"false"});
+        const condition = Assembler.Gpr.r13d;
+        as.mov(
+            .{ .gpr = condition },
+            .{ .mem = .{ .size = .dword, .base = .vsp, .disp = .{ .literal = -0x10 } } },
+            "load condition from top of stack",
+        );
+        as.sub(.{ .gpr = .vsp }, .{ .raw = "0x10" }, "condition was popped");
+        as.@"test"(.{ .gpr = condition }, .{ .gpr = condition }, "");
+        as.jcc(.z, .{ .label = &false_branch }, "");
+        var block_type = SkipUlebIdx.fastPath(as, .r11, "type");
+        as.allowClobbering(.initOne(Assembler.Gpr.stp.tag));
+        as.add(.{ .gpr = .stp }, .{ .u8 = 8 }, "increment STP");
+        as.preventClobbering(.initOne(Assembler.Gpr.stp.tag));
+        @"if".jmpToNextHandler(as, .r13);
+        block_type.writeSlowPath(as);
 
-        try ctx.asm_out.print(
-            \\{[false_branch]f}:
-            \\    # Avoids reading the block type
-            \\    lea r15, [{[vip]t} - 1] # save ip to if byte
-            \\
-        , .{ .false_branch = false_branch, .vip = Reg64.vip });
-        const branch = try ctx.takeBranch();
-        try ctx.jmpToNextHandler(.r11);
-        try branch.writeSlowPath(ctx);
+        false_branch.place(as);
+        as.writeComment("no need to read the block type");
+        const saved_ip = Assembler.Gpr.r15;
+        as.lea(
+            saved_ip,
+            .{ .mem = .{ .base = .vip, .disp = .{ .literal = -1 } } },
+            "save ip to if byte",
+        );
+        var branch = TakeBranch.fastPath(as);
+        @"if".jmpToNextHandler(as, .r11);
+        branch.writeSlowPath(as, optimize);
+        @"if".end(as);
     }
+    if (true) {
+        return;
+    }
+    const ctx = void;
     {
         try ctx.defineOpcodeHandler("else", .@"32");
         try ctx.asm_out.writeAll(std.fmt.comptimePrint(
@@ -345,6 +564,100 @@ fn defineControlOpcodeHandlers2(ctx: *Context) !void {
             \\
         , .{ .prefix = ctx.name_prefix });
         ctx.skip_oof_handler -= 1;
+    }
+}
+
+// fn defineCallOpcodeHandlers
+// fn defineParametericOpcodeHandlers
+
+fn defineLocalOpcodeHandlers(as: *Assembler, zig: *ZigWriter) void {
+    const LocalOpcode = enum {
+        @"local.get",
+        @"local.set",
+        @"local.tee",
+    };
+    for (std.enums.values(LocalOpcode)) |opcode| {
+        var get = as.defineOpcodeHandler(zig, @tagName(opcode), .@"64");
+        const local_idx = Assembler.Gpr64.r13;
+        var idx_decode = DecodeUlebIdx.fastPath(as, local_idx, .{ .r14, .r15 }, "local");
+        as.shl(.gpr64(local_idx), .{ .amount = 4 }, "offset to local, 16-bytes each");
+        as.preventClobbering(.initOne(local_idx.toGpr().tag));
+        switch (opcode) {
+            .@"local.get" => {
+                as.movaps(
+                    .{ .xmm = .xmm0 },
+                    .{ .mem = .{ .size = .xmmword, .base = .locals, .index = local_idx.toGpr() } },
+                    "load value from locals",
+                );
+                as.movaps(
+                    .{ .mem = .{ .size = .xmmword, .base = .vsp } },
+                    .{ .xmm = .xmm0 },
+                    "store into value stack",
+                );
+                as.add(.{ .gpr = .vsp }, .{ .raw = "0x10" }, "vsp");
+            },
+            .@"local.set", .@"local.tee" => {
+                as.movaps(
+                    .{ .xmm = .xmm0 },
+                    .{ .mem = .{ .size = .xmmword, .base = .vsp, .disp = .{ .literal = -0x10 } } },
+                    "load value to copy from value stack",
+                );
+                if (opcode == .@"local.set") {
+                    as.sub(.{ .gpr = .vsp }, .{ .raw = "0x10" }, "vsp");
+                }
+                as.movaps(
+                    .{ .mem = .{ .size = .xmmword, .base = .locals, .index = local_idx.toGpr() } },
+                    .{ .xmm = .xmm0 },
+                    "store into locals",
+                );
+                if (opcode == .@"local.tee") {
+                    as.writeComment("argument is still at the top of the value stack");
+                }
+            },
+        }
+        as.allowClobberingStrict(.initOne(local_idx.toGpr().tag));
+        get.jmpToNextHandler(as, .r11);
+        idx_decode.writeSlowPath(as);
+        get.end(as);
+    }
+}
+
+fn defineAllOpcodeHandlers(ctx: *Context) !void {
+    try defineCallOpcodeHandlers(ctx);
+    try defineParametericOpcodeHandlers(ctx);
+    // try defineLocalOpcodeHandlers(ctx);
+    try defineGlobalOpcodeHandlers(ctx);
+    try defineMemoryLoadOpcodeHandlers(ctx);
+    try defineMemoryStoreOpcodeHandlers(ctx);
+    try defineMemoryManagementOpcodeHandlers(ctx);
+    try defineConstOpcodeHandlers(ctx);
+    try defineIntegerOpcodeHandlers(ctx, .i32);
+    try defineIntegerOpcodeHandlers(ctx, .i64);
+    try defineFloatOpcodeHandlers(ctx, .f32);
+    try defineFloatOpcodeHandlers(ctx, .f64);
+
+    // Write handlers for traps
+    try ctx.asm_out.writeAll(".align 32\n");
+    for (&[_][]const u8{
+        Context.trap_integer_divide_by_zero,
+        Context.trap_integer_overflow,
+    }) |name| {
+        try ctx.asm_out.print(
+            \\ # r12 is clobbered
+            \\"{[prefix]s}jmp.{[name]s}":
+            \\    lea rdi, [r14 - 1] # vip
+            \\    mov rdx, {[eip]t}
+            \\    mov rcx, {[stp]t}
+            \\
+        , .{ .prefix = ctx.name_prefix, .name = name, .eip = Reg64.eip, .stp = Reg64.stp });
+        try ctx.popSystemVSavedRegisters();
+        try ctx.asm_out.print(
+            \\    mov rsp, rbp
+            \\    pop rbp
+            \\    jmp "{[prefix]s}{[name]s}"
+            \\    ud2
+            \\
+        , .{ .prefix = ctx.name_prefix, .name = name });
     }
 }
 
@@ -496,48 +809,6 @@ fn defineParametericOpcodeHandlers(ctx: *Context) !void {
             \\
         , .{ .vsp = Reg64.vsp, .true = true_label });
         try ctx.jmpToNextHandler(.r11);
-    }
-}
-
-fn defineLocalOpcodeHandlers(ctx: *Context) !void {
-    {
-        try ctx.defineOpcodeHandler("local.get", .@"64");
-        const idx_decode = try ctx.decodeUlebIdx(.r13, .r14, .r15, "idx");
-        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
-            \\    shl r13, 4
-            \\    movaps xmm0, xmmword ptr [{[locals]t} + r13] # load value from locals
-            \\    movaps xmmword ptr [{[vsp]t}], xmm0 # store into value stack
-            \\    add {[vsp]t}, 16
-            \\
-        , .{ .locals = Reg64.locals, .vsp = Reg64.vsp }));
-        try ctx.jmpToNextHandler(.r11);
-        try idx_decode.writeSlowPath(ctx);
-    }
-    {
-        try ctx.defineOpcodeHandler("local.set", .@"64");
-        const idx_decode = try ctx.decodeUlebIdx(.r13, .r14, .r15, "idx");
-        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
-            \\    shl r13, 4
-            \\    movaps xmm0, xmmword ptr [{[vsp]t} - 16] # load value to copy from value stack
-            \\    sub {[vsp]t}, 16
-            \\    movaps xmmword ptr [{[locals]t} + r13], xmm0 # store into locals
-            \\
-        , .{ .locals = Reg64.locals, .vsp = Reg64.vsp }));
-        try ctx.jmpToNextHandler(.r11);
-        try idx_decode.writeSlowPath(ctx);
-    }
-    {
-        try ctx.defineOpcodeHandler("local.tee", .@"64");
-        const idx_decode = try ctx.decodeUlebIdx(.r13, .r14, .r15, "idx");
-        try ctx.asm_out.writeAll(std.fmt.comptimePrint(
-            \\    shl r13, 4
-            \\    movaps xmm0, xmmword ptr [{[vsp]t} - 16] # load value to copy from value stack
-            \\    movaps xmmword ptr [{[locals]t} + r13], xmm0 # store into locals
-            \\    # argument is still at the top of the value stack
-            \\
-        , .{ .locals = Reg64.locals, .vsp = Reg64.vsp }));
-        try ctx.jmpToNextHandler(.r11);
-        try idx_decode.writeSlowPath(ctx);
     }
 }
 
@@ -1983,57 +2254,10 @@ const Context = struct {
         byte: Reg32,
         acc: Reg32,
 
-        fn writeSlowPath(decode: DecodeUlebIdx, ctx: *Context) !void {
-            try ctx.asm_out.print(
-                \\.align 16
-                \\{[label]f}:
-                \\    and {[result]t}, 0x7F
-                \\
-            , .{
-                .label = decode.slow_path,
-                .result = decode.result,
-            });
-            // A loop would probably work better here, but clobbering another register is annoying
-            for (1..4) |i| {
-                try ctx.asm_out.print(
-                    \\    movzx {[byte]t}, byte ptr [{[ip]t}]
-                    \\    inc {[ip]t}
-                    \\    mov {[acc]t}, {[byte]t}
-                    \\    and {[acc]t}, 0x7F
-                    \\    shl {[acc]t}, {[shift_by]d}
-                    \\    or {[result]t}, {[acc]t}
-                    \\    test {[byte_8]t}, 0x80
-                    \\    jz {[fast_path]f}
-                    \\
-                , .{
-                    .result = decode.result,
-                    .byte = decode.byte,
-                    .byte_8 = decode.byte.toReg8(),
-                    .acc = decode.acc,
-                    .shift_by = i * 7,
-                    .ip = Reg64.vip,
-                    .fast_path = decode.fast_path,
-                });
-            }
-
-            // Assume max length (5 bytes) ULEB128
-            try ctx.asm_out.print(
-                \\    movzx {[byte]t}, byte ptr [{[ip]t}]
-                \\    inc {[ip]t}
-                \\    mov {[acc]t}, {[byte]t} 
-                \\    and {[acc]t}, 0x7F
-                \\    shl {[acc]t}, 28
-                \\    or {[result]t}, {[acc]t}
-                \\    jmp {[fast_path]f}
-                \\    ud2
-                \\
-            , .{
-                .result = decode.result,
-                .byte = decode.byte,
-                .acc = decode.acc,
-                .ip = Reg64.vip,
-                .fast_path = decode.fast_path,
-            });
+        fn writeSlowPath(decode: @This(), ctx: *Context) !void {
+            _ = decode;
+            _ = ctx;
+            unreachable;
         }
     };
 
@@ -2043,76 +2267,18 @@ const Context = struct {
         clobber_0: TempReg,
         clobber_1: TempReg,
         name: []const u8,
-    ) !DecodeUlebIdx {
-        const fast_path = try Label.initWithSuffix(ctx, name, "fast");
-        const slow_path = try Label.initWithSuffix(ctx, name, "slow");
-        try ctx.asm_out.print(
-            \\    movzx {[temp]t}, byte ptr [{[ip]t}]
-            \\    inc {[ip]t}
-            \\    test {[temp_8]t}, 0x80
-            \\
-        , .{ .temp = result, .temp_8 = result.toReg8(), .ip = Reg64.vip });
-        try ctx.asm_out.print("    jnz {f}\n", .{slow_path});
-        try ctx.asm_out.print("{f}:\n", .{fast_path});
-        return DecodeUlebIdx{
-            .slow_path = slow_path,
-            .fast_path = fast_path,
-            .result = result.toReg32(),
-            .byte = clobber_0.toReg32(),
-            .acc = clobber_1.toReg32(),
-        };
-    }
-
-    const SkipBlockType = struct {
-        type_idx: Label,
-        fast_path: Label,
-        clobber: Reg32,
-
-        fn writeSlowPath(skip: SkipBlockType, ctx: *Context) !void {
-            try ctx.asm_out.print(
-                \\.align 16
-                \\{[skip_type_idx]f}:
-                \\    movzx {[temp]t}, byte ptr [{[vip]t}]
-                \\    inc {[vip]t}
-                \\    test {[temp_b]t}, 0x80
-                \\    jz {[fast_path]f}
-                \\    jmp {[skip_type_idx]f}
-                \\    ud2
-                \\
-            , .{
-                .temp = skip.clobber,
-                .temp_b = skip.clobber.toReg8(),
-                .vip = Reg64.vip,
-                .skip_type_idx = skip.type_idx,
-                .fast_path = skip.fast_path,
-            });
-        }
-    };
-
-    fn skipBlockType(ctx: *Context, clobber: TempReg) !SkipBlockType {
-        const skip_type_idx = try Label.init(ctx, "skip-type-idx");
-        const fast_path = try Label.init(ctx, "after-block-type");
-        const clobber_32 = clobber.toReg32();
-        try ctx.asm_out.print(
-            \\    movzx {[temp]t}, byte ptr [{[vip]t}]
-            \\    inc {[vip]t}
-            \\    test {[temp_b]t}, 0x80
-            \\    jnz {[skip_type_idx]f}
-            \\{[fast_path]f}:
-            \\
-        , .{
-            .temp = clobber,
-            .temp_b = clobber_32.toReg8(),
-            .vip = Reg64.vip,
-            .skip_type_idx = skip_type_idx,
-            .fast_path = fast_path,
-        });
-        return .{ .type_idx = skip_type_idx, .fast_path = fast_path, .clobber = clobber_32 };
+    ) !@This().DecodeUlebIdx {
+        _ = ctx;
+        _ = result;
+        _ = clobber_0;
+        _ = clobber_1;
+        _ = name;
+        unreachable;
     }
 
     const LinearMemoryAccess = struct {
-        align_decode: DecodeUlebIdx,
-        offset_decode: DecodeUlebIdx,
+        align_decode: @This().DecodeUlebIdx,
+        offset_decode: @This().DecodeUlebIdx,
         oob: Label,
         size: std.mem.Alignment,
 
@@ -2184,92 +2350,6 @@ const Context = struct {
         };
     }
 
-    const TakeBranch = struct {
-        begin: Label,
-        finish: Label,
-
-        fn writeSlowPath(branch: *const TakeBranch, ctx: *Context) !void {
-            // TODO: See if AVX is enabled to use ymm registers
-            try ctx.asm_out.print(
-                \\.align 16
-                \\{[begin_label]f}:
-                \\    add {[vsp]t}, 16
-                \\    lea r13, [r14 + 16]  # pointer for results destination
-                \\
-            , .{ .begin_label = branch.begin, .vsp = Reg64.vsp });
-
-            const loop_start = try Label.init(ctx, "copy-results-loop");
-            try ctx.asm_out.print(
-                \\{[loop_start]f}:
-                \\
-            , .{ .loop_start = loop_start });
-
-            const unroll_count: usize = switch (ctx.optimize) {
-                .Debug, .ReleaseSmall => 1,
-                .ReleaseSafe, .ReleaseFast => 4,
-            };
-            for (0..unroll_count) |_| {
-                try ctx.asm_out.print(
-                    \\    movaps xmm0, xmmword ptr [{[vsp]t}]
-                    \\    movaps xmmword ptr [r13], xmm0
-                    \\    add {[vsp]t}, 16
-                    \\    add r13, 16
-                    \\    cmp r13, r15
-                    \\    je {[finish]f}
-                    \\
-                , .{ .vsp = Reg64.vsp, .finish = branch.finish });
-            }
-
-            try ctx.asm_out.print(
-                \\    jmp {[loop_start]f}
-                \\    ud2
-                \\
-            , .{ .loop_start = loop_start });
-        }
-    };
-
-    /// Branch to take is stored in `Reg64.stp`.
-    ///
-    /// IP to first byte of branch instruction is stored at `r15`.
-    fn takeBranch(ctx: *Context) !TakeBranch {
-        const cpy_many_results = try Label.init(ctx, "copy-results");
-        const finish_cpy_results = try Label.init(ctx, "adjust-stp");
-        try ctx.asm_out.print(
-            \\    movsxd r11, dword ptr [{[stp]t}] # delta_ip
-            \\    lea {[vip]t}, [r15 + r11]
-            \\    movzx r11, byte ptr [{[stp]t} + {[copy_count_off]d}] # copy_count
-            \\    shl r11, 4
-            \\    movzx r13, byte ptr [{[stp]t} + {[pop_count_off]d}] # pop_count
-            \\    shl r13, 4
-            \\    mov r14, {[vsp]t}
-            \\    sub r14, r13 # base pointer for results destination
-            \\    test r11, r11
-            \\    jz {[finish_cpy_results]f}
-            \\    mov r15, {[vsp]t} # copying stops at this address
-            \\    sub {[vsp]t}, r11 # base pointer for results source
-            \\    movaps xmm0, xmmword ptr [{[vsp]t}] # copy single result
-            \\    movaps xmmword ptr [r14], xmm0
-            \\    cmp r13, 0x20
-            \\    jae {[cpy_many_results]f} # clobbers r13
-            \\{[finish_cpy_results]f}:
-            \\    lea {[vsp]t}, [r14 + r11]
-            \\    movsx r11, word ptr [{[stp]t} + {[delta_stp_off]d}] # delta_stp
-            \\    shl r11, 3
-            \\    add {[stp]t}, r11
-            \\
-        , .{
-            .vip = Reg64.vip,
-            .vsp = Reg64.vsp,
-            .stp = Reg64.stp,
-            .delta_stp_off = 4,
-            .copy_count_off = 6,
-            .pop_count_off = 7,
-            .cpy_many_results = cpy_many_results,
-            .finish_cpy_results = finish_cpy_results,
-        });
-        return .{ .begin = cpy_many_results, .finish = finish_cpy_results };
-    }
-
     fn jmpToNextHandler(ctx: *Context, comptime temp: TempReg) !void {
         const out_of_fuel = try Label.init(ctx, "out-of-fuel");
         _ = temp;
@@ -2300,5 +2380,6 @@ const Context = struct {
 };
 
 const std = @import("std");
+const ArenaAllocator = std.heap.ArenaAllocator;
 const Assembler = @import("Assembler.zig");
 const ZigWriter = @import("ZigWriter");

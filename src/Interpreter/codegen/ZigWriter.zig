@@ -21,7 +21,7 @@ fn print(writer: *ZigWriter, s: []const u8) void {
     writer.out.interface.writeAll(s) catch std.debug.panic("{t}", .{writer.out.err.?});
 }
 
-pub fn defineOpcodeHandlerAlias(writer: *ZigWriter, as: []const u8, name: []const u8) void {
+pub fn defineOpcodeHandlerAlias(writer: *ZigWriter, name: []const u8, as: []const u8) void {
     writer.print((" " ** 8) ++ "pub const @\"");
     writer.print(as);
     writer.print("\" = @extern(OpcodeHandler, .{ .name = \"");

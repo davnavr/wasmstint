@@ -4,7 +4,8 @@
 
 out: std.fs.File.Writer,
 symbol_prefix: []const u8,
-arena: std.heap.ArenaAllocator,
+/// Only reset when a new function is defined.
+function_arena: std.heap.ArenaAllocator,
 function_name: ?[]const u8 = null,
 label_counter: u32 = 0,
 /// Which registers should't be modified.
@@ -28,10 +29,10 @@ pub fn init(
         \\.text
         \\
     ) catch std.debug.panic("{t}", .{out.err.?});
-    return .{ .out = out, .symbol_prefix = symbol_prefix, .arena = arena };
+    return .{ .out = out, .symbol_prefix = symbol_prefix, .function_arena = arena };
 }
 
-pub const Gpr = packed struct(u7) {
+pub const Gpr = packed struct(u6) {
     tag: Tag,
     size: Size,
 
@@ -42,7 +43,7 @@ pub const Gpr = packed struct(u7) {
         byte,
     };
 
-    pub const Tag = enum(u5) {
+    pub const Tag = enum(u4) {
         a,
         b,
         c,
@@ -278,6 +279,50 @@ pub const Gpr = packed struct(u7) {
     }
 };
 
+pub const Gpr64 = enum(u4) {
+    /// System V scratch register.
+    rax,
+    /// System V callee-saved register.
+    rbx,
+    /// System V scratch register.
+    rcx,
+    /// System V scratch register.
+    rdx,
+
+    /// System V scratch register.
+    rsi,
+    /// System V scratch register.
+    rdi,
+    rsp,
+    rbp,
+
+    /// System V scratch register.
+    r8,
+    /// System V scratch register.
+    r9,
+    /// System V scratch register.
+    r10,
+    /// System V scratch register.
+    r11,
+
+    /// System V callee-saved register.
+    r12,
+    /// System V callee-saved register.
+    r13,
+    /// System V callee-saved register.
+    r14,
+    /// System V callee-saved register.
+    r15,
+
+    pub fn toGpr(reg: Gpr64) Gpr {
+        return .qword(@enumFromInt(@intFromEnum(reg)));
+    }
+
+    comptime {
+        std.debug.assert(Gpr64.r8.toGpr().tag == .@"8");
+    }
+};
+
 pub inline fn markInitialized(as: *Assembler, registers: std.EnumSet(Gpr.Tag)) void {
     as.uninitialized_gprs.setIntersection(registers.complement());
 }
@@ -432,11 +477,12 @@ fn printLabelName(as: *Assembler, l: *const Label) void {
     as.printInt(l.number);
 }
 
-pub fn label(as: *Assembler, name: []const u8) Label {
+pub fn label(as: *Assembler, name: []const []const u8) Label {
+    const name_concat = std.mem.concat(as.function_arena.allocator(), u8, name) catch @panic("oom");
     return .{
         .function_name = as.function_name.?.ptr,
-        .name_ptr = name.ptr,
-        .name_len = @intCast(name.len),
+        .name_ptr = name_concat.ptr,
+        .name_len = @intCast(name_concat.len),
         .number = as.nextNumberedLabel(),
     };
 }
@@ -448,7 +494,7 @@ const Function = struct {
         const func_name = as.function_name.?;
         std.debug.assert(@intFromPtr(func.name) == @intFromPtr(func_name.ptr));
 
-        var end_label = as.label("end");
+        var end_label = as.label(&.{"end"});
         end_label.place(as);
         as.printMany(&.{ ".size ", as.symbol_prefix, func_name, ", " });
         as.printLabelName(&end_label);
@@ -470,6 +516,7 @@ pub fn startFunction(
     name: []const u8,
     alignment: std.mem.Alignment,
 ) Function {
+    _ = as.function_arena.reset(.retain_capacity);
     as.function_name = name;
     as.no_clobber_gprs = .initEmpty();
     as.uninitialized_gprs = comptime .initMany(&Gpr.Tag.no_rsp_or_rbp);
@@ -527,11 +574,11 @@ fn printSymbol(as: *Assembler, sym: Symbol) void {
 }
 
 pub const Operand = union(enum) {
+    raw: []const u8,
     gpr: Gpr,
     xmm: Xmm,
-    u8: u8,
-    u32: u32,
     mem: Mem,
+    u8: u8,
     label: *const Label,
     symbol: Symbol,
 
@@ -545,8 +592,12 @@ pub const Operand = union(enum) {
         };
     }
 
+    pub fn gpr64(reg: Gpr64) Operand {
+        return .{ .gpr = reg.toGpr() };
+    }
+
     pub const Mem = struct {
-        size: Size,
+        size: ?Size = null,
         base: ?Gpr = null,
         index: ?Gpr = null,
         scale: Scale = .@"1",
@@ -603,14 +654,19 @@ pub fn instr(
             .xmm => |xmm| as.print(@tagName(xmm)),
             .symbol => |sym| as.printSymbol(sym),
             .label => |l| as.printLabelName(l),
-            inline .u8, .u32 => |value| as.printIntWithOptions(
+            .raw => |s| as.print(s),
+            .u8 => |value| as.printIntWithOptions(
                 value,
-                if (value < 0xA) .dec else .hex,
+                if (@rem(value, 16) != 0 or value == 0) .dec else .hex,
                 .{},
             ),
             .mem => |mem| {
-                as.print(@tagName(mem.size));
-                as.print(" ptr [");
+                if (mem.size) |size| {
+                    as.print(@tagName(size));
+                    as.print(" ptr ");
+                }
+
+                as.print("[");
                 if (mem.base) |base| {
                     as.printGpr(base);
                 }
@@ -632,16 +688,29 @@ pub fn instr(
                 }
 
                 if (!mem.disp.isZero()) {
-                    if (mem.base != null or mem.index != null) {
-                        as.print(" + ");
-                    }
+                    const has_base_or_index = mem.base != null or mem.index != null;
                     switch (mem.disp) {
-                        .literal => |disp| as.printIntWithOptions(
-                            disp,
-                            if (@rem(disp, 16) == 0) .hex else .dec,
-                            .{},
-                        ),
-                        .symbol => |symbol| as.printSymbol(symbol),
+                        .literal => |disp| {
+                            const negative = disp < 0;
+                            const amount: u33 = @intCast(@abs(@as(i64, disp)));
+                            if (has_base_or_index) {
+                                as.print(if (negative) " - " else " + ");
+                            } else if (negative) {
+                                as.print("-");
+                            }
+
+                            as.printIntWithOptions(
+                                amount,
+                                if (@rem(amount, 16) == 0) .hex else .dec,
+                                .{},
+                            );
+                        },
+                        .symbol => |symbol| {
+                            if (has_base_or_index) {
+                                as.print(" + ");
+                            }
+                            as.printSymbol(symbol);
+                        },
                     }
                 }
 
@@ -702,6 +771,21 @@ pub const Condition = enum {
     }
 };
 
+/// https://www.felixcloutier.com/x86/add
+pub fn add(as: *Assembler, dst: Operand, src: Operand, comment: []const u8) void {
+    as.instr("add", &.{ dst, src }, comment);
+}
+
+/// https://www.felixcloutier.com/x86/and
+pub fn @"and"(as: *Assembler, dst: Operand, src: Operand, comment: []const u8) void {
+    as.instr("and", &.{ dst, src }, comment);
+}
+
+/// https://www.felixcloutier.com/x86/cmp
+pub fn cmp(as: *Assembler, a: Operand, b: Operand, comment: []const u8) void {
+    as.instr("cmp", &.{ a, b }, comment);
+}
+
 /// https://www.felixcloutier.com/x86/inc
 pub fn inc(as: *Assembler, dst: Operand, comment: []const u8) void {
     as.instr("inc", &.{dst}, comment);
@@ -728,9 +812,29 @@ pub fn mov(as: *Assembler, dst: Operand, src: Operand, comment: []const u8) void
     as.instr("mov", &.{ dst, src }, comment);
 }
 
+/// https://www.felixcloutier.com/x86/movsx:movsxd
+pub fn movsx(as: *Assembler, dst: Gpr, src: Operand, comment: []const u8) void {
+    as.instr("movsx", &.{ .{ .gpr = dst }, src }, comment);
+}
+
+/// https://www.felixcloutier.com/x86/movsx:movsxd
+pub fn movsxd(as: *Assembler, dst: Gpr, src: Operand, comment: []const u8) void {
+    as.instr("movsxd", &.{ .{ .gpr = dst }, src }, comment);
+}
+
 /// https://www.felixcloutier.com/x86/movzx
 pub fn movzx(as: *Assembler, dst: Gpr, src: Operand, comment: []const u8) void {
     as.instr("movzx", &.{ .{ .gpr = dst }, src }, comment);
+}
+
+/// https://www.felixcloutier.com/x86/movaps
+pub fn movaps(as: *Assembler, dst: Operand, src: Operand, comment: []const u8) void {
+    as.instr("movaps", &.{ dst, src }, comment);
+}
+
+/// https://www.felixcloutier.com/x86/or
+pub fn @"or"(as: *Assembler, dst: Operand, src: Operand, comment: []const u8) void {
+    as.instr("or", &.{ dst, src }, comment);
 }
 
 /// https://www.felixcloutier.com/x86/pop
@@ -743,9 +847,31 @@ pub fn push(as: *Assembler, op: Operand, comment: []const u8) void {
     as.instr("push", &.{op}, comment);
 }
 
+pub const Shift = union(enum) {
+    amount: u6,
+    cl,
+
+    pub fn operand(shift: Shift) Operand {
+        return switch (shift) {
+            .amount => |imm| .{ .u8 = imm },
+            .cl => .{ .gpr = Gpr.cl },
+        };
+    }
+};
+
+/// https://www.felixcloutier.com/x86/sal:sar:shl:shr
+pub fn shl(as: *Assembler, dst: Operand, shift: Shift, comment: []const u8) void {
+    as.instr("shl", &.{ dst, shift.operand() }, comment);
+}
+
 /// https://www.felixcloutier.com/x86/sub
 pub fn sub(as: *Assembler, dst: Operand, src: Operand, comment: []const u8) void {
     as.instr("sub", &.{ dst, src }, comment);
+}
+
+/// https://www.felixcloutier.com/x86/test
+pub fn @"test"(as: *Assembler, a: Operand, b: Operand, comment: []const u8) void {
+    as.instr("test", &.{ a, b }, comment);
 }
 
 /// https://www.felixcloutier.com/x86/ud
@@ -775,23 +901,22 @@ pub const OpcodeHandler = struct {
     pub fn jmpToNextHandler(
         handler: *const OpcodeHandler,
         as: *Assembler,
-        temp: Gpr,
+        temp: Gpr64,
     ) void {
         // TODO: Store fuel directly instead of via pointer, include fuel in return value
         // System V supports two return registers
-        std.debug.assert(temp.size == .qword);
-        as.movzx(temp, .{ .mem = .{ .size = .byte, .base = .vip } }, "read next opcode byte");
-        as.sub(.{ .mem = .{ .size = .qword, .base = .fuel } }, .{ .u8 = 1 }, "fuel check");
+        as.movzx(temp.toGpr(), .{ .mem = .{ .size = .byte, .base = .vip } }, "read next opcode byte");
+        as.sub(.{ .mem = .{ .size = .qword, .base = .fuel } }, .{ .raw = "1" }, "fuel check");
         as.jcc(.b, .{ .label = &handler.out_of_fuel }, "");
         as.writeComment("jump to the next handler");
         as.inc(.{ .gpr = .vip }, "vip");
         // \\    mov {[temp]t}, qword ptr [{[disp]t} + {[temp]t} * 8]
         as.mov(
-            .{ .gpr = temp },
-            .{ .mem = .{ .size = .qword, .base = .disp, .index = temp, .scale = .@"8" } },
+            .gpr64(temp),
+            .{ .mem = .{ .size = .qword, .base = .disp, .index = temp.toGpr(), .scale = .@"8" } },
             "load next handler",
         );
-        as.jmp(.{ .gpr = temp }, "");
+        as.jmp(.gpr64(temp), "");
         as.ud2();
     }
 };
@@ -809,9 +934,9 @@ pub fn defineOpcodeHandler(
     as.preventClobbering(
         as.no_clobber_gprs
             .unionWith(comptime interpreter_state.unionWith(.initMany(&.{ .stack, .base })))
-            .differenceWith(.initOne(Gpr.vip.tag)),
+            .differenceWith(comptime Gpr.sliceToTagSet(&.{ .vip, .vsp })),
     );
-    return .{ .function = func, .out_of_fuel = as.label("out_of_fuel") };
+    return .{ .function = func, .out_of_fuel = as.label(&.{"out_of_fuel"}) };
 }
 
 pub fn restoreSystemVSavedRegisters(as: *Assembler) void {
