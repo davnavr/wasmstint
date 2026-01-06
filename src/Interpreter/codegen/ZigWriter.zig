@@ -13,6 +13,7 @@ pub fn init(writer: std.fs.File.Writer, symbol_prefix: []const u8) ZigWriter {
         \\/// TODO: Write comptime checks for layout of runtime structures
         \\pub fn handlers(comptime OpcodeHandler: type) type {
         \\    return struct {
+        \\
     ) catch std.debug.panic("{t}", .{out.err.?});
     return .{ .out = out, .symbol_prefix = symbol_prefix };
 }

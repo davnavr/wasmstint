@@ -523,9 +523,10 @@ fn trapMemoryAccessOutOfBounds(
     stp: Stp, // rbx -> rcx
     mem_idx: usize, // r8
     interp: *Interpreter, // stays in r9
-    address: u32,
-    size: u8,
-    memory: *const runtime.MemInst,
+    // These parameters are passed on the stack
+    address: u32, // rbp + 16
+    size: u8, // rbp + 24
+    memory: *const runtime.MemInst, // rbp + 32
 ) callconv(sysvcc) Transition {
     std.log.debug("address={X}, size={X}, memory={*}", .{ address, size, memory });
     return Transition.trapAt(
