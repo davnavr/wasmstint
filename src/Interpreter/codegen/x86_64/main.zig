@@ -462,7 +462,7 @@ fn defineControlOpcodeHandlers(
         as.write(".p2align 4\n");
         false_branch.place(as);
         var skip_label_idx = SkipUlebIdx.fastPath(as, .r11, "label");
-        as.printInstrs(&.{"inc {[stp]f} # stp"}, .{ .stp = Gpr.stp });
+        as.printInstrs(&.{"add {[stp]f}, 8 # increment stp"}, .{ .stp = Gpr.stp });
         br_if.jmpToNextHandler(as);
         skip_label_idx.writeSlowPath(as);
         br_if.end(as);
