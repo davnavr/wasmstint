@@ -196,7 +196,8 @@ pub const Gpr = packed struct(u6) {
     pub const mems = Gpr.r8;
     pub const interp = Gpr.r9;
     pub const eip = Gpr.r10;
-    // r11
+    /// Set only in handler for opcode prefix, currently only used to help debug invalid opcodes.
+    pub const prefix_opcode_base_ip = Gpr.r11;
     pub const disp = Gpr.r12;
 
     pub const interpreter_state =

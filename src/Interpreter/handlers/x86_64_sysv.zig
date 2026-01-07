@@ -131,7 +131,7 @@ pub inline fn callOpcodeHandler(
 }
 
 const invalidByteOpcode = @extern(
-    *align(16) const OpcodeHandler,
+    *const OpcodeHandler,
     .{ .name = symbol_prefix ++ "invalidByteOpcode" },
 );
 
@@ -152,12 +152,80 @@ fn panicInvalidByteOpcode(ip: Ip, eip: Eip) callconv(sysvcc) noreturn {
     );
 }
 
+fn panicInvalidPrefixedOpcode(ip: Ip, eip: Eip, prefix_ip: Ip) callconv(sysvcc) noreturn {
+    @branchHint(.cold);
+    const opcode_bytes = prefix_ip[0 .. ip - prefix_ip];
+
+    const FormatInvalidInstruction = struct {
+        opcode_bytes: []const u8,
+
+        pub fn format(f: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            const prefix_byte = f.opcode_bytes[0];
+            for (0.., f.opcode_bytes) |i, b| {
+                if (i > 0) {
+                    try writer.writeByte(' ');
+                }
+
+                try writer.print("{X:0>2}", .{b});
+            }
+
+            const numeric_opcode = opcode: {
+                var numeric_value: u32 = 0;
+                var leb_bytes = f.opcode_bytes[1..];
+                for (0..5) |i| {
+                    const byte = if (leb_bytes.len == 0) return else leb_bytes[0];
+                    leb_bytes = leb_bytes[1..];
+                    numeric_value |= std.math.shlExact(
+                        u32,
+                        byte & 0x7F,
+                        @as(u5, @intCast(i)) * 7,
+                    ) catch return;
+                    if (byte & 0x80 == 0) {
+                        break :opcode numeric_value;
+                    }
+                }
+
+                return;
+            };
+
+            try writer.print(" #{d}", .{numeric_opcode});
+
+            const name: ?[]const u8 = name: switch (prefix_byte) {
+                0xFC => @tagName(
+                    std.meta.intToEnum(opcodes.FCPrefixOpcode, numeric_opcode) catch
+                        break :name null,
+                ),
+                0xFD => @tagName(
+                    std.meta.intToEnum(opcodes.FDPrefixOpcode, numeric_opcode) catch
+                        break :name null,
+                ),
+                else => null,
+            };
+
+            if (name) |known| {
+                try writer.print(" ({s})", .{known});
+            }
+        }
+    };
+
+    std.debug.panic(
+        "invalid instruction {f} @ {X}, EIP={X}",
+        .{
+            FormatInvalidInstruction{ .opcode_bytes = opcode_bytes },
+            @intFromPtr(prefix_ip),
+            @intFromPtr(eip),
+        },
+    );
+}
+
 comptime {
     switch (builtin.mode) {
-        .Debug, .ReleaseSafe => @export(
-            &panicInvalidByteOpcode,
-            .{ .name = symbol_prefix ++ "panicInvalidByteOpcode" },
-        ),
+        .Debug, .ReleaseSafe => for (&[_][]const u8{
+            "panicInvalidByteOpcode",
+            "panicInvalidPrefixedOpcode",
+        }) |name| {
+            @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
+        },
         .ReleaseFast, .ReleaseSmall => {},
     }
 }
@@ -544,12 +612,28 @@ fn trapMemoryAccessOutOfBounds(
 }
 
 const generated = @import("asm_generated");
+const generated_handlers = generated.handlers(*const OpcodeHandler);
 
 pub const byte_dispatch_table align(64) = common.dispatchTable(
     opcodes.ByteOpcode,
-    generated.handlers(*const OpcodeHandler),
+    generated_handlers,
     invalidByteOpcode,
     256,
+);
+
+const invalidPrefixedOpcode: *const OpcodeHandler = switch (builtin.mode) {
+    .Debug, .ReleaseSafe => @extern(
+        *align(16) const OpcodeHandler,
+        .{ .name = symbol_prefix ++ "invalidPrefixedOpcode" },
+    ),
+    .ReleaseFast, .ReleaseSmall => invalidByteOpcode,
+};
+
+pub const fc_prefix_dispatch_table align(64) = common.dispatchTable(
+    opcodes.FCPrefixOpcode,
+    generated_handlers,
+    invalidPrefixedOpcode,
+    std.math.maxInt(u5),
 );
 
 comptime {
@@ -565,6 +649,7 @@ comptime {
         "trapTableAccessOob",
         "trapIndirectCallToNull",
         "byte_dispatch_table",
+        "fc_prefix_dispatch_table",
     }) |name| {
         @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
     }

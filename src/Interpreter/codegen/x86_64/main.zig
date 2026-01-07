@@ -59,6 +59,7 @@ pub fn main() noreturn {
     defineIntegerOpcodeHandlers(&asm_writer, &zig_writer, .i64);
     defineFloatOpcodeHandlers(&asm_writer, &zig_writer, .f32);
     defineFloatOpcodeHandlers(&asm_writer, &zig_writer, .f64);
+    definePrefixOpcodeHandlers(&asm_writer, &zig_writer, optimize);
 
     asm_writer.finish();
     zig_writer.finish();
@@ -156,6 +157,25 @@ fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) voi
             "ud2",
         }, .{ .symbol_prefix = as.symbol_prefix });
         oof.end(as);
+    }
+    switch (optimize) {
+        .Debug, .ReleaseSafe => {
+            var invalid = as.startFunction("invalidPrefixedOpcode", .@"16");
+            for (0.., &[3]Gpr{ .vip, .eip, .prefix_opcode_base_ip }) |idx, param| {
+                as.printInstrs(&.{"mov {[param]f}, {[src]f} #{[n]d}"}, .{
+                    .param = SystemVParam{ .index = @intCast(idx) },
+                    .src = param,
+                    .n = idx + 1,
+                });
+            }
+            as.printInstrs(&.{
+                "# doesn't `jmp`, so stack trace is better",
+                "call {[symbol_prefix]s}panicInvalidPrefixedOpcode",
+                "ud2",
+            }, .{ .symbol_prefix = as.symbol_prefix });
+            invalid.end(as);
+        },
+        .ReleaseFast, .ReleaseSmall => {},
     }
 }
 
@@ -1869,6 +1889,34 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, float_type: FloatT
         });
         copysign.jmpToNextHandler(as);
         copysign.end(as);
+    }
+}
+
+fn definePrefixOpcodeHandlers(
+    as: *AsmWriter,
+    zig: *ZigWriter,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    for (&[_][2][]const u8{.{ "0xFC", "fc_prefix_dispatch_table" }}) |info| {
+        const opcode_name, const table_name = info;
+        var op = as.startFunction(opcode_name, .@"32");
+        zig.defineOpcodeHandler(opcode_name);
+        switch (optimize) {
+            .Debug, .ReleaseSafe => as.printInstrs(&.{
+                "lea {[invalid_ip]f}, [{[vip]f} - 1] # save IP in case of invalid opcode",
+            }, .{ .invalid_ip = Gpr.prefix_opcode_base_ip, .vip = Gpr.vip }),
+            .ReleaseFast, .ReleaseSmall => {},
+        }
+        var decode_opcode = DecodeUlebIdx.fastPath(as, .r13, .{ .r14, .r15 }, "opcode");
+        as.printInstrs(
+            &.{
+                "jmp [{[symbol_prefix]s}{[table_name]s} + r13*8]",
+                "ud2",
+            },
+            .{ .symbol_prefix = as.symbol_prefix, .table_name = table_name },
+        );
+        decode_opcode.writeSlowPath(as);
+        op.end(as);
     }
 }
 
