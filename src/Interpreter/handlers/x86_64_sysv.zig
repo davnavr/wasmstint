@@ -596,7 +596,6 @@ fn trapMemoryAccessOutOfBounds(
     size: u8, // rbp + 24
     memory: *const runtime.MemInst, // rbp + 32
 ) callconv(sysvcc) Transition {
-    std.log.debug("address={X}, size={X}, memory={*}", .{ address, size, memory });
     return Transition.trapAt(
         trap_ip,
         eip,
@@ -608,6 +607,25 @@ fn trapMemoryAccessOutOfBounds(
             .access,
             .{ .address = address, .size = @enumFromInt(size), .maximum = memory.size },
         )),
+    );
+}
+
+fn trapMemoryFillOutOfBounds(
+    ip: Ip, // rax -> rdi
+    sp: Sp, // stays in rsi
+    eip: Eip, // r10 -> rdx
+    stp: Stp, // rbx -> rcx
+    mem_idx: usize, // r8
+    interp: *Interpreter, // stays in r9
+) callconv(sysvcc) Transition {
+    return Transition.trap(
+        ip,
+        .{ .fc = .@"memory.fill" },
+        eip,
+        sp,
+        stp,
+        interp,
+        .init(.memory_access_out_of_bounds, .init(@enumFromInt(mem_idx), .@"memory.fill", {})),
     );
 }
 
@@ -646,6 +664,7 @@ comptime {
         "trapIntegerDivisionByZero",
         "trapIntegerOverflow",
         "trapMemoryAccessOutOfBounds",
+        "trapMemoryFillOutOfBounds",
         "trapTableAccessOob",
         "trapIndirectCallToNull",
         "byte_dispatch_table",

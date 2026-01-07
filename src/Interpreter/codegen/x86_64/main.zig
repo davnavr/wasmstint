@@ -364,6 +364,7 @@ const TakeBranch = struct {
         var loop_start = as.label(&.{"copy_results_loop"});
         loop_start.place(as);
 
+        // TODO: fix, this is not how to unroll a copying operation, better to just have simple loop
         const unroll_count: usize = switch (optimize) {
             .Debug, .ReleaseSmall => 1,
             .ReleaseSafe, .ReleaseFast => 4,
@@ -1035,6 +1036,105 @@ fn defineMemoryStoreOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .store_size = store_size,
         });
         access.end(&store, as);
+    }
+
+    {
+        // LLVM uses `call memset@PLT`, but that means 5 interpreter registers need to be `pushed`
+        // to the stack.
+        var memset = as.defineOpcodeHandler(zig, "memory.fill", .@"64");
+        as.printInstrs(&.{"mov r15, {f} # save IP to first byte after opcode"}, .{Gpr.vip});
+        var oob = as.label(&.{"oob"});
+        var mem_idx = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "memory");
+        // With no proof whatsover, this assumes that calling `memset` via PLT would be slower than
+        // a custom memset implementation.
+        const clobbers = AsmWriter.PreservedRegisters{
+            .registers = &[4]Gpr{ .vip, .fuel, .locals, .stp },
+            .comments = &[4][]const u8{ "vip", "fuel", "locals", "stp" },
+        };
+        clobbers.preserve(as);
+        var done = as.label(&.{"done"});
+        var below_16 = as.label(&.{"below_16"});
+        as.printInstrs(&.{
+            "mov r13, qword ptr [{[mems]f} + r11*8] # pointer to MemInst",
+            "mov r14, qword ptr [r13] # base pointer",
+            "mov ecx, dword ptr [{[vsp]f} - 0x10] # number of bytes to fill, clobbers fuel",
+            "mov eax, dword ptr [{[vsp]f} - 0x20] # byte to replicate, clobbers vip",
+            "mov edi, dword ptr [{[vsp]f} - 0x30] # offset to start at, clobbers locals",
+            "sub {[vsp]f}, 0x30 # vsp",
+            "mov rbx, qword ptr [r13 + {[size_field_off]d}] # memory size, clobbers stp",
+            "lea r13, [rdi + rcx] # end offset, clobbers pointer to MemInst",
+            "cmp r13, rbx",
+            "ja {[oob]f} # exceeded memory bounds",
+            "lea rdi, [r14 + rdi] # pointer to start at, clobbers offset to start at",
+            "cmp ecx, 16 # assume most WASM compilers won't memory.fill for sizes below this",
+            "# Zig LLVM backend emits `memory.fill` for sizes >= 32",
+            "jb {[below_16]f}",
+            "ud2 # more than 16",
+        }, .{
+            .mems = Gpr.mems,
+            .vsp = Gpr.vsp,
+            .size_field_off = 8,
+            .oob = oob,
+            .below_16 = below_16,
+        });
+        // https://www.microsoft.com/en-us/msrc/blog/2021/01/building-faster-amd64-memset-routines
+        // ^ guesses that future `rep stos` would use AVX-512, requiring 64-byte alignment
+        // TODO: See if AVX is enabled to use ymm registers
+        // TODO: rep stosq for larger amounts (maybe even check cpuid)
+        done.place(as);
+        clobbers.restore(as);
+        memset.jmpToNextHandler(as);
+        mem_idx.writeSlowPath(as);
+
+        as.write(".p2align 4\n");
+        below_16.place(as);
+        as.printInstrs(&.{
+            "test ecx, ecx",
+            "jz {[done]f} # copying zero bytes?",
+            "lea rcx, [r14 + r13 - 1] # clobbers # of bytes to copy",
+        }, .{ .done = done });
+        var loop_below_16 = as.label(&.{"below_16_loop"});
+        loop_below_16.place(as);
+        as.printInstrs(&.{
+            "# fills from both ends, ensuring at most 2 stores per loop iteration",
+            "mov byte ptr [rdi], al",
+            "mov byte ptr [rcx], al",
+            "inc rdi",
+            "dec rcx",
+            "cmp rdi, rcx",
+            "jbe {[loop]f} # ensures middle byte is copied for odd lengths",
+            "jmp {[done]f}",
+            "ud2",
+        }, .{ .loop = loop_below_16, .done = done });
+
+        as.write(".p2align 4\n");
+        oob.place(as);
+
+        clobbers.restore(as);
+        for (
+            Gpr.system_v_parameters,
+            &[6]Gpr{ .r15, .vsp, .eip, .stp, .r11, .interp },
+            &[6][]const u8{ "vip", "vsp", "eip", "stp", "memory index", "interpreter" },
+        ) |dst, src, comment| {
+            if (dst != src)
+                as.printInstrs(
+                    &.{"mov {[dst]f}, {[src]f} # {[comment]s}"},
+                    .{ .dst = dst, .src = src, .comment = comment },
+                )
+            else
+                as.printInstrs(
+                    &.{"# {[comment]s} stays in {[dst]f}"},
+                    .{ .comment = comment, .dst = dst },
+                );
+        }
+        as.restoreSystemVSavedRegisters();
+        as.printInstrs(&.{
+            "mov rsp, rbp # TODO: is this unnecessary?",
+            "pop rbp",
+            "jmp {[prefix]s}trapMemoryFillOutOfBounds",
+            "ud2",
+        }, .{ .prefix = as.symbol_prefix });
+        memset.end(as);
     }
 }
 

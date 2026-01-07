@@ -447,6 +447,27 @@ pub const SystemVParam = struct {
     }
 };
 
+pub const PreservedRegisters = struct {
+    registers: []const Gpr,
+    comments: []const []const u8,
+
+    pub fn preserve(info: *const PreservedRegisters, as: *AsmWriter) void {
+        for (info.registers, info.comments) |reg, comment| {
+            as.printInstrs(&.{"push {[reg]f} # {[comment]s}"}, .{ .reg = reg, .comment = comment });
+        }
+    }
+
+    pub fn restore(info: *const PreservedRegisters, as: *AsmWriter) void {
+        for (0..info.comments.len) |forward_idx| {
+            const i = info.comments.len - forward_idx - 1;
+            as.printInstrs(
+                &.{"pop {[reg]f} # {[comment]s}"},
+                .{ .reg = info.registers[i], .comment = info.comments[i] },
+            );
+        }
+    }
+};
+
 pub fn defineOpcodeHandler(
     as: *AsmWriter,
     zig: *ZigWriter,
