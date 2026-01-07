@@ -59,6 +59,7 @@ pub fn main() noreturn {
     defineIntegerOpcodeHandlers(&asm_writer, &zig_writer, .i64);
     defineFloatOpcodeHandlers(&asm_writer, &zig_writer, .f32);
     defineFloatOpcodeHandlers(&asm_writer, &zig_writer, .f64);
+    defineNumericConversionOpcodeHandlers(&asm_writer, &zig_writer);
     definePrefixOpcodeHandlers(&asm_writer, &zig_writer, optimize);
     defineBulkMemoryOpcodeHandlers(&asm_writer, &zig_writer);
 
@@ -1891,6 +1892,34 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, float_type: FloatT
         });
         copysign.jmpToNextHandler(as);
         copysign.end(as);
+    }
+}
+
+fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
+    {
+        var wrap = as.defineOpcodeHandler(zig, "i32.wrap_i64", .@"16");
+        as.writeInstrs(&.{"# truncate i64 to i32, high qword is unobserved"});
+        wrap.jmpToNextHandler(as);
+        wrap.end(as);
+    }
+    // i32.trunc_f32_s
+    {
+        var extend = as.defineOpcodeHandler(zig, "i64.extend_i32_s", .@"16");
+        as.printInstrs(&.{
+            "movsxd r13, dword ptr [{[vsp]f} - 0x10] # sign-extend",
+            "mov qword ptr [{[vsp]f} - 0x10], r13",
+        }, .{ .vsp = Gpr.vsp });
+        extend.jmpToNextHandler(as);
+        extend.end(as);
+    }
+    {
+        var extend = as.defineOpcodeHandler(zig, "i64.extend_i32_u", .@"16");
+        as.printInstrs(&.{
+            "xor r13d, r13d",
+            "mov dword ptr [{[vsp]f} - 0xC], r13d # zero-extend by placing zeroes in high 32-bits",
+        }, .{ .vsp = Gpr.vsp });
+        extend.jmpToNextHandler(as);
+        extend.end(as);
     }
 }
 
