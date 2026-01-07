@@ -584,6 +584,17 @@ fn trapIntegerOverflow(
     return Transition.trapAt(trap_ip, eip, sp, stp, interp, .init(.integer_overflow, {}));
 }
 
+fn trapInvalidConversionToInteger(
+    trap_ip: Ip, // rdi
+    sp: Sp, // stays in rsi
+    eip: Eip, // r10 -> rdx
+    stp: Stp, // rbx -> rcx
+    _: usize, // r8 (unused)
+    interp: *Interpreter, // stays in r9
+) callconv(sysvcc) Transition {
+    return Transition.trapAt(trap_ip, eip, sp, stp, interp, .init(.invalid_conversion_to_integer, {}));
+}
+
 fn trapMemoryAccessOutOfBounds(
     trap_ip: Ip, // rdi
     sp: Sp, // stays in rsi
@@ -663,6 +674,7 @@ comptime {
         "memoryGrowReallocate",
         "trapIntegerDivisionByZero",
         "trapIntegerOverflow",
+        "trapInvalidConversionToInteger",
         "trapMemoryAccessOutOfBounds",
         "trapMemoryFillOutOfBounds",
         "trapTableAccessOob",

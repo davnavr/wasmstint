@@ -1274,13 +1274,16 @@ const IntType = enum {
     }
 };
 
-fn integerDivisionTrapJmp(as: *AsmWriter, handler: []const u8) void {
+/// IP to first byte after opcode is stored in `r14`.
+///
+/// TODO: deduplicate these handlers
+fn numericOperationTrapJmp(as: *AsmWriter, handler: []const u8) void {
     as.printInstrs(&.{
-        "# r12 is clobbered",
         "lea {[param_0]f}, [r14 - 1] # vip, param 1",
         "# VSP already in rsi, param 2",
         "mov {[param_2]f}, {[eip]f} # eip, param 3",
         "mov {[param_3]f}, {[stp]f} # stp, param 4",
+        "# r9 already contains interpreter",
     }, .{
         .eip = Gpr.eip,
         .stp = Gpr.stp,
@@ -1528,12 +1531,12 @@ fn defineIntegerOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, int_type: IntTyp
                     });
                     op.jmpToNextHandler(as);
                 },
-                .div => integerDivisionTrapJmp(as, "trapIntegerOverflow"),
+                .div => numericOperationTrapJmp(as, "trapIntegerOverflow"),
             }
         }
 
         div_by_zero.place(as);
-        integerDivisionTrapJmp(as, "trapIntegerDivisionByZero");
+        numericOperationTrapJmp(as, "trapIntegerDivisionByZero");
 
         op.end(as);
     }
@@ -1902,7 +1905,51 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         wrap.jmpToNextHandler(as);
         wrap.end(as);
     }
-    // i32.trunc_f32_s
+    // Signed-conversions
+    for (&[_]struct { []const u8, []const u8, []const u8, u8, u8, Gpr }{
+        .{ "i32.trunc_f32_s", "0xCF00" ++ "0001", "0x4F00" ++ "0000", 's', 'd', Gpr.r11d },
+    }) |info| {
+        const name, const lower_bound, const upper_bound, const float_suffix, const int_suffix, const temp =
+            info;
+
+        var trunc = as.defineOpcodeHandler(zig, name, .@"16");
+        var nan = as.label(&.{"nan"});
+        var overflow = as.label(&.{"overflow"});
+        as.printInstrs(&.{
+            "mov r14, {[vip]f} # save IP in case of trap",
+            "movs{[suffix]c} xmm0, {[size]t} ptr [{[vsp]f} - 0x10] # load float value",
+            "mov {[temp]f}, {[lower_bound]s} # lower bound",
+            "mov{[movd_suffix]c} xmm1, {[temp]f} # load lower bound",
+            "ucomis{[suffix]c} xmm1, xmm0",
+            "jae [{[overflow]f}]",
+            "jz [{[nan]f}] # nan check must come after bounds check",
+            "mov {[temp]f}, {[upper_bound]s} # upper bound",
+            "mov{[movd_suffix]c} xmm1, {[temp]f} # load upper bound",
+            "ucomis{[suffix]c} xmm0, xmm1",
+            "jae [{[overflow]f}]",
+            "cvtts{[suffix]c}2si {[temp]f}, xmm0",
+            "mov {[size]t} ptr [{[vsp]f} - 0x10], {[temp]f}",
+        }, .{
+            .vip = Gpr.vip,
+            .vsp = Gpr.vsp,
+            .size = temp.size,
+            .suffix = float_suffix,
+            .movd_suffix = int_suffix,
+            .temp = temp,
+            .lower_bound = lower_bound,
+            .upper_bound = upper_bound,
+            .nan = nan,
+            .overflow = overflow,
+        });
+        trunc.jmpToNextHandler(as);
+        as.write(".p2align 4\n");
+        overflow.place(as);
+        numericOperationTrapJmp(as, "trapIntegerOverflow");
+        nan.place(as);
+        numericOperationTrapJmp(as, "trapInvalidConversionToInteger");
+
+        trunc.end(as);
+    }
     {
         var extend = as.defineOpcodeHandler(zig, "i64.extend_i32_s", .@"16");
         as.printInstrs(&.{
