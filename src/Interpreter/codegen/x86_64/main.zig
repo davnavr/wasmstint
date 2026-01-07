@@ -1053,14 +1053,17 @@ fn defineMemoryStoreOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         };
         clobbers.preserve(as);
         var done = as.label(&.{"done"});
-        var below_16 = as.label(&.{"below_16"});
+        var below_16 = as.label(&.{"below_16_bytes"});
+        var between_16_and_32 = as.label(&.{"between_16_and_32_bytes"});
+        var between_32_and_64 = as.label(&.{"between_32_and_64_bytes"});
+        // TODO: See if AVX is enabled to use ymm registers
         as.printInstrs(&.{
             "mov r13, qword ptr [{[mems]f} + r11*8] # pointer to MemInst",
             "mov r14, qword ptr [r13] # base pointer",
             "mov ecx, dword ptr [{[vsp]f} - 0x10] # number of bytes to fill, clobbers fuel",
             "mov eax, dword ptr [{[vsp]f} - 0x20] # byte to replicate, clobbers vip",
             "mov edi, dword ptr [{[vsp]f} - 0x30] # offset to start at, clobbers locals",
-            "sub {[vsp]f}, 0x30 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x30] # vsp", // TODO: use lea to replace VSP add/sub
             "mov rbx, qword ptr [r13 + {[size_field_off]d}] # memory size, clobbers stp",
             "lea r13, [rdi + rcx] # end offset, clobbers pointer to MemInst",
             "cmp r13, rbx",
@@ -1069,18 +1072,73 @@ fn defineMemoryStoreOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "cmp ecx, 16 # assume most WASM compilers won't memory.fill for sizes below this",
             "# Zig LLVM backend emits `memory.fill` for sizes >= 32",
             "jb {[below_16]f}",
-            "ud2 # more than 16",
+            "# vector stores beyond this point!",
+            "mov r11, 0x0101010101010101 # clobbers memory index",
+            "imul rax, r11 # expand byte to fill",
+            "movq xmm0, rax",
+            "movaps xmm1, xmm0",
+            "punpckhqdq xmm0, xmm1 # 16-byte pattern to fill with",
+            "cmp ecx, 32",
+            "jbe {[between_16_and_32]f}",
+            "cmp ecx, 64",
+            "jbe {[between_32_and_64]f}",
+            "# copy first 64 bytes",
+            "movups xmmword ptr [rdi], xmm0",
+            "movups xmmword ptr [rdi + 0x10], xmm0",
+            "movups xmmword ptr [rdi + 0x20], xmm0",
+            "movups xmmword ptr [rdi + 0x30], xmm0",
+            "mov rbx, rdi # old destination pointer, clobbers memory size",
+            "lea rdi, [rdi + 63]",
+            "shr rdi, 6",
+            "shl rdi, 6 # round rdi up to nearest multiple of 64",
+            "mov rax, rdi # clobbers 8-byte pattern to fill",
+            "sub rax, rbx # number of bytes to get to 64-byte alignment",
+            "sub ecx, eax # update count",
+            // TODO: rep stosq if size > 1024
         }, .{
             .mems = Gpr.mems,
             .vsp = Gpr.vsp,
             .size_field_off = 8,
             .oob = oob,
             .below_16 = below_16,
+            .between_16_and_32 = between_16_and_32,
+            .between_32_and_64 = between_32_and_64,
         });
         // https://www.microsoft.com/en-us/msrc/blog/2021/01/building-faster-amd64-memset-routines
         // ^ guesses that future `rep stos` would use AVX-512, requiring 64-byte alignment
-        // TODO: See if AVX is enabled to use ymm registers
-        // TODO: rep stosq for larger amounts (maybe even check cpuid)
+        var set_trailing_bytes = as.label(&.{"set_trailing_bytes"});
+        var copy_64_aligned = as.label(&.{"copy_64_aligned"});
+        copy_64_aligned.place(as);
+        as.write(".p2align 4\n");
+        as.printInstrs(&.{
+            "# rdi is 64-byte aligned at this point",
+            "cmp ecx, 64",
+            "jb {[set_trailing_bytes]f}",
+            "movaps xmmword ptr [rdi], xmm0",
+            "movaps xmmword ptr [rdi + 0x10], xmm0",
+            "movaps xmmword ptr [rdi + 0x20], xmm0",
+            "movaps xmmword ptr [rdi + 0x30], xmm0",
+            "lea rdi, [rdi + 64] # update destination pointer",
+            "sub ecx, 64 # update count",
+            "jmp {[copy_64_aligned]f}",
+        }, .{ .set_trailing_bytes = set_trailing_bytes, .copy_64_aligned = copy_64_aligned });
+        set_trailing_bytes.place(as);
+        var copy_trailing_32_unaligned = as.label(&.{"copy_trailing_32_unaligned"});
+        as.printInstrs(&.{
+            "# rdi is still 64-byte aligned at this point",
+            "cmp ecx, 32",
+            "jb {[copy_trailing_32_unaligned]f}",
+            "movaps xmmword ptr [rdi], xmm0",
+            "movaps xmmword ptr [rdi + 0x10], xmm0",
+            "lea rdi, [rdi + 32] # update destination pointer",
+            "sub ecx, 64 # update count",
+        }, .{ .copy_trailing_32_unaligned = copy_trailing_32_unaligned });
+        copy_trailing_32_unaligned.place(as);
+        as.writeInstrs(&.{
+            "# fill remaining 0-31 bytes",
+            "movups xmmword ptr [rdi + rcx - 16], xmm0",
+            "movups xmmword ptr [rdi + rcx - 32], xmm0",
+        });
         done.place(as);
         clobbers.restore(as);
         memset.jmpToNextHandler(as);
@@ -1106,6 +1164,26 @@ fn defineMemoryStoreOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "jmp {[done]f}",
             "ud2",
         }, .{ .loop = loop_below_16, .done = done });
+
+        as.write(".p2align 4\n");
+        between_32_and_64.place(as);
+        as.printInstrs(&.{
+            "movups xmmword ptr [rdi], xmm0",
+            "movups xmmword ptr [rdi + 0x10], xmm0",
+            "movups xmmword ptr [rdi + rcx - 0x20], xmm0",
+            "movups xmmword ptr [rdi + rcx - 0x10], xmm0",
+            "jmp {[done]f}",
+            "ud2",
+        }, .{ .done = done });
+
+        as.write(".p2align 4\n");
+        between_16_and_32.place(as);
+        as.printInstrs(&.{
+            "movups xmmword ptr [rdi], xmm0",
+            "movups xmmword ptr [rdi + rcx - 16], xmm0",
+            "jmp {[done]f}",
+            "ud2",
+        }, .{ .done = done });
 
         as.write(".p2align 4\n");
         oob.place(as);
