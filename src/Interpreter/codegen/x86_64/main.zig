@@ -1905,14 +1905,39 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         wrap.jmpToNextHandler(as);
         wrap.end(as);
     }
-    // Signed-conversions
-    for (&[_]struct { []const u8, []const u8, []const u8, u8, u8, Gpr }{
-        .{ "i32.trunc_f32_s", "0xCF00" ++ "0001", "0x4F00" ++ "0000", 's', 'd', Gpr.r11d },
-    }) |info| {
-        const name, const lower_bound, const upper_bound, const float_suffix, const int_suffix, const temp =
-            info;
 
-        var trunc = as.defineOpcodeHandler(zig, name, .@"16");
+    const IntToFloat = struct {
+        name: []const u8,
+        lower_bound: []const u8,
+        upper_bound: []const u8,
+        float_suffix: u8,
+        int_suffix: u8,
+        temp: Gpr,
+        result_size: Gpr.Size,
+    };
+
+    for (&[_]IntToFloat{
+        .{
+            .name = "i32.trunc_f32_s",
+            .lower_bound = "0xCF00" ++ "0001",
+            .upper_bound = "0x4F00" ++ "0000",
+            .float_suffix = 's',
+            .int_suffix = 'd',
+            .temp = .r11d,
+            .result_size = .dword,
+        },
+        .{
+            // VCVTTSS2USI requires AVX512F
+            .name = "i32.trunc_f32_u",
+            .lower_bound = "0xBF80" ++ "0000",
+            .upper_bound = "0x4F80" ++ "0000",
+            .float_suffix = 's',
+            .int_suffix = 'd',
+            .temp = .r11d,
+            .result_size = .qword,
+        },
+    }) |info| {
+        var trunc = as.defineOpcodeHandler(zig, info.name, .@"16");
         var nan = as.label(&.{"nan"});
         var overflow = as.label(&.{"overflow"});
         as.printInstrs(&.{
@@ -1927,17 +1952,18 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "mov{[movd_suffix]c} xmm1, {[temp]f} # load upper bound",
             "ucomis{[suffix]c} xmm0, xmm1",
             "jae [{[overflow]f}]",
-            "cvtts{[suffix]c}2si {[temp]f}, xmm0",
+            "cvtts{[suffix]c}2si {[result]f}, xmm0",
             "mov {[size]t} ptr [{[vsp]f} - 0x10], {[temp]f}",
         }, .{
             .vip = Gpr.vip,
             .vsp = Gpr.vsp,
-            .size = temp.size,
-            .suffix = float_suffix,
-            .movd_suffix = int_suffix,
-            .temp = temp,
-            .lower_bound = lower_bound,
-            .upper_bound = upper_bound,
+            .size = info.temp.size,
+            .suffix = info.float_suffix,
+            .movd_suffix = info.int_suffix,
+            .temp = info.temp,
+            .result = info.temp.withSize(info.result_size),
+            .lower_bound = info.lower_bound,
+            .upper_bound = info.upper_bound,
             .nan = nan,
             .overflow = overflow,
         });
