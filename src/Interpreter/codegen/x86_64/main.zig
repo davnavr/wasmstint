@@ -1974,6 +1974,25 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .temp_size = .dword,
             .result_size = .qword,
         },
+        .{
+            .name = "i64.trunc_f64_s",
+            .lower_bound = "0xC3E0" ++ "0000" ++ "0000" ++ "0001",
+            .upper_bound = "0x43E0" ++ "0000" ++ "0000" ++ "0000",
+            .float_suffix = 'd',
+            .int_suffix = 'q',
+            .temp_size = .qword,
+            .result_size = .qword,
+        },
+        .{
+            .name = "i64.trunc_f64_u",
+            .lower_bound = "0xBFF0" ++ "0000" ++ "0000" ++ "0000",
+            .upper_bound = "0x43F0" ++ "0000" ++ "0000" ++ "0000",
+            .subtract = "0x43E0" ++ "0000" ++ "0000" ++ "0000",
+            .float_suffix = 'd',
+            .int_suffix = 'q',
+            .temp_size = .qword,
+            .result_size = .qword,
+        },
     }) |info| {
         var trunc = as.defineOpcodeHandler(zig, info.name, .@"16");
         var nan = as.label(&.{"nan"});
@@ -2008,7 +2027,7 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         });
         if (info.subtract) |subtract| {
             as.printInstrs(&.{
-                "# Thanks LLVM!",
+                "# Thanks Zig+LLVM!",
                 "mov r13, r11",
                 "mov r14, {[subtract]s}",
                 "movq xmm1, r14",
