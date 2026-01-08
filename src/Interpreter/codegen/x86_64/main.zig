@@ -1910,9 +1910,10 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         name: []const u8,
         lower_bound: []const u8,
         upper_bound: []const u8,
+        subtract: ?[]const u8 = null,
         float_suffix: u8,
         int_suffix: u8,
-        temp: Gpr,
+        temp_size: Gpr.Size,
         result_size: Gpr.Size,
     };
 
@@ -1923,7 +1924,7 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .upper_bound = "0x4F00" ++ "0000",
             .float_suffix = 's',
             .int_suffix = 'd',
-            .temp = .r11d,
+            .temp_size = .dword,
             .result_size = .dword,
         },
         .{
@@ -1933,7 +1934,7 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .upper_bound = "0x4F80" ++ "0000",
             .float_suffix = 's',
             .int_suffix = 'd',
-            .temp = .r11d,
+            .temp_size = .dword,
             .result_size = .qword,
         },
         .{
@@ -1942,7 +1943,7 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .upper_bound = "0x41E0" ++ "0000" ++ "0000" ++ "0000",
             .float_suffix = 'd',
             .int_suffix = 'q',
-            .temp = .r11,
+            .temp_size = .qword,
             .result_size = .qword,
         },
         .{
@@ -1951,13 +1952,34 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .upper_bound = "0x41F0" ++ "0000" ++ "0000" ++ "0000",
             .float_suffix = 'd',
             .int_suffix = 'q',
-            .temp = .r11,
+            .temp_size = .qword,
+            .result_size = .qword,
+        },
+        .{
+            .name = "i64.trunc_f32_s",
+            .lower_bound = "0xDF00" ++ "0001",
+            .upper_bound = "0x5F00" ++ "0000",
+            .float_suffix = 's',
+            .int_suffix = 'd',
+            .temp_size = .dword,
+            .result_size = .qword,
+        },
+        .{
+            .name = "i64.trunc_f32_u",
+            .lower_bound = "0xBF80" ++ "0000",
+            .upper_bound = "0x5F80" ++ "0000",
+            .subtract = "0x5F00" ++ "0000",
+            .float_suffix = 's',
+            .int_suffix = 'd',
+            .temp_size = .dword,
             .result_size = .qword,
         },
     }) |info| {
         var trunc = as.defineOpcodeHandler(zig, info.name, .@"16");
         var nan = as.label(&.{"nan"});
         var overflow = as.label(&.{"overflow"});
+        const temp = Gpr.r11.withSize(info.temp_size);
+        const result = Gpr.r11.withSize(info.result_size);
         as.printInstrs(&.{
             "mov r14, {[vip]f} # save IP in case of trap",
             "movs{[suffix]c} xmm0, {[size]t} ptr [{[vsp]f} - 0x10] # load float value",
@@ -1971,20 +1993,38 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "ucomis{[suffix]c} xmm0, xmm1",
             "jae [{[overflow]f}]",
             "cvtts{[suffix]c}2si {[result]f}, xmm0",
-            "mov {[size]t} ptr [{[vsp]f} - 0x10], {[temp]f}",
         }, .{
             .vip = Gpr.vip,
             .vsp = Gpr.vsp,
-            .size = info.temp.size,
+            .size = info.temp_size,
             .suffix = info.float_suffix,
             .movd_suffix = info.int_suffix,
-            .temp = info.temp,
-            .result = info.temp.withSize(info.result_size),
+            .temp = temp,
+            .result = result,
             .lower_bound = info.lower_bound,
             .upper_bound = info.upper_bound,
             .nan = nan,
             .overflow = overflow,
         });
+        if (info.subtract) |subtract| {
+            as.printInstrs(&.{
+                "# Thanks LLVM!",
+                "mov r13, r11",
+                "mov r14, {[subtract]s}",
+                "movq xmm1, r14",
+                "subs{[suffix]c} xmm0, xmm1",
+                "cvtts{[suffix]c}2si r14, xmm0",
+                "sar r13, 63 # sign-extend result?",
+                "and r14, r13",
+                "or r11, r14",
+            }, .{
+                .subtract = subtract,
+                .suffix = info.float_suffix,
+            });
+        }
+        as.printInstrs(&.{
+            "mov {[result_size]t} ptr [{[vsp]f} - 0x10], {[result]f}",
+        }, .{ .result_size = info.result_size, .vsp = Gpr.vsp, .result = result });
         trunc.jmpToNextHandler(as);
         as.write(".p2align 4\n");
         overflow.place(as);

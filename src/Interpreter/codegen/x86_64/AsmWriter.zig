@@ -55,6 +55,15 @@ pub const Gpr = packed struct(u6) {
         dword,
         word,
         byte,
+
+        pub fn toBits(size: Size) u5 {
+            return switch (size) {
+                .qword => 64,
+                .dword => 32,
+                .word => 16,
+                .byte => 8,
+            };
+        }
     };
 
     pub const Tag = enum(u4) {
