@@ -2216,6 +2216,17 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         demote.jmpToNextHandler(as);
         demote.end(as);
     }
+    for (&[_][]const u8{
+        "i32.reinterpret_f32",
+        "i64.reinterpret_f64",
+        "f32.reinterpret_i32",
+        "f64.reinterpret_i64",
+    }) |name| {
+        var reinterpret = as.defineOpcodeHandler(zig, name, .@"16");
+        as.write("\t# no-op\n");
+        reinterpret.jmpToNextHandler(as);
+        reinterpret.end(as);
+    }
 }
 
 fn definePrefixOpcodeHandlers(
