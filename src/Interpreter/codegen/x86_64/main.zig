@@ -2102,7 +2102,43 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         convert.jmpToNextHandler(as);
         convert.end(as);
     }
-    // f32.convert_i64_(s|u)
+    {
+        var convert = as.defineOpcodeHandler(zig, "f32.convert_i64_s", .@"16");
+        as.printInstrs(&.{
+            "cvtsi2ss xmm0, qword ptr [{[vsp]f} - 0x10]",
+            "movss dword ptr [{[vsp]f} - 0x10], xmm0",
+        }, .{ .vsp = Gpr.vsp });
+        convert.jmpToNextHandler(as);
+        convert.end(as);
+    }
+    {
+        var convert = as.defineOpcodeHandler(zig, "f32.convert_i64_u", .@"16");
+        var done = as.label(&.{"done"});
+        var negative = as.label(&.{"negative"});
+        as.printInstrs(&.{
+            "# Taken from LLVM output for Zig @floatFromInt",
+            "mov r11, qword ptr [{[vsp]f} - 0x10]",
+            "test r11, r11",
+            "js {[negative]f}",
+            "cvtsi2ss xmm0, r11",
+        }, .{ .vsp = Gpr.vsp, .negative = negative });
+        done.place(as);
+        as.printInstrs(&.{"movss dword ptr [{[vsp]f} - 0x10], xmm0"}, .{ .vsp = Gpr.vsp });
+        convert.jmpToNextHandler(as);
+
+        negative.place(as);
+        as.printInstrs(&.{
+            "mov r13, r11",
+            "shr r13",
+            "and r11, 1",
+            "or r11, r13",
+            "cvtsi2ss xmm0, r11",
+            "addss xmm0, xmm0",
+            "jmp {[done]f}",
+            "ud2",
+        }, .{ .done = done });
+        convert.end(as);
+    }
     {
         var convert = as.defineOpcodeHandler(zig, "f64.convert_i32_s", .@"16");
         as.printInstrs(&.{
