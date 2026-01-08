@@ -1131,7 +1131,7 @@ fn defineConstOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         for (continuation, 0..) |*cont_label, i| {
             var cont_label_name_buf: [7]u8 = undefined;
             cont_label.* = as.label(&.{
-                std.fmt.bufPrint(&cont_label_name_buf, "byte_{d}", .{1 + i}) catch unreachable,
+                std.fmt.bufPrint(&cont_label_name_buf, "byte_{d}_", .{1 + i}) catch unreachable,
             });
         }
 
@@ -1216,7 +1216,7 @@ fn defineConstOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .r11 = r11,
             .r13 = r13,
             .vip = Gpr.vip,
-            .final_shift = bit_size - (7 * continuation.len),
+            .final_shift = 7 * continuation.len,
             .finished = finished,
         });
         op.end(as);

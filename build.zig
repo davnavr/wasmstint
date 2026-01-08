@@ -708,16 +708,33 @@ fn buildSpecificationTests(
 
     top_steps.@"test".dependOn(test_spec_all_step);
 
-    const test_fuzzed_step = b.step("test-fuzzed", "Run test cases discovered by fuzzing");
-    const fuzzed_test_names = [_][]const u8{ "validation.wast", "wasmi_diff.wast" };
-    const fuzzed_test_dir = b.path("tests/fuzzed");
-    for (fuzzed_test_names) |name| {
-        test_fuzzed_step.dependOn(
-            buildWastTest(b, interpreter, fuzzed_test_dir.path(b, name), wabt, name),
-        );
-    }
+    {
+        const test_fuzzed_step = b.step("test-fuzzed", "Run test cases discovered by fuzzing");
+        const fuzzed_test_names = [_][]const u8{ "validation.wast", "wasmi_diff.wast" };
+        const fuzzed_test_dir = b.path("tests/fuzzed");
+        for (fuzzed_test_names) |name| {
+            test_fuzzed_step.dependOn(
+                buildWastTest(b, interpreter, fuzzed_test_dir.path(b, name), wabt, name),
+            );
+        }
 
-    top_steps.@"test".dependOn(test_fuzzed_step);
+        top_steps.@"test".dependOn(test_fuzzed_step);
+    }
+    {
+        const test_regression_step = b.step(
+            "test-spec-regression",
+            "Run test cases to check bug fixes",
+        );
+        const regression_test_names = [_][]const u8{"const.wast"};
+        const regression_test_dir = b.path("tests/regression");
+        for (regression_test_names) |name| {
+            test_regression_step.dependOn(
+                buildWastTest(b, interpreter, regression_test_dir.path(b, name), wabt, name),
+            );
+        }
+
+        top_steps.@"test".dependOn(test_regression_step);
+    }
 }
 
 const Wasip1Interp = struct {
