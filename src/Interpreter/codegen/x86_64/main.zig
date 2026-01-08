@@ -2104,6 +2104,25 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
     }
     // f32.convert_i64_(s|u)
     {
+        var convert = as.defineOpcodeHandler(zig, "f64.convert_i32_s", .@"16");
+        as.printInstrs(&.{
+            "cvtsi2sd xmm0, dword ptr [{[vsp]f} - 0x10]",
+            "movsd qword ptr [{[vsp]f} - 0x10], xmm0",
+        }, .{ .vsp = Gpr.vsp });
+        convert.jmpToNextHandler(as);
+        convert.end(as);
+    }
+    {
+        var convert = as.defineOpcodeHandler(zig, "f64.convert_i32_u", .@"16");
+        as.printInstrs(&.{
+            "mov r11d, dword ptr [{[vsp]f} - 0x10]",
+            "cvtsi2sd xmm0, r11 # u32 as i64",
+            "movsd qword ptr [{[vsp]f} - 0x10], xmm0",
+        }, .{ .vsp = Gpr.vsp });
+        convert.jmpToNextHandler(as);
+        convert.end(as);
+    }
+    {
         var convert = as.defineOpcodeHandler(zig, "f64.convert_i64_s", .@"16");
         as.printInstrs(&.{
             "cvtsi2sd xmm0, qword ptr [{[vsp]f} - 0x10]",
@@ -2112,7 +2131,6 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         convert.jmpToNextHandler(as);
         convert.end(as);
     }
-    // f32.convert_i64_(s|u)
     {
         var convert = as.defineOpcodeHandler(zig, "f64.convert_i64_u", .@"16");
         as.write(
