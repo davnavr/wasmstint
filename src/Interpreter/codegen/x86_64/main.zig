@@ -2075,6 +2075,15 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
     // more trunc instructions
 
     {
+        var demote = as.defineOpcodeHandler(zig, "f32.demote_f64", .@"16");
+        as.printInstrs(&.{
+            "cvtsd2ss xmm0, qword ptr [{[vsp]f} - 0x10]",
+            "movss dword ptr [{[vsp]f} - 0x10], xmm0",
+        }, .{ .vsp = Gpr.vsp });
+        demote.jmpToNextHandler(as);
+        demote.end(as);
+    }
+    {
         var convert = as.defineOpcodeHandler(zig, "f32.convert_i32_s", .@"16");
         as.printInstrs(&.{
             "cvtsi2ss xmm0, dword ptr [{[vsp]f} - 0x10]",
@@ -2143,6 +2152,15 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         });
         convert.jmpToNextHandler(as);
         convert.end(as);
+    }
+    {
+        var demote = as.defineOpcodeHandler(zig, "f64.promote_f32", .@"16");
+        as.printInstrs(&.{
+            "cvtss2sd xmm0, dword ptr [{[vsp]f} - 0x10]",
+            "movsd qword ptr [{[vsp]f} - 0x10], xmm0",
+        }, .{ .vsp = Gpr.vsp });
+        demote.jmpToNextHandler(as);
+        demote.end(as);
     }
 }
 
