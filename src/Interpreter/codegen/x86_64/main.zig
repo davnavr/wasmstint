@@ -1936,6 +1936,24 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .temp = .r11d,
             .result_size = .qword,
         },
+        .{
+            .name = "i32.trunc_f64_s",
+            .lower_bound = "0xC1E0" ++ "0000" ++ "0020" ++ "0000",
+            .upper_bound = "0x41E0" ++ "0000" ++ "0000" ++ "0000",
+            .float_suffix = 'd',
+            .int_suffix = 'q',
+            .temp = .r11,
+            .result_size = .qword,
+        },
+        .{
+            .name = "i32.trunc_f64_u",
+            .lower_bound = "0xBFF0" ++ "0000" ++ "0000" ++ "0000",
+            .upper_bound = "0x41F0" ++ "0000" ++ "0000" ++ "0000",
+            .float_suffix = 'd',
+            .int_suffix = 'q',
+            .temp = .r11,
+            .result_size = .qword,
+        },
     }) |info| {
         var trunc = as.defineOpcodeHandler(zig, info.name, .@"16");
         var nan = as.label(&.{"nan"});
