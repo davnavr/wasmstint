@@ -2071,6 +2071,27 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         extend.jmpToNextHandler(as);
         extend.end(as);
     }
+    // more trunc instructions
+
+    {
+        var convert = as.defineOpcodeHandler(zig, "f32.convert_i32_s", .@"16");
+        as.printInstrs(&.{
+            "cvtsi2ss xmm0, dword ptr [{[vsp]f} - 0x10]",
+            "movss dword ptr [{[vsp]f} - 0x10], xmm0",
+        }, .{ .vsp = Gpr.vsp });
+        convert.jmpToNextHandler(as);
+        convert.end(as);
+    }
+    {
+        var convert = as.defineOpcodeHandler(zig, "f32.convert_i32_u", .@"16");
+        as.printInstrs(&.{
+            "mov r11d, dword ptr [{[vsp]f} - 0x10]",
+            "cvtsi2ss xmm0, r11 # u32 is a valid i64",
+            "movss dword ptr [{[vsp]f} - 0x10], xmm0",
+        }, .{ .vsp = Gpr.vsp });
+        convert.jmpToNextHandler(as);
+        convert.end(as);
+    }
 }
 
 fn definePrefixOpcodeHandlers(
