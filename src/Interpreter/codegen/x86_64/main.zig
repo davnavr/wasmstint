@@ -1908,6 +1908,7 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
 
     const IntToFloat = struct {
         name: []const u8,
+        // Bounds based on what Zig uses to panic on Debug/ReleaseSafe for `@floatFromInt`
         lower_bound: []const u8,
         upper_bound: []const u8,
         subtract: ?[]const u8 = null,
@@ -2089,6 +2090,57 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "cvtsi2ss xmm0, r11 # u32 is a valid i64",
             "movss dword ptr [{[vsp]f} - 0x10], xmm0",
         }, .{ .vsp = Gpr.vsp });
+        convert.jmpToNextHandler(as);
+        convert.end(as);
+    }
+    // f32.convert_i64_(s|u)
+    {
+        var convert = as.defineOpcodeHandler(zig, "f64.convert_i64_s", .@"16");
+        as.printInstrs(&.{
+            "cvtsi2sd xmm0, qword ptr [{[vsp]f} - 0x10]",
+            "movsd qword ptr [{[vsp]f} - 0x10], xmm0",
+        }, .{ .vsp = Gpr.vsp });
+        convert.jmpToNextHandler(as);
+        convert.end(as);
+    }
+    // f32.convert_i64_(s|u)
+    {
+        var convert = as.defineOpcodeHandler(zig, "f64.convert_i64_u", .@"16");
+        as.write(
+            \\.section .rodata
+            \\.p2align 5
+            \\
+        );
+        var const_dwords = as.label(&.{"const_dwords"});
+        const_dwords.place(as);
+        as.writeInstrs(&.{
+            ".long 0x4330" ++ "0000",
+            ".long 0x4530" ++ "0000",
+            ".long 0",
+            ".long 0",
+        });
+        var const_qwords = as.label(&.{"const_qwords"});
+        const_qwords.place(as);
+        as.writeInstrs(&.{
+            ".quad 0x4330" ++ "0000" ++ "0000" ++ "0000",
+            ".quad 0x4530" ++ "0000" ++ "0000" ++ "0000",
+        });
+
+        as.write(".text\n");
+        as.printInstrs(&.{
+            "# Based on what LLVM compilers for Zig's @floatFromInt",
+            "movsd xmm0, qword ptr [{[vsp]f} - 0x10] # load integer to convert",
+            "unpcklps xmm0, xmmword ptr [{[const_dwords]f}]",
+            "subpd xmm0, xmmword ptr [{[const_qwords]f}]",
+            "movapd xmm1, xmm0",
+            "unpckhpd xmm1, xmm0",
+            "addsd xmm1, xmm0",
+            "movsd qword ptr [{[vsp]f} - 0x10], xmm1",
+        }, .{
+            .vsp = Gpr.vsp,
+            .const_dwords = const_dwords,
+            .const_qwords = const_qwords,
+        });
         convert.jmpToNextHandler(as);
         convert.end(as);
     }
