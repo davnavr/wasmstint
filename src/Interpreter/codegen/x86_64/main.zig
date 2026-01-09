@@ -2259,6 +2259,180 @@ fn definePrefixOpcodeHandlers(
 
 fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
     {
+        var memmove = as.defineOpcodeHandler(zig, "memory.copy", .fromByteUnits(128));
+        as.printInstrs(&.{"mov r15, {f} # save IP to first byte after opcode"}, .{Gpr.vip});
+        var dst_mem_idx = DecodeUlebIdx.fastPath(as, .rbx, .{ .r13, .r14 }, "dst_mem");
+        var src_mem_idx = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "src_mem");
+        const clobbers = AsmWriter.PreservedRegisters{
+            .registers = &[8]Gpr{ .vip, .fuel, .locals, .stp, .mems, .eip, .disp, .interp },
+            .comments = &[8][]const u8{
+                "vip",
+                "fuel",
+                "locals",
+                "stp",
+                "memories",
+                "eip",
+                "dispatch",
+                "interpreter",
+            },
+        };
+        clobbers.preserve(as);
+        var dst_oob = as.label(&.{"src_oob"});
+        var src_oob = as.label(&.{"dst_oob"});
+        var copy_reverse = as.label(&.{"reverse"});
+        var copy_trailing = as.label(&.{"copy_trailing"});
+        as.printInstrs(&.{
+            "# stp clobbered, rbx contains dst memory index",
+            "mov r13, qword ptr [{[mems]f} + rbx*8] # pointer to dst MemInst",
+            "mov r14, qword ptr [{[mems]f} + r11*8] # pointer to src MemInst",
+            "mov r8, qword ptr [r13] # dst base pointer, clobbers mems",
+            "mov r10, qword ptr [r13] # src base pointer, clobbers eip",
+
+            "mov edi, dword ptr [{[vsp]f} - 0x30] # dst offset, clobbers locals",
+            "mov eax, dword ptr [{[vsp]f} - 0x10] # number of bytes to copy, clobbers vip",
+            "mov ecx, dword ptr [{[vsp]f} - 0x20] # src offset, clobbers fuel",
+            "lea {[vsp]f}, [{[vsp]f} - 0x30] # vsp",
+
+            "mov r12, qword ptr [r13 + {[size_field_off]d}] # dst memory size, clobbers dispatch",
+            "lea r9, [rdi + rax] # dst end offset, clobbers interpreter",
+            "cmp r9, r12",
+            "ja {[dst_oob]f}",
+
+            "mov r12, qword ptr [r14 + {[size_field_off]d}] # src memory size, clobbers dst size",
+            "lea rbx, [rcx + rax] # src end offset, clobbers dst mem index",
+            "cmp rbx, r12",
+            "ja {[src_oob]f}",
+
+            "lea rdi, [r8 + rax] # dst start ptr, clobbers dst offset",
+            "lea rcx, [rdi + rax] # src start ptr, clobbers src offset",
+
+            "# check for overlap:",
+            "lea rbx, [rcx + rax] # src end ptr, clobbers src end offset",
+            "cmp rdi, rbx",
+            "jb {[copy_reverse]f} # check for overlap",
+
+            "# LLVM Zig backend emits memory.copy for lengths > 32",
+            "# This assumes that lengths below that are unlikely",
+            "# TODO: check for large length to use rep stosb",
+            "cmp eax, 32",
+            "jb {[copy_trailing]f}",
+        }, .{
+            .mems = Gpr.mems,
+            .vsp = Gpr.vsp,
+            .size_field_off = 8,
+            .dst_oob = dst_oob,
+            .src_oob = src_oob,
+            .copy_reverse = copy_reverse,
+            .copy_trailing = copy_trailing,
+        });
+        {
+            var hot_loop = as.label(&.{"hot_loop"});
+            hot_loop.place(as);
+            as.write(".p2align 5\n");
+            as.printInstrs(&.{
+                "movups xmm0, xmmword ptr [rcx]",
+                "movups xmmword ptr [rdi], xmm0",
+                "movups xmm0, xmmword ptr [rcx + 16]",
+                "movups xmmword ptr [rdi + 16], xmm0",
+                "lea rcx, [rcx + 32] # advance src ptr",
+                "lea rdi, [rdi + 32] # advance dst ptr",
+                "sub eax, 32",
+                "cmp eax, 32",
+                "jae {[hot_loop]f}",
+            }, .{ .hot_loop = hot_loop });
+
+            copy_trailing.place(as);
+            var copy_trailing_below_8 = as.label(&.{"copy_trailing_below_8"});
+            as.printInstrs(&.{
+                "cmp eax, 8",
+                "jb {[copy_trailing_below_8]f}",
+            }, .{ .copy_trailing_below_8 = copy_trailing_below_8 });
+            var copy_trailing_qwords = as.label(&.{"copy_trailing_qwords"});
+            as.write(".p2align 4\n");
+            copy_trailing_qwords.place(as);
+            as.printInstrs(&.{
+                "mov rbx, qword ptr [rcx] # unaligned, clobbers src end ptr",
+                "mov qword ptr [rdi], rbx # unaligned",
+                "lea rcx, [rcx + 8] # advance src ptr",
+                "lea rdi, [rdi + 8] # advance dst ptr",
+                "sub eax, 8",
+                "cmp eax, 8",
+                "jae {[copy_trailing_qwords]f}",
+            }, .{ .copy_trailing_qwords = copy_trailing_qwords });
+
+            copy_trailing_below_8.place(as);
+            var done = as.label(&.{"done"});
+            as.printInstrs(&.{
+                "test eax, eax",
+                "jz {[done]f}",
+                "xor ebx, ebx",
+            }, .{ .done = done });
+            as.write(".p2align 3\n");
+            var copy_trailing_bytes = as.label(&.{"copy_trailing_bytes"});
+            copy_trailing_bytes.place(as);
+            as.printInstrs(&.{
+                "mov bl, byte ptr [rcx]",
+                "mov byte ptr [rdi], bl",
+                "lea rcx, [rcx + 1] # advance src ptr",
+                "lea rdi, [rdi + 1] # advance dst ptr",
+                "sub eax, 1",
+                "jnz {[copy_trailing_bytes]f}",
+            }, .{ .copy_trailing_bytes = copy_trailing_bytes });
+
+            as.write(".p2align 4\n");
+            done.place(as);
+            clobbers.restore(as);
+            memmove.jmpToNextHandler(as);
+        }
+
+        {
+            as.write(".p2align 5\n");
+            copy_reverse.place(as);
+            as.printInstrs(&.{
+                "# src end ptr in rbx",
+                "lea rdi, [rdi + rax] # dst end ptr, clobbers dst start pointer",
+                "ud2 # TODO: reverse copy",
+            }, .{});
+        }
+
+        dst_mem_idx.writeSlowPath(as);
+        src_mem_idx.writeSlowPath(as);
+
+        {
+            as.write(".p2align 5\n");
+            dst_oob.place(as);
+            as.writeInstrs(&.{"mov r11, rbx # dst memory index"});
+            src_oob.place(as);
+            as.write("\t# if src is oob, r11 contains src memory index\n");
+            clobbers.restore(as);
+            for (
+                Gpr.system_v_parameters,
+                &[6]Gpr{ .r15, .vsp, .eip, .stp, .r11, .interp },
+                &[6][]const u8{ "vip", "vsp", "eip", "stp", "memory index", "interpreter" },
+            ) |dst, src, comment| {
+                if (dst != src)
+                    as.printInstrs(
+                        &.{"mov {[dst]f}, {[src]f} # {[comment]s}"},
+                        .{ .dst = dst, .src = src, .comment = comment },
+                    )
+                else
+                    as.printInstrs(
+                        &.{"# {[comment]s} stays in {[dst]f}"},
+                        .{ .comment = comment, .dst = dst },
+                    );
+            }
+            as.restoreSystemVSavedRegisters();
+            as.printInstrs(&.{
+                "mov rsp, rbp # TODO: is this unnecessary?",
+                "pop rbp",
+                "jmp {[prefix]s}trapMemoryCopyOutOfBounds",
+                "ud2",
+            }, .{ .prefix = as.symbol_prefix });
+        }
+
+        memmove.end(as);
+    }
+    {
         // LLVM uses `call memset@PLT`, but that means 5 interpreter registers need to be `pushed`
         // to the stack.
         var memset = as.defineOpcodeHandler(zig, "memory.fill", .@"64");
@@ -2340,7 +2514,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "movaps xmmword ptr [rdi + 0x30], xmm0",
             "lea rdi, [rdi + 64] # update destination pointer",
             "sub ecx, 64 # update count",
-            "jmp {[copy_64_aligned]f}",
+            "jmp {[copy_64_aligned]f}", // TODO: restructure loop so each iteration doesn't have two jumps
         }, .{ .set_trailing_bytes = set_trailing_bytes, .copy_64_aligned = copy_64_aligned });
         set_trailing_bytes.place(as);
         var copy_trailing_32_unaligned = as.label(&.{"copy_trailing_32_unaligned"});

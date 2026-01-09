@@ -607,6 +607,7 @@ fn trapMemoryAccessOutOfBounds(
     size: u8, // rbp + 24
     memory: *const runtime.MemInst, // rbp + 32
 ) callconv(sysvcc) Transition {
+    @branchHint(.cold);
     return Transition.trapAt(
         trap_ip,
         eip,
@@ -620,6 +621,25 @@ fn trapMemoryAccessOutOfBounds(
         )),
     );
 }
+fn trapMemoryCopyOutOfBounds(
+    ip: Ip, // rax -> rdi
+    sp: Sp, // stays in rsi
+    eip: Eip, // r10 -> rdx
+    stp: Stp, // rbx -> rcx
+    mem_idx: usize, // r8
+    interp: *Interpreter, // stays in r9
+) callconv(sysvcc) Transition {
+    @branchHint(.cold);
+    return Transition.trap(
+        ip,
+        .{ .fc = .@"memory.copy" },
+        eip,
+        sp,
+        stp,
+        interp,
+        .init(.memory_access_out_of_bounds, .init(@enumFromInt(mem_idx), .@"memory.copy", {})),
+    );
+}
 
 fn trapMemoryFillOutOfBounds(
     ip: Ip, // rax -> rdi
@@ -629,6 +649,7 @@ fn trapMemoryFillOutOfBounds(
     mem_idx: usize, // r8
     interp: *Interpreter, // stays in r9
 ) callconv(sysvcc) Transition {
+    @branchHint(.cold);
     return Transition.trap(
         ip,
         .{ .fc = .@"memory.fill" },
@@ -676,6 +697,7 @@ comptime {
         "trapIntegerOverflow",
         "trapInvalidConversionToInteger",
         "trapMemoryAccessOutOfBounds",
+        "trapMemoryCopyOutOfBounds",
         "trapMemoryFillOutOfBounds",
         "trapTableAccessOob",
         "trapIndirectCallToNull",
