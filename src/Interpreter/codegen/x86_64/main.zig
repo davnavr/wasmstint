@@ -2259,13 +2259,152 @@ fn definePrefixOpcodeHandlers(
 
 fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
     {
+        var memory_init = as.defineOpcodeHandler(zig, "memory.init", .fromByteUnits(128));
+        as.printInstrs(&.{"mov r15, {f} # save IP to first byte after opcode"}, .{Gpr.vip});
+        var data_idx = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "data");
+        var mem_idx = DecodeUlebIdx.fastPath(as, .r13, .{ .r13, .r14 }, "mem");
+        var clobbers = AsmWriter.PreservedRegisters{
+            .registers = &[6]Gpr{ .vip, .fuel, .locals, .interp, .disp, .mems },
+            .comments = &[6][]const u8{
+                "vip",
+                "fuel",
+                "locals",
+                "interpreter",
+                "dispatch",
+                "memories",
+            },
+        };
+        clobbers.preserve(as);
+        var oob = as.label(&.{"oob"});
+        var copy_trailing_bytes = as.label(&.{"copy_trailing_below_64"});
+        as.printInstrs(&.{
+            "mov r14, qword ptr [{[mems]f} + r13*8] # pointer to MemInst",
+            "mov r9, qword ptr [{[module]f} + {[module_info_off]d}]" ++
+                " # pointer to module info, clobbers interp",
+
+            "mov edi, dword ptr [{[vsp]f} - 0x30] # dst offset, clobbers locals",
+            "mov eax, dword ptr [{[vsp]f} - 0x10] # number of bytes to copy, clobbers vip",
+            "mov ecx, dword ptr [{[vsp]f} - 0x20] # src offset, clobbers fuel",
+            "lea {[vsp]f}, [{[vsp]f} - 0x30] # vsp",
+
+            "mov r12, qword ptr [r14 + {[size_field_off]d}] # dst memory size, clobbers dispatch",
+            "lea r8, [rdi + rax] # dst end offset, clobbers mems",
+            "cmp r8, r12",
+            "ja {[oob]f}",
+
+            "mov r12, qword ptr [r9 + {[info_datas_lens_off]d}]" ++
+                " # ptr to data lens, clobbers dst mem size",
+            "mov r12d, dword ptr [r12 + r11*4] # data len, clobbers ptr to data lens",
+            "lea r8, [rcx + rax] # src end offset, clobbers dst end offset",
+            "cmp r8, r12",
+            "ja {[oob]f}",
+
+            "mov r9, qword ptr [r9 + {[info_datas_ptrs_off]d}]" ++
+                " # ptr to data byte ptrs, clobbers ptr to module info",
+            "mov r9, qword ptr [r9 + r13*8] # ptr to data base, clobbers ptr to data byte ptrs",
+            "add rcx, r9 # src data ptr, clobbers src offset",
+
+            "mov r9, qword ptr [r14] # dst base pointer, clobbers ptr to data base",
+            "add rdi, r9 # dst ptr, clobbers dst offset",
+
+            "# differs from memory.copy since regions are guaranteed to not overlap",
+            "# TODO: could test for large length to use rep stosb here",
+            "cmp eax, 64",
+            "jb {[copy_trailing_bytes]f}",
+        }, .{
+            .mems = Gpr.mems,
+            .module = Gpr.module,
+            .module_info_off = 8,
+            .info_datas_ptrs_off = 232, // Assumes offset of RawInner in Module.Inner is 0
+            .info_datas_lens_off = 240, // Assumes offset of RawInner in Module.Inner is 0
+            .size_field_off = 8,
+            .vsp = Gpr.vsp,
+            .oob = oob,
+            .copy_trailing_bytes = copy_trailing_bytes,
+        });
+
+        as.write(".p2align 5\n");
+        var hot_loop = as.label(&.{"hot_loop"});
+        hot_loop.place(as);
+        as.printInstrs(&.{
+            "movups xmm0, xmmword ptr [rcx]",
+            "movups xmmword ptr [rdi], xmm0",
+            "movups xmm1, xmmword ptr [rcx + 0x10]",
+            "movups xmmword ptr [rdi + 0x10], xmm1",
+            "movups xmm2, xmmword ptr [rcx + 0x20]",
+            "movups xmmword ptr [rdi + 0x20], xmm2",
+            "movups xmm3, xmmword ptr [rcx + 0x30]",
+            "movups xmmword ptr [rdi + 0x30], xmm3",
+            "lea rcx, [rcx + 64] # src",
+            "lea rdi, [rdi + 64] # dst",
+            "sub eax, 64",
+            "cmp eax, 64",
+            "jae {[hot_loop]f}",
+        }, .{ .hot_loop = hot_loop });
+
+        as.write(".p2align 5\n");
+        copy_trailing_bytes.place(as);
+        var done = as.label(&.{"done"});
+        as.printInstrs(&.{
+            "test eax, eax",
+            "jz {[done]f}",
+            ".p2align 4",
+        }, .{ .done = done });
+
+        var copy_byte = as.label(&.{"copy_byte"});
+        copy_byte.place(as);
+        as.printInstrs(&.{
+            "movzx r8, byte ptr [rcx]",
+            "mov byte ptr [rdi], r8b",
+            "inc rcx # src",
+            "inc rdi # dst",
+            "dec eax",
+            "jnz {[copy_byte]f}",
+        }, .{ .copy_byte = copy_byte });
+
+        done.place(as);
+        clobbers.restore(as);
+        memory_init.jmpToNextHandler(as);
+
+        data_idx.writeSlowPath(as);
+        mem_idx.writeSlowPath(as);
+
+        as.write(".p2align 5\n");
+        oob.place(as);
+        clobbers.restore(as);
+        for (
+            Gpr.system_v_parameters,
+            &[6]Gpr{ .r15, .vsp, .eip, .stp, .r13, .interp },
+            &[6][]const u8{ "vip", "vsp", "eip", "stp", "memory index", "interpreter" },
+        ) |dst, src, comment| {
+            if (dst != src)
+                as.printInstrs(
+                    &.{"mov {[dst]f}, {[src]f} # {[comment]s}"},
+                    .{ .dst = dst, .src = src, .comment = comment },
+                )
+            else
+                as.printInstrs(
+                    &.{"# {[comment]s} stays in {[dst]f}"},
+                    .{ .comment = comment, .dst = dst },
+                );
+        }
+        as.restoreSystemVSavedRegisters();
+        as.printInstrs(&.{
+            "mov rsp, rbp # TODO: is this unnecessary?",
+            "pop rbp",
+            "jmp {[prefix]s}trapMemoryInitOutOfBounds",
+            "ud2",
+        }, .{ .prefix = as.symbol_prefix });
+
+        memory_init.end(as);
+    }
+    {
         var memmove = as.defineOpcodeHandler(zig, "memory.copy", .fromByteUnits(128));
         as.printInstrs(&.{
             "mov r15, {[vip]f} # save IP to first byte after opcode",
             "push {[stp]f} # STP clobbered when dst mem index is read",
         }, .{ .vip = Gpr.vip, .stp = Gpr.stp });
 
-        // TODO: BUG this clobbers rbx before it is saved
         var dst_mem_idx = DecodeUlebIdx.fastPath(as, .rbx, .{ .r13, .r14 }, "dst_mem");
         var src_mem_idx = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "src_mem");
 
@@ -2349,7 +2488,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
                 "movups xmm0, xmmword ptr [rcx]",
                 "movups xmmword ptr [rdi], xmm0",
                 "movups xmm0, xmmword ptr [rcx + 16]",
-                "movups xmmword ptr [rdi + 16], xmm0",
+                "movups xmmword ptr [rdi + 16], xmm0", // TODO: use xmm1
                 "lea rcx, [rcx + 32] # advance src ptr",
                 "lea rdi, [rdi + 32] # advance dst ptr",
                 "sub eax, 32",
@@ -2417,7 +2556,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
                 "movups xmm0, xmmword ptr [rbx - 16]",
                 "movups xmmword ptr [rdi - 16], xmm0",
                 "movups xmm0, xmmword ptr [rbx - 32]",
-                "movups xmmword ptr [rdi - 32], xmm0",
+                "movups xmmword ptr [rdi - 32], xmm0", // TODO: use xmm1
                 "lea rbx, [rbx - 32] # advance src ptr",
                 "lea rdi, [rdi - 32] # advance dst ptr",
                 "sub eax, 32",

@@ -38,6 +38,8 @@ comptime {
     std.debug.assert(@offsetOf(ModuleInner, "raw") == 0);
     std.debug.assert(@offsetOf(@FieldType(ModuleInner, "raw"), "types") == 0);
     std.debug.assert(@offsetOf(@FieldType(ModuleInner, "raw"), "global_types") == 80);
+    std.debug.assert(@offsetOf(@FieldType(ModuleInner, "raw"), "datas_ptrs") == 232);
+    std.debug.assert(@offsetOf(@FieldType(ModuleInner, "raw"), "datas_lens") == 240);
     std.debug.assert(@offsetOf(runtime.ModuleInst.Header, "tables") == 40);
     std.debug.assert(@offsetOf(runtime.ModuleInst.Header, "globals") == 48);
     std.debug.assert(@sizeOf(Module.GlobalType) == 2);
@@ -621,6 +623,27 @@ fn trapMemoryAccessOutOfBounds(
         )),
     );
 }
+
+fn trapMemoryInitOutOfBounds(
+    ip: Ip, // rax -> rdi
+    sp: Sp, // stays in rsi
+    eip: Eip, // r10 -> rdx
+    stp: Stp, // rbx -> rcx
+    mem_idx: usize, // r8
+    interp: *Interpreter, // stays in r9
+) callconv(sysvcc) Transition {
+    @branchHint(.cold);
+    return Transition.trap(
+        ip,
+        .{ .fc = .@"memory.init" },
+        eip,
+        sp,
+        stp,
+        interp,
+        .init(.memory_access_out_of_bounds, .init(@enumFromInt(mem_idx), .@"memory.init", {})),
+    );
+}
+
 fn trapMemoryCopyOutOfBounds(
     ip: Ip, // rax -> rdi
     sp: Sp, // stays in rsi
@@ -697,6 +720,7 @@ comptime {
         "trapIntegerOverflow",
         "trapInvalidConversionToInteger",
         "trapMemoryAccessOutOfBounds",
+        "trapMemoryInitOutOfBounds",
         "trapMemoryCopyOutOfBounds",
         "trapMemoryFillOutOfBounds",
         "trapTableAccessOob",

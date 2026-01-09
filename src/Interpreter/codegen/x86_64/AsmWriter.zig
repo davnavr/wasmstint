@@ -350,6 +350,7 @@ pub fn startFunction(
     name: []const u8,
     alignment: std.mem.Alignment,
 ) Function {
+    std.debug.assert(as.function_name == null);
     _ = as.function_arena.reset(.retain_capacity);
     as.function_name = name;
     as.label_counter = 0;
@@ -461,6 +462,7 @@ pub const PreservedRegisters = struct {
     comments: []const []const u8,
 
     pub fn preserve(info: *const PreservedRegisters, as: *AsmWriter) void {
+        // TODO: if register is .disp, can use lea of dispatch table instead of pop
         for (info.registers, info.comments) |reg, comment| {
             as.printInstrs(&.{"push {[reg]f} # {[comment]s}"}, .{ .reg = reg, .comment = comment });
         }
