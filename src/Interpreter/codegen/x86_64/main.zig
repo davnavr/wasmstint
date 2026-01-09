@@ -2307,8 +2307,10 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
 
             "# check for overlap:",
             "lea rbx, [rcx + rax] # src end ptr, clobbers src end offset",
-            "cmp rdi, rbx",
-            "jb {[copy_reverse]f} # check for overlap",
+            "mov r8, rbx # clobbers dst base pointer",
+            "sub r8, rdi",
+            "cmp r8, rax # reverse if dst start < src end and src end - dst start < bytes to copy",
+            "jl {[copy_reverse]f} # check for overlap",
         }, .{
             .mems = Gpr.mems,
             .vsp = Gpr.vsp,
