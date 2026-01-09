@@ -2351,22 +2351,54 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         trunc.jmpToNextHandler(as);
         trunc.end(as);
     }
-    // {
-    //     var trunc = as.defineOpcodeHandler(zig, ".trunc_sat_f", .@"16");
-    //     as.printInstrs(&.{
-    //         "# based on what LLVM generates for its `@llvm.___` intrinsic",
-    //     }, .{ .vsp = Gpr.vsp });
-    //     trunc.jmpToNextHandler(as);
-    //     trunc.end(as);
-    // }
-    // {
-    //     var trunc = as.defineOpcodeHandler(zig, ".trunc_sat_f", .@"16");
-    //     as.printInstrs(&.{
-    //         "# based on what LLVM generates for its `@llvm.___` intrinsic",
-    //     }, .{ .vsp = Gpr.vsp });
-    //     trunc.jmpToNextHandler(as);
-    //     trunc.end(as);
-    // }
+    {
+        var trunc = as.defineOpcodeHandler(zig, "i64.trunc_sat_f64_s", .@"16");
+        as.printInstrs(&.{
+            "# based on what LLVM generates for its `@llvm.fptosi.sat.i64.f64` intrinsic",
+            "movsd xmm0, qword ptr [{[vsp]f} - 0x10] # load f64",
+            "cvttsd2si r11, xmm0",
+            "movabs r13, 0x43DF" ++ "FFFF" ++ "FFFF" ++ "FFFF",
+            "movq xmm1, r13",
+            "ucomisd xmm0, xmm1",
+            "movabs r13, 0x7FFF" ++ "FFFF" ++ "FFFF" ++ "FFFF # most positive i64",
+            "cmovbe r13, r11",
+            "xor r11d, r11d",
+            "ucomisd xmm0, xmm0 # detect NaN",
+            "cmovnp r11, r13 # store calculated result if not NaN, zero otherwise?",
+            "mov qword ptr [{[vsp]f} - 0x10], r11 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        trunc.jmpToNextHandler(as);
+        trunc.end(as);
+    }
+    {
+        var trunc = as.defineOpcodeHandler(zig, "i64.trunc_sat_f64_u", .@"16");
+        as.printInstrs(&.{
+            "# based on what LLVM generates for its `@llvm.fptoui.sat.i64.f64` intrinsic",
+            "movsd xmm0, qword ptr [{[vsp]f} - 0x10] # load f64",
+            "cvttsd2si r11, xmm0",
+            "mov r13, r11",
+            "sar r13, 63 # fill with sign bit",
+            "movapd xmm1, xmm0",
+            "movabs r14, 0x43E0" ++ "0000" ++ "0000" ++ "0000",
+            "movq xmm2, r14",
+            "subsd xmm1, xmm2",
+            "cvttsd2si r14, xmm1",
+            "and r14, r13 # all zeroes if r11 was positive",
+            "or r14, r11",
+            "xor r11d, r11d",
+            "xorpd xmm1, xmm1",
+            "ucomisd xmm0, xmm1",
+            "cmovae r11, r14 # seems to detect negative f64?",
+            "movabs r15, 0x43EF" ++ "FFFF" ++ "FFFF" ++ "FFFF",
+            "movq xmm2, r15",
+            "ucomisd xmm0, xmm2",
+            "mov r13, -1",
+            "cmovbe r13, r11",
+            "mov qword ptr [{[vsp]f} - 0x10], r13 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        trunc.jmpToNextHandler(as);
+        trunc.end(as);
+    }
 }
 
 fn definePrefixOpcodeHandlers(
