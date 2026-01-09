@@ -61,6 +61,7 @@ pub fn main() noreturn {
     defineFloatOpcodeHandlers(&asm_writer, &zig_writer, .f32);
     defineFloatOpcodeHandlers(&asm_writer, &zig_writer, .f64);
     defineNumericConversionOpcodeHandlers(&asm_writer, &zig_writer);
+    defineReferenceOpcodeHandlers(&asm_writer, &zig_writer);
     definePrefixOpcodeHandlers(&asm_writer, &zig_writer, optimize);
     defineBulkMemoryOpcodeHandlers(&asm_writer, &zig_writer);
 
@@ -2527,6 +2528,32 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         trunc.jmpToNextHandler(as);
         trunc.end(as);
     }
+}
+
+fn defineReferenceOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
+    {
+        var ref_null = as.defineOpcodeHandler(zig, "ref.null", .@"16");
+        as.printInstrs(&.{
+            "mov qword ptr [{[vsp]f}], 0",
+            "inc {[vip]f} # skip ref type, should be LEB if GC support is added",
+            "lea {[vsp]f}, [{[vsp]f} + 0x10] # vsp",
+        }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
+        ref_null.jmpToNextHandler(as);
+        ref_null.end(as);
+    }
+    {
+        var is_null = as.defineOpcodeHandler(zig, "ref.is_null", .@"16");
+        as.printInstrs(&.{
+            "mov r13, qword ptr [{[vsp]f} - 0x10] # reference to check",
+            "xor r14d, r14d",
+            "test r13, r13",
+            "setz r14b",
+            "mov dword ptr [{[vsp]f} - 0x10], r14d # store result",
+        }, .{ .vsp = Gpr.vsp });
+        is_null.jmpToNextHandler(as);
+        is_null.end(as);
+    }
+    // TODO: ref.func needs to call into the runtime
 }
 
 fn definePrefixOpcodeHandlers(
