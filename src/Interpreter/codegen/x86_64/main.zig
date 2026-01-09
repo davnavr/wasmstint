@@ -1102,6 +1102,7 @@ fn defineMemoryManagementOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "# OS pages are zeroed",
             "# Assuming 65536 page size, could memset with rep stosb" ++
                 " (apparently not as good on AMD)",
+            "shr r14d, 16 # from pages to bytes",
             "mov dword ptr [{[vsp]f} - 0x10], r14d # store old size",
             "mov qword ptr [r11 + {[mem_size_off]d}], r13 # store new size",
         }, .{ .vsp = Gpr.vsp, .mem_size_off = 8 });
