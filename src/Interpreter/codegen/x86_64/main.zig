@@ -577,7 +577,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
                 " # ptr to module's tables, clobbers module",
             "mov rdx, qword ptr [rdx + r13 * 8] # ptr to table",
             "cmp r14d, dword ptr [rdx + {[table_len_off]d}] # bounds check",
-            "ja {[oob]f}",
+            "jae {[oob]f}",
             "mov rdx, qword ptr [rdx] # ptr to elems, clobbers ptr to table",
             "mov rdx, qword ptr [rdx + r14 * 8] # funcref, clobbers ptr to elems",
             "test rdx, rdx # check for null",
