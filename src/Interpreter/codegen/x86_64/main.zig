@@ -2293,7 +2293,7 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "# based on what LLVM generates for its `@llvm.fptoui.sat.i32.f64` intrinsic",
             "xorpd xmm0, xmm0",
-            "maxsd xmm0, qword ptr [{[vsp]f} - 0x10] # load float and ensure non-negative",
+            "maxsd xmm0, qword ptr [{[vsp]f} - 0x10] # load f64 and ensure non-negative",
             "mov r11, 0x41EF" ++ "FFFF" ++ "FFE0" ++ "0000 # maximum bound",
             "movq xmm1, r11",
             "minsd xmm1, xmm0 # ensure does not exceed maximum bound",
@@ -2303,22 +2303,54 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         trunc.jmpToNextHandler(as);
         trunc.end(as);
     }
-    // {
-    //     var trunc = as.defineOpcodeHandler(zig, ".trunc_sat_f", .@"16");
-    //     as.printInstrs(&.{
-    //         "# based on what LLVM generates for its `@llvm.___` intrinsic",
-    //     }, .{ .vsp = Gpr.vsp });
-    //     trunc.jmpToNextHandler(as);
-    //     trunc.end(as);
-    // }
-    // {
-    //     var trunc = as.defineOpcodeHandler(zig, ".trunc_sat_f", .@"16");
-    //     as.printInstrs(&.{
-    //         "# based on what LLVM generates for its `@llvm.___` intrinsic",
-    //     }, .{ .vsp = Gpr.vsp });
-    //     trunc.jmpToNextHandler(as);
-    //     trunc.end(as);
-    // }
+    {
+        var trunc = as.defineOpcodeHandler(zig, "i64.trunc_sat_f32_s", .@"16");
+        as.printInstrs(&.{
+            "# based on what LLVM generates for its `@llvm.fptosi.sat.i64.f32` intrinsic",
+            "movss xmm0, dword ptr [{[vsp]f} - 0x10] # load f32",
+            "cvttss2si r11, xmm0",
+            "mov r13d, 0x5EFF" ++ "FFFF # could be a maximum bound?",
+            "movd xmm1, r13d",
+            "ucomiss xmm0, xmm1",
+            "movabs r13, 0x7FFF" ++ "FFFF" ++ "FFFF" ++ "FFFF # most positive i64",
+            "cmovbe r13, r11",
+            "xor r11d, r11d",
+            "ucomiss xmm0, xmm0 # detect NaN",
+            "cmovnp r11, r13 # store calculated result if not NaN, zero otherwise?",
+            "mov qword ptr [{[vsp]f} - 0x10], r11 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        trunc.jmpToNextHandler(as);
+        trunc.end(as);
+    }
+    {
+        var trunc = as.defineOpcodeHandler(zig, "i64.trunc_sat_f32_u", .@"16");
+        as.printInstrs(&.{
+            "# based on what LLVM generates for its `@llvm.fptoui.sat.i64.f32` intrinsic",
+            "movss xmm0, dword ptr [{[vsp]f} - 0x10] # load f32",
+            "cvttss2si r11, xmm0",
+            "mov r13, r11",
+            "sar r13, 63 # fill with sign bit",
+            "movaps xmm1, xmm0",
+            "mov r14d, 0x5F00" ++ "0000",
+            "movd xmm2, r14d",
+            "subss xmm1, xmm2",
+            "cvttss2si r14, xmm1",
+            "and r14, r13 # zero if r11 was positive?",
+            "or r14, r11",
+            "xor r11d, r11d",
+            "xorps xmm1, xmm1",
+            "ucomiss xmm0, xmm1",
+            "cmovae r11, r14",
+            "mov r15d, 0x5F7F" ++ "FFFF",
+            "movd xmm2, r15d",
+            "ucomiss xmm0, xmm2",
+            "mov r13, -1",
+            "cmovbe r13, r11",
+            "mov qword ptr [{[vsp]f} - 0x10], r13 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        trunc.jmpToNextHandler(as);
+        trunc.end(as);
+    }
     // {
     //     var trunc = as.defineOpcodeHandler(zig, ".trunc_sat_f", .@"16");
     //     as.printInstrs(&.{
