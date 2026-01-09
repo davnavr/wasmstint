@@ -923,7 +923,7 @@ fn defineTableAccessOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "mov {[param_6]f}, r11d # index",
             "mov {[param_7]f}, 0 # cause",
-            "mov {[param_8]f}, r14 # *TableInst",
+            "mov {[param_8]f}, r10 # *TableInst",
             "mov rsp, rbp # TODO: is this unnecessary?",
             "pop rbp",
             "jmp {[prefix]s}trapTableAccessOutOfBounds",
@@ -985,7 +985,7 @@ fn defineTableAccessOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "mov {[param_6]f}, r11d # index",
             "mov {[param_7]f}, 1 # cause",
-            "mov {[param_8]f}, r14 # *TableInst",
+            "mov {[param_8]f}, r10 # *TableInst",
             "mov rsp, rbp # TODO: is this unnecessary?",
             "pop rbp",
             "jmp {[prefix]s}trapTableAccessOutOfBounds",
