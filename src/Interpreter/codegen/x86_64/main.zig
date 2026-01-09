@@ -662,7 +662,7 @@ fn defineParametericOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         // select without type requires numeric or vector type, so this must
         // assume xmmword-sized values to be safe
         as.printInstrs(&.{
-            "xor r14, r14",
+            "xor r14d, r14d",
             "mov r13d, dword ptr [{[vsp]f} - 0x10] # load condition",
             "test r13d, r13d",
             "jnz {[true]f}",
@@ -725,7 +725,7 @@ fn defineGlobalOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "mov r13, qword ptr [{[module]f} + {[module_info_off]d}] # ptr to info",
             "mov r13, qword ptr [r13 + {[info_types_off]d}] # ptr to global types",
-            "xor r14, r14",
+            "xor r14d, r14d",
             "mov r14b, byte ptr [r13 + r11 * {[global_type_size]d}] # global type",
             "# r14b contains valtype byte",
             "sub r14b, 0x6F # index into jump table",
@@ -799,7 +799,7 @@ fn defineGlobalOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "mov r13, qword ptr [{[module]f} + {[module_info_off]d}] # ptr to info",
             "mov r13, qword ptr [r13 + {[info_types_off]d}] # ptr to global types",
-            "xor r14, r14",
+            "xor r14d, r14d",
             "mov r14b, byte ptr [r13 + r11 * {[global_type_size]d}] # global type",
             "# r14b contains valtype byte",
             "# i32       = 7F",
@@ -1656,7 +1656,6 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, float_type: FloatT
         var cmp = as.defineOpcodeHandler(zig, opcode_name.name(info[0]), .@"64");
         as.printInstrs(&.{
             "movs{[float_suffix]c} xmm0, {[size]t} ptr [{[vsp]f} - 0x10] # load operand 2",
-            "xor r13, r13",
             "{[instr]s}{[float_suffix]c} xmm0, {[size]t} ptr [{[vsp]f} - 0x20] # load operand 1",
             "mov{[int_suffix]c} {[r13]f}, xmm0 # all 1's if true",
             "and {[r13]f}, 1",
@@ -1685,7 +1684,7 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, float_type: FloatT
         var cmp = as.defineOpcodeHandler(zig, opcode_name.name(name), .@"64");
         as.printInstrs(&.{
             "movs{[suffix]c} xmm0, {[size]t} ptr [{[vsp]f} - {[op_1]s}] # operand 2",
-            "xor r15, r15",
+            "xor r15d, r15d",
             "ucomis{[suffix]c} xmm0, {[size]t} ptr [{[vsp]f} - {[op_2]s}] # operand 1",
             "{[set_instr]s} r15b",
             "mov dword ptr [{[vsp]f} - 0x20], r15d # store result",
@@ -2242,7 +2241,7 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "ucomiss xmm0, xmm1",
             "mov r13d, 0x7FFF" ++ "FFFF",
             "cmovbe r13d, r11d",
-            "xor r11d, r11d", // TODO: xor 32-bit registers, NOT the 64-bit one
+            "xor r11d, r11d",
             "ucomiss xmm0, xmm0",
             "cmovnp r11d, r13d",
             "mov dword ptr [{[vsp]f} - 0x10], r11d # store result",
