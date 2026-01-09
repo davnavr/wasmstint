@@ -2302,8 +2302,8 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "cmp rbx, r12",
             "ja {[src_oob]f}",
 
-            "lea rdi, [r8 + rax] # dst start ptr, clobbers dst offset",
-            "lea rcx, [rdi + rax] # src start ptr, clobbers src offset",
+            "lea rdi, [r8 + rdi] # dst start ptr, clobbers dst offset",
+            "lea rcx, [r10 + rcx] # src start ptr, clobbers src offset",
 
             "# check for overlap:",
             "lea rbx, [rcx + rax] # src end ptr, clobbers src end offset",
