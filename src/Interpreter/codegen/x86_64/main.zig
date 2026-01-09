@@ -2260,23 +2260,35 @@ fn definePrefixOpcodeHandlers(
 fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
     {
         var memmove = as.defineOpcodeHandler(zig, "memory.copy", .fromByteUnits(128));
-        as.printInstrs(&.{"mov r15, {f} # save IP to first byte after opcode"}, .{Gpr.vip});
+        as.printInstrs(&.{
+            "mov r15, {[vip]f} # save IP to first byte after opcode",
+            "push {[stp]f} # STP clobbered when dst mem index is read",
+        }, .{ .vip = Gpr.vip, .stp = Gpr.stp });
+
+        // TODO: BUG this clobbers rbx before it is saved
         var dst_mem_idx = DecodeUlebIdx.fastPath(as, .rbx, .{ .r13, .r14 }, "dst_mem");
         var src_mem_idx = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "src_mem");
-        const clobbers = AsmWriter.PreservedRegisters{
-            .registers = &[8]Gpr{ .vip, .fuel, .locals, .stp, .mems, .eip, .disp, .interp },
-            .comments = &[8][]const u8{
-                "vip",
-                "fuel",
-                "locals",
-                "stp",
-                "memories",
-                "eip",
-                "dispatch",
-                "interpreter",
-            },
+
+        var clobbered_registers_buf: [8]Gpr =
+            .{ .stp, .vip, .fuel, .locals, .mems, .eip, .disp, .interp };
+        var clobbered_info_buf: [8][]const u8 = .{
+            "stp (cloberred before indices were parsed)",
+            "vip",
+            "fuel",
+            "locals",
+            "memories",
+            "eip",
+            "dispatch",
+            "interpreter",
         };
-        clobbers.preserve(as);
+        var clobbers = AsmWriter.PreservedRegisters{
+            .registers = clobbered_registers_buf[1..],
+            .comments = clobbered_info_buf[1..],
+        };
+        clobbers.preserve(as); // STP is saved earlier
+        clobbers.registers = &clobbered_registers_buf;
+        clobbers.comments = &clobbered_info_buf;
+
         var dst_oob = as.label(&.{"src_oob"});
         var src_oob = as.label(&.{"dst_oob"});
         var copy_reverse = as.label(&.{"reverse"});
