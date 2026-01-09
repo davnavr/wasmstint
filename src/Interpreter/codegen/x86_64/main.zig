@@ -51,6 +51,7 @@ pub fn main() noreturn {
     defineParametericOpcodeHandlers(&asm_writer, &zig_writer);
     defineLocalOpcodeHandlers(&asm_writer, &zig_writer);
     defineGlobalOpcodeHandlers(&asm_writer, &zig_writer);
+    defineTableAccessOpcodeHandlers(&asm_writer, &zig_writer);
     defineMemoryLoadOpcodeHandlers(&asm_writer, &zig_writer);
     defineMemoryStoreOpcodeHandlers(&asm_writer, &zig_writer);
     defineMemoryManagementOpcodeHandlers(&asm_writer, &zig_writer);
@@ -625,7 +626,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "mov rsp, rbp # TODO: is this unnecessary?",
             "pop rbp",
-            "jmp {[prefix]s}trapTableAccessOob",
+            "jmp {[prefix]s}trapCallIndirectAccessOob",
             "ud2",
         }, .{ .prefix = as.symbol_prefix });
 
@@ -869,6 +870,132 @@ fn defineGlobalOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             ".quad {[store_4]f} # i32",
         }), .{ .store_4 = store_4, .store_8 = store_8, .store_16 = store_16 });
         as.write(".text\n");
+        set.end(as);
+    }
+}
+
+fn defineTableAccessOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
+    {
+        var get = as.defineOpcodeHandler(zig, "table.get", .@"32");
+        var table_idx = DecodeUlebIdx.fastPath(as, .r13, .{ .r14, .r15 }, "table");
+        var oob = as.label(&.{"oob"});
+        as.printInstrs(&.{
+            "mov r11d, dword ptr [{[vsp]f} - 0x10] # index of element",
+            "mov r14, qword ptr [{[module]f} + {[module_tables_off]d}] # ptr to module's tables",
+            "mov r14, qword ptr [r14 + r13*8] # ptr to target table",
+            "cmp r11d, dword ptr [r14 + {[table_len_off]d}] # bounds check",
+            "mov r15, qword ptr [r14] # table base pointer",
+            "jae {[oob]f}",
+            "mov r11, qword ptr [r15 + r11*8] # load element, clobbers index of element",
+            "mov qword ptr [{[vsp]f} - 0x10], r11",
+        }, .{
+            .vsp = Gpr.vsp,
+            .module = Gpr.module,
+            .module_tables_off = 40,
+            .table_len_off = 12,
+            .oob = oob,
+        });
+        get.jmpToNextHandler(as);
+
+        table_idx.writeSlowPath(as);
+
+        oob.place(as);
+        as.printInstrs(&.{
+            "lea {[param_0]f}, [{[vip]f} - 1]",
+            "# vsp in rsi",
+            "mov {[param_2]f}, {[eip]f} # eip",
+            "mov {[param_3]f}, {[stp]f} # stp",
+            "mov {[param_4]f}, r13 # table index",
+            "# interp in r9",
+            "# index to access in r11",
+            "mov r10, r14 # *TableInst",
+        }, .{
+            .param_0 = SystemVParam{ .index = 0 },
+            .vip = Gpr.vip,
+            .param_2 = SystemVParam{ .index = 2 },
+            .eip = Gpr.eip,
+            .param_3 = SystemVParam{ .index = 3 },
+            .stp = Gpr.stp,
+            .param_4 = SystemVParam{ .index = 4 },
+        });
+        as.restoreSystemVSavedRegisters();
+        as.printInstrs(&.{
+            "mov {[param_6]f}, r11d # index",
+            "mov {[param_7]f}, 0 # cause",
+            "mov {[param_8]f}, r14 # *TableInst",
+            "mov rsp, rbp # TODO: is this unnecessary?",
+            "pop rbp",
+            "jmp {[prefix]s}trapTableAccessOutOfBounds",
+            "ud2",
+        }, .{
+            .param_6 = SystemVParam{ .index = 6, .size = .dword },
+            .param_7 = SystemVParam{ .index = 7 },
+            .param_8 = SystemVParam{ .index = 8 },
+            .prefix = as.symbol_prefix,
+        });
+
+        get.end(as);
+    }
+    {
+        var set = as.defineOpcodeHandler(zig, "table.set", .@"32");
+        var table_idx = DecodeUlebIdx.fastPath(as, .r13, .{ .r14, .r15 }, "table");
+        var oob = as.label(&.{"oob"});
+        as.printInstrs(&.{
+            "mov r11d, dword ptr [{[vsp]f} - 0x20] # index of element to set",
+            "mov r14, qword ptr [{[module]f} + {[module_tables_off]d}] # ptr to module's tables",
+            "mov r14, qword ptr [r14 + r13*8] # ptr to target table",
+            "cmp r11d, dword ptr [r14 + {[table_len_off]d}] # bounds check",
+            "mov r15, qword ptr [r14] # table base pointer",
+            "jae {[oob]f}",
+            "mov r13, qword ptr [{[vsp]f} - 0x10] # element, clobbers index of table",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
+            "mov qword ptr [r15 + r11*8], r13 # store element",
+        }, .{
+            .vsp = Gpr.vsp,
+            .module = Gpr.module,
+            .module_tables_off = 40,
+            .table_len_off = 12,
+            .oob = oob,
+        });
+        set.jmpToNextHandler(as);
+
+        table_idx.writeSlowPath(as);
+
+        oob.place(as);
+        as.printInstrs(&.{
+            "lea {[param_0]f}, [{[vip]f} - 1]",
+            "# vsp in rsi",
+            "mov {[param_2]f}, {[eip]f} # eip",
+            "mov {[param_3]f}, {[stp]f} # stp",
+            "mov {[param_4]f}, r13 # table index",
+            "# interp in r9",
+            "# index to access in r11",
+            "mov r10, r14 # *TableInst",
+        }, .{
+            .param_0 = SystemVParam{ .index = 0 },
+            .vip = Gpr.vip,
+            .param_2 = SystemVParam{ .index = 2 },
+            .eip = Gpr.eip,
+            .param_3 = SystemVParam{ .index = 3 },
+            .stp = Gpr.stp,
+            .param_4 = SystemVParam{ .index = 4 },
+        });
+        as.restoreSystemVSavedRegisters();
+        as.printInstrs(&.{
+            "mov {[param_6]f}, r11d # index",
+            "mov {[param_7]f}, 1 # cause",
+            "mov {[param_8]f}, r14 # *TableInst",
+            "mov rsp, rbp # TODO: is this unnecessary?",
+            "pop rbp",
+            "jmp {[prefix]s}trapTableAccessOutOfBounds",
+            "ud2",
+        }, .{
+            .param_6 = SystemVParam{ .index = 6, .size = .dword },
+            .param_7 = SystemVParam{ .index = 7 },
+            .param_8 = SystemVParam{ .index = 8 },
+            .prefix = as.symbol_prefix,
+        });
+
         set.end(as);
     }
 }

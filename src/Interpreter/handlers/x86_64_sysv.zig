@@ -536,7 +536,7 @@ fn memoryGrowReallocate(
     });
 }
 
-fn trapTableAccessOob(
+fn trapCallIndirectAccessOob(
     trap_ip: Ip, // rdi
     sp: Sp, // stays in rsi
     eip: Eip, // r10 -> rdx
@@ -684,6 +684,35 @@ fn trapMemoryFillOutOfBounds(
     );
 }
 
+fn trapTableAccessOutOfBounds(
+    trap_ip: Ip, // rdi
+    sp: Sp, // stays in rsi
+    eip: Eip, // r10 -> rdx
+    stp: Stp, // rbx -> rcx
+    table_idx: usize, // r8
+    interp: *Interpreter, // stays in r9
+    // These parameters are passed on the stack
+    index: u32, // rbp + 16
+    cause: enum(usize) { @"table.get" = 0, @"table.set" = 1 }, // rbp + 24
+    table: *const runtime.TableInst, // rbp + 32
+) callconv(sysvcc) Transition {
+    @branchHint(.cold);
+    return Transition.trapAt(
+        trap_ip,
+        eip,
+        sp,
+        stp,
+        interp,
+        .init(.table_access_out_of_bounds, .init(@enumFromInt(table_idx), switch (cause) {
+            inline else => |trap_cause| @unionInit(
+                Interpreter.Trap.TableAccessOutOfBounds.Cause,
+                @tagName(trap_cause),
+                .{ .index = index, .maximum = table.len },
+            ),
+        })),
+    );
+}
+
 const generated = @import("asm_generated");
 const generated_handlers = generated.handlers(*const OpcodeHandler);
 
@@ -723,7 +752,8 @@ comptime {
         "trapMemoryInitOutOfBounds",
         "trapMemoryCopyOutOfBounds",
         "trapMemoryFillOutOfBounds",
-        "trapTableAccessOob",
+        "trapTableAccessOutOfBounds",
+        "trapCallIndirectAccessOob",
         "trapIndirectCallToNull",
         "byte_dispatch_table",
         "fc_prefix_dispatch_table",
