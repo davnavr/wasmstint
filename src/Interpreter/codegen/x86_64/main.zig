@@ -3236,6 +3236,43 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         }, .{ .prefix = as.symbol_prefix });
         memset.end(as);
     }
+    {
+        var table_init = as.defineOpcodeHandler(zig, "table.init", .@"64");
+        as.write("# better to implement in Zig instead of assembly\n");
+        var elem_idx = DecodeUlebIdx.fastPath(as, .rdi, .{ .r13, .r14 }, "elem");
+        var table_idx = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "table");
+        as.printInstrs(&.{
+            "# pack indices to ensure another register parameter can be passed",
+            "shl rdi, 32 # elem index in high 32-bits",
+            "or rdi, r11 # table index in low 32-bits",
+            "# setup register parameters",
+            "#0 elem/table indices in rdi, locals was clobbered",
+            "#1 vsp is already in rsi",
+            "#2 module is already in rdx",
+            "#3 fuel is already in rcx",
+            "mov r8, {[vip]f} #4 vip, memories was clobbered",
+            "#5 interp is already in r9",
+            "# prevent cloberring when System V callee-saved registers are restored",
+            "mov r11, {[stp]f} # stp",
+            "# eip already in r10",
+        }, .{ .vip = Gpr.vip, .stp = Gpr.stp });
+        as.restoreSystemVSavedRegisters();
+        as.printInstrs(&.{
+            "mov {[param_6]f}, r11 # stp",
+            "mov {[param_7]f}, r10 # eip",
+            "mov rsp, rbp # TODO: is this unnecessary?",
+            "pop rbp",
+            "jmp {[prefix]s}tableInit",
+            "ud2",
+        }, .{
+            .param_6 = SystemVParam{ .index = 6 },
+            .param_7 = SystemVParam{ .index = 7 },
+            .prefix = as.symbol_prefix,
+        });
+        elem_idx.writeSlowPath(as);
+        table_idx.writeSlowPath(as);
+        table_init.end(as);
+    }
 }
 
 const std = @import("std");

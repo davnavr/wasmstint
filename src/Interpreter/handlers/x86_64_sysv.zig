@@ -554,6 +554,100 @@ fn memoryGrowReallocate(
     });
 }
 
+const TableInitIndices = packed struct(u64) {
+    table: u32,
+    elem: u32,
+};
+
+fn tableInit(
+    indices: TableInitIndices, // rdi
+    sp: Sp, // rsi
+    module: runtime.ModuleInst, // rdx,
+    fuel: *const Interpreter.Fuel, // rcx
+    ip: Ip, // rax -> r8
+    interp: *Interpreter, // r9
+    // These parameters are passed on the stack
+    stp: Stp, // rbx -> `rbp + 16`
+    eip: Eip, // r10 -> `rbp + 24`
+    _: usize, // `rbp + 32`
+    _: usize, // `rbp + 40`
+    _: usize, // `rbp + 48`
+) callconv(sysvcc) Transition {
+    const current_frame = interp.stack.currentFrame().?;
+    if (builtin.mode == .Debug) {
+        const expected_eip = @intFromPtr(current_frame.wasm.eip);
+        if (expected_eip != @intFromPtr(eip)) {
+            std.debug.panic("expected EIP 0x{X}, got 0x{X}", .{ expected_eip, @intFromPtr(eip) });
+        }
+        std.debug.assert(@intFromPtr(ip) <= @intFromPtr(eip));
+        std.debug.assert( // bad module ptr
+            @intFromPtr(current_frame.function.expanded().wasm.module.inner) ==
+                @intFromPtr(module.inner),
+        );
+    }
+
+    // Just copies what the portable interpreter does
+    var vals = Stack.Values.init(
+        sp,
+        &interp.stack,
+        3,
+        @max(3, module.header().module.elementSegments()[indices.elem].header.elem_max_stack),
+    );
+
+    const operands = vals.popArray(3);
+    vals.assertRemainingCountIs(0);
+    const n: u32 = @bitCast(operands[2].i32);
+    const src_idx: u32 = @bitCast(operands[1].i32);
+    const d: u32 = @bitCast(operands[0].i32);
+    @memset(operands, undefined);
+
+    const table_idx: Module.TableIdx = @enumFromInt(indices.elem);
+    runtime.TableInst.init(
+        table_idx,
+        module,
+        @enumFromInt(indices.elem),
+        n,
+        src_idx,
+        d,
+        vals.unallocated(&interp.stack),
+    ) catch |e| switch (e) {
+        error.TableAccessOutOfBounds => {
+            const info = Interpreter.Trap.init(
+                .table_access_out_of_bounds,
+                .init(table_idx, .@"table.init"),
+            );
+            return Transition.trap(ip, .{ .fc = .@"table.init" }, eip, sp, stp, interp, info);
+        },
+    };
+
+    if (builtin.zig_backend == .stage2_x86_64) {
+        // trampoline continues execution
+        return Transition.interrupted(.init(ip, eip), sp, stp, interp, .out_of_fuel);
+    } else {
+        var instr = Instr.init(ip, eip);
+        const locals = common.Locals{ .ptr = current_frame.localValues(&interp.stack).ptr };
+        const handler = instr.readNextOpcodeHandler(fuel, locals, module, interp);
+        // TODO: inlineLlvmTailCallToHandler()
+        return @call(
+            .always_tail,
+            @as(@TypeOf(&tableInit), @ptrCast(opcodeHandlerTrampoline)),
+            .{
+                @as(TableInitIndices, @bitCast(locals)),
+                sp,
+                module,
+                fuel,
+                @as(Ip, @bitCast(module.header().mems)),
+                interp,
+                @as(Stp, @bitCast(instr.next)),
+                @as(Eip, @bitCast(stp)),
+                @intFromPtr(instr.end),
+                @intFromPtr(handler),
+                undefined,
+            },
+        );
+    }
+}
+
 fn trapCallIndirectAccessOob(
     trap_ip: Ip, // rdi
     sp: Sp, // stays in rsi
@@ -764,6 +858,7 @@ comptime {
         "invokeWithinWasmIndirect",
         "constructFuncRef",
         "memoryGrowReallocate",
+        "tableInit",
         "trapIntegerDivisionByZero",
         "trapIntegerOverflow",
         "trapInvalidConversionToInteger",
