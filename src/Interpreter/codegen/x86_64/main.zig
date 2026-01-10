@@ -2639,14 +2639,16 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         var data_idx = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "data");
         var mem_idx = DecodeUlebIdx.fastPath(as, .r13, .{ .r13, .r14 }, "mem");
         var clobbers = AsmWriter.PreservedRegisters{
-            .registers = &[6]Gpr{ .vip, .fuel, .locals, .interp, .disp, .mems },
-            .comments = &[6][]const u8{
+            .registers = &[8]Gpr{ .vip, .fuel, .locals, .interp, .disp, .mems, .eip, .module },
+            .comments = &[8][]const u8{
                 "vip",
                 "fuel",
                 "locals",
                 "interpreter",
                 "dispatch",
                 "memories",
+                "eip",
+                "module",
             },
         };
         clobbers.preserve(as);
@@ -2659,7 +2661,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
 
             "mov edi, dword ptr [{[vsp]f} - 0x30] # dst offset, clobbers locals",
             "mov eax, dword ptr [{[vsp]f} - 0x10] # number of bytes to copy, clobbers vip",
-            "mov ecx, dword ptr [{[vsp]f} - 0x20] # src offset, clobbers fuel",
+            "mov r10d, dword ptr [{[vsp]f} - 0x20] # src offset, clobbers eip",
             "lea {[vsp]f}, [{[vsp]f} - 0x30] # vsp",
 
             "mov r12, qword ptr [r14 + {[size_field_off]d}] # dst memory size, clobbers dispatch",
@@ -2670,6 +2672,22 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "mov r12, qword ptr [r9 + {[info_datas_lens_off]d}]" ++
                 " # ptr to data lens, clobbers dst mem size",
             "mov r12d, dword ptr [r12 + r11*4] # data len, clobbers ptr to data lens",
+
+            "mov rdx, qword ptr [{[module]f} + {[module_datas_drop_mask_off]d}]" ++
+                " # ptr to datas drop masks, clobbers module",
+            "mov ecx, r11d # data index, clobbers fuel",
+            "shr ecx, 5 # calculate index of drop word",
+            "mov edx, dword ptr [rdx + rcx*4] # drop word ptr, clobbers datas drop masks ptr",
+            "mov ecx, r11d # data index",
+            "and ecx, 31 # bit index into data word",
+            // "lea ecx, [31 - ecx]",
+            // "shl edx, cl # move drop bit to bit 31",
+            "shr edx, cl # move drop bit to bit 0",
+            "shl edx, 31 # move drop bit to bit 31",
+            "sar edx, 31 # all 0's is data segment was dropped, all 1's otherwise",
+            "and r12d, edx # set data segment length to 0 if it was dropped",
+
+            "mov rcx, r10 # src offset",
             "lea r8, [rcx + rax] # src end offset, clobbers dst end offset",
             "cmp r8, r12",
             "ja {[oob]f}",
@@ -2690,6 +2708,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .mems = Gpr.mems,
             .module = Gpr.module,
             .module_info_off = 8,
+            .module_datas_drop_mask_off = 56,
             .info_datas_ptrs_off = 232, // Assumes offset of RawInner in Module.Inner is 0
             .info_datas_lens_off = 240, // Assumes offset of RawInner in Module.Inner is 0
             .size_field_off = 8,
