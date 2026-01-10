@@ -949,7 +949,7 @@ fn defineTableAccessOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "mov r15, qword ptr [r14] # table base pointer",
             "jae {[oob]f}",
             "mov r13, qword ptr [{[vsp]f} - 0x10] # element, clobbers index of table",
-            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x20] # vsp",
             "mov qword ptr [r15 + r11*8], r13 # store element",
         }, .{
             .vsp = Gpr.vsp,
