@@ -42,6 +42,7 @@ comptime {
     std.debug.assert(@offsetOf(@FieldType(ModuleInner, "raw"), "datas_lens") == 240);
     std.debug.assert(@offsetOf(runtime.ModuleInst.Header, "tables") == 40);
     std.debug.assert(@offsetOf(runtime.ModuleInst.Header, "globals") == 48);
+    std.debug.assert(@offsetOf(runtime.ModuleInst.Header, "datas_drop_mask") == 56);
     std.debug.assert(@sizeOf(Module.GlobalType) == 2);
     std.debug.assert(@offsetOf(Module.GlobalType, "val_type") == 0);
     std.debug.assert(@offsetOf(runtime.TableInst, "base") == 0);
