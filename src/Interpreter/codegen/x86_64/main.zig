@@ -2553,7 +2553,55 @@ fn defineReferenceOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         is_null.jmpToNextHandler(as);
         is_null.end(as);
     }
-    // TODO: ref.func needs to call into the runtime
+    {
+        var ref_func = as.defineOpcodeHandler(zig, "ref.func", .@"16");
+        var func_idx = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "func");
+
+        const stack_saved_registers = [_]Gpr{ .locals, .mems, .interp, .eip };
+        comptime std.debug.assert(stack_saved_registers.len % 2 == 0); // ensure 16-byte alignment
+
+        for (stack_saved_registers) |saved| {
+            as.printInstrs(&.{"push {f}"}, .{saved});
+        }
+
+        // Already saved
+        comptime std.debug.assert(Gpr.system_v_callee_saved[4].tag == Gpr.stp.tag);
+        comptime std.debug.assert(Gpr.system_v_callee_saved[3].tag == Gpr.disp.tag);
+        const callee_saved_registers: [Gpr.system_v_callee_saved.len - 2]Gpr =
+            .{ .vip, .fuel, .vsp };
+
+        for (Gpr.system_v_callee_saved[0..3], callee_saved_registers) |dst, src| {
+            as.printInstrs(&.{"mov {f}, {f}"}, .{ dst, src });
+        }
+
+        as.printInstrs(&.{
+            "mov {[param_0]f}, r11 # func index",
+            "# rsi is skipped",
+            "# module already in rdx",
+            "# System V calling convention",
+            "call {[symbol_prefix]s}constructFuncRef",
+            "# module still in rdx",
+            "mov qword ptr [{[temp_vsp]f}], rax",
+            "lea {[temp_vsp]f}, [{[temp_vsp]f} + 0x10] # vsp",
+        }, .{
+            .param_0 = SystemVParam{ .index = 0 },
+            .symbol_prefix = as.symbol_prefix,
+            .temp_vsp = Gpr.system_v_callee_saved[2],
+        });
+        comptime std.debug.assert(callee_saved_registers[2].tag == Gpr.vsp.tag);
+
+        for (Gpr.system_v_callee_saved[0..3], callee_saved_registers) |src, dst| {
+            as.printInstrs(&.{"mov {f}, {f}"}, .{ dst, src });
+        }
+
+        for (0..stack_saved_registers.len) |i| {
+            as.printInstrs(&.{"pop {f}"}, .{stack_saved_registers[stack_saved_registers.len - i - 1]});
+        }
+
+        ref_func.jmpToNextHandler(as);
+        func_idx.writeSlowPath(as);
+        ref_func.end(as);
+    }
 }
 
 fn definePrefixOpcodeHandlers(

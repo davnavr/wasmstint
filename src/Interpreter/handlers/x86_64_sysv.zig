@@ -508,6 +508,23 @@ fn invokeWithinWasmIndirect(
     );
 }
 
+const ConstructedFuncRef = extern struct {
+    func: runtime.FuncRef.Nullable, // rax
+    current_module: runtime.ModuleInst, // stays in rdx
+};
+
+fn constructFuncRef(
+    func_index: usize, // rdi
+    _: usize, // rsi
+    module: runtime.ModuleInst, // stays in rdx
+) callconv(sysvcc) ConstructedFuncRef {
+    const func_idx: Module.FuncIdx = @enumFromInt(func_index);
+    return .{
+        .func = @as(runtime.FuncRef.Nullable, @bitCast(module.inner.funcRef(func_idx))),
+        .current_module = module,
+    };
+}
+
 fn memoryGrowReallocate(
     new_size: usize, // rdi
     /// `sp - 1` refers to `(i32.const -1)`, indicating growth failure.
@@ -744,6 +761,7 @@ comptime {
         "returnFromWasm",
         "invokeWithinWasm",
         "invokeWithinWasmIndirect",
+        "constructFuncRef",
         "memoryGrowReallocate",
         "trapIntegerDivisionByZero",
         "trapIntegerOverflow",
