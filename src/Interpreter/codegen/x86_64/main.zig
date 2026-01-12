@@ -3245,7 +3245,10 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
     }
     {
         var table_init = as.defineOpcodeHandler(zig, "table.init", .@"64");
-        as.write("# better to implement in Zig instead of assembly\n");
+        as.printInstrs(&.{
+            "# better to implement in Zig instead of assembly\n",
+            "mov r15, {[vip]f} # trap ip",
+        }, .{ .vip = Gpr.vip });
         var elem_idx = DecodeUlebIdx.fastPath(as, .rdi, .{ .r13, .r14 }, "elem");
         var table_idx = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "table");
         as.printInstrs(&.{
@@ -3262,11 +3265,13 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "# prevent cloberring when System V callee-saved registers are restored",
             "mov r11, {[stp]f} # stp",
             "# eip already in r10",
+            "mov {[vip]f}, r15 # trap ip",
         }, .{ .vip = Gpr.vip, .stp = Gpr.stp });
         as.restoreSystemVSavedRegisters();
         as.printInstrs(&.{
             "mov {[param_6]f}, r11 # stp",
             "mov {[param_7]f}, r10 # eip",
+            "mov {[param_8]f}, {[vip]f} # trap IP, clobered actual VIP which is currently in r8",
             "mov rsp, rbp # TODO: is this unnecessary?",
             "pop rbp",
             "jmp {[prefix]s}tableInit",
@@ -3274,6 +3279,8 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         }, .{
             .param_6 = SystemVParam{ .index = 6 },
             .param_7 = SystemVParam{ .index = 7 },
+            .param_8 = SystemVParam{ .index = 8 },
+            .vip = Gpr.vip,
             .prefix = as.symbol_prefix,
         });
         elem_idx.writeSlowPath(as);

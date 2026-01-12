@@ -565,12 +565,12 @@ fn tableInit(
     sp: Sp, // rsi
     module: runtime.ModuleInst, // rdx,
     fuel: *const Interpreter.Fuel, // rcx
-    ip: Ip, // rax -> r8
+    next_ip: Ip, // rax -> r8
     interp: *Interpreter, // r9
     // These parameters are passed on the stack
     stp: Stp, // rbx -> `rbp + 16`
     eip: Eip, // r10 -> `rbp + 24`
-    _: usize, // `rbp + 32`
+    trap_ip: Ip, // `rbp + 32`
     _: usize, // `rbp + 40`
     _: usize, // `rbp + 48`
 ) callconv(sysvcc) Transition {
@@ -580,7 +580,8 @@ fn tableInit(
         if (expected_eip != @intFromPtr(eip)) {
             std.debug.panic("expected EIP 0x{X}, got 0x{X}", .{ expected_eip, @intFromPtr(eip) });
         }
-        std.debug.assert(@intFromPtr(ip) <= @intFromPtr(eip));
+        std.debug.assert(@intFromPtr(trap_ip) < @intFromPtr(next_ip));
+        std.debug.assert(@intFromPtr(next_ip) <= @intFromPtr(eip));
         std.debug.assert( // bad module ptr
             @intFromPtr(current_frame.function.expanded().wasm.module.inner) ==
                 @intFromPtr(module.inner),
@@ -617,15 +618,15 @@ fn tableInit(
                 .table_access_out_of_bounds,
                 .init(table_idx, .@"table.init"),
             );
-            return Transition.trap(ip, .{ .fc = .@"table.init" }, eip, sp, stp, interp, info);
+            return Transition.trap(trap_ip, .{ .fc = .@"table.init" }, eip, sp, stp, interp, info);
         },
     };
 
+    var instr = Instr.init(next_ip, eip);
     if (builtin.zig_backend == .stage2_x86_64) {
         // trampoline continues execution
-        return Transition.interrupted(.init(ip, eip), sp, stp, interp, .out_of_fuel);
+        return Transition.interrupted(instr, sp, stp, interp, .out_of_fuel);
     } else {
-        var instr = Instr.init(ip, eip);
         const locals = common.Locals{ .ptr = current_frame.localValues(&interp.stack).ptr };
         const handler = instr.readNextOpcodeHandler(fuel, locals, module, interp);
         // TODO: inlineLlvmTailCallToHandler()
@@ -641,7 +642,7 @@ fn tableInit(
                 interp,
                 @as(Stp, @bitCast(instr.next)),
                 @as(Eip, @bitCast(stp)),
-                @intFromPtr(instr.end),
+                instr.end,
                 @intFromPtr(handler),
                 undefined,
             },
