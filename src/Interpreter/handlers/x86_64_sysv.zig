@@ -556,8 +556,8 @@ fn memoryGrowReallocate(
 }
 
 const TableInitIndices = packed struct(u64) {
-    table: u32,
     elem: u32,
+    table: u32,
 };
 
 fn tableInit(
