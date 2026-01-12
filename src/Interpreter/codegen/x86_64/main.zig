@@ -2792,30 +2792,37 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
 
         memory_init.end(as);
     }
-    {
-        var data_drop = as.defineOpcodeHandler(zig, "data.drop", .@"32");
+    for (&[_]struct { []const u8, u8 }{
+        .{ "data.drop", 56 },
+        .{ "elem.drop", 64 },
+    }) |info| {
+        const name, const drop_mask_offset = info;
+        const kind = name[0..4];
+        var drop = as.defineOpcodeHandler(zig, name, .@"32");
         as.writeInstrs(&.{"mov r13, rcx # save fuel"});
-        var data_idx = DecodeUlebIdx.fastPath(as, .rcx, .{ .r14, .r15 }, "data");
+        var idx = DecodeUlebIdx.fastPath(as, .rcx, .{ .r14, .r15 }, kind);
         as.printInstrs(&.{
-            "mov r14, [{[module]f} + {[module_datas_drop_mask_off]d}] # datas drop masks ptr",
+            "mov r14, [{[module]f} + {[module_drop_mask_off]d}] # {[kind]s} drop masks ptr",
             "mov r15, rcx",
             "shr r15, 5 # calculate index of drop word",
-            "lea r14, dword ptr [r14 + r15*4] # drop word ptr, clobbers datas drop masks ptr",
-            "and rcx, 0x1F # calculate bit index into drop word, clobbers data idx",
+            "lea r14, dword ptr [r14 + r15*4] # drop word ptr, clobbers {[kind]s}s drop masks ptr",
+            "and rcx, 0x1F # calculate bit index into drop word, clobbers {[kind]s} idx",
             "mov r15d, 1",
             // "shlx r15d, r13b", // requires BMI2
-            "shl r15d, cl # bit corresponding to the data to drop",
+            "shl r15d, cl # bit corresponding to the {[kind]s} to drop",
             "# could use ANDN if BMI1 is enabled",
             "not r15d # ensure only corresponding bit is set to zero",
-            "and dword ptr [r14], r15d # set drop bit to zero, meaning data length is set to zero",
+            "and dword ptr [r14], r15d" ++
+                " # set drop bit to zero, meaning {[kind]s} length is set to zero",
             "mov rcx, r13 # restore fuel",
         }, .{
             .module = Gpr.module,
-            .module_datas_drop_mask_off = 56,
+            .module_drop_mask_off = drop_mask_offset,
+            .kind = kind,
         });
-        data_drop.jmpToNextHandler(as);
-        data_idx.writeSlowPath(as);
-        data_drop.end(as);
+        drop.jmpToNextHandler(as);
+        idx.writeSlowPath(as);
+        drop.end(as);
     }
     {
         var memmove = as.defineOpcodeHandler(zig, "memory.copy", .fromByteUnits(128));
