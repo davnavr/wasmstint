@@ -2638,19 +2638,9 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{"mov r15, {f} # save IP to first byte after opcode"}, .{Gpr.vip});
         var data_idx = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "data");
         var mem_idx = DecodeUlebIdx.fastPath(as, .r13, .{ .r13, .r14 }, "mem");
-        var clobbers = AsmWriter.PreservedRegisters{
-            .registers = &[8]Gpr{ .vip, .fuel, .locals, .interp, .disp, .mems, .eip, .module },
-            .comments = &[8][]const u8{
-                "vip",
-                "fuel",
-                "locals",
-                "interpreter",
-                "dispatch",
-                "memories",
-                "eip",
-                "module",
-            },
-        };
+        var clobbers = AsmWriter.PreservedRegisters.init(
+            &.{ "vip", "fuel", "locals", "interp", "disp", "mems", "eip", "module" },
+        );
         clobbers.preserve(as);
         var oob = as.label(&.{"oob"});
         var copy_trailing_bytes = as.label(&.{"copy_trailing_below_64"});
@@ -2887,6 +2877,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "mov r8, rbx # clobbers dst base pointer",
             "sub r8, rdi",
             "cmp r8, rax # reverse if dst start < src end and src end - dst start < bytes to copy",
+            // TODO: Fix, logic might be wrong if src end == dst start
             "jl {[copy_reverse]f} # check for overlap",
         }, .{
             .mems = Gpr.mems,
@@ -3076,10 +3067,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         var mem_idx = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "memory");
         // With no proof whatsover, this assumes that calling `memset` via PLT would be slower than
         // a custom memset implementation.
-        const clobbers = AsmWriter.PreservedRegisters{
-            .registers = &[4]Gpr{ .vip, .fuel, .locals, .stp },
-            .comments = &[4][]const u8{ "vip", "fuel", "locals", "stp" },
-        };
+        const clobbers = AsmWriter.PreservedRegisters.init(&.{ "vip", "fuel", "locals", "stp" });
         clobbers.preserve(as);
         var done = as.label(&.{"done"});
         var below_16 = as.label(&.{"below_16_bytes"});
@@ -3286,6 +3274,219 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         elem_idx.writeSlowPath(as);
         table_idx.writeSlowPath(as);
         table_init.end(as);
+    }
+    {
+        var table_copy = as.defineOpcodeHandler(zig, "table.copy", .@"64");
+        as.printInstrs(&.{
+            "push {[disp]f} # prevent clobbering disp",
+            "mov {[disp]f}, {[vip]f} # save IP to first byte after opcode, clobbers disp",
+        }, .{ .vip = Gpr.vip, .disp = Gpr.disp });
+        var dst_idx = DecodeUlebIdx.fastPath(as, .r11, .{ .r14, .r15 }, "dst");
+        var src_idx = DecodeUlebIdx.fastPath(as, .r13, .{ .r14, .r15 }, "src");
+        var clobbers = AsmWriter.PreservedRegisters.init(&.{
+            "disp", // contains saved ip
+            "module",
+            "stp",
+            "locals",
+            "vip",
+            "fuel",
+            "mems",
+            "interp",
+        });
+        // disp was already saved
+        const restore_disp = clobbers;
+        clobbers.registers = clobbers.registers[1..];
+        clobbers.comments = clobbers.comments[1..];
+        clobbers.preserve(as);
+        clobbers = restore_disp;
+        var src_oob = as.label(&.{"dst_oob"});
+        var dst_oob = as.label(&.{"src_oob"});
+        var copy_reverse = as.label(&.{"reverse"});
+        as.printInstrs(&.{
+            "mov rdx, qword ptr [{[module]f} + {[module_tables_off]d}]" ++
+                " # ptr to table inst ptrs, clobbers module",
+            "mov rbx, qword ptr [rdx + r13*8] # ptr to src table, clobbers STP",
+            "mov rdx, qword ptr [rdx + r11*8] # ptr to dst table, clobbers ptr to table inst ptrs",
+
+            "mov eax, dword ptr [{[vsp]f} - 0x10] # number of elements to copy, clobbers VIP",
+            "mov ecx, dword ptr [{[vsp]f} - 0x20] # src offset, clobbers fuel",
+            "mov edi, dword ptr [{[vsp]f} - 0x30] # dst offset, clobbers locals",
+            "lea {[vsp]f}, [{[vsp]f} - 0x30] # VSP",
+
+            "mov r8d, dword ptr [rbx + {[table_len_off]d}] # src table len, clobbers mems",
+            "lea r9, [rcx + rax] # src end offset, clobbers interpreter",
+            "cmp r9, r8",
+            "ja {[src_oob]f}",
+
+            "mov r8d, dword ptr [rdx + {[table_len_off]d}] # dst table len, clobbers src table len",
+            "lea r13, [rdi + rax] # dst end offset, clobbers src table idx",
+            "cmp r13, r8",
+            "ja {[dst_oob]f}",
+
+            "mov rbx, qword ptr [rbx] # src elems ptr, clobbers ptr to src tables",
+            "mov rdx, qword ptr [rdx] # dst elems ptr, clobbers ptr to dst tables",
+            "lea rcx, [rbx + rcx*8] # src ptr, clobbers src offset",
+
+            "xor ebx, ebx # clobbers src elems ptr",
+            "cmp edi, r9d # dst_start < src_end",
+            "setb bl",
+            "xor r13d, r13d # clobbers dst end offset",
+            "sub r9d, edi # src_end - dst_start, clobbers src end offset",
+            "cmp r9d, eax",
+            "setb r13b",
+
+            "lea rdi, [rdx + rdi*8] # dst ptr, clobbers dst offset",
+
+            "# check for overlap:",
+            "# if dst_start < src_end and src_end - dst_start < length then reverse",
+            "test bl, r13b",
+            "jnz {[copy_reverse]f}",
+        }, .{
+            .module = Gpr.module,
+            .module_tables_off = 40,
+            .table_len_off = 12,
+            .vsp = Gpr.vsp,
+            .src_oob = src_oob,
+            .dst_oob = dst_oob,
+            .copy_reverse = copy_reverse,
+        });
+        var done = as.label(&.{"label"});
+        {
+            var copy_trailing = as.label(&.{"copy_trailing"});
+            as.printInstrs(&.{
+                "cmp eax, 8",
+                "jb {[copy_trailing]f}",
+            }, .{ .copy_trailing = copy_trailing });
+
+            as.write(".p2align 5\n");
+            var copy_8_elems = as.label(&.{"copy_8_elems"});
+            copy_8_elems.place(as);
+            as.printInstrs(&.{
+                "movups xmm0, xmmword ptr [rcx]",
+                "movups xmmword ptr [rdi], xmm0",
+                "movups xmm1, xmmword ptr [rcx + 0x10]",
+                "movups xmmword ptr [rdi + 0x10], xmm1",
+                "movups xmm2, xmmword ptr [rcx + 0x20]",
+                "movups xmmword ptr [rdi + 0x20], xmm2",
+                "movups xmm3, xmmword ptr [rcx + 0x30]",
+                "movups xmmword ptr [rdi + 0x30], xmm3",
+                "lea rcx, [rcx + 64] # advance src",
+                "lea rdi, [rdi + 64] # advance dst",
+                "sub eax, 8",
+                "cmp eax, 8",
+                "jae {[copy_8_elems]f}",
+            }, .{ .copy_8_elems = copy_8_elems });
+
+            as.write(".p2align 4\n");
+            copy_trailing.place(as);
+            as.printInstrs(&.{
+                "test eax, eax",
+                "jz {[done]f}",
+            }, .{ .done = done });
+            var copy_elem = as.label(&.{"copy_elem"});
+            copy_elem.place(as);
+            as.printInstrs(&.{
+                "mov rbx, qword ptr [rcx] # clobbers",
+                "mov qword ptr [rdi], rbx",
+                "lea rcx, [rcx + 8] # advance src",
+                "lea rdi, [rdi + 8] # advance dst",
+                "dec eax",
+                "jnz {[copy_elem]f}",
+            }, .{ .copy_elem = copy_elem });
+        }
+        {
+            done.place(as);
+            clobbers.restore(as);
+            table_copy.jmpToNextHandler(as);
+        }
+        {
+            as.write(".p2align 5\n");
+            copy_reverse.place(as);
+            var copy_trailing = as.label(&.{"copy_reverse_trailing"});
+            as.printInstrs(&.{
+                "lea rcx, [rcx + rax*8] # src end ptr, clobbers src ptr",
+                "lea rdi, [rdi + rax*8] # dst end ptr, clobbers dst ptr",
+                "cmp eax, 8",
+                "jb {[copy_trailing]f}",
+            }, .{ .copy_trailing = copy_trailing });
+
+            as.write(".p2align 5\n");
+            var copy_8_elems = as.label(&.{"copy_reverse_8_elems"});
+            copy_8_elems.place(as);
+            as.printInstrs(&.{
+                "movups xmm0, xmmword ptr [rcx - 0x10]",
+                "movups xmmword ptr [rdi - 0x10], xmm0",
+                "movups xmm1, xmmword ptr [rcx - 0x20]",
+                "movups xmmword ptr [rdi - 0x20], xmm1",
+                "movups xmm2, xmmword ptr [rcx - 0x30]",
+                "movups xmmword ptr [rdi - 0x30], xmm2",
+                "movups xmm3, xmmword ptr [rcx - 0x40]",
+                "movups xmmword ptr [rdi - 0x40], xmm3",
+                "sub rcx, 64 # advance src",
+                "sub rdi, 64 # advance dst",
+                "sub eax, 8",
+                "cmp eax, 8",
+                "jae {[copy_8_elems]f}",
+            }, .{ .copy_8_elems = copy_8_elems });
+
+            as.write(".p2align 4\n");
+            copy_trailing.place(as);
+            as.printInstrs(&.{
+                "test eax, eax",
+                "jz {[done]f}",
+            }, .{ .done = done });
+            var copy_elem = as.label(&.{"copy_reverse_elem"});
+            copy_elem.place(as);
+            as.printInstrs(&.{
+                "mov rbx, qword ptr [rcx - 8] # clobbers ptr to src table elems",
+                "mov qword ptr [rdi - 8], rbx",
+                "sub rcx, 8 # advance src",
+                "sub rdi, 8 # advance dst",
+                "dec eax",
+                "jnz {[copy_elem]f}",
+                "jmp {[done]f}",
+                "ud2",
+            }, .{ .copy_elem = copy_elem, .done = done });
+        }
+
+        dst_idx.writeSlowPath(as);
+        src_idx.writeSlowPath(as);
+
+        {
+            src_oob.place(as);
+            as.writeInstrs(&.{"mov r11, r13 # move src table index"});
+            dst_oob.place(as);
+            as.printInstrs(
+                &.{"mov r15, {[disp]f} # IP to first byte, saved in disp"},
+                .{ .disp = Gpr.disp },
+            );
+            clobbers.restore(as);
+            for (
+                Gpr.system_v_parameters,
+                &[6]Gpr{ .r15, .vsp, .eip, .stp, .r11, .interp },
+                &[6][]const u8{ "first byte IP", "vsp", "eip", "stp", "table index", "interpreter" },
+            ) |dst, src, comment| {
+                if (dst != src)
+                    as.printInstrs(
+                        &.{"mov {[dst]f}, {[src]f} # {[comment]s}"},
+                        .{ .dst = dst, .src = src, .comment = comment },
+                    )
+                else
+                    as.printInstrs(
+                        &.{"# {[comment]s} stays in {[dst]f}"},
+                        .{ .comment = comment, .dst = dst },
+                    );
+            }
+            as.restoreSystemVSavedRegisters();
+            as.printInstrs(&.{
+                "mov rsp, rbp # TODO: is this unnecessary?",
+                "pop rbp",
+                "jmp {[prefix]s}trapTableCopyOutOfBounds",
+                "ud2",
+            }, .{ .prefix = as.symbol_prefix });
+        }
+
+        table_copy.end(as);
     }
 }
 

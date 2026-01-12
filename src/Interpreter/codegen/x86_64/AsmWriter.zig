@@ -461,6 +461,25 @@ pub const PreservedRegisters = struct {
     registers: []const Gpr,
     comments: []const []const u8,
 
+    pub fn init(
+        /// Register at `0` is the one that gets pushed first, and is popped last.
+        comptime selected: []const []const u8,
+    ) PreservedRegisters {
+        const preserved: [selected.len]Gpr = comptime registers: {
+            var registers: [selected.len]Gpr = undefined;
+            for (&registers, selected) |*dst, name| {
+                dst.* = @field(Gpr, name);
+            }
+
+            break :registers registers;
+        };
+
+        return .{
+            .registers = comptime &preserved,
+            .comments = selected,
+        };
+    }
+
     pub fn preserve(info: *const PreservedRegisters, as: *AsmWriter) void {
         // TODO: if register is .disp, can use lea of dispatch table instead of pop
         for (info.registers, info.comments) |reg, comment| {
