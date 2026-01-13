@@ -3534,7 +3534,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "mov rbx, qword ptr [rbx + r11*8]" ++
                 " # ptr to table, clobbers ptr to table insts ptrs",
 
-            "mov ecx, dword ptr [{[vsp]f} - 0x10] # number of bytes to copy, clobbers fuel",
+            "mov ecx, dword ptr [{[vsp]f} - 0x10] # number of elements to copy, clobbers fuel",
             "mov rax, qword ptr [{[vsp]f} - 0x20] # elem to replicate, clobbers vip",
             "mov edi, dword ptr [{[vsp]f} - 0x30] # offset to start at, clobbers locals",
             "lea {[vsp]f}, [{[vsp]f} - 0x30] # vsp",
@@ -3595,7 +3595,8 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "test ecx, ecx",
             "jz {[done]f}",
             "mov qword ptr [rdi], rax # write at least one element",
-            "jz {[done]f} # if only one element was remaining, no need to update count & ptr",
+            "cmp ecx, 1",
+            "je {[done]f} # if only one element was remaining, no need to update count & ptr",
             "# if more elements remaining, above write is duplicated",
         }, .{ .done = done });
 
