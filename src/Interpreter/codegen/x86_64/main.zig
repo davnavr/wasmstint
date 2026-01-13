@@ -3540,7 +3540,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "lea {[vsp]f}, [{[vsp]f} - 0x30] # vsp",
 
             "mov r13d, dword ptr [rbx + {[table_len_off]d}] # table len",
-            "lea r14, [edi*8 + ecx] # end offset, clobbers interpreter",
+            "lea r14, [edi + ecx] # end offset, clobbers interpreter",
             "cmp r14, r13",
             "ja {[oob]f}",
 
