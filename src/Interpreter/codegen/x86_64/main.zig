@@ -720,7 +720,7 @@ fn defineLocalOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .@"local.get" => as.printInstrs(&.{
                 "movaps xmm0, xmmword ptr [{[locals]f} + r13] # load value from locals",
                 "movaps xmmword ptr [{[vsp]f}], xmm0 # store into value stack",
-                "add {[vsp]f}, 0x10 # pop value that was stored",
+                "lea {[vsp]f}, [{[vsp]f} + 0x10] # push value that was stored",
             }, .{ .locals = Gpr.locals, .vsp = Gpr.vsp }),
             .@"local.set", .@"local.tee" => {
                 as.printInstrs(&.{
@@ -3545,7 +3545,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "ja {[oob]f}",
 
             "mov rbx, qword ptr [rbx] # table elems ptr, clobbers ptr to table",
-            "add rdi, rbx # ptr to write to, clobbers start offset",
+            "lea rdi, [rbx + rdi*8] # ptr to write to, clobbers start offset",
             "lea rbx, [rbx + r14*8] # table end ptr, clobbers table elems ptr",
 
             "movq xmm0, rax # replicate element",
@@ -3607,8 +3607,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "dec ecx",
             "cmp ecx, 2",
             "ja {[loop]f}",
-            "# write last 0-2 elements",
-            "movups xmmword ptr [rbx - 0x20], xmm0",
+            "movups xmmword ptr [rbx - 0x10], xmm0 # write last 0-2 elements",
         }, .{ .loop = write_2_elems });
 
         done.place(as);
