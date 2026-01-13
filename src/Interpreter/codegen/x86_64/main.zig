@@ -3515,6 +3515,135 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
 
         table_copy.end(as);
     }
+    {
+        var table_fill = as.defineOpcodeHandler(zig, "table.fill", .@"64");
+        as.printInstrs(&.{"mov r15, {f} # save IP to first byte after opcode"}, .{Gpr.vip});
+        var table_idx = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "table");
+        const clobbers = AsmWriter.PreservedRegisters.init(&.{
+            "vip",
+            "fuel",
+            "locals",
+            "stp",
+        });
+        clobbers.preserve(as);
+        var oob = as.label(&.{"oob"});
+        var less_than_8_elems = as.label(&.{"less_than_8_elems"});
+        as.printInstrs(&.{
+            "mov rbx, qword ptr [{[module]f} + {[module_tables_off]d}]" ++
+                " # ptr to table inst ptrs, clobbers STP",
+            "mov rbx, qword ptr [rbx + r11*8]" ++
+                " # ptr to table, clobbers ptr to table insts ptrs",
+
+            "mov ecx, dword ptr [{[vsp]f} - 0x10] # number of bytes to copy, clobbers fuel",
+            "mov rax, qword ptr [{[vsp]f} - 0x20] # elem to replicate, clobbers vip",
+            "mov edi, dword ptr [{[vsp]f} - 0x30] # offset to start at, clobbers locals",
+            "lea {[vsp]f}, [{[vsp]f} - 0x30] # vsp",
+
+            "mov r13d, dword ptr [rbx + {[table_len_off]d}] # table len",
+            "lea r14, [edi*8 + ecx] # end offset, clobbers interpreter",
+            "cmp r14, r13",
+            "ja {[oob]f}",
+
+            "mov rbx, qword ptr [rbx] # table elems ptr, clobbers ptr to table",
+            "add rdi, rbx # ptr to write to, clobbers start offset",
+            "lea rbx, [rbx + r14*8] # table end ptr, clobbers table elems ptr",
+
+            "movq xmm0, rax # replicate element",
+            "pshufd xmm0, xmm0, 0x44 # move low qword to high qword",
+
+            "cmp ecx, 8",
+            "jb {[less_than_8_elems]f}",
+            "# Fill first 64-bytes, and align",
+            "movups xmmword ptr [rdi], xmm0",
+            "movups xmmword ptr [rdi + 0x10], xmm0",
+            "movups xmmword ptr [rdi + 0x20], xmm0",
+            "movups xmmword ptr [rdi + 0x30], xmm0",
+
+            "mov r13, rdi # unrounded ptr to write to, clobbers table len",
+            "lea rdi, [rdi + 64] # clobbers ptr to write to",
+            "shr rdi, 6",
+            "shl rdi, 6 # clears low 6 bits, contains rounded/aligned ptr to write to",
+            "mov r14, rdi # clobbers end offset",
+            "sub r14, r13 # how many elems were written to become aligned",
+            "sub ecx, r14d # update count",
+            "cmp ecx, 8",
+            "jb {[less_than_8_elems]f}",
+        }, .{
+            .module = Gpr.module,
+            .module_tables_off = 40,
+            .table_len_off = 12,
+            .vsp = Gpr.vsp,
+            .oob = oob,
+            .less_than_8_elems = less_than_8_elems,
+        });
+        var hot_loop = as.label(&.{"write_8_elems_aligned"});
+        hot_loop.place(as);
+        as.printInstrs(&.{
+            "movaps xmmword ptr [rdi], xmm0",
+            "movaps xmmword ptr [rdi + 0x10], xmm0",
+            "movaps xmmword ptr [rdi + 0x20], xmm0",
+            "movaps xmmword ptr [rdi + 0x30], xmm0",
+            "lea rdi, [rdi + 64] # advance ptr",
+            "sub ecx, 8",
+            "cmp ecx, 8",
+            "jae {[hot_loop]f}",
+        }, .{ .hot_loop = hot_loop });
+
+        less_than_8_elems.place(as);
+        var done = as.label(&.{"done"});
+        as.printInstrs(&.{
+            "test ecx, ecx",
+            "jz {[done]f}",
+            "mov qword ptr [rdi], rax # write at least one element",
+            "jz {[done]f} # if only one element was remaining, no need to update count & ptr",
+            "# if more elements remaining, above write is duplicated",
+        }, .{ .done = done });
+
+        var write_2_elems = as.label(&.{"write_2_elems_unaligned"});
+        write_2_elems.place(as);
+        as.printInstrs(&.{
+            "movups xmmword ptr [rdi], xmm0 # possibly unaligned if total # to copy is < 8",
+            "lea rdi, [rdi + 16] # advance ptr",
+            "dec ecx",
+            "cmp ecx, 2",
+            "ja {[loop]f}",
+            "# write last 0-2 elements",
+            "movups xmmword ptr [rbx - 0x20], xmm0",
+        }, .{ .loop = write_2_elems });
+
+        done.place(as);
+        clobbers.restore(as);
+        table_fill.jmpToNextHandler(as);
+        table_idx.writeSlowPath(as);
+
+        oob.place(as);
+        clobbers.restore(as);
+        for (
+            Gpr.system_v_parameters,
+            &[6]Gpr{ .r15, .vsp, .eip, .stp, .r11, .interp },
+            &[6][]const u8{ "vip", "vsp", "eip", "stp", "table index", "interpreter" },
+        ) |dst, src, comment| {
+            if (dst != src)
+                as.printInstrs(
+                    &.{"mov {[dst]f}, {[src]f} # {[comment]s}"},
+                    .{ .dst = dst, .src = src, .comment = comment },
+                )
+            else
+                as.printInstrs(&.{"# {[comment]s} stays in {[dst]f}"}, .{
+                    .comment = comment,
+                    .dst = dst,
+                });
+        }
+        as.restoreSystemVSavedRegisters();
+        as.printInstrs(&.{
+            "mov rsp, rbp # TODO: is this unnecessary?",
+            "pop rbp",
+            "jmp {[prefix]s}trapTableFillOutOfBounds",
+            "ud2",
+        }, .{ .prefix = as.symbol_prefix });
+
+        table_fill.end(as);
+    }
 }
 
 const std = @import("std");

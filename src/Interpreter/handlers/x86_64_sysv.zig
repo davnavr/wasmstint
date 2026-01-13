@@ -854,6 +854,21 @@ fn trapTableCopyOutOfBounds(
     return Transition.trap(ip, .{ .fc = .@"table.copy" }, eip, sp, stp, interp, info);
 }
 
+fn trapTableFillOutOfBounds(
+    trap_ip: Ip, // rdi
+    sp: Sp, // stays in rsi
+    eip: Eip, // r10 -> rdx
+    stp: Stp, // rbx -> rcx
+    table_idx: usize, // r8
+    interp: *Interpreter, // stays in r9
+) callconv(sysvcc) Transition {
+    @branchHint(.cold);
+    return Transition.trap(trap_ip, .{ .fc = .@"table.fill" }, eip, sp, stp, interp, .init(
+        .table_access_out_of_bounds,
+        .init(@enumFromInt(table_idx), .@"table.fill"),
+    ));
+}
+
 const generated = @import("asm_generated");
 const generated_handlers = generated.handlers(*const OpcodeHandler);
 
@@ -898,6 +913,7 @@ comptime {
         "trapMemoryFillOutOfBounds",
         "trapTableAccessOutOfBounds",
         "trapTableCopyOutOfBounds",
+        "trapTableFillOutOfBounds",
         "trapCallIndirectAccessOob",
         "trapIndirectCallToNull",
         "byte_dispatch_table",
