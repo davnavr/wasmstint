@@ -403,10 +403,10 @@ pub const ExternAddr = packed union {
     }
 
     pub fn format(ref: ExternAddr, writer: *Writer) Writer.Error!void {
-        if (ref.ptr == null) {
-            try writer.writeAll("(ref.null extern)");
+        if (ref.nat.toInt()) |n| {
+            try writer.print("(ref.extern 0x{X})", .{n});
         } else {
-            try writer.print("(ref.extern 0x{X})", .{@intFromPtr(ref.ptr)});
+            try writer.writeAll("(ref.null extern)");
         }
     }
 };
