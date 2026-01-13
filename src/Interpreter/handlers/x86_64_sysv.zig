@@ -650,6 +650,17 @@ fn tableInit(
     }
 }
 
+fn trapUnreachable(
+    trap_ip: Ip, // rdi
+    sp: Sp, // stays in rsi
+    eip: Eip, // r10 -> rdx
+    stp: Stp, // rbx -> rcx
+    _: usize, // r8 (unused)
+    interp: *Interpreter, // stays in r9
+) callconv(sysvcc) Transition {
+    return Transition.trapAt(trap_ip, eip, sp, stp, interp, .init(.unreachable_code_reached, {}));
+}
+
 fn trapCallIndirectAccessOob(
     trap_ip: Ip, // rdi
     sp: Sp, // stays in rsi
@@ -877,6 +888,7 @@ comptime {
         "constructFuncRef",
         "memoryGrowReallocate",
         "tableInit",
+        "trapUnreachable",
         "trapIntegerDivisionByZero",
         "trapIntegerOverflow",
         "trapInvalidConversionToInteger",

@@ -398,6 +398,33 @@ fn defineControlOpcodeHandlers(
     optimize: std.builtin.OptimizeMode,
 ) void {
     {
+        var handler = as.defineOpcodeHandler(zig, "unreachable", .@"16");
+        as.printInstrs(&.{
+            "lea rdi, [{[vip]f} - 1] # IP to opcode byte",
+        }, .{ .vip = Gpr.vip });
+        inline for (
+            Gpr.system_v_parameters[1..],
+            [5]?[]const u8{ "vsp", "eip", "stp", null, "interp" },
+        ) |dst, arg| {
+            if (arg) |reg| {
+                as.printInstrs(
+                    &.{"mov {[dst]f}, {[src]f} # " ++ reg},
+                    .{ .dst = dst, .src = @as(Gpr, @field(Gpr, reg)) },
+                );
+            } else {
+                as.printInstrs(&.{"# {f} is unused"}, .{dst});
+            }
+        }
+        as.restoreSystemVSavedRegisters();
+        as.printInstrs(&.{
+            "mov rsp, rbp # TODO: is this unnecessary",
+            "pop rbp",
+            "jmp {[prefix]s}trapUnreachable",
+            "ud2",
+        }, .{ .prefix = as.symbol_prefix });
+        handler.end(as);
+    }
+    {
         var nop = as.defineOpcodeHandler(zig, "nop", .@"16");
         nop.jmpToNextHandler(as);
         nop.end(as);

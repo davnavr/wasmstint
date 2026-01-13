@@ -351,7 +351,7 @@ const Modules = struct {
                     .pic = false,
                     // .code_model = .small, // Forces usage of LLVM backend
                 }),
-                .max_rss = ByteSize.mib(130).bytes,
+                .max_rss = ByteSize.mib(131).bytes,
             });
             codegen_x64_sysv_exe.root_module.addImport("ZigWriter", codegen_zig_writer);
 
