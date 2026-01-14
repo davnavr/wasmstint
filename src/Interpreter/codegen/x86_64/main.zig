@@ -688,19 +688,18 @@ fn defineParametericOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
     // TODO: "select t" handler to fallthrough to "select" handler
     {
         var select = as.defineOpcodeHandler(zig, "select", .@"16");
-        var true_label = as.label(&.{"true"});
         // select without type requires numeric or vector type, so this must
         // assume xmmword-sized values to be safe
         as.printInstrs(&.{
             "xor r14d, r14d",
             "mov r13d, dword ptr [{[vsp]f} - 0x10] # load condition",
             "test r13d, r13d",
-            "jnz {[true]f}",
-            "movaps xmm0, xmmword ptr [{[vsp]f} - 0x20] # move selected value to correct place",
-            "movaps xmmword ptr [{[vsp]f} - 0x30], xmm0",
-        }, .{ .vsp = Gpr.vsp, .true = true_label });
-        true_label.place(as);
-        as.printInstrs(&.{"lea {[vsp]f}, [{[vsp]f} - 0x20] # vsp"}, .{ .vsp = Gpr.vsp });
+            "setz r14b # set r14 to 1 if condition is false",
+            "shl r14d, 4 # set r14 to 0x10 if condition is false",
+            "movaps xmm0, xmmword ptr [{[vsp]f} - 0x30 + r14] # load selected value",
+            "movaps xmmword ptr [{[vsp]f} - 0x30], xmm0 # move selected value to correct place",
+            "lea {[vsp]f}, [{[vsp]f} - 0x20] # vsp",
+        }, .{ .vsp = Gpr.vsp });
         select.jmpToNextHandler(as);
         select.end(as);
     }
