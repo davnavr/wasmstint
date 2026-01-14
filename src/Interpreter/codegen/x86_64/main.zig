@@ -2769,7 +2769,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
 
             "mov r9, qword ptr [r9 + {[info_datas_ptrs_off]d}]" ++
                 " # ptr to data byte ptrs, clobbers ptr to module info",
-            "mov r9, qword ptr [r9 + r13*8] # ptr to data base, clobbers ptr to data byte ptrs",
+            "mov r9, qword ptr [r9 + r11*8] # ptr to data base, clobbers ptr to data byte ptrs",
             "add rcx, r9 # src data ptr, clobbers src offset",
 
             "mov r9, qword ptr [r14] # dst base pointer, clobbers ptr to data base",
