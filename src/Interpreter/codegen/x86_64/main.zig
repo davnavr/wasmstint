@@ -361,7 +361,7 @@ const TakeBranch = struct {
         as.write(".p2align 4\n");
         take.copy_results.place(as);
         as.printInstrs(&.{
-            "add {[vsp]f}, 0x10 # one result was already copied",
+            "lea {[vsp]f}, [{[vsp]f} + 0x10 # one result was already copied",
             "lea r13, [r14 + 0x10] # pointer to results destination",
         }, .{ .vsp = Gpr.vsp });
 
@@ -377,7 +377,7 @@ const TakeBranch = struct {
             as.printInstrs(&.{
                 "movaps xmm0, xmmword ptr [{[vsp]f}]",
                 "movaps xmmword ptr [r13], xmm0",
-                "add {[vsp]f}, 0x10",
+                "lea {[vsp]f}, [{[vsp]f} + 0x10] # vsp",
                 "add r13, 0x10",
                 "cmp r13, r15 # check if done",
                 "je {[finish]f}",
@@ -442,7 +442,7 @@ fn defineControlOpcodeHandlers(
         var false_branch = as.label(&.{"false"});
         as.printInstrs(&.{
             "mov r13d, dword ptr [{[vsp]f} - 0x10] # load condition from top of stack",
-            "sub {[vsp]f}, 0x10 # condition was popped",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # condition was popped",
             "test r13d, r13d",
             "jz {[false_branch]f}",
         }, .{
@@ -502,7 +502,7 @@ fn defineControlOpcodeHandlers(
         var false_branch = as.label(&.{"false"});
         as.printInstrs(&.{
             "mov r13d, dword ptr [{[vsp]f} - 0x10] # load condition",
-            "sub {[vsp]f}, 0x10 # pop condition",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # pop condition",
             "test r13d, r13d",
             "jz {[false]f}",
             "lea r15, [{[vip]f} - 1] # save ip to br_if byte",
@@ -528,7 +528,7 @@ fn defineControlOpcodeHandlers(
         as.printInstrs(&.{
             "# no need to actually read the labels",
             "mov r13d, dword ptr [{[vsp]f} - 0x10] # load index from value stack",
-            "sub {[vsp]f}, 0x10 # VSP",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # VSP",
             "cmp r11d, r13d",
             "cmovb r13d, r11d # prevent exceeding label count",
             "shl r13d, 3 # side table entries are 8 bytes in size",
@@ -681,7 +681,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
 fn defineParametericOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
     {
         var drop = as.defineOpcodeHandler(zig, "drop", .@"16");
-        as.printInstrs(&.{"sub {[vsp]f}, 0x10 # vsp"}, .{ .vsp = Gpr.vsp });
+        as.printInstrs(&.{"lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp"}, .{ .vsp = Gpr.vsp });
         drop.jmpToNextHandler(as);
         drop.end(as);
     }
@@ -700,7 +700,7 @@ fn defineParametericOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "movaps xmmword ptr [{[vsp]f} - 0x30], xmm0",
         }, .{ .vsp = Gpr.vsp, .true = true_label });
         true_label.place(as);
-        as.printInstrs(&.{"sub {[vsp]f}, 0x20 # vsp"}, .{ .vsp = Gpr.vsp });
+        as.printInstrs(&.{"lea {[vsp]f}, [{[vsp]f} - 0x20] # vsp"}, .{ .vsp = Gpr.vsp });
         select.jmpToNextHandler(as);
         select.end(as);
     }
@@ -728,7 +728,7 @@ fn defineLocalOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
                     "movaps xmm0, xmmword ptr [{[vsp]f} - 0x10] # load from value stack",
                 }, .{ .vsp = Gpr.vsp });
                 if (opcode_name == .@"local.set") {
-                    as.printInstrs(&.{"sub {[vsp]f}, 0x10 # vsp"}, .{ .vsp = Gpr.vsp });
+                    as.printInstrs(&.{"lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp"}, .{ .vsp = Gpr.vsp });
                 }
                 as.printInstrs(&.{
                     "movaps xmmword ptr [{[locals]f} + r13], xmm0 # store into locals",
@@ -778,7 +778,7 @@ fn defineGlobalOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "mov r11d, dword ptr [r15] # get value to load",
             "mov dword ptr [{[vsp]f}], r11d",
-            "add {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} + 0x10] # vsp",
         }, .{ .vsp = Gpr.vsp });
         get.jmpToNextHandler(as);
 
@@ -787,7 +787,7 @@ fn defineGlobalOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "mov r11, qword ptr [r15] # get value to load",
             "mov qword ptr [{[vsp]f}], r11",
-            "add {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} + 0x10] # vsp",
         }, .{ .vsp = Gpr.vsp });
         get.jmpToNextHandler(as);
 
@@ -796,7 +796,7 @@ fn defineGlobalOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "movaps xmm0, xmmword ptr [r15] # get value to load",
             "movaps xmmword ptr [{[vsp]f}], xmm0",
-            "add {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} + 0x10] # vsp",
         }, .{ .vsp = Gpr.vsp });
         get.jmpToNextHandler(as);
 
@@ -860,7 +860,7 @@ fn defineGlobalOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "mov r11d, dword ptr [{[vsp]f} - 0x10] # get value to store",
             "mov dword ptr [r15], r11d",
-            "sub {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
         }, .{ .vsp = Gpr.vsp });
         set.jmpToNextHandler(as);
 
@@ -869,7 +869,7 @@ fn defineGlobalOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "mov r11, qword ptr [{[vsp]f} - 0x10] # get value to store",
             "mov qword ptr [r15], r11",
-            "sub {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
         }, .{ .vsp = Gpr.vsp });
         set.jmpToNextHandler(as);
 
@@ -878,7 +878,7 @@ fn defineGlobalOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "movaps xmm0, xmmword ptr [{[vsp]f} - 0x10] # get value to store",
             "movaps xmmword ptr [r15], xmm0",
-            "sub {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
         }, .{ .vsp = Gpr.vsp });
         set.jmpToNextHandler(as);
 
@@ -1185,7 +1185,7 @@ fn defineMemoryStoreOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "mov {[load_reg]f}, {[load_size]t} ptr [{[vsp]f} - 0x10] # get value to store ",
             "{[instr]s} {[store_size]t} ptr [r13 + r15], {[store_reg]f}" ++
                 " # write into linear memory",
-            "sub {[vsp]f}, 0x20 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x20] # vsp",
         }, .{
             .vsp = Gpr.vsp,
             .load_reg = Gpr.r14.withSize(load_size),
@@ -1329,7 +1329,7 @@ fn defineConstOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         finished.place(as);
         as.printInstrs(&.{
             "mov {[store_size]t} ptr [{[vsp]f}], {[r11]f}",
-            "add {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} + 0x10] # vsp",
         }, .{
             .store_size = switch (int_type) {
                 .i32 => Gpr.Size.dword,
@@ -1399,7 +1399,7 @@ fn defineConstOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "mov r13d, dword ptr [{[vip]f}] # unaligned",
             "add {[vip]f}, 4",
             "mov dword ptr [{[vsp]f}], r13d",
-            "add {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} + 0x10] # vsp",
         }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
         op.jmpToNextHandler(as);
         op.end(as);
@@ -1410,7 +1410,7 @@ fn defineConstOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "mov r13, qword ptr [{[vip]f}] # unaligned",
             "add {[vip]f}, 8",
             "mov qword ptr [{[vsp]f}], r13",
-            "add {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} + 0x10] # vsp",
         }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
         op.jmpToNextHandler(as);
         op.end(as);
@@ -1510,7 +1510,7 @@ fn defineIntegerOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, int_type: IntTyp
             "cmp {[r13]f}, {[size]t} ptr [{[vsp]f} - 0x10]",
             "{[set_instr]s} r14b",
             "mov dword ptr [{[vsp]f} - 0x20], r14d # store result of comparison",
-            "sub {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
         }, .{ .r13 = r13, .size = size, .vsp = Gpr.vsp, .set_instr = info[1] });
         cmp.jmpToNextHandler(as);
         cmp.end(as);
@@ -1535,7 +1535,7 @@ fn defineIntegerOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, int_type: IntTyp
         as.printInstrs(&.{
             "mov {[r13]f}, {[size]t} ptr [{[vsp]f} - 0x10]",
             "add {[size]t} ptr [{[vsp]f} - 0x20], {[r13]f}",
-            "sub {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
         }, .{ .r13 = r13, .size = size, .vsp = Gpr.vsp });
         add.jmpToNextHandler(as);
         add.end(as);
@@ -1545,7 +1545,7 @@ fn defineIntegerOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, int_type: IntTyp
         as.printInstrs(&.{
             "mov {[r13]f}, {[size]t} ptr [{[vsp]f} - 0x10]",
             "sub {[size]t} ptr [{[vsp]f} - 0x20], {[r13]f}",
-            "sub {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
         }, .{ .r13 = r13, .size = size, .vsp = Gpr.vsp });
         sub.jmpToNextHandler(as);
         sub.end(as);
@@ -1556,7 +1556,7 @@ fn defineIntegerOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, int_type: IntTyp
             "mov {[r13]f}, {[size]t} ptr [{[vsp]f} - 0x10]",
             "imul {[r13]f}, {[size]t} ptr [{[vsp]f} - 0x20]",
             "mov {[size]t} ptr [{[vsp]f} - 0x20], {[r13]f}",
-            "sub {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
         }, .{ .r13 = r13, .size = size, .vsp = Gpr.vsp });
         mul.jmpToNextHandler(as);
         mul.end(as);
@@ -1659,7 +1659,7 @@ fn defineIntegerOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, int_type: IntTyp
 
         as.printInstrs(&.{
             "mov {[size]t} ptr [{[vsp]f} - 0x20], {[result]f} # store result",
-            "sub {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
             "mov {[vip]f}, r14 # restore IP",
             "mov {[module]f}, r15 # restore module",
         }, .{
@@ -1690,7 +1690,7 @@ fn defineIntegerOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, int_type: IntTyp
                 .rem => {
                     as.printInstrs(&.{
                         "mov {[size]t} ptr [{[vsp]f} - 0x20], {[rdx]f}",
-                        "sub {[vsp]f}, 0x10 # vsp",
+                        "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
                         "mov {[vip]f}, r14 # restore IP",
                         "mov {[module]f}, r15 # restore module",
                     }, .{
@@ -1717,7 +1717,7 @@ fn defineIntegerOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, int_type: IntTyp
         as.printInstrs(&.{
             "mov {[r13]f}, {[size]t} ptr [{[vsp]f} - 0x10]",
             "{[instr]s} {[size]t} ptr [{[vsp]f} - 0x20], {[r13]f}",
-            "sub {[vsp]f}, 0x10 # VSP",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # VSP",
         }, .{ .r13 = r13, .size = size, .vsp = Gpr.vsp, .instr = name[1..] });
         op.jmpToNextHandler(as);
         op.end(as);
@@ -1738,7 +1738,7 @@ fn defineIntegerOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, int_type: IntTyp
             "mov {[rcx]f}, {[size]t} ptr [{[vsp]f} - 0x10] # shift amount",
             "# TODO: could use BMI2 shift without flags here",
             "{[instr]s} {[size]t} ptr [{[vsp]f} - 0x20], cl",
-            "sub {[vsp]f}, 0x10 # VSP",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # VSP",
             "mov {[fuel]f}, r13 # restore fuel",
         }, .{
             .rcx = rcx,
@@ -1831,7 +1831,7 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, float_type: FloatT
             "mov{[int_suffix]c} {[r13]f}, xmm0 # all 1's if true",
             "and {[r13]f}, 1",
             "mov {[size]t} ptr [{[vsp]f} - 0x20], {[r13]f} # write result",
-            "sub {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
         }, .{
             .float_suffix = float_suffix,
             .int_suffix = int_suffix,
@@ -1859,7 +1859,7 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, float_type: FloatT
             "ucomis{[suffix]c} xmm0, {[size]t} ptr [{[vsp]f} - {[op_2]s}] # operand 1",
             "{[set_instr]s} r15b",
             "mov dword ptr [{[vsp]f} - 0x20], r15d # store result",
-            "sub {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
         }, .{
             .suffix = float_suffix,
             .size = size,
@@ -1942,7 +1942,7 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, float_type: FloatT
             "movs{[suffix]c} xmm0, {[size]t} ptr [{[vsp]f} - 0x20] # operand 2",
             "{[instr]s}{[suffix]c} xmm0, {[size]t} ptr [{[vsp]f} - 0x10]",
             "movs{[suffix]c} {[size]t} ptr [{[vsp]f} - 0x20], xmm0 # store result",
-            "sub {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
         }, .{ .suffix = float_suffix, .size = size, .vsp = Gpr.vsp, .instr = info[1] });
         op.jmpToNextHandler(as);
         op.end(as);
@@ -1978,7 +1978,7 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, float_type: FloatT
             "orp{[float_suffix]c} xmm2, xmm4",
 
             "mov{[int_suffix]c} {[size]t} ptr [{[vsp]f} - 0x20], xmm2 # write result",
-            "sub {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
         }, .{
             .r13 = r13,
             .canonical_nan_mask = canonical_nan_mask,
@@ -2030,7 +2030,7 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, float_type: FloatT
             "orp{[float_suffix]c} xmm3, xmm4",
 
             "mov{[int_suffix]c} {[size]t} ptr [{[vsp]f} - 0x20], xmm3 # write result",
-            "sub {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
         }, .{
             .r13 = r13,
             .sign_bit = sign_bit,
@@ -2055,7 +2055,7 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter, float_type: FloatT
             "and {[r14]f}, {[size]t} ptr [{[vsp]f} - 0x20] # get other bits",
             "or {[r13]f}, {[r14]f} # combine them",
             "mov {[size]t} ptr [{[vsp]f} - 0x20], {[r13]f} # store result",
-            "sub {[vsp]f}, 0x10 # vsp",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
         }, .{
             .r13 = r13,
             .r14 = r14,
@@ -3123,7 +3123,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "mov ecx, dword ptr [{[vsp]f} - 0x10] # number of bytes to fill, clobbers fuel",
             "mov eax, dword ptr [{[vsp]f} - 0x20] # byte to replicate, clobbers vip",
             "mov edi, dword ptr [{[vsp]f} - 0x30] # offset to start at, clobbers locals",
-            "lea {[vsp]f}, [{[vsp]f} - 0x30] # vsp", // TODO: use lea to replace VSP add/sub
+            "lea {[vsp]f}, [{[vsp]f} - 0x30] # vsp",
             "mov rbx, qword ptr [r13 + {[size_field_off]d}] # memory size, clobbers stp",
             "lea r13, [rdi + rcx] # end offset, clobbers pointer to MemInst",
             "cmp r13, rbx",
