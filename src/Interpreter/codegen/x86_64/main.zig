@@ -1202,7 +1202,7 @@ fn defineMemoryManagementOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         var mem_idx_decode = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "memory");
         as.printInstrs(&.{
             "mov r13, qword ptr [{[mems]f} + r11*8] # pointer to MemInst",
-            "mov r13d, dword ptr [r13 + {[mem_size_off]d}] # memory size",
+            "mov r13, qword ptr [r13 + {[mem_size_off]d}] # memory size",
             "shr r13d, 16 # go bytes to page size",
             "mov dword ptr [{[vsp]f}], r13d",
             "lea {[vsp]f}, [{[vsp]f} + 0x10] # pushed onto stack",
@@ -3520,6 +3520,26 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         }
 
         table_copy.end(as);
+    }
+    {
+        var table_size = as.defineOpcodeHandler(zig, "table.size", .@"32");
+        var table_idx_decode = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "table");
+        as.printInstrs(&.{
+            "mov r13, qword ptr [{[module]f} + {[module_tables_off]d}]" ++
+                " # pointer to module table ptrs",
+            "mov r13, qword ptr [r13 + r11*8] # pointer to TableInst",
+            "mov r13d, dword ptr [r13 + {[table_len_off]d}] # table len",
+            "mov dword ptr [{[vsp]f}], r13d",
+            "lea {[vsp]f}, [{[vsp]f} + 0x10] # pushed onto stack",
+        }, .{
+            .module = Gpr.module,
+            .module_tables_off = 40,
+            .table_len_off = 12,
+            .vsp = Gpr.vsp,
+        });
+        table_size.jmpToNextHandler(as);
+        table_idx_decode.writeSlowPath(as);
+        table_size.end(as);
     }
     {
         var table_fill = as.defineOpcodeHandler(zig, "table.fill", .@"64");
