@@ -2946,8 +2946,8 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             as.printInstrs(&.{
                 "movups xmm0, xmmword ptr [rcx]",
                 "movups xmmword ptr [rdi], xmm0",
-                "movups xmm0, xmmword ptr [rcx + 16]",
-                "movups xmmword ptr [rdi + 16], xmm0", // TODO: use xmm1
+                "movups xmm1, xmmword ptr [rcx + 16]",
+                "movups xmmword ptr [rdi + 16], xmm1",
                 "lea rcx, [rcx + 32] # advance src ptr",
                 "lea rdi, [rdi + 32] # advance dst ptr",
                 "sub eax, 32",
@@ -3000,7 +3000,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         }
         {
             copy_reverse.place(as);
-            var copy_trailing = as.label(&.{"copy_trailing"});
+            var copy_trailing = as.label(&.{"copy_trailing_reverse"});
             as.printInstrs(&.{
                 "# src end ptr in rbx",
                 "lea rdi, [rdi + rax] # dst end ptr, clobbers dst start pointer",
@@ -3009,13 +3009,13 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             }, .{ .copy_trailing = copy_trailing });
 
             as.write(".p2align 5\n");
-            var hot_loop = as.label(&.{"hot_loop"});
+            var hot_loop = as.label(&.{"hot_loop_reverse"});
             hot_loop.place(as);
             as.printInstrs(&.{
                 "movups xmm0, xmmword ptr [rbx - 16]",
                 "movups xmmword ptr [rdi - 16], xmm0",
-                "movups xmm0, xmmword ptr [rbx - 32]",
-                "movups xmmword ptr [rdi - 32], xmm0", // TODO: use xmm1
+                "movups xmm1, xmmword ptr [rbx - 32]",
+                "movups xmmword ptr [rdi - 32], xmm1",
                 "lea rbx, [rbx - 32] # advance src ptr",
                 "lea rdi, [rdi - 32] # advance dst ptr",
                 "sub eax, 32",
@@ -3025,16 +3025,16 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
 
             copy_trailing.place(as);
             as.write(".p2align 5\n");
-            var copy_trailing_below_8 = as.label(&.{"copy_trailing_below_8"});
+            var copy_trailing_below_8 = as.label(&.{"copy_trailing_below_8_reverse"});
             as.printInstrs(&.{
                 "cmp eax, 8",
                 "jb {[copy_trailing_below_8]f}",
             }, .{ .copy_trailing_below_8 = copy_trailing_below_8 });
-            var copy_trailing_qwords = as.label(&.{"copy_trailing_qwords"});
+            var copy_trailing_qwords = as.label(&.{"copy_trailing_qwords_reverse"});
             copy_trailing_qwords.place(as);
             as.printInstrs(&.{
-                "mov rbx, qword ptr [rbx - 8] # unaligned, clobbers src end ptr",
-                "mov qword ptr [rdi - 8], rbx # unaligned",
+                "mov rcx, qword ptr [rbx - 8] # unaligned, clobbers src start ptr",
+                "mov qword ptr [rdi - 8], rcx # unaligned",
                 "lea rbx, [rbx - 8] # advance src ptr",
                 "lea rdi, [rdi - 8] # advance dst ptr",
                 "sub eax, 8",
@@ -3047,9 +3047,9 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             as.printInstrs(&.{
                 "test eax, eax",
                 "jz {[done]f}",
-                "xor ecx, ecx # clobbers src start ptr, which wasn't used anyway",
+                "xor ecx, ecx # clobbers",
             }, .{ .done = done });
-            var copy_trailing_bytes = as.label(&.{"copy_trailing_bytes"});
+            var copy_trailing_bytes = as.label(&.{"copy_trailing_bytes_reverse"});
             copy_trailing_bytes.place(as);
             as.printInstrs(&.{
                 "mov cl, byte ptr [rbx - 1]",
