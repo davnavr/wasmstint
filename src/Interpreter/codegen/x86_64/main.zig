@@ -3100,6 +3100,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         var below_16 = as.label(&.{"below_16_bytes"});
         var between_16_and_32 = as.label(&.{"between_16_and_32_bytes"});
         var between_32_and_64 = as.label(&.{"between_32_and_64_bytes"});
+        var set_64_trailing_bytes = as.label(&.{"set_64_trailing_bytes"});
         // TODO: See if AVX is enabled to use ymm registers
         as.printInstrs(&.{
             "mov r13, qword ptr [{[mems]f} + r11*8] # pointer to MemInst",
@@ -3137,6 +3138,9 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "mov rax, rdi # clobbers 8-byte pattern to fill",
             "sub rax, rbx # number of bytes to get to 64-byte alignment",
             "sub ecx, eax # update count",
+            "# rdi is 64-byte aligned at this point",
+            "cmp ecx, 64",
+            "jb {[set_64_trailing_bytes]f}",
             // TODO: rep stosq if size > 1024
         }, .{
             .mems = Gpr.mems,
@@ -3146,41 +3150,31 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .below_16 = below_16,
             .between_16_and_32 = between_16_and_32,
             .between_32_and_64 = between_32_and_64,
+            .set_64_trailing_bytes = set_64_trailing_bytes,
         });
         // https://www.microsoft.com/en-us/msrc/blog/2021/01/building-faster-amd64-memset-routines
         // ^ guesses that future `rep stos` would use AVX-512, requiring 64-byte alignment
-        var set_trailing_bytes = as.label(&.{"set_trailing_bytes"});
+        as.write(".p2align 4\n");
         var copy_64_aligned = as.label(&.{"copy_64_aligned"});
         copy_64_aligned.place(as);
-        as.write(".p2align 4\n");
         as.printInstrs(&.{
-            "# rdi is 64-byte aligned at this point",
-            "cmp ecx, 64",
-            "jb {[set_trailing_bytes]f}",
             "movaps xmmword ptr [rdi], xmm0",
             "movaps xmmword ptr [rdi + 0x10], xmm0",
             "movaps xmmword ptr [rdi + 0x20], xmm0",
             "movaps xmmword ptr [rdi + 0x30], xmm0",
             "lea rdi, [rdi + 64] # update destination pointer",
             "sub ecx, 64 # update count",
-            "jmp {[copy_64_aligned]f}", // TODO: restructure loop so each iteration doesn't have two jumps
-        }, .{ .set_trailing_bytes = set_trailing_bytes, .copy_64_aligned = copy_64_aligned });
-        set_trailing_bytes.place(as);
-        var copy_trailing_32_unaligned = as.label(&.{"copy_trailing_32_unaligned"});
-        as.printInstrs(&.{
-            "# rdi is still 64-byte aligned at this point",
-            "cmp ecx, 32",
-            "jb {[copy_trailing_32_unaligned]f}",
-            "movaps xmmword ptr [rdi], xmm0",
-            "movaps xmmword ptr [rdi + 0x10], xmm0",
-            "lea rdi, [rdi + 32] # update destination pointer",
-            "sub ecx, 64 # update count",
-        }, .{ .copy_trailing_32_unaligned = copy_trailing_32_unaligned });
-        copy_trailing_32_unaligned.place(as);
+            "cmp ecx, 64",
+            "jae {[copy_64_aligned]f}",
+        }, .{ .copy_64_aligned = copy_64_aligned });
+        set_64_trailing_bytes.place(as);
         as.writeInstrs(&.{
-            "# fill remaining 0-31 bytes",
-            "movups xmmword ptr [rdi + rcx - 16], xmm0",
-            "movups xmmword ptr [rdi + rcx - 32], xmm0",
+            "# fill remaining 0-63 bytes",
+            "movups xmmword ptr [rdi + rcx - 0x40], xmm0",
+            "movups xmmword ptr [rdi + rcx - 0x30], xmm0",
+            "movups xmmword ptr [rdi + rcx - 0x20], xmm0",
+            "movups xmmword ptr [rdi + rcx - 0x10], xmm0",
+            "# no need to update counts, we are done",
         });
         done.place(as);
         clobbers.restore(as);
@@ -3223,7 +3217,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         between_16_and_32.place(as);
         as.printInstrs(&.{
             "movups xmmword ptr [rdi], xmm0",
-            "movups xmmword ptr [rdi + rcx - 16], xmm0",
+            "movups xmmword ptr [rdi + rcx - 0x10], xmm0",
             "jmp {[done]f}",
             "ud2",
         }, .{ .done = done });
