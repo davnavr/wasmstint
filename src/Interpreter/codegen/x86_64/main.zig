@@ -155,7 +155,7 @@ fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) voi
         // Seems to be no way to avoid doing this, even if a normal `call` is used here
         as.restoreSystemVSavedRegisters();
         as.printInstrs(&.{
-            "mov rsp, rbp # TODO: is this mov unnecessary?",
+            "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[symbol_prefix]s}interruptOutOfFuel",
             "ud2",
@@ -417,7 +417,7 @@ fn defineControlOpcodeHandlers(
         }
         as.restoreSystemVSavedRegisters();
         as.printInstrs(&.{
-            "mov rsp, rbp # TODO: is this unnecessary",
+            "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}trapUnreachable",
             "ud2",
@@ -544,11 +544,12 @@ fn defineControlOpcodeHandlers(
         var @"return" = as.defineOpcodeHandler(zig, "return", .@"32");
         as.printInstrs(&.{
             "# no need to save every register, since this is returning",
-            "mov {[param_0]f}, {[eip]f} # most parameters are already in the correct place",
+            "mov {[param_0]f}, {[eip]f} # EIP",
+            "# other parameters are already in the correct place",
         }, .{ .eip = Gpr.eip, .param_0 = SystemVParam{ .index = 0 } });
         as.restoreSystemVSavedRegisters();
         as.printInstrs(&.{
-            "mov rsp, rbp # TODO: is this unnecessary",
+            "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}returnFromWasm",
             "ud2",
@@ -576,7 +577,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         }
         as.restoreSystemVSavedRegisters();
         as.printInstrs(&.{
-            "mov rsp, rbp # TODO: is this unnecessary?",
+            "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}invokeWithinWasm # call into Zig",
             "ud2",
@@ -634,7 +635,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         }
         as.restoreSystemVSavedRegisters();
         as.printInstrs(&.{
-            "mov rsp, rbp # TODO: is this unnecessary?",
+            "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}invokeWithinWasmIndirect",
             "ud2",
@@ -652,7 +653,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         }, .{ .eip = Gpr.eip, .stp = Gpr.stp });
         as.restoreSystemVSavedRegisters();
         as.printInstrs(&.{
-            "mov rsp, rbp # TODO: is this unnecessary?",
+            "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}trapCallIndirectAccessOob",
             "ud2",
@@ -668,7 +669,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         }, .{ .eip = Gpr.eip, .stp = Gpr.stp });
         as.restoreSystemVSavedRegisters();
         as.printInstrs(&.{
-            "mov rsp, rbp # TODO: is this unnecessary?",
+            "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}trapIndirectCallToNull",
             "ud2",
@@ -951,7 +952,7 @@ fn defineTableAccessOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "mov {[param_6]f}, r11d # index",
             "mov {[param_7]f}, 0 # cause",
             "mov {[param_8]f}, r10 # *TableInst",
-            "mov rsp, rbp # TODO: is this unnecessary?",
+            "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}trapTableAccessOutOfBounds",
             "ud2",
@@ -1013,7 +1014,7 @@ fn defineTableAccessOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "mov {[param_6]f}, r11d # index",
             "mov {[param_7]f}, 1 # cause",
             "mov {[param_8]f}, r10 # *TableInst",
-            "mov rsp, rbp # TODO: is this unnecessary?",
+            "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}trapTableAccessOutOfBounds",
             "ud2",
@@ -1069,6 +1070,7 @@ const LinearMemoryAccess = struct {
         };
     }
 
+    /// At this point `rsp` must refer to the saved `rbp` (it must be equal to `rbp`).
     fn end(access: *LinearMemoryAccess, op: *AsmWriter.OpcodeHandler, as: *AsmWriter) void {
         op.jmpToNextHandler(as);
         access.align_skip.writeSlowPath(as);
@@ -1099,7 +1101,7 @@ const LinearMemoryAccess = struct {
             "mov {[param_6]f}, r10d # address",
             "mov {[param_7]f}, {[size]d} # size",
             "mov {[param_8]f}, r11 # *MemInst",
-            "mov rsp, rbp # TODO: is this unnecessary?",
+            "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}trapMemoryAccessOutOfBounds",
             "ud2",
@@ -1253,7 +1255,7 @@ fn defineMemoryManagementOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.restoreSystemVSavedRegisters();
         as.printInstrs(&.{
             "mov {[param_6]f}, r11 #7 stp",
-            "mov rsp, rbp # TODO: is this unnecessary?",
+            "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}memoryGrowReallocate",
             "ud2",
@@ -2814,7 +2816,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         }
         as.restoreSystemVSavedRegisters();
         as.printInstrs(&.{
-            "mov rsp, rbp # TODO: is this unnecessary?",
+            "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}trapMemoryInitOutOfBounds",
             "ud2",
@@ -3089,7 +3091,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             }
             as.restoreSystemVSavedRegisters();
             as.printInstrs(&.{
-                "mov rsp, rbp # TODO: is this unnecessary?",
+                "# rsp already refers to saved rbp",
                 "pop rbp",
                 "jmp {[prefix]s}trapMemoryCopyOutOfBounds",
                 "ud2",
@@ -3257,7 +3259,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         }
         as.restoreSystemVSavedRegisters();
         as.printInstrs(&.{
-            "mov rsp, rbp # TODO: is this unnecessary?",
+            "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}trapMemoryFillOutOfBounds",
             "ud2",
@@ -3293,7 +3295,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "mov {[param_6]f}, r11 # stp",
             "mov {[param_7]f}, r10 # eip",
             "mov {[param_8]f}, {[vip]f} # trap IP, clobered actual VIP which is currently in r8",
-            "mov rsp, rbp # TODO: is this unnecessary?",
+            "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}tableInit",
             "ud2",
@@ -3512,7 +3514,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             }
             as.restoreSystemVSavedRegisters();
             as.printInstrs(&.{
-                "mov rsp, rbp # TODO: is this unnecessary?",
+                "# rsp already refers to saved rbp",
                 "pop rbp",
                 "jmp {[prefix]s}trapTableCopyOutOfBounds",
                 "ud2",
@@ -3662,7 +3664,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         }
         as.restoreSystemVSavedRegisters();
         as.printInstrs(&.{
-            "mov rsp, rbp # TODO: is this unnecessary?",
+            "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}trapTableFillOutOfBounds",
             "ud2",
