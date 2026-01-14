@@ -1197,7 +1197,20 @@ fn defineMemoryStoreOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
 }
 
 fn defineMemoryManagementOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
-    // memory.size
+    {
+        var memory_size = as.defineOpcodeHandler(zig, "memory.size", .@"32");
+        var mem_idx_decode = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "memory");
+        as.printInstrs(&.{
+            "mov r13, qword ptr [{[mems]f} + r11*8] # pointer to MemInst",
+            "mov r13d, dword ptr [r13 + {[mem_size_off]d}] # memory size",
+            "shr r13d, 16 # go bytes to page size",
+            "mov dword ptr [{[vsp]f}], r13d",
+            "lea {[vsp]f}, [{[vsp]f} + 0x10] # pushed onto stack",
+        }, .{ .mems = Gpr.mems, .mem_size_off = 8, .vsp = Gpr.vsp });
+        memory_size.jmpToNextHandler(as);
+        mem_idx_decode.writeSlowPath(as);
+        memory_size.end(as);
+    }
     {
         var memory_grow = as.defineOpcodeHandler(zig, "memory.grow", .@"64");
         var mem_idx_decode = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "memory");
