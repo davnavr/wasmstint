@@ -48,7 +48,7 @@ pub fn main() noreturn {
     defineSupportRoutines(&asm_writer, optimize);
     defineControlOpcodeHandlers(&asm_writer, &zig_writer, optimize);
     defineCallOpcodeHandlers(&asm_writer, &zig_writer);
-    defineParametericOpcodeHandlers(&asm_writer, &zig_writer);
+    defineParametericOpcodeHandlers(&asm_writer, &zig_writer, optimize);
     defineLocalOpcodeHandlers(&asm_writer, &zig_writer);
     defineGlobalOpcodeHandlers(&asm_writer, &zig_writer);
     defineTableAccessOpcodeHandlers(&asm_writer, &zig_writer);
@@ -678,28 +678,72 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
     }
 }
 
-fn defineParametericOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
+fn writeSelectHandler(as: *AsmWriter) void {
+    as.printInstrs(&.{
+        "xor r14d, r14d",
+        "mov r13d, dword ptr [{[vsp]f} - 0x10] # load condition",
+        "test r13d, r13d",
+        "setz r14b # set r14 to 1 if condition is false",
+        "shl r14d, 4 # set r14 to 0x10 if condition is false",
+        "movaps xmm0, xmmword ptr [{[vsp]f} - 0x30 + r14] # load selected value",
+        "movaps xmmword ptr [{[vsp]f} - 0x30], xmm0 # move selected value to correct place",
+        "lea {[vsp]f}, [{[vsp]f} - 0x20] # vsp",
+    }, .{ .vsp = Gpr.vsp });
+}
+
+fn defineParametericOpcodeHandlers(
+    as: *AsmWriter,
+    zig: *ZigWriter,
+    optimize: std.builtin.OptimizeMode,
+) void {
     {
         var drop = as.defineOpcodeHandler(zig, "drop", .@"16");
         as.printInstrs(&.{"lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp"}, .{ .vsp = Gpr.vsp });
         drop.jmpToNextHandler(as);
         drop.end(as);
     }
-    // TODO: "select t" handler to fallthrough to "select" handler
+    {
+        var select_t = AsmWriter.OpcodeHandler{
+            .function = as.startFunction("select_t", .@"16"),
+            .out_of_fuel = as.label(&.{"out_of_fuel"}),
+        };
+        zig.defineOpcodeHandlerAlias("select_t", "select t");
+        var type_count = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "count");
+        var bad_type_count: AsmWriter.Label = undefined;
+        const has_type_count_check = switch (optimize) {
+            .Debug, .ReleaseSafe => true,
+            .ReleaseFast, .ReleaseSmall => false,
+        };
+
+        if (has_type_count_check) {
+            bad_type_count = as.label(&.{"type_count_check"});
+            as.printInstrs(&.{
+                "test r11, r11",
+                "cmp r11, 1",
+                "jne {[bad_type_count]f}",
+            }, .{ .bad_type_count = bad_type_count });
+        }
+
+        as.printInstrs(&.{
+            "inc {[vip]f} # skip val type",
+        }, .{ .vip = Gpr.vip });
+        writeSelectHandler(as);
+        select_t.jmpToNextHandler(as);
+
+        type_count.writeSlowPath(as);
+
+        if (has_type_count_check) {
+            bad_type_count.place(as);
+            as.writeInstrs(&.{"ud2 # invalid type count for select t"});
+        }
+
+        select_t.end(as);
+    }
     {
         var select = as.defineOpcodeHandler(zig, "select", .@"16");
         // select without type requires numeric or vector type, so this must
         // assume xmmword-sized values to be safe
-        as.printInstrs(&.{
-            "xor r14d, r14d",
-            "mov r13d, dword ptr [{[vsp]f} - 0x10] # load condition",
-            "test r13d, r13d",
-            "setz r14b # set r14 to 1 if condition is false",
-            "shl r14d, 4 # set r14 to 0x10 if condition is false",
-            "movaps xmm0, xmmword ptr [{[vsp]f} - 0x30 + r14] # load selected value",
-            "movaps xmmword ptr [{[vsp]f} - 0x30], xmm0 # move selected value to correct place",
-            "lea {[vsp]f}, [{[vsp]f} - 0x20] # vsp",
-        }, .{ .vsp = Gpr.vsp });
+        writeSelectHandler(as);
         select.jmpToNextHandler(as);
         select.end(as);
     }
