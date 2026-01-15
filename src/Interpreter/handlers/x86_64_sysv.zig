@@ -558,8 +558,8 @@ fn memoryGrowReallocate(
 }
 
 const TableInitIndices = packed struct(u64) {
-    elem: u32,
     table: u32,
+    elem: u32,
 };
 
 fn tableInit(
@@ -605,7 +605,7 @@ fn tableInit(
     const d: u32 = @bitCast(operands[0].i32);
     @memset(operands, undefined);
 
-    const table_idx: Module.TableIdx = @enumFromInt(indices.elem);
+    const table_idx: Module.TableIdx = @enumFromInt(indices.table);
     runtime.TableInst.init(
         table_idx,
         module,
