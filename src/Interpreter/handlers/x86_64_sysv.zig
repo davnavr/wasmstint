@@ -452,9 +452,9 @@ inline fn resumeAfterInvokeWithinWasmIndirect(
         // TODO: inlineLlvmTailCallToHandler()
         return @call(
             .always_tail,
-            @as(@TypeOf(&invokeWithinWasm), @ptrCast(opcodeHandlerTrampoline)),
+            @as(@TypeOf(&invokeWithinWasmIndirect), @ptrCast(opcodeHandlerTrampoline)),
             .{
-                @as(usize, @bitCast(locals)),
+                @as(Ip, @ptrCast(locals.ptr)),
                 sp,
                 @as(runtime.FuncRef, @bitCast(module)),
                 fuel,
@@ -566,17 +566,19 @@ fn tableInit(
     indices: TableInitIndices, // rdi
     sp: Sp, // rsi
     module: runtime.ModuleInst, // rdx,
-    fuel: *const Interpreter.Fuel, // rcx
+    fuel: *Interpreter.Fuel, // rcx
     next_ip: Ip, // rax -> r8
     interp: *Interpreter, // r9
     // These parameters are passed on the stack
-    stp: Stp, // rbx -> `rbp + 16`
+    /// Needs to allow passing `Ip` on tail call.
+    unaligned_stp: [*]align(1) const Module.Code.SideTableEntry, // rbx -> `rbp + 16`
     eip: Eip, // r10 -> `rbp + 24`
     trap_ip: Ip, // `rbp + 32`
     _: usize, // `rbp + 40`
     _: usize, // `rbp + 48`
 ) callconv(sysvcc) Transition {
-    const current_frame = interp.stack.currentFrame().?;
+    const stp: Stp = @alignCast(unaligned_stp);
+    const current_frame = interp.stack.frameAt(interp.stack.current_frame).?;
     if (builtin.mode == .Debug) {
         const expected_eip = @intFromPtr(current_frame.wasm.eip);
         if (expected_eip != @intFromPtr(eip)) {
@@ -640,11 +642,11 @@ fn tableInit(
                 vals.top,
                 module,
                 fuel,
-                @as(Ip, @bitCast(module.header().mems)),
+                @as(Ip, @ptrCast(module.header().mems)),
                 interp,
-                @as(Stp, @bitCast(instr.next)),
-                @as(Eip, @bitCast(stp)),
-                instr.end,
+                @as([*]align(1) const Module.Code.SideTableEntry, @ptrCast(@alignCast(instr.next))),
+                @as(Eip, @ptrCast(stp)),
+                @as(Ip, @ptrFromInt(@intFromPtr(instr.end))),
                 @intFromPtr(handler),
                 undefined,
             },
