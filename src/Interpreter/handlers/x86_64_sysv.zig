@@ -48,6 +48,8 @@ comptime {
     std.debug.assert(@offsetOf(Module.GlobalType, "val_type") == 0);
     std.debug.assert(@offsetOf(runtime.TableInst, "base") == 0);
     std.debug.assert(@offsetOf(runtime.TableInst, "len") == 12);
+    std.debug.assert(@offsetOf(runtime.TableInst, "capacity") == 16);
+    std.debug.assert(@offsetOf(runtime.TableInst, "limit") == 20);
 }
 
 const symbol_prefix = @import("options").symbol_prefix;

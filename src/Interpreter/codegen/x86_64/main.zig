@@ -1269,7 +1269,7 @@ fn defineMemoryManagementOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "mov r11, [{[mems]f} + r11*8] # ptr to memory, clobbers memidx",
             "mov r14, qword ptr [r11 + {[mem_size_off]d}] # memory size",
             "add r13, r14 # memory size + delta = desired size",
-            "cmp r13, qword ptr [r11 + {[mem_limit_off]d}] # check against limit ",
+            "cmp r13, qword ptr [r11 + {[mem_limit_off]d}] # check against limit",
             "ja {[fail]f}",
             "cmp r13, qword ptr [r11 + {[mem_cap_off]d}] # check against capacity",
             "jna {[within_capacity]f}",
@@ -3565,6 +3565,103 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         }
 
         table_copy.end(as);
+    }
+    {
+        var table_grow = as.defineOpcodeHandler(zig, "table.grow", .@"32");
+        var table_idx_decode = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "table");
+        var fail = as.label(&.{"fail"});
+        var within_capacity = as.label(&.{"within_capacity"});
+        as.printInstrs(&.{
+            "mov r13d, dword ptr [{[vsp]f} - 0x10] # delta",
+            "mov r15, qword ptr [{[vsp]f} - 0x20] # element to fill with",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+            "mov r14, qword ptr [{[module]f} + {[module_tables_off]d}]" ++
+                " # pointer to module table ptrs",
+            "mov r11, qword ptr [r14 + r11*8] # pointer to TableInst, clobbers table index",
+            "mov r14d, dword ptr [r11 + {[table_len_off]d}]" ++
+                " # table len, clobbers ptr to module table ptrs",
+            "add r13d, r14d # desired length, clobbers delta",
+            "jc {[fail]f} # cmp below can't detect overflow",
+            "cmp r13d, dword ptr [r11 + {[table_limit_off]d}] # check against limit",
+            "ja {[fail]f}",
+            "cmp r13d, dword ptr [r11 + {[table_cap_off]d}] # check against capacity",
+            "jbe {[within_capacity]f}",
+            "ud2 # TODO: Call into Zig",
+        }, .{
+            .module = Gpr.module,
+            .module_tables_off = 40,
+            .table_len_off = 12,
+            .table_cap_off = 16,
+            .table_limit_off = 20,
+            .vsp = Gpr.vsp,
+            .fail = fail,
+            .within_capacity = within_capacity,
+        });
+
+        as.write(".p2align 4\n");
+        within_capacity.place(as);
+        var done = as.label(&.{"within_capacity_done"});
+        var less_than_4_elems = as.label(&.{"less_than_4_elems"});
+        as.printInstrs(&.{
+            "mov dword ptr [r11 + {[table_len_off]d}], r13d # write new length",
+            "mov r11, qword ptr [r11] # pointer to table elems, clobbers TableInst ptr",
+            "lea r11, [r11 + r14*8] # start ptr, clobbers ptr to table elems",
+            "mov dword ptr [{[vsp]f} - 0x10], r14d # put old length onto value stack",
+            "sub r13d, r14d # delta, clobbers new length",
+            "lea r14, [r11 + r13*8]" ++
+                " # end ptr, one element past the last to write, clobbers table len",
+            "# similar to what table.fill does",
+            "cmp r13d, 4",
+            "jb {[less_than_4_elems]f}",
+            "movq xmm0, r15 # replicate element",
+            "pshufd xmm0, xmm0, 0x44 # move low qword to high qword",
+        }, .{
+            .vsp = Gpr.vsp,
+            .table_len_off = 12,
+            .less_than_4_elems = less_than_4_elems,
+        });
+        as.write(".p2align 4\n");
+        var copy_4_elems = as.label(&.{"copy_4_elems"});
+        copy_4_elems.place(as);
+        as.printInstrs(&.{
+            "movups xmmword ptr [r11], xmm0",
+            "movups xmmword ptr [r11 + 0x10], xmm0",
+            "lea r11, [r11 + 32] # advance ptr",
+            "sub r13d, 4",
+            "cmp r13d, 4",
+            "ja {[copy_4_elems]f}",
+            "# write trailing 4 elements, possibly overlapping",
+            "movups xmmword ptr [r14 - 0x10], xmm0",
+            "movups xmmword ptr [r14 - 0x20], xmm0",
+        }, .{ .copy_4_elems = copy_4_elems });
+        done.place(as);
+        table_grow.jmpToNextHandler(as);
+
+        as.write(".p2align 4\n");
+        less_than_4_elems.place(as);
+        as.printInstrs(&.{
+            "test r13d, r13d",
+            "jz {[done]f}",
+        }, .{ .done = done });
+        var fill_1_elem = as.label(&.{"fill_1_elem"});
+        fill_1_elem.place(as);
+        as.printInstrs(&.{
+            "mov qword ptr [r11], r15",
+            "lea r11, [r11 + 8] # advance ptr",
+            "dec r13d # count",
+            "jz {[done]f}",
+            "jmp {[loop]f}",
+            "ud2",
+        }, .{ .done = done, .loop = fill_1_elem });
+
+        fail.place(as);
+        as.printInstrs(&.{
+            "mov dword ptr [{[vsp]f} - 0x10], -1",
+            "jmp {[done]f}",
+            "ud2",
+        }, .{ .vsp = Gpr.vsp, .done = done });
+        table_idx_decode.writeSlowPath(as);
+        table_grow.end(as);
     }
     {
         var table_size = as.defineOpcodeHandler(zig, "table.size", .@"32");
