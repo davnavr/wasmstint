@@ -620,14 +620,14 @@ fn tableInit(
                 .table_access_out_of_bounds,
                 .init(table_idx, .@"table.init"),
             );
-            return Transition.trap(trap_ip, .{ .fc = .@"table.init" }, eip, sp, stp, interp, info);
+            return Transition.trap(trap_ip, .{ .fc = .@"table.init" }, eip, vals.top, stp, interp, info);
         },
     };
 
     var instr = Instr.init(next_ip, eip);
     if (builtin.zig_backend == .stage2_x86_64) {
         // trampoline continues execution
-        return Transition.interrupted(instr, sp, stp, interp, .out_of_fuel);
+        return Transition.interrupted(instr, vals.top, stp, interp, .out_of_fuel);
     } else {
         const locals = common.Locals{ .ptr = current_frame.localValues(&interp.stack).ptr };
         const handler = instr.readNextOpcodeHandler(fuel, locals, module, interp);
@@ -637,7 +637,7 @@ fn tableInit(
             @as(@TypeOf(&tableInit), @ptrCast(opcodeHandlerTrampoline)),
             .{
                 @as(TableInitIndices, @bitCast(locals)),
-                sp,
+                vals.top,
                 module,
                 fuel,
                 @as(Ip, @bitCast(module.header().mems)),
