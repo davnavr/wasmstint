@@ -46,7 +46,7 @@ pub fn main() noreturn {
     );
 
     defineSupportRoutines(&asm_writer, optimize);
-    defineControlOpcodeHandlers(&asm_writer, &zig_writer, optimize);
+    defineControlOpcodeHandlers(&asm_writer, &zig_writer);
     defineCallOpcodeHandlers(&asm_writer, &zig_writer);
     defineParametericOpcodeHandlers(&asm_writer, &zig_writer, optimize);
     defineLocalOpcodeHandlers(&asm_writer, &zig_writer);
@@ -356,8 +356,7 @@ const TakeBranch = struct {
         return take;
     }
 
-    fn writeSlowPath(take: *TakeBranch, as: *AsmWriter, optimize: std.builtin.OptimizeMode) void {
-        // TODO: See if AVX is enabled to use ymm registers
+    fn writeSlowPath(take: *TakeBranch, as: *AsmWriter) void {
         as.write(".p2align 4\n");
         take.copy_results.place(as);
         as.printInstrs(&.{
@@ -367,36 +366,22 @@ const TakeBranch = struct {
 
         var loop_start = as.label(&.{"copy_results_loop"});
         loop_start.place(as);
-
-        // TODO: fix, this is not how to unroll a copying operation, better to just have simple loop
-        const unroll_count: usize = switch (optimize) {
-            .Debug, .ReleaseSmall => 1,
-            .ReleaseSafe, .ReleaseFast => 4,
-        };
-        for (0..unroll_count) |_| {
-            as.printInstrs(&.{
-                "movaps xmm0, xmmword ptr [{[vsp]f}]",
-                "movaps xmmword ptr [r13], xmm0",
-                "lea {[vsp]f}, [{[vsp]f} + 0x10] # vsp",
-                "add r13, 0x10",
-                "cmp r13, r15 # check if done",
-                "je {[finish]f}",
-            }, .{ .vsp = Gpr.vsp, .finish = take.finish });
-        }
-
         as.printInstrs(&.{
+            "# assumes small number of results, so this just copies one at a time",
+            "movaps xmm0, xmmword ptr [{[vsp]f}]",
+            "movaps xmmword ptr [r13], xmm0",
+            "lea {[vsp]f}, [{[vsp]f} + 0x10] # vsp",
+            "add r13, 0x10",
+            "cmp r13, r15 # check if done",
+            "je {[finish]f}",
             "jmp {[loop_start]f}",
             "ud2",
-        }, .{ .loop_start = loop_start });
+        }, .{ .vsp = Gpr.vsp, .finish = take.finish, .loop_start = loop_start });
         take.* = undefined;
     }
 };
 
-fn defineControlOpcodeHandlers(
-    as: *AsmWriter,
-    zig: *ZigWriter,
-    optimize: std.builtin.OptimizeMode,
-) void {
+fn defineControlOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
     {
         var handler = as.defineOpcodeHandler(zig, "unreachable", .@"16");
         as.printInstrs(&.{
@@ -460,7 +445,7 @@ fn defineControlOpcodeHandlers(
         }, .{ .vip = Gpr.vip });
         var branch = TakeBranch.fastPath(as);
         @"if".jmpToNextHandler(as);
-        branch.writeSlowPath(as, optimize);
+        branch.writeSlowPath(as);
         block_type.writeSlowPath(as);
         @"if".end(as);
     }
@@ -472,7 +457,7 @@ fn defineControlOpcodeHandlers(
         }, .{ .vip = Gpr.vip });
         var branch = TakeBranch.fastPath(as);
         @"else".jmpToNextHandler(as);
-        branch.writeSlowPath(as, optimize);
+        branch.writeSlowPath(as);
         @"else".end(as);
     }
     {
@@ -494,7 +479,7 @@ fn defineControlOpcodeHandlers(
         }, .{ .vip = Gpr.vip });
         var branch = TakeBranch.fastPath(as);
         br.jmpToNextHandler(as);
-        branch.writeSlowPath(as, optimize);
+        branch.writeSlowPath(as);
         br.end(as);
     }
     {
@@ -509,7 +494,7 @@ fn defineControlOpcodeHandlers(
         }, .{ .vsp = Gpr.vsp, .vip = Gpr.vip, .false = false_branch });
         var branch = TakeBranch.fastPath(as);
         br_if.jmpToNextHandler(as);
-        branch.writeSlowPath(as, optimize);
+        branch.writeSlowPath(as);
 
         as.write(".p2align 4\n");
         false_branch.place(as);
@@ -536,7 +521,7 @@ fn defineControlOpcodeHandlers(
         }, .{ .vsp = Gpr.vsp, .stp = Gpr.stp });
         var branch = TakeBranch.fastPath(as);
         br_table.jmpToNextHandler(as);
-        branch.writeSlowPath(as, optimize);
+        branch.writeSlowPath(as);
         label_count.writeSlowPath(as);
         br_table.end(as);
     }
