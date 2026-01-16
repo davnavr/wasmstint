@@ -509,12 +509,19 @@ pub fn defineOpcodeHandler(
     return .{ .function = func, .out_of_fuel = as.label(&.{"out_of_fuel"}) };
 }
 
-pub fn restoreSystemVSavedRegisters(as: *AsmWriter) void {
+pub fn pushSystemVSavedRegisters(as: *AsmWriter) void {
+    as.write("\t# save System V callee-saved registers\n");
+    for (Gpr.system_v_callee_saved) |gpr| {
+        as.printInstrs(&.{"push {[saved]f}"}, .{ .saved = gpr });
+    }
+}
+
+pub fn popSystemVSavedRegisters(as: *AsmWriter) void {
     as.write("\t# restore System V callee-saved registers\n");
-    for (Gpr.system_v_parameters.len.., Gpr.system_v_callee_saved) |i, saved| {
+    for (0..Gpr.system_v_callee_saved.len) |i| {
         as.printInstrs(
-            &.{"mov {[saved]s}, {[slot]f}"},
-            .{ .saved = saved.name(), .slot = SystemVParam{ .index = @intCast(i) } },
+            &.{"pop {[saved]f}"},
+            .{ .saved = Gpr.system_v_callee_saved[Gpr.system_v_callee_saved.len - 1 - i] },
         );
     }
 }

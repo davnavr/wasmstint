@@ -247,8 +247,9 @@ pub const State = union(Tag) {
                 interp,
             );
 
-            if (builtin.mode == .Debug) {
-                interp.version.check(transitioned.version);
+            switch (builtin.mode) {
+                .Debug, .ReleaseSafe => interp.version.check(transitioned.version),
+                .ReleaseFast, .ReleaseSmall => {},
             }
 
             return State.init(interp);

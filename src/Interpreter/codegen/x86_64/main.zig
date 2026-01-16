@@ -79,23 +79,14 @@ fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) voi
             "# System V calling convention",
             "push rbp",
             "mov rbp, rsp",
-            "# Move callee-saved registers into parameter stack area",
         });
+        as.pushSystemVSavedRegisters();
         as.printInstrs(&.{
-            "mov {[vip]f}, {[stack_0]f} # IP",
-            "mov {[stack_0]f}, r15 # callee-saved",
-
-            "mov r11, rbx # prevent clobbering RBX below",
-            "mov {[stp]f}, {[stack_1]f} # STP, clobbers RBX",
-            "mov {[stack_1]f}, r14 # callee-saved",
-
-            "mov {[eip]f}, {[stack_2]f} # EIP",
-            "mov {[stack_2]f}, r13 # callee-saved",
-
-            "mov r15, {[stack_3]f} # opcode handler, clobbers r15 which was just saved",
-            "mov {[stack_3]f}, r12 # callee-saved",
-
-            "mov {[stack_4]f}, r11 # rbx is callee-saved",
+            "# Stack is NOT 16-byte aligned, as required by the calling convention, at this point",
+            "mov {[vip]f}, {[stack_0]f} #6 VIP",
+            "mov {[stp]f}, {[stack_1]f} #7 STP",
+            "mov {[eip]f}, {[stack_2]f} #8 EIP",
+            "mov r15, {[stack_3]f} #9 opcode handler",
 
             "# jump to next handler",
             "lea {[dispatch]f}, {[symbol_prefix]s}byte_dispatch_table",
@@ -109,7 +100,6 @@ fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) voi
             .eip = Gpr.eip,
             .stack_2 = SystemVParam{ .index = 8 },
             .stack_3 = SystemVParam{ .index = 9 },
-            .stack_4 = SystemVParam{ .index = 10 },
             .dispatch = Gpr.disp,
             .symbol_prefix = as.symbol_prefix,
         });
@@ -122,8 +112,8 @@ fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) voi
         });
         switch (optimize) {
             .Debug, .ReleaseSafe => as.printInstrs(&.{
-                "mov {[param_0]f}, {[vip]f} # 1",
-                "mov {[param_1]f}, {[eip]f} # 2",
+                "mov {[param_0]f}, {[vip]f} #0 VIP",
+                "mov {[param_1]f}, {[eip]f} #1 EIP",
                 "# doesn't `jmp`, so stack trace is better",
                 "call {[symbol_prefix]s}panicInvalidByteOpcode",
             }, .{
@@ -144,16 +134,15 @@ fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) voi
             &[_]Gpr{ .vip, .vsp, .eip, .stp, .interp },
             &[_]u8{ 0, 2, 1, 3, 4 },
         ) |arg, idx| {
-            as.printInstrs(&.{"mov {[param]f}, {[src]f} # argument #{[n]d}"}, .{
-                .param = SystemVParam{ .index = idx },
-                .src = arg,
-                .n = idx + 1,
-            });
+            as.printInstrs(
+                &.{"mov {[param]f}, {[src]f} # argument {[n]d}"},
+                .{ .param = SystemVParam{ .index = idx }, .src = arg, .n = idx },
+            );
         }
         as.writeInstrs(&.{"# perform a tail call"});
         // This will make the called function restore the registers
         // Seems to be no way to avoid doing this, even if a normal `call` is used here
-        as.restoreSystemVSavedRegisters();
+        as.popSystemVSavedRegisters();
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
@@ -166,11 +155,10 @@ fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) voi
         .Debug, .ReleaseSafe => {
             var invalid = as.startFunction("invalidPrefixedOpcode", .@"16");
             for (0.., &[3]Gpr{ .vip, .eip, .prefix_opcode_base_ip }) |idx, param| {
-                as.printInstrs(&.{"mov {[param]f}, {[src]f} #{[n]d}"}, .{
-                    .param = SystemVParam{ .index = @intCast(idx) },
-                    .src = param,
-                    .n = idx + 1,
-                });
+                as.printInstrs(
+                    &.{"mov {[param]f}, {[src]f} # argument {[n]d}"},
+                    .{ .param = SystemVParam{ .index = @intCast(idx) }, .src = param, .n = idx },
+                );
             }
             as.printInstrs(&.{
                 "# doesn't `jmp`, so stack trace is better",
@@ -385,22 +373,28 @@ fn defineControlOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
     {
         var handler = as.defineOpcodeHandler(zig, "unreachable", .@"16");
         as.printInstrs(&.{
-            "lea rdi, [{[vip]f} - 1] # IP to opcode byte",
+            "lea rdi, [{[vip]f} - 1] #0 IP to opcode byte",
         }, .{ .vip = Gpr.vip });
         inline for (
+            1..,
             Gpr.system_v_parameters[1..],
             [5]?[]const u8{ "vsp", "eip", "stp", null, "interp" },
-        ) |dst, arg| {
+        ) |i, dst, arg| {
             if (arg) |reg| {
-                as.printInstrs(
-                    &.{"mov {[dst]f}, {[src]f} # " ++ reg},
-                    .{ .dst = dst, .src = @as(Gpr, @field(Gpr, reg)) },
-                );
+                const src: Gpr = @field(Gpr, reg);
+                if (dst.tag == src.tag) {
+                    as.printInstrs(&.{"#{d} {s} is already in {f}"}, .{ i, reg, dst });
+                } else {
+                    as.printInstrs(
+                        &.{"mov {[dst]f}, {[src]f} #{[i]d} " ++ reg},
+                        .{ .i = i, .dst = dst, .src = src },
+                    );
+                }
             } else {
-                as.printInstrs(&.{"# {f} is unused"}, .{dst});
+                as.printInstrs(&.{"#{d} {f} is unused"}, .{ i, dst });
             }
         }
-        as.restoreSystemVSavedRegisters();
+        as.popSystemVSavedRegisters();
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
@@ -435,7 +429,7 @@ fn defineControlOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .false_branch = false_branch,
         });
         var block_type = SkipUlebIdx.fastPath(as, .r11, "type");
-        as.printInstrs(&.{"add {[stp]f}, 8 # increment STP"}, .{ .stp = Gpr.stp });
+        as.printInstrs(&.{"lea {[stp]f}, [{[stp]f} + 8] # increment STP"}, .{ .stp = Gpr.stp });
         @"if".jmpToNextHandler(as);
 
         false_branch.place(as);
@@ -499,7 +493,7 @@ fn defineControlOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.write(".p2align 4\n");
         false_branch.place(as);
         var skip_label_idx = SkipUlebIdx.fastPath(as, .r11, "label");
-        as.printInstrs(&.{"add {[stp]f}, 8 # increment stp"}, .{ .stp = Gpr.stp });
+        as.printInstrs(&.{"lea {[stp]f}, [{[stp]f} + 8] # increment stp"}, .{ .stp = Gpr.stp });
         br_if.jmpToNextHandler(as);
         skip_label_idx.writeSlowPath(as);
         br_if.end(as);
@@ -529,10 +523,10 @@ fn defineControlOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         var @"return" = as.defineOpcodeHandler(zig, "return", .@"32");
         as.printInstrs(&.{
             "# no need to save every register, since this is returning",
-            "mov {[param_0]f}, {[eip]f} # EIP",
+            "mov {[param_0]f}, {[eip]f} #0 EIP",
             "# other parameters are already in the correct place",
         }, .{ .eip = Gpr.eip, .param_0 = SystemVParam{ .index = 0 } });
-        as.restoreSystemVSavedRegisters();
+        as.popSystemVSavedRegisters();
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
@@ -547,20 +541,23 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
     {
         var call = as.defineOpcodeHandler(zig, "call", .@"32");
         as.printInstrs(&.{
-            "lea r15, [{[vip]f} - 1] # save ip to call byte",
+            "lea r15, [{[vip]f} - 1] # save VIP to call byte",
+            "# stack parameters",
         }, .{ .vip = Gpr.vip });
         var idx_decode = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "func");
         for (
             Gpr.system_v_parameters.len..,
             &[5]Gpr{ .vip, .stp, .eip, .r11, .r15 },
-            &[5][]const u8{ "vip", "stp", "eip", "func_idx", "call_ip" },
+            &[5][]const u8{ "VIP", "STP", "EIP", "function index", "call VIP" },
         ) |i, src, comment| {
-            as.printInstrs(
-                &.{"mov {[dst]f}, {[src]f} # {[comment]s}"},
-                .{ .dst = SystemVParam{ .index = @intCast(i) }, .src = src, .comment = comment },
-            );
+            as.printInstrs(&.{"mov {[dst]f}, {[src]f} #{[i]d} {[comment]s}"}, .{
+                .dst = SystemVParam{ .index = @intCast(i) },
+                .src = src,
+                .i = i,
+                .comment = comment,
+            });
         }
-        as.restoreSystemVSavedRegisters();
+        as.popSystemVSavedRegisters();
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
@@ -573,7 +570,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
     {
         var call_indirect = as.defineOpcodeHandler(zig, "call_indirect", .@"32");
         as.printInstrs(&.{
-            "lea rdi, [{[vip]f} - 1] # save ip to call_indirect byte, clobbers locals",
+            "lea rdi, [{[vip]f} - 1] #0 save ip to call_indirect byte, clobbers locals",
             "# clobbers mems",
         }, .{ .vip = Gpr.vip });
         var type_idx_decode = DecodeUlebIdx.fastPath(as, .r8, .{ .r13, .r14 }, "type");
@@ -610,15 +607,16 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         for (
             Gpr.system_v_parameters.len..,
             &[3]Gpr{ .vip, .stp, .eip },
-            &[3][]const u8{ "vip", "stp", "eip" },
+            &[3][]const u8{ "VIP", "STP", "EIP" },
         ) |i, src, comment| {
-            as.printInstrs(&.{"mov {[dst]f}, {[src]f} # {[comment]s}"}, .{
+            as.printInstrs(&.{"mov {[dst]f}, {[src]f} #{[i]d} {[comment]s}"}, .{
                 .dst = SystemVParam{ .index = @intCast(i) },
                 .src = src,
+                .i = i,
                 .comment = comment,
             });
         }
-        as.restoreSystemVSavedRegisters();
+        as.popSystemVSavedRegisters();
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
@@ -631,12 +629,12 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.write(".p2align 4\n");
         oob.place(as);
         as.printInstrs(&.{
-            "# rdi has trap_ip",
-            "mov rdx, {[eip]f} # eip",
-            "mov rcx, {[stp]f} # stp",
-            "mov r8, r13 # table index",
+            "#0 rdi has trap_ip",
+            "mov rdx, {[eip]f} #2 EIP",
+            "mov rcx, {[stp]f} #3 STP",
+            "mov r8, r13 #4 table index",
         }, .{ .eip = Gpr.eip, .stp = Gpr.stp });
-        as.restoreSystemVSavedRegisters();
+        as.popSystemVSavedRegisters();
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
@@ -647,12 +645,12 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.write(".p2align 4\n");
         null_elem.place(as);
         as.printInstrs(&.{
-            "# rdi has trap_ip",
-            "mov rdx, {[eip]f}",
-            "mov rcx, {[stp]f}",
-            "mov r8, r14 # elem index",
+            "#0 rdi has trap_ip",
+            "mov rdx, {[eip]f} #2 EIP",
+            "mov rcx, {[stp]f} #3 STP",
+            "mov r8, r14 #4 elem index",
         }, .{ .eip = Gpr.eip, .stp = Gpr.stp });
-        as.restoreSystemVSavedRegisters();
+        as.popSystemVSavedRegisters();
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
@@ -958,14 +956,15 @@ fn defineTableAccessOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
 
         oob.place(as);
         as.printInstrs(&.{
-            "lea {[param_0]f}, [{[vip]f} - 1]",
-            "# vsp in rsi",
-            "mov {[param_2]f}, {[eip]f} # eip",
-            "mov {[param_3]f}, {[stp]f} # stp",
-            "mov {[param_4]f}, r13 # table index",
-            "# interp in r9",
-            "# index to access in r11",
-            "mov r10, r14 # *TableInst",
+            "lea {[param_0]f}, [{[vip]f} - 1] #0 VIP",
+            "#1 VSP in rsi",
+            "mov {[param_2]f}, {[eip]f} #2 EIP",
+            "mov {[param_3]f}, {[stp]f} #3 STP",
+            "mov {[param_4]f}, r13 #4 table index",
+            "#5 interp in r9",
+            "mov {[param_6]f}, r11d #6 index to access",
+            "mov {[param_7]f}, 0 #7 cause enum",
+            "mov {[param_8]f}, r14 #8 *TableInst",
         }, .{
             .param_0 = SystemVParam{ .index = 0 },
             .vip = Gpr.vip,
@@ -974,22 +973,17 @@ fn defineTableAccessOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .param_3 = SystemVParam{ .index = 3 },
             .stp = Gpr.stp,
             .param_4 = SystemVParam{ .index = 4 },
+            .param_6 = SystemVParam{ .index = 6, .size = .dword },
+            .param_7 = SystemVParam{ .index = 7 },
+            .param_8 = SystemVParam{ .index = 8 },
         });
-        as.restoreSystemVSavedRegisters();
+        as.popSystemVSavedRegisters();
         as.printInstrs(&.{
-            "mov {[param_6]f}, r11d # index",
-            "mov {[param_7]f}, 0 # cause",
-            "mov {[param_8]f}, r10 # *TableInst",
             "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}trapTableAccessOutOfBounds",
             "ud2",
-        }, .{
-            .param_6 = SystemVParam{ .index = 6, .size = .dword },
-            .param_7 = SystemVParam{ .index = 7 },
-            .param_8 = SystemVParam{ .index = 8 },
-            .prefix = as.symbol_prefix,
-        });
+        }, .{ .prefix = as.symbol_prefix });
 
         get.end(as);
     }
@@ -1020,14 +1014,15 @@ fn defineTableAccessOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
 
         oob.place(as);
         as.printInstrs(&.{
-            "lea {[param_0]f}, [{[vip]f} - 1]",
-            "# vsp in rsi",
-            "mov {[param_2]f}, {[eip]f} # eip",
-            "mov {[param_3]f}, {[stp]f} # stp",
-            "mov {[param_4]f}, r13 # table index",
-            "# interp in r9",
-            "# index to access in r11",
-            "mov r10, r14 # *TableInst",
+            "lea {[param_0]f}, [{[vip]f} - 1] #0 VIP",
+            "#1 VSP in rsi",
+            "mov {[param_2]f}, {[eip]f} #2 EIP",
+            "mov {[param_3]f}, {[stp]f} #3 STP",
+            "mov {[param_4]f}, r13 #4 table index",
+            "#5 interp in r9",
+            "mov {[param_6]f}, r11d #6 index to access",
+            "mov {[param_7]f}, 1 #7 cause enum",
+            "mov {[param_8]f}, r14 #8 *TableInst",
         }, .{
             .param_0 = SystemVParam{ .index = 0 },
             .vip = Gpr.vip,
@@ -1036,22 +1031,17 @@ fn defineTableAccessOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .param_3 = SystemVParam{ .index = 3 },
             .stp = Gpr.stp,
             .param_4 = SystemVParam{ .index = 4 },
+            .param_6 = SystemVParam{ .index = 6, .size = .dword },
+            .param_7 = SystemVParam{ .index = 7 },
+            .param_8 = SystemVParam{ .index = 8 },
         });
-        as.restoreSystemVSavedRegisters();
+        as.popSystemVSavedRegisters();
         as.printInstrs(&.{
-            "mov {[param_6]f}, r11d # index",
-            "mov {[param_7]f}, 1 # cause",
-            "mov {[param_8]f}, r10 # *TableInst",
             "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}trapTableAccessOutOfBounds",
             "ud2",
-        }, .{
-            .param_6 = SystemVParam{ .index = 6, .size = .dword },
-            .param_7 = SystemVParam{ .index = 7 },
-            .param_8 = SystemVParam{ .index = 8 },
-            .prefix = as.symbol_prefix,
-        });
+        }, .{ .prefix = as.symbol_prefix });
 
         set.end(as);
     }
@@ -1107,14 +1097,15 @@ const LinearMemoryAccess = struct {
         as.write(".p2align 4\n");
         access.oob.place(as);
         as.printInstrs(&.{
-            "lea {[param_0]f}, [{[vip]f} - 1]",
-            "# vsp in rsi",
-            "mov {[param_2]f}, {[eip]f} # eip",
-            "mov {[param_3]f}, {[stp]f} # stp",
-            "mov {[param_4]f}, 0 # memidx",
-            "# interp in r9",
-            "mov r10d, r13d # address",
-            "mov r11, r14 # *MemInst",
+            "lea {[param_0]f}, [{[vip]f} - 1] #0 VIP",
+            "#1 VSP in rsi",
+            "mov {[param_2]f}, {[eip]f} #2 EIP",
+            "mov {[param_3]f}, {[stp]f} #3 STP",
+            "mov {[param_4]f}, 0 #4 memory index",
+            "#5 interp in r9",
+            "mov {[param_6]f}, r13d #6 address",
+            "mov {[param_7]f}, {[size]d} #7 size",
+            "mov {[param_8]f}, r14 #8 *MemInst",
         }, .{
             .param_0 = SystemVParam{ .index = 0 },
             .vip = Gpr.vip,
@@ -1123,23 +1114,18 @@ const LinearMemoryAccess = struct {
             .param_3 = SystemVParam{ .index = 3 },
             .stp = Gpr.stp,
             .param_4 = SystemVParam{ .index = 4 },
-        });
-        as.restoreSystemVSavedRegisters();
-        as.printInstrs(&.{
-            "mov {[param_6]f}, r10d # address",
-            "mov {[param_7]f}, {[size]d} # size",
-            "mov {[param_8]f}, r11 # *MemInst",
-            "# rsp already refers to saved rbp",
-            "pop rbp",
-            "jmp {[prefix]s}trapMemoryAccessOutOfBounds",
-            "ud2",
-        }, .{
             .param_6 = SystemVParam{ .index = 6, .size = .dword },
             .size = @intFromEnum(access.size),
             .param_7 = SystemVParam{ .index = 7, .size = .dword },
             .param_8 = SystemVParam{ .index = 8 },
-            .prefix = as.symbol_prefix,
         });
+        as.popSystemVSavedRegisters();
+        as.printInstrs(&.{
+            "# rsp already refers to saved rbp",
+            "pop rbp",
+            "jmp {[prefix]s}trapMemoryAccessOutOfBounds",
+            "ud2",
+        }, .{ .prefix = as.symbol_prefix });
         access.* = undefined;
         op.end(as);
     }
@@ -1265,8 +1251,8 @@ fn defineMemoryManagementOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "mov rdx, {[vip]f} #2 clobbers module",
             "mov rcx, {[eip]f} #3 clobbers fuel",
             "mov r8, r11 #4 clobbers mems",
-            "#7 interp is already in r9",
-            "mov r11, {[stp]f} # prevent clobbering STP",
+            "#5 interp is already in r9",
+            "mov {[param_6]f}, {[stp]f} #6 STP",
         }, .{
             .vsp = Gpr.vsp,
             .vip = Gpr.vip,
@@ -1279,18 +1265,15 @@ fn defineMemoryManagementOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .mem_size_off = 8,
             .mem_cap_off = 16,
             .mem_limit_off = 24,
+            .param_6 = SystemVParam{ .index = 6 },
         });
-        as.restoreSystemVSavedRegisters();
+        as.popSystemVSavedRegisters();
         as.printInstrs(&.{
-            "mov {[param_6]f}, r11 #7 stp",
             "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}memoryGrowReallocate",
             "ud2",
-        }, .{
-            .param_6 = SystemVParam{ .index = 6 },
-            .prefix = as.symbol_prefix,
-        });
+        }, .{ .prefix = as.symbol_prefix });
 
         var to_next = as.label(&.{"next_opcode"});
         as.write(".p2align 4\n");
@@ -1478,11 +1461,11 @@ const IntType = enum {
 /// TODO: deduplicate these handlers
 fn numericOperationTrapJmp(as: *AsmWriter, handler: []const u8) void {
     as.printInstrs(&.{
-        "lea {[param_0]f}, [r14 - 1] # vip, param 1",
-        "# VSP already in rsi, param 2",
-        "mov {[param_2]f}, {[eip]f} # eip, param 3",
-        "mov {[param_3]f}, {[stp]f} # stp, param 4",
-        "# r9 already contains interpreter",
+        "lea {[param_0]f}, [r14 - 1] #0 VIP",
+        "#1 VSP already in rsi",
+        "mov {[param_2]f}, {[eip]f} #2 EIP",
+        "mov {[param_3]f}, {[stp]f} #3 STP",
+        "#5 r9 already contains interpreter",
     }, .{
         .eip = Gpr.eip,
         .stp = Gpr.stp,
@@ -1490,7 +1473,7 @@ fn numericOperationTrapJmp(as: *AsmWriter, handler: []const u8) void {
         .param_2 = SystemVParam{ .index = 2 },
         .param_3 = SystemVParam{ .index = 3 },
     });
-    as.restoreSystemVSavedRegisters();
+    as.popSystemVSavedRegisters();
     as.printInstrs(&.{
         "mov rsp, rbp # TODO: is this unnecessary",
         "pop rbp",
@@ -2628,11 +2611,15 @@ fn defineReferenceOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         var func_idx = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "func");
 
         const stack_saved_registers = [_]Gpr{ .locals, .mems, .interp, .eip };
-        comptime std.debug.assert(stack_saved_registers.len % 2 == 0); // ensure 16-byte alignment
+        comptime std.debug.assert(
+            (Gpr.system_v_callee_saved.len + stack_saved_registers.len) % 2 == 1,
+        );
 
         for (stack_saved_registers) |saved| {
             as.printInstrs(&.{"push {f}"}, .{saved});
         }
+
+        as.writeInstrs(&.{"push rax # garbage, ensures 16-byte alignment"});
 
         // Already saved
         comptime std.debug.assert(Gpr.system_v_callee_saved[4].tag == Gpr.stp.tag);
@@ -2651,7 +2638,7 @@ fn defineReferenceOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "# System V calling convention",
             "call {[symbol_prefix]s}constructFuncRef",
             "# module still in rdx",
-            "mov qword ptr [{[temp_vsp]f}], rax",
+            "mov qword ptr [{[temp_vsp]f}], rax # vsp",
             "lea {[temp_vsp]f}, [{[temp_vsp]f} + 0x10] # vsp",
         }, .{
             .param_0 = SystemVParam{ .index = 0 },
@@ -2660,12 +2647,14 @@ fn defineReferenceOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         });
         comptime std.debug.assert(callee_saved_registers[2].tag == Gpr.vsp.tag);
 
-        for (Gpr.system_v_callee_saved[0..3], callee_saved_registers) |src, dst| {
-            as.printInstrs(&.{"mov {f}, {f}"}, .{ dst, src });
-        }
+        as.writeInstrs(&.{"pop rax # used to align stack"});
 
         for (0..stack_saved_registers.len) |i| {
             as.printInstrs(&.{"pop {f}"}, .{stack_saved_registers[stack_saved_registers.len - i - 1]});
+        }
+
+        for (Gpr.system_v_callee_saved[0..3], callee_saved_registers) |src, dst| {
+            as.printInstrs(&.{"mov {f}, {f}"}, .{ dst, src });
         }
 
         ref_func.jmpToNextHandler(as);
@@ -2842,7 +2831,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
                     .{ .comment = comment, .dst = dst },
                 );
         }
-        as.restoreSystemVSavedRegisters();
+        as.popSystemVSavedRegisters();
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
@@ -3117,7 +3106,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
                         .{ .comment = comment, .dst = dst },
                     );
             }
-            as.restoreSystemVSavedRegisters();
+            as.popSystemVSavedRegisters();
             as.printInstrs(&.{
                 "# rsp already refers to saved rbp",
                 "pop rbp",
@@ -3285,7 +3274,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
                     .{ .comment = comment, .dst = dst },
                 );
         }
-        as.restoreSystemVSavedRegisters();
+        as.popSystemVSavedRegisters();
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
@@ -3313,27 +3302,24 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "#3 fuel is already in rcx",
             "mov r8, {[vip]f} #4 vip, memories was clobbered",
             "#5 interp is already in r9",
-            "# prevent cloberring when System V callee-saved registers are restored",
-            "mov r11, {[stp]f} # stp",
-            "# eip already in r10",
-            "mov {[vip]f}, r15 # trap ip",
-        }, .{ .vip = Gpr.vip, .stp = Gpr.stp });
-        as.restoreSystemVSavedRegisters();
+            "# setup stack parameters",
+            "mov {[param_6]f}, {[stp]f} #6 EIP",
+            "mov {[param_7]f}, r10 #7 EIP",
+            "mov {[param_8]f}, r15 #8 trap IP",
+        }, .{
+            .vip = Gpr.vip,
+            .stp = Gpr.stp,
+            .param_6 = SystemVParam{ .index = 6 },
+            .param_7 = SystemVParam{ .index = 7 },
+            .param_8 = SystemVParam{ .index = 8 },
+        });
+        as.popSystemVSavedRegisters();
         as.printInstrs(&.{
-            "mov {[param_6]f}, r11 # stp",
-            "mov {[param_7]f}, r10 # eip",
-            "mov {[param_8]f}, {[vip]f} # trap IP, clobered actual VIP which is currently in r8",
             "# rsp already refers to saved rbp",
             "pop rbp",
             "jmp {[prefix]s}tableInit",
             "ud2",
-        }, .{
-            .param_6 = SystemVParam{ .index = 6 },
-            .param_7 = SystemVParam{ .index = 7 },
-            .param_8 = SystemVParam{ .index = 8 },
-            .vip = Gpr.vip,
-            .prefix = as.symbol_prefix,
-        });
+        }, .{ .prefix = as.symbol_prefix });
         elem_idx.writeSlowPath(as);
         table_idx.writeSlowPath(as);
         table_init.end(as);
@@ -3540,7 +3526,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
                         .{ .comment = comment, .dst = dst },
                     );
             }
-            as.restoreSystemVSavedRegisters();
+            as.popSystemVSavedRegisters();
             as.printInstrs(&.{
                 "# rsp already refers to saved rbp",
                 "pop rbp",
@@ -3774,7 +3760,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         for (
             Gpr.system_v_parameters,
             &[6]Gpr{ .r15, .vsp, .eip, .stp, .r11, .interp },
-            &[6][]const u8{ "vip", "vsp", "eip", "stp", "table index", "interpreter" },
+            &[6][]const u8{ "VIP", "VSP", "EIP", "STP", "table index", "interpreter" },
         ) |dst, src, comment| {
             if (dst != src)
                 as.printInstrs(
@@ -3787,7 +3773,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
                     .dst = dst,
                 });
         }
-        as.restoreSystemVSavedRegisters();
+        as.popSystemVSavedRegisters();
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
