@@ -311,14 +311,19 @@ const Modules = struct {
             options: *const ProjectOptions,
             imports: struct { coz: Coz, allocators: Allocators },
         ) Wasmstint {
-            const module = b.addModule(name, .{
+            const root_module = b.addModule(name, .{
                 .root_source_file = b.path("src/root.zig"),
                 .target = options.target,
                 .optimize = options.optimize_interpreter,
                 .link_libc = options.link_libc,
             });
-            addAsImportTo(Coz, imports.coz, module);
-            addAsImportTo(Allocators, imports.allocators, module);
+            addAsImportTo(Coz, imports.coz, root_module);
+            addAsImportTo(Allocators, imports.allocators, root_module);
+
+            const opcodes_module = b.createModule(.{
+                .root_source_file = b.path("src/opcodes.zig"),
+            });
+            root_module.addImport("opcodes", opcodes_module);
 
             const use_assembly_interpreter = b.option(
                 InterpreterBackend,
@@ -331,7 +336,7 @@ const Modules = struct {
                 "use_assembly_interpreter",
                 use_assembly_interpreter == .assembly,
             );
-            module.addOptions("options", wasmstint_options);
+            root_module.addOptions("options", wasmstint_options);
 
             const codegen_zig_writer = b.createModule(.{
                 .root_source_file = b.path("src/Interpreter/codegen/ZigWriter.zig"),
@@ -360,6 +365,9 @@ const Modules = struct {
             if (use_assembly_interpreter == .assembly and
                 options.target.result.cpu.arch == .x86_64)
             {
+                // TODO: Provide `opcodes` module as import to codegen, so only dispatch table needs
+                // to be exposed, and opcode handlers can be marked as local symbols
+                // ^ use .local instead of .globl
                 const run_codegen = b.addRunArtifact(codegen_x64_sysv_exe);
                 run_codegen.step.max_rss = ByteSize.mib(2).bytes; // arbitrary amount
                 run_codegen.addArg(x64_asm_interp_symbol_prefix);
@@ -367,8 +375,8 @@ const Modules = struct {
                 //run_codegen.addArg(options.target.query.zigTriple(b.allocator) catch @panic("oom"));
                 //run_codegen.addArg(options.target.query.serializeCpuAlloc(b.allocator) catch @panic("oom"));
                 run_codegen.addArg(b.fmt("{t}", .{options.optimize_interpreter}));
-                module.addAssemblyFile(run_codegen.addOutputFileArg("x86_64_sysv.s"));
-                module.addAnonymousImport("asm_generated", .{
+                root_module.addAssemblyFile(run_codegen.addOutputFileArg("x86_64_sysv.s"));
+                root_module.addAnonymousImport("asm_generated", .{
                     .root_source_file = run_codegen.addOutputFileArg("x86_64_sys_decls.zig"),
                     .target = options.target,
                     .optimize = options.optimize_interpreter,
@@ -378,7 +386,7 @@ const Modules = struct {
 
             const tests = b.addTest(.{
                 .name = name,
-                .root_module = module,
+                .root_module = root_module,
                 // TODO(zig): https://github.com/ziglang/zig/issues/23423
                 .use_llvm = true,
                 .max_rss = ByteSize.mib(398).bytes,
@@ -387,11 +395,11 @@ const Modules = struct {
             const tests_run = &b.addRunArtifact(tests).step;
             tests_run.max_rss = ByteSize.mib(43).bytes;
             steps.@"test-unit".dependOn(tests_run);
-            addCheck(b, steps, .@"test", module, name, .{
+            addCheck(b, steps, .@"test", root_module, name, .{
                 .max_rss = .mib(126),
                 .use_llvm = options.use_llvm.interpreter,
             });
-            return .{ .module = module };
+            return .{ .module = root_module };
         }
     };
 

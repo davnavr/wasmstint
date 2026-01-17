@@ -120,4 +120,4 @@ const Module = @import("../Module.zig");
 const Value = @import("value.zig").Value;
 const Instr = @import("Instr.zig");
 const ModuleInst = @import("../runtime/module_inst.zig").ModuleInst;
-const opcodes = @import("../opcodes.zig");
+const opcodes = @import("opcodes");

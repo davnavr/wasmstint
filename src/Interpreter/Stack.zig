@@ -1054,7 +1054,7 @@ pub const Walker = struct {
 
     pub fn formatIp(ip: Module.Code.Ip, writer: *Writer) Writer.Error!void {
         try writer.print("0x{X:0>2}", .{ip[0]});
-        if (std.enums.fromInt(@import("../opcodes.zig").ByteOpcode, ip[0])) |opcode| {
+        if (std.enums.fromInt(@import("opcodes").ByteOpcode, ip[0])) |opcode| {
             try writer.print("({t})", .{opcode});
         }
         try writer.print("@{X}", .{@intFromPtr(ip)});

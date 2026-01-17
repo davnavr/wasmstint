@@ -2769,5 +2769,5 @@ const Reader = @import("Reader.zig");
 const Diagnostics = Reader.Diagnostics;
 const ValType = Module.ValType;
 const V128 = @import("../v128.zig").V128;
-const opcodes = @import("../opcodes.zig");
+const opcodes = @import("opcodes");
 const coz = @import("coz");

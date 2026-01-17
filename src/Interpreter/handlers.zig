@@ -402,7 +402,7 @@ const Trap = @import("Trap.zig");
 const Value = @import("value.zig").Value;
 const Version = @import("version.zig").Version;
 
-const opcodes = @import("../opcodes.zig");
+const opcodes = @import("opcodes");
 const runtime = @import("../runtime.zig");
 const Module = @import("../Module.zig");
 const SideTable = @import("side_table.zig").SideTable;

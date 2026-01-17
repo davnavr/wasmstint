@@ -100,7 +100,7 @@ pub const SideTable = packed struct(usize) {
         //     .{
         //         @intFromPtr(instr.next) - wasm_base_ptr,
         //         instr.next[0],
-        //         @tagName(@as(@import("../opcodes.zig").ByteOpcode, @enumFromInt(instr.next[0]))),
+        //         @tagName(@as(@import("opcodes.zig").ByteOpcode, @enumFromInt(instr.next[0]))),
         //     },
         // );
 

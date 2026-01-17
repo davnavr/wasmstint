@@ -2242,7 +2242,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const allocators = @import("allocators");
 const ArenaFallbackAllocator = allocators.ArenaFallbackAllocator;
 const Reader = @import("Module/Reader.zig");
-const opcodes = @import("opcodes.zig");
+const opcodes = @import("opcodes");
 const validator = @import("Module/validator.zig");
 const coz = @import("coz");
 

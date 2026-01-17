@@ -958,7 +958,7 @@ comptime {
 
 const std = @import("std");
 const builtin = @import("builtin");
-const opcodes = @import("../../opcodes.zig");
+const opcodes = @import("opcodes");
 
 const Module = @import("../../Module.zig");
 const Interpreter = @import("../../Interpreter.zig");

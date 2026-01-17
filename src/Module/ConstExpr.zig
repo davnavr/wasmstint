@@ -224,7 +224,7 @@ pub fn parse(
 
 const std = @import("std");
 const builtin = @import("builtin");
-const opcodes = @import("../opcodes.zig");
+const opcodes = @import("opcodes");
 const ValType = @import("val_type.zig").ValType;
 const Reader = @import("Reader.zig");
 const FuncRefs = @import("FuncRefs.zig");

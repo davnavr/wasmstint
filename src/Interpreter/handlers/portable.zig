@@ -2938,7 +2938,7 @@ const CallingConvention = std.builtin.CallingConvention;
 const builtin = @import("builtin");
 const coz = @import("coz");
 
-const opcodes = @import("../../opcodes.zig");
+const opcodes = @import("opcodes");
 const Module = @import("../../Module.zig");
 const runtime = @import("../../runtime.zig");
 

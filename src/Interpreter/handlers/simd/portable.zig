@@ -1577,7 +1577,7 @@ const std = @import("std");
 const runtime = @import("../../../runtime.zig");
 const Interpreter = @import("../../../Interpreter.zig");
 const Fuel = Interpreter.Fuel;
-const FDPrefixOpcode = @import("../../../opcodes.zig").FDPrefixOpcode;
+const FDPrefixOpcode = @import("opcodes").FDPrefixOpcode;
 const V128 = @import("../../../v128.zig").V128;
 
 const portable = @import("../portable.zig");
