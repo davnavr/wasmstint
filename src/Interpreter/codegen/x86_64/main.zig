@@ -3585,7 +3585,16 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             "ja {[fail]f}",
             "cmp r13d, dword ptr [r11 + {[table_cap_off]d}] # check against capacity",
             "jbe {[within_capacity]f}",
-            "ud2 # TODO: Call into Zig",
+
+            "mov dword ptr [{[vsp]f} - 0x10], -1 # assume growth failure",
+            "# Setup parameters",
+            "mov rdi, r13 #0 new length, clobbers locals",
+            "#1 VSP is already in rsi",
+            "mov rdx, {[vip]f} #2 VIP clobbers module",
+            "mov rcx, {[eip]f} #3 EIP clobbers fuel",
+            "mov r8, r11 #4 pointer to table, clobbers mems",
+            "#5 interp is already in r9",
+            "mov {[param_6]f}, {[stp]f} #6 STP",
         }, .{
             .module = Gpr.module,
             .module_tables_off = 40,
@@ -3595,7 +3604,19 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .vsp = Gpr.vsp,
             .fail = fail,
             .within_capacity = within_capacity,
+            .vip = Gpr.vip,
+            .eip = Gpr.eip,
+            .stp = Gpr.stp,
+            .param_6 = SystemVParam{ .index = 6 },
         });
+        as.popSystemVSavedRegisters();
+        as.printInstrs(&.{
+            "# rsp already refers to saved rbp",
+            "pop rbp",
+            ".cfi_def_cfa rsp, 8",
+            "jmp {[prefix]s}tableGrowReallocate",
+            "ud2",
+        }, .{ .prefix = as.symbol_prefix });
 
         as.write(".p2align 4\n");
         within_capacity.place(as);
