@@ -338,14 +338,6 @@ const Modules = struct {
             );
             root_module.addOptions("options", wasmstint_options);
 
-            const codegen_zig_writer = b.createModule(.{
-                .root_source_file = b.path("src/Interpreter/codegen/ZigWriter.zig"),
-                .target = b.graph.host,
-                .optimize = .Debug,
-                .single_threaded = true,
-                .pic = false,
-            });
-
             const codegen_x64_sysv_exe = b.addExecutable(.{
                 .name = "wasmstint-codegen-x86_64_sysv",
                 .root_module = b.createModule(.{
@@ -356,9 +348,9 @@ const Modules = struct {
                     .pic = false,
                     // .code_model = .small, // Forces usage of LLVM backend
                 }),
-                .max_rss = ByteSize.mib(133).bytes,
+                .max_rss = ByteSize.mib(135).bytes,
             });
-            codegen_x64_sysv_exe.root_module.addImport("ZigWriter", codegen_zig_writer);
+            codegen_x64_sysv_exe.root_module.addImport("opcodes", opcodes_module);
 
             const x64_asm_interp_symbol_prefix = "wasmstint.x86_64_sysv.";
 

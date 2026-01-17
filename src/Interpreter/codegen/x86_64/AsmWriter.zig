@@ -1,9 +1,13 @@
 out: std.fs.File.Writer,
 symbol_prefix: []const u8,
-/// Only reset when a new function is defined.
-function_arena: std.heap.ArenaAllocator,
+
+/// Only reset when a function is finished.
+function_arena: *std.heap.ArenaAllocator,
 function_name: ?[]const u8 = null,
 label_counter: u16 = 0,
+
+byte_opcode_lookup: std.EnumSet(opcodes.ByteOpcode) = .initEmpty(),
+fc_opcode_lookup: std.EnumSet(opcodes.FCPrefixOpcode) = .initEmpty(),
 
 const AsmWriter = @This();
 
@@ -27,7 +31,7 @@ pub fn print(as: *AsmWriter, comptime fmt: []const u8, args: anytype) void {
 pub fn init(
     writer: std.fs.File.Writer,
     symbol_prefix: []const u8,
-    arena: std.heap.ArenaAllocator,
+    arena: *std.heap.ArenaAllocator,
 ) AsmWriter {
     var as = AsmWriter{
         .out = writer,
@@ -342,31 +346,44 @@ const Function = struct {
             .label = end_label.name(),
         });
         as.function_name = null;
+        _ = as.function_arena.reset(.retain_capacity);
         func.* = undefined;
     }
+
+    pub const Options = packed struct {
+        alignment: std.mem.Alignment = .@"1",
+        binding: Binding = .global,
+
+        pub const Binding = enum(u1) {
+            global,
+            local,
+        };
+    };
 };
 
 pub fn startFunction(
     as: *AsmWriter,
     /// Must match the pattern `[a-zA-Z_0-9\.]`.
     name: []const u8,
-    alignment: std.mem.Alignment,
+    options: Function.Options,
 ) Function {
     std.debug.assert(as.function_name == null);
-    _ = as.function_arena.reset(.retain_capacity);
     as.function_name = name;
     as.label_counter = 0;
-    as.print(
-        \\
-        \\.globl {[symbol_prefix]s}{[name]s}
-        \\.p2align {[alignment]d}
-        \\.type {[symbol_prefix]s}{[name]s}, @function
-        \\{[symbol_prefix]s}{[name]s}:
-    ++ "\n\t.cfi_startproc\n", .{
+    as.print("\n.{[binding]t} {[symbol_prefix]s}{[name]s}\n", .{
+        .binding = options.binding,
         .symbol_prefix = as.symbol_prefix,
         .name = name,
-        .alignment = @intFromEnum(alignment),
     });
+    if (options.alignment != .@"1") {
+        as.print(".p2align {d}\n", .{@intFromEnum(options.alignment)});
+    }
+    as.print(
+        \\.type {[symbol_prefix]s}{[name]s}, @function
+        \\{[symbol_prefix]s}{[name]s}:
+        \\
+    , .{ .symbol_prefix = as.symbol_prefix, .name = name });
+    as.writeInstrs(&.{".cfi_startproc"});
 
     return Function{ .name = name.ptr };
 }
@@ -512,14 +529,50 @@ pub const PreservedRegisters = struct {
     }
 };
 
+pub const Opcode = union(enum) {
+    byte: opcodes.ByteOpcode,
+    fc: opcodes.FCPrefixOpcode,
+
+    pub fn init(comptime Type: type, opcode: Type) Opcode {
+        return @unionInit(
+            Opcode,
+            switch (Type) {
+                opcodes.ByteOpcode => "byte",
+                opcodes.FCPrefixOpcode => "fc",
+                else => unreachable,
+            },
+            opcode,
+        );
+    }
+
+    pub fn name(opcode: Opcode) []const u8 {
+        return switch (opcode) {
+            .byte => |byte| if (byte != .@"select t") @tagName(byte) else "select_t",
+            inline else => |n| @tagName(n),
+        };
+    }
+};
+
+pub fn addOpcodeToLookup(as: *AsmWriter, opcode: Opcode) void {
+    switch (opcode) {
+        inline else => |n, tag| {
+            const lookup = switch (comptime tag) {
+                .byte => &as.byte_opcode_lookup,
+                .fc => &as.fc_opcode_lookup,
+            };
+            std.debug.assert(!lookup.contains(n));
+            lookup.insert(n);
+        },
+    }
+}
+
 pub fn defineOpcodeHandler(
     as: *AsmWriter,
-    zig: *ZigWriter,
-    name: []const u8,
+    opcode: Opcode,
     alignment: std.mem.Alignment,
 ) OpcodeHandler {
-    const func = as.startFunction(name, alignment);
-    zig.defineOpcodeHandler(name);
+    const func = as.startFunction(opcode.name(), .{ .binding = .local, .alignment = alignment });
+    as.addOpcodeToLookup(opcode);
     OpcodeHandler.writeStartingCfiDirectives(as);
     return .{ .function = func, .out_of_fuel = as.label(&.{"out_of_fuel"}) };
 }
@@ -549,4 +602,4 @@ pub fn popSystemVSavedRegisters(as: *AsmWriter) void {
 
 const std = @import("std");
 const Writer = std.Io.Writer;
-const ZigWriter = @import("ZigWriter");
+const opcodes = @import("opcodes");

@@ -135,11 +135,6 @@ pub inline fn callOpcodeHandler(
     return transition;
 }
 
-const invalidByteOpcode = @extern(
-    *const OpcodeHandler,
-    .{ .name = symbol_prefix ++ "invalidByteOpcode" },
-);
-
 fn panicInvalidByteOpcode(ip: Ip, eip: Eip) callconv(sysvcc) noreturn {
     @branchHint(.cold);
     const bad_ip = ip - 1;
@@ -901,32 +896,14 @@ fn trapTableFillOutOfBounds(
     ));
 }
 
-const generated = @import("asm_generated");
-const generated_handlers = generated.handlers(*const OpcodeHandler);
-
-pub const byte_dispatch_table align(64) = common.dispatchTable(
-    opcodes.ByteOpcode,
-    generated_handlers,
-    invalidByteOpcode,
-    256,
-);
-
-const invalidPrefixedOpcode: *const OpcodeHandler = switch (builtin.mode) {
-    .Debug, .ReleaseSafe => @extern(
-        *align(16) const OpcodeHandler,
-        .{ .name = symbol_prefix ++ "invalidPrefixedOpcode" },
-    ),
-    .ReleaseFast, .ReleaseSmall => invalidByteOpcode,
-};
-
-pub const fc_prefix_dispatch_table align(64) = common.dispatchTable(
-    opcodes.FCPrefixOpcode,
-    generated_handlers,
-    invalidPrefixedOpcode,
-    std.math.maxInt(u5),
+pub const byte_dispatch_table = @extern(
+    *align(128) const [256]*const OpcodeHandler,
+    .{ .name = symbol_prefix ++ "byte_dispatch_table" },
 );
 
 comptime {
+    _ = @import("asm_generated");
+
     for (&[_][]const u8{
         "interruptOutOfFuel",
         "returnFromWasm",
@@ -949,8 +926,6 @@ comptime {
         "trapTableFillOutOfBounds",
         "trapCallIndirectAccessOob",
         "trapIndirectCallToNull",
-        "byte_dispatch_table",
-        "fc_prefix_dispatch_table",
     }) |name| {
         @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
     }

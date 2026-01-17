@@ -21,7 +21,7 @@ else
 /// Use `callOpcodeHandler()`
 pub const OpcodeHandler = implementation.OpcodeHandler;
 pub const outOfFuelHandler = implementation.outOfFuelHandler;
-pub const byte_dispatch_table = &implementation.byte_dispatch_table;
+pub const byte_dispatch_table = implementation.byte_dispatch_table;
 pub const callOpcodeHandler = implementation.callOpcodeHandler;
 
 pub const Locals = packed struct(usize) {
@@ -44,7 +44,7 @@ pub const Eip = *const Module.Code.End;
 pub const Sp = Stack.Top;
 pub const Stp = SideTable.Ptr;
 
-fn dispatchTableLength(comptime Opcode: type, comptime manual_len: usize) comptime_int {
+pub fn dispatchTableLength(comptime Opcode: type, comptime manual_len: usize) comptime_int {
     var maximum = 0;
     for (@typeInfo(Opcode).@"enum".fields) |op| {
         maximum = @max(maximum, op.value);
