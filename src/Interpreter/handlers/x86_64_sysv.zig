@@ -35,11 +35,10 @@ const sysvcc = std.builtin.CallingConvention{ .x86_64_sysv = .{} };
 comptime {
     // TODO: Move these checks to generated Zig
     const ModuleInner = @typeInfo(@FieldType(Module, "inner")).pointer.child;
-    std.debug.assert(@offsetOf(ModuleInner, "raw") == 0);
-    std.debug.assert(@offsetOf(@FieldType(ModuleInner, "raw"), "types") == 0);
-    std.debug.assert(@offsetOf(@FieldType(ModuleInner, "raw"), "global_types") == 80);
-    std.debug.assert(@offsetOf(@FieldType(ModuleInner, "raw"), "datas_ptrs") == 232);
-    std.debug.assert(@offsetOf(@FieldType(ModuleInner, "raw"), "datas_lens") == 240);
+    std.debug.assert(@offsetOf(ModuleInner, "types") == 0);
+    std.debug.assert(@offsetOf(ModuleInner, "global_types") == 80);
+    std.debug.assert(@offsetOf(ModuleInner, "datas_ptrs") == 232);
+    std.debug.assert(@offsetOf(ModuleInner, "datas_lens") == 240);
     std.debug.assert(@offsetOf(runtime.ModuleInst.Header, "tables") == 40);
     std.debug.assert(@offsetOf(runtime.ModuleInst.Header, "globals") == 48);
     std.debug.assert(@offsetOf(runtime.ModuleInst.Header, "datas_drop_mask") == 56);

@@ -136,7 +136,7 @@ pub const FuncInst = extern struct {
         /// Asserts that `idx` does **not** refer to a function import.
         pub fn init(module: ModuleInst, idx: Module.FuncIdx) Wasm {
             std.debug.assert( // function import not allowed
-                module.header().module.inner.raw.func_import_count <= @intFromEnum(idx),
+                module.header().module.inner.func_import_count <= @intFromEnum(idx),
             );
 
             return Wasm{ .module = module, .idx = idx };
@@ -227,8 +227,8 @@ pub const FuncRef = packed struct(usize) {
         pub fn funcIdx(wasm: Wasm) Module.FuncIdx {
             const wasm_module = wasm.module().header().module.inner;
             const lookup_idx = wasm.lookupIdx();
-            const import_count = wasm_module.raw.func_import_count;
-            const idx: Module.FuncIdx = wasm_module.func_refs.keys()[lookup_idx];
+            const import_count = wasm_module.func_import_count;
+            const idx: Module.FuncIdx = wasm_module.parent().func_refs.keys()[lookup_idx];
 
             if (builtin.mode == .Debug) {
                 std.debug.assert(import_count <= lookup_idx);

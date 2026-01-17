@@ -2,6 +2,8 @@
 //!
 //! Based on <https://doi.org/10.48550/arXiv.2205.01183>.
 
+// TODO: Rename this to `Computation` or `Execution` or `Thread`
+
 const Value = @import("Interpreter/value.zig").Value;
 const Stack = @import("Interpreter/Stack.zig");
 const SideTable = @import("Interpreter/side_table.zig").SideTable;
@@ -568,7 +570,7 @@ pub const State = union(Tag) {
                 try interp.stack.allocateScratchSpace(
                     &interp.stack_top,
                     alloca,
-                    module.requiring_instantiation.inner.module.inner.raw.init_max_stack,
+                    module.requiring_instantiation.inner.module.inner.init_max_stack,
                 ),
             ) catch {
                 const trap = switch (instantiation_error) {

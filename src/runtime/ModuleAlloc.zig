@@ -58,7 +58,7 @@ pub fn allocateWithDefinitions(
         try allocator.alignedAlloc(
             u8,
             .fromByteUnits(std.atomic.cache_line),
-            module.inner.runtime_shape.size.bytes,
+            module.inner.parent().runtime_shape.size.bytes,
         ),
     );
     errdefer allocator.free(arena.buffer);
@@ -77,25 +77,23 @@ pub fn allocateWithDefinitions(
         .fromByteUnits(@sizeOf(value.FuncRef.Wasm.Block)),
         ModuleInst.Header.funcBlockCount(module),
     ) catch unreachable;
-    const func_imports = arena.allocator().alloc(
-        value.FuncRef,
-        module.inner.raw.func_import_count,
-    ) catch unreachable;
+    const func_imports = arena.allocator()
+        .alloc(value.FuncRef, module.inner.func_import_count) catch unreachable;
     const tables =
-        arena.allocator().alloc(*TableInst, module.inner.raw.table_count) catch unreachable;
-    const mems = arena.allocator().alloc(*MemInst, module.inner.raw.mem_count) catch
+        arena.allocator().alloc(*TableInst, module.inner.table_count) catch unreachable;
+    const mems = arena.allocator().alloc(*MemInst, module.inner.mem_count) catch
         unreachable;
-    const globals = arena.allocator().alloc(*anyopaque, module.inner.raw.global_count) catch
+    const globals = arena.allocator().alloc(*anyopaque, module.inner.global_count) catch
         unreachable;
     const datas_drop_mask = arena.allocator().alloc(
         u32,
-        std.math.divCeil(u32, module.inner.raw.datas_count, 32) catch unreachable,
+        std.math.divCeil(u32, module.inner.datas_count, 32) catch unreachable,
     ) catch unreachable;
     const elems_drop_mask = arena.allocator().dupe(
         u32,
-        module.inner.raw.non_declarative_elems_mask[0 .. std.math.divCeil(
+        module.inner.non_declarative_elems_mask[0 .. std.math.divCeil(
             u32,
-            module.inner.raw.elems_count,
+            module.inner.elems_count,
             32,
         ) catch unreachable],
     ) catch unreachable;
@@ -116,7 +114,7 @@ pub fn allocateWithDefinitions(
     }
 
     for (
-        tables[0..module.inner.raw.table_import_count],
+        tables[0..module.inner.table_import_count],
         module.tableImportNames(),
         module.tableImportTypes(),
     ) |*import, name, *table_type| {
@@ -130,7 +128,7 @@ pub fn allocateWithDefinitions(
     }
 
     for (
-        mems[0..module.inner.raw.mem_import_count],
+        mems[0..module.inner.mem_import_count],
         module.memImportNames(),
         module.memImportTypes(),
     ) |*import, name, *mem_type| {
@@ -144,7 +142,7 @@ pub fn allocateWithDefinitions(
     }
 
     for (
-        globals[0..module.inner.raw.global_import_count],
+        globals[0..module.inner.global_import_count],
         module.globalImportNames(),
         module.globalImportTypes(),
     ) |*import, name, *global_type| {
@@ -162,15 +160,15 @@ pub fn allocateWithDefinitions(
     for (func_blocks, 0..) |*block, i| {
         block.* = value.FuncRef.Wasm.Block{
             .module = module_inst,
-            .starting_idx = module.inner.raw.func_import_count +
+            .starting_idx = module.inner.func_import_count +
                 (@as(u32, @intCast(i)) * value.FuncRef.Wasm.Block.funcs_per_block),
         };
     }
 
     // Initialize definitions
     for (
-        globals[module.inner.raw.global_import_count..],
-        module.globalTypes()[module.inner.raw.global_import_count..],
+        globals[module.inner.global_import_count..],
+        module.globalTypes()[module.inner.global_import_count..],
     ) |*value_ptr, *global_type| {
         value_ptr.* = switch (global_type.val_type) {
             inline else => |val_type| value: {
@@ -194,7 +192,7 @@ pub fn allocateWithDefinitions(
     }
 
     for (
-        tables[module.inner.raw.table_import_count..],
+        tables[module.inner.table_import_count..],
         defined_table_types,
         definitions.tables,
     ) |*table_addr, *table_type, table_inst| {
@@ -205,7 +203,7 @@ pub fn allocateWithDefinitions(
     }
 
     for (
-        mems[module.inner.raw.mem_import_count..],
+        mems[module.inner.mem_import_count..],
         defined_mem_types,
         definitions.memories,
     ) |*mem_addr, *mem_type, mem_inst| {

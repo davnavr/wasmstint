@@ -11,7 +11,7 @@ pub fn bytes(
     base: [*]const u8,
     module: Module,
 ) [:@intFromEnum(opcodes.ByteOpcode.end)]const u8 {
-    const b = expr.slice.slice(base, module.inner.wasm);
+    const b = expr.slice.slice(base, module.wasmBytes());
     std.debug.assert(b.len >= 2);
     return b[0 .. b.len - 1 :@intFromEnum(opcodes.ByteOpcode.end)];
 }

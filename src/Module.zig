@@ -17,7 +17,7 @@ pub const FuncIdx = enum(u31) {
     }
 
     pub fn code(idx: FuncIdx, module: Module) ?*Code {
-        return if (@intFromEnum(idx) < module.inner.raw.func_import_count)
+        return if (@intFromEnum(idx) < module.inner.func_import_count)
             null
         else
             module.code(idx);
@@ -67,8 +67,8 @@ const Module = @This();
 
 // Fields are ordered manually, for the following reasons:
 // - to (maybe) ensure fields used together are close together
-// - to allow access from assembly code (when/if it is used)
-// - to reduce padding (compiler should already do this though?)
+// - to allow access from assembly code
+// - to reduce padding
 //
 // Slices are also manually split into length and ptr fields to shave a few bytes
 // off the size.
@@ -135,6 +135,11 @@ const RawInner = extern struct {
     datas_ptrs: [*]const [*]const u8,
     datas_lens: [*]const u32,
     active_datas: [*]const ActiveData,
+
+    /// Internal API.
+    pub inline fn parent(inner: *const RawInner) *const Inner {
+        return @as(*const Inner, @fieldParentPtr("raw", inner));
+    }
 };
 
 const Inner = struct {
@@ -149,23 +154,28 @@ const Inner = struct {
     func_refs: FuncRefs.Lookup,
 };
 
-inner: *align(std.atomic.cache_line) const Inner,
+inner: *const RawInner,
+
+/// A slice of the original WASM module.
+pub inline fn wasmBytes(module: Module) []const u8 {
+    return module.inner.parent().wasm;
+}
 
 pub inline fn customSections(module: Module) []const CustomSection {
-    return module.inner.raw.custom_sections();
+    return module.inner.custom_sections();
 }
 
 pub inline fn types(module: Module) []const FuncType {
-    return module.inner.raw.types[0..module.inner.raw.types_count];
+    return module.inner.types[0..module.inner.types_count];
 }
 
 pub inline fn funcCount(module: Module) u32 {
-    return module.inner.raw.func_import_count + module.inner.raw.code_count;
+    return module.inner.func_import_count + module.inner.code_count;
 }
 
 pub inline fn funcTypes(module: Module) []const *const FuncType {
-    return module.inner.raw
-        .func_types[0 .. module.inner.raw.func_import_count + module.inner.raw.code_count];
+    return module.inner
+        .func_types[0..(module.inner.func_import_count + module.inner.code_count)];
 }
 
 pub inline fn funcTypeIdx(module: Module, func: FuncIdx) TypeIdx {
@@ -175,96 +185,96 @@ pub inline fn funcTypeIdx(module: Module, func: FuncIdx) TypeIdx {
     const type_ptr = @intFromPtr(@as(*const FuncType, module.funcTypes()[func_idx]));
     std.debug.assert(
         type_ptr < @intFromPtr(
-            @as(*const FuncType, &module.inner.raw.types[module.inner.raw.types_count]),
+            @as(*const FuncType, &module.inner.types[module.inner.types_count]),
         ),
     );
-    return @enumFromInt((type_ptr - @intFromPtr(module.inner.raw.types)) / @sizeOf(FuncType));
+    return @enumFromInt((type_ptr - @intFromPtr(module.inner.types)) / @sizeOf(FuncType));
 }
 
 pub inline fn funcImportNames(module: Module) []const ImportName {
-    return module.inner.raw.func_imports[0..module.inner.raw.func_import_count];
+    return module.inner.func_imports[0..module.inner.func_import_count];
 }
 
 pub inline fn funcImportTypes(module: Module) []const *const FuncType {
-    return module.funcTypes()[0..module.inner.raw.func_import_count];
+    return module.funcTypes()[0..module.inner.func_import_count];
 }
 
 pub fn funcIsReferencable(module: Module, idx: FuncIdx) bool {
-    // @intFromEnum(idx) < module.inner.raw.func_import_count or
-    return module.inner.func_refs.containsContext(idx, .{});
+    // @intFromEnum(idx) < module.inner.func_import_count or
+    return module.inner.parent().func_refs.containsContext(idx, .{});
 }
 
 pub inline fn tableTypes(module: Module) []const TableType {
-    return module.inner.raw.table_types[0..module.inner.raw.table_count];
+    return module.inner.table_types[0..module.inner.table_count];
 }
 
 pub inline fn tableImportNames(module: Module) []const ImportName {
-    return module.inner.raw.table_imports[0..module.inner.raw.table_import_count];
+    return module.inner.table_imports[0..module.inner.table_import_count];
 }
 
 pub inline fn tableImportTypes(module: Module) []const TableType {
-    return module.tableTypes()[0..module.inner.raw.table_import_count];
+    return module.tableTypes()[0..module.inner.table_import_count];
 }
 
 pub inline fn tableDefinedTypes(module: Module) []const TableType {
-    return module.tableTypes()[module.inner.raw.table_import_count..];
+    return module.tableTypes()[module.inner.table_import_count..];
 }
 
 pub inline fn memTypes(module: Module) []const MemType {
-    return module.inner.raw.mem_types[0..module.inner.raw.mem_count];
+    return module.inner.mem_types[0..module.inner.mem_count];
 }
 
 pub inline fn memImportNames(module: Module) []const ImportName {
-    return module.inner.raw.mem_imports[0..module.inner.raw.mem_import_count];
+    return module.inner.mem_imports[0..module.inner.mem_import_count];
 }
 
 pub inline fn memImportTypes(module: Module) []const MemType {
-    return module.memTypes()[0..module.inner.raw.mem_import_count];
+    return module.memTypes()[0..module.inner.mem_import_count];
 }
 
 pub inline fn memDefinedTypes(module: Module) []const MemType {
-    return module.memTypes()[module.inner.raw.mem_import_count..];
+    return module.memTypes()[module.inner.mem_import_count..];
 }
 
 pub fn globalTypes(module: Module) []const GlobalType {
-    return module.inner.raw.global_types[0..module.inner.raw.global_count];
+    return module.inner.global_types[0..module.inner.global_count];
 }
 
 pub inline fn globalImportNames(module: Module) []const ImportName {
-    return module.inner.raw.global_imports[0..module.inner.raw.global_import_count];
+    return module.inner.global_imports[0..module.inner.global_import_count];
 }
 
 pub inline fn globalImportTypes(module: Module) []const GlobalType {
-    return module.globalTypes()[0..module.inner.raw.global_import_count];
+    return module.globalTypes()[0..module.inner.global_import_count];
 }
 
 pub inline fn globalInitializers(module: Module) []const GlobalExpr {
-    const defined_count = module.inner.raw.global_count - module.inner.raw.global_import_count;
-    return module.inner.raw.global_exprs[0..defined_count];
+    const defined_count = module.inner.global_count - module.inner.global_import_count;
+    return module.inner.global_exprs[0..defined_count];
 }
 
 pub inline fn codeEntries(module: Module) []const Code.Entry {
-    return module.inner.raw.code_entries[0..module.inner.raw.code_count];
+    return module.inner.code_entries[0..module.inner.code_count];
 }
 
 /// Asserts that the function index refers to a function definition.
 pub inline fn code(module: Module, idx: FuncIdx) *Code {
-    const definition_index = @intFromEnum(idx) - module.inner.raw.func_import_count;
-    return &module.inner.raw.code[0..module.inner.raw.code_count][definition_index];
+    const definition_index = @intFromEnum(idx) - module.inner.func_import_count;
+    return &module.inner.code[0..module.inner.code_count][definition_index];
 }
 
 pub inline fn dataSegmentContents(module: Module, idx: DataIdx) []const u8 {
     const i = @intFromEnum(idx);
-    std.debug.assert(i < module.inner.raw.datas_count);
-    return module.inner.raw.datas_ptrs[i][0..module.inner.raw.datas_lens[i]];
+    std.debug.assert(i < module.inner.datas_count);
+    return module.inner.datas_ptrs[i][0..module.inner.datas_lens[i]];
 }
 
 pub inline fn elementSegments(module: Module) []const ElemSegment {
-    return module.inner.raw.elems[0..module.inner.raw.elems_count];
+    return module.inner.elems[0..module.inner.elems_count];
 }
 
 pub inline fn exports(module: Module) []const Export {
-    return module.inner.raw.exports[0..module.inner.raw.export_count];
+    return module.inner.exports[0..module.inner.export_count];
 }
 
 pub const Start = packed struct(u32) {
@@ -409,12 +419,12 @@ pub const ImportName = struct {
 
     pub inline fn desc_name(self: ImportName, module: Module) Name {
         const name_slice = WasmSlice{ .offset = self.name_offset, .size = self.name_size };
-        return .init(name_slice.slice(module.inner.raw.import_section, module.inner.wasm));
+        return .init(name_slice.slice(module.inner.import_section, module.wasmBytes()));
     }
 
     pub inline fn module_name(self: ImportName, module: Module) Name {
         const name_slice = WasmSlice{ .offset = self.module_offset, .size = self.module_size };
-        return .init(name_slice.slice(module.inner.raw.import_section, module.inner.wasm));
+        return .init(name_slice.slice(module.inner.import_section, module.wasmBytes()));
     }
 };
 
@@ -442,7 +452,7 @@ pub const Export = packed struct(u64) {
 
     pub inline fn name(self: Export, module: Module) Module.Name {
         const name_slice = WasmSlice{ .offset = self.name_offset, .size = self.name_size };
-        const bytes = name_slice.slice(module.inner.raw.export_section, module.inner.wasm);
+        const bytes = name_slice.slice(module.inner.export_section, module.wasmBytes());
         return .init(bytes);
     }
 
@@ -696,7 +706,7 @@ pub const ElemSegment = struct {
             expr: Expr,
             module: Module,
         ) [:@intFromEnum(opcodes.ByteOpcode.end)]const u8 {
-            return expr.init.bytes(module.inner.raw.elem_section, module);
+            return expr.init.bytes(module.inner.elem_section, module);
         }
     };
 };
@@ -716,7 +726,7 @@ pub const ActiveElem = struct {
         elem: *const ActiveElem,
         module: Module,
     ) [:@intFromEnum(opcodes.ByteOpcode.end)]const u8 {
-        return elem.offset.value.bytes(module.inner.raw.elem_section, module);
+        return elem.offset.value.bytes(module.inner.elem_section, module);
     }
 };
 
@@ -731,7 +741,7 @@ pub const ActiveData = struct {
         data: *const ActiveData,
         module: Module,
     ) [:@intFromEnum(opcodes.ByteOpcode.end)]const u8 {
-        return data.offset.value.bytes(module.inner.raw.data_section, module);
+        return data.offset.value.bytes(module.inner.data_section, module);
     }
 };
 
@@ -1244,7 +1254,7 @@ pub fn parse(
         .func_refs = func_refs_finished,
     };
 
-    const final_module = Module{ .inner = module.inner };
+    const final_module = Module{ .inner = &module.inner.raw };
     try module.inner.runtime_shape.calculate(final_module);
     return final_module;
 }
@@ -1585,7 +1595,7 @@ const GlobalExpr = struct {
     init: ConstExpr,
 
     pub fn bytes(expr: GlobalExpr, module: Module) [:@intFromEnum(opcodes.ByteOpcode.end)]const u8 {
-        return expr.init.bytes(module.inner.raw.global_section, module);
+        return expr.init.bytes(module.inner.global_section, module);
     }
 };
 
@@ -2196,7 +2206,7 @@ pub fn finishCodeValidation(
     diag: ParseDiagnostics,
 ) validator.Error!bool {
     var all_validated = true;
-    for (module.inner.raw.code[0..module.inner.raw.code_count]) |*code_entry| {
+    for (module.inner.code[0..module.inner.code_count]) |*code_entry| {
         _ = scratch.reset(.retain_capacity);
         all_validated = all_validated and try code_entry.validate(
             allocator,

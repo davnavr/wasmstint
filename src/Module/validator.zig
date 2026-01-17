@@ -170,14 +170,14 @@ pub const Code = extern struct {
         defer coz_transaction.end();
 
         const code_addr = @intFromPtr(code);
-        const code_sec_ptr = module.inner.raw.code;
+        const code_sec_ptr = module.inner.code;
         std.debug.assert(@intFromPtr(code_sec_ptr) <= code_addr);
-        std.debug.assert(code_addr < @intFromPtr(code_sec_ptr + module.inner.raw.code_count));
+        std.debug.assert(code_addr < @intFromPtr(code_sec_ptr + module.inner.code_count));
 
         const func_idx: Module.FuncIdx = @enumFromInt(@as(
             @typeInfo(Module.FuncIdx).@"enum".tag_type,
             @intCast(
-                module.inner.raw.func_import_count + @divExact(
+                module.inner.func_import_count + @divExact(
                     code_addr - @intFromPtr(code_sec_ptr),
                     @sizeOf(Code),
                 ),
@@ -191,8 +191,8 @@ pub const Code = extern struct {
             allocator,
             module,
             module.funcTypeIdx(func_idx),
-            module.codeEntries()[@intFromEnum(func_idx) - module.inner.raw.func_import_count]
-                .contents.slice(module.inner.raw.code_section, module.inner.wasm),
+            module.codeEntries()[@intFromEnum(func_idx) - module.inner.func_import_count]
+                .contents.slice(module.inner.code_section, module.wasmBytes()),
             scratch,
             diag,
         );
@@ -302,7 +302,7 @@ const BlockType = union(enum) {
             return BlockType.void;
         } else if (tag_int >= 0) {
             reader.bytes.* = int_bytes;
-            return if (tag_int < module.inner.raw.types_count)
+            return if (tag_int < module.inner.types_count)
                 BlockType{
                     .type = .{
                         .idx = @enumFromInt(
@@ -540,7 +540,7 @@ fn readMemIdx(reader: *Reader, module: Module, diag: Diagnostics) !void {
         return diag.writeAll(.parse, msg);
     }
 
-    if (module.inner.raw.mem_count == 0) {
+    if (module.inner.mem_count == 0) {
         return diag.print(.validation, "unknown memory {}", .{idx});
     }
 }
@@ -568,7 +568,7 @@ fn readMemArg(
             diag.writeAll(.parse, "malformed memop flags, alignment overflow");
     }
 
-    if (module.inner.raw.mem_count == 0) {
+    if (module.inner.mem_count == 0) {
         return diag.writeAll(.validation, "unknown memory in memarg");
     }
 
@@ -602,11 +602,11 @@ const ReadDataIdx = struct {
 
     fn boundsCheck(self: ReadDataIdx, module: Module, diag: Diagnostics) !void {
         // spec first checks OOB index
-        if (self.idx >= module.inner.raw.datas_count) {
+        if (self.idx >= module.inner.datas_count) {
             return diag.print(.validation, "unknown data segment {}, in code", .{self.idx});
         }
 
-        if (!module.inner.raw.has_data_count_section) {
+        if (!module.inner.has_data_count_section) {
             return diag.writeAll(.parse, "data count section required");
         }
     }
@@ -615,7 +615,7 @@ const ReadDataIdx = struct {
 fn readElemIdx(reader: *Reader, module: Module, diag: Diagnostics) !ValType {
     const idx = try reader.readIdx(
         Module.ElemIdx,
-        module.inner.raw.elems_count,
+        module.inner.elems_count,
         diag,
         &.{ "elem segment", "in code" },
     );
