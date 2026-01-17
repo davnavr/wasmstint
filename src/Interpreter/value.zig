@@ -128,9 +128,10 @@ pub const TaggedValue = union(enum) {
             switch (value.*) {
                 inline .i32, .i64 => |i, tag| {
                     const Unsigned = std.meta.Int(.unsigned, @typeInfo(@TypeOf(i)).int.bits);
+                    const u: Unsigned = @bitCast(i);
 
                     try writer.writeAll("(" ++ @tagName(tag));
-                    try writer.print(".const 0x{X}", .{i});
+                    try writer.print(".const 0x{X}", .{u});
                     if (self.options.int.signed or self.options.int.unsigned) {
                         try writer.writeAll(" (; ");
 
@@ -143,7 +144,7 @@ pub const TaggedValue = union(enum) {
                         }
 
                         if (self.options.int.unsigned) {
-                            try writer.print("unsigned={d}", .{@as(Unsigned, @bitCast(i))});
+                            try writer.print("unsigned={d}", .{u});
                         }
 
                         try writer.writeAll(" ;))");
