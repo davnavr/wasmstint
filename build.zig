@@ -709,7 +709,7 @@ fn buildSpecificationTests(
     top_steps.@"test".dependOn(test_spec_all_step);
 
     {
-        const test_fuzzed_step = b.step("test-fuzzed", "Run test cases discovered by fuzzing");
+        const test_fuzzed_step = b.step("test-fuzzed", "Run WAST test cases discovered by fuzzing");
         const fuzzed_test_names = [_][]const u8{ "validation.wast", "wasmi_diff.wast" };
         const fuzzed_test_dir = b.path("tests/fuzzed");
         for (fuzzed_test_names) |name| {
@@ -723,9 +723,9 @@ fn buildSpecificationTests(
     {
         const test_regression_step = b.step(
             "test-spec-regression",
-            "Run test cases to check bug fixes",
+            "Run WAST test cases to check bug fixes",
         );
-        const regression_test_names = [_][]const u8{"const.wast"};
+        const regression_test_names = [_][]const u8{ "const.wast", "table_grow.wast" };
         const regression_test_dir = b.path("tests/regression");
         for (regression_test_names) |name| {
             test_regression_step.dependOn(
