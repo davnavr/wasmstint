@@ -78,7 +78,10 @@ fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) voi
         as.writeInstrs(&.{
             "# System V calling convention",
             "push rbp",
+            ".cfi_def_cfa_offset 16",
+            ".cfi_offset rbp, -16",
             "mov rbp, rsp",
+            ".cfi_def_cfa_register rbp",
         });
         as.pushSystemVSavedRegisters();
         as.printInstrs(&.{
@@ -110,6 +113,7 @@ fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) voi
             .Debug, .ReleaseSafe => .@"16",
             .ReleaseFast, .ReleaseSmall => .@"1",
         });
+        AsmWriter.OpcodeHandler.writeStartingCfiDirectives(as);
         switch (optimize) {
             .Debug, .ReleaseSafe => as.printInstrs(&.{
                 "mov {[param_0]f}, {[vip]f} #0 VIP",
@@ -130,6 +134,7 @@ fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) voi
     }
     {
         var oof = as.startFunction("outOfFuelHandler", .@"16");
+        AsmWriter.OpcodeHandler.writeStartingCfiDirectives(as);
         for (
             &[_]Gpr{ .vip, .vsp, .eip, .stp, .interp },
             &[_]u8{ 0, 2, 1, 3, 4 },
@@ -146,6 +151,7 @@ fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) voi
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
+            ".cfi_def_cfa rsp, 8",
             "jmp {[symbol_prefix]s}interruptOutOfFuel",
             "ud2",
         }, .{ .symbol_prefix = as.symbol_prefix });
@@ -154,6 +160,7 @@ fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) voi
     switch (optimize) {
         .Debug, .ReleaseSafe => {
             var invalid = as.startFunction("invalidPrefixedOpcode", .@"16");
+            AsmWriter.OpcodeHandler.writeStartingCfiDirectives(as);
             for (0.., &[3]Gpr{ .vip, .eip, .prefix_opcode_base_ip }) |idx, param| {
                 as.printInstrs(
                     &.{"mov {[param]f}, {[src]f} # argument {[n]d}"},
@@ -398,6 +405,7 @@ fn defineControlOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
+            ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapUnreachable",
             "ud2",
         }, .{ .prefix = as.symbol_prefix });
@@ -530,6 +538,7 @@ fn defineControlOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
+            ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}returnFromWasm",
             "ud2",
         }, .{ .prefix = as.symbol_prefix });
@@ -561,6 +570,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
+            ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}invokeWithinWasm # call into Zig",
             "ud2",
         }, .{ .prefix = as.symbol_prefix });
@@ -620,6 +630,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
+            ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}invokeWithinWasmIndirect",
             "ud2",
         }, .{ .prefix = as.symbol_prefix });
@@ -638,6 +649,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
+            ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapCallIndirectAccessOob",
             "ud2",
         }, .{ .prefix = as.symbol_prefix });
@@ -654,6 +666,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
+            ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapIndirectCallToNull",
             "ud2",
         }, .{ .prefix = as.symbol_prefix });
@@ -690,6 +703,7 @@ fn defineParametericOpcodeHandlers(
             .function = as.startFunction("select_t", .@"16"),
             .out_of_fuel = as.label(&.{"out_of_fuel"}),
         };
+        AsmWriter.OpcodeHandler.writeStartingCfiDirectives(as);
         zig.defineOpcodeHandlerAlias("select_t", "select t");
         var type_count = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "count");
         var bad_type_count: AsmWriter.Label = undefined;
@@ -981,6 +995,7 @@ fn defineTableAccessOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
+            ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapTableAccessOutOfBounds",
             "ud2",
         }, .{ .prefix = as.symbol_prefix });
@@ -1039,6 +1054,7 @@ fn defineTableAccessOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
+            ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapTableAccessOutOfBounds",
             "ud2",
         }, .{ .prefix = as.symbol_prefix });
@@ -1123,6 +1139,7 @@ const LinearMemoryAccess = struct {
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
+            ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapMemoryAccessOutOfBounds",
             "ud2",
         }, .{ .prefix = as.symbol_prefix });
@@ -1271,6 +1288,7 @@ fn defineMemoryManagementOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
+            ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}memoryGrowReallocate",
             "ud2",
         }, .{ .prefix = as.symbol_prefix });
@@ -1458,6 +1476,8 @@ const IntType = enum {
 
 /// IP to first byte after opcode is stored in `r14`.
 ///
+/// Assumes that the saved `rbp` is on top of the stack
+///
 /// TODO: deduplicate these handlers
 fn numericOperationTrapJmp(as: *AsmWriter, handler: []const u8) void {
     as.printInstrs(&.{
@@ -1475,8 +1495,8 @@ fn numericOperationTrapJmp(as: *AsmWriter, handler: []const u8) void {
     });
     as.popSystemVSavedRegisters();
     as.printInstrs(&.{
-        "mov rsp, rbp # TODO: is this unnecessary",
         "pop rbp",
+        ".cfi_def_cfa rsp, 8",
         "jmp {[prefix]s}{[name]s}",
         "ud2",
     }, .{ .prefix = as.symbol_prefix, .name = handler });
@@ -2616,6 +2636,7 @@ fn defineReferenceOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         );
 
         for (stack_saved_registers) |saved| {
+            // No CFI directives needed here right?
             as.printInstrs(&.{"push {f}"}, .{saved});
         }
 
@@ -2628,6 +2649,7 @@ fn defineReferenceOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             .{ .vip, .fuel, .vsp };
 
         for (Gpr.system_v_callee_saved[0..3], callee_saved_registers) |dst, src| {
+            // No CFI directives needed here right?
             as.printInstrs(&.{"mov {f}, {f}"}, .{ dst, src });
         }
 
@@ -2671,6 +2693,7 @@ fn definePrefixOpcodeHandlers(
     for (&[_][2][]const u8{.{ "0xFC", "fc_prefix_dispatch_table" }}) |info| {
         const opcode_name, const table_name = info;
         var op = as.startFunction(opcode_name, .@"32");
+        AsmWriter.OpcodeHandler.writeStartingCfiDirectives(as);
         zig.defineOpcodeHandler(opcode_name);
         switch (optimize) {
             .Debug, .ReleaseSafe => as.printInstrs(&.{
@@ -2835,6 +2858,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
+            ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapMemoryInitOutOfBounds",
             "ud2",
         }, .{ .prefix = as.symbol_prefix });
@@ -3110,6 +3134,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             as.printInstrs(&.{
                 "# rsp already refers to saved rbp",
                 "pop rbp",
+                ".cfi_def_cfa rsp, 8",
                 "jmp {[prefix]s}trapMemoryCopyOutOfBounds",
                 "ud2",
             }, .{ .prefix = as.symbol_prefix });
@@ -3278,6 +3303,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
+            ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapMemoryFillOutOfBounds",
             "ud2",
         }, .{ .prefix = as.symbol_prefix });
@@ -3317,6 +3343,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
+            ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}tableInit",
             "ud2",
         }, .{ .prefix = as.symbol_prefix });
@@ -3530,6 +3557,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
             as.printInstrs(&.{
                 "# rsp already refers to saved rbp",
                 "pop rbp",
+                ".cfi_def_cfa rsp, 8",
                 "jmp {[prefix]s}trapTableCopyOutOfBounds",
                 "ud2",
             }, .{ .prefix = as.symbol_prefix });
@@ -3777,6 +3805,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter, zig: *ZigWriter) void {
         as.printInstrs(&.{
             "# rsp already refers to saved rbp",
             "pop rbp",
+            ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapTableFillOutOfBounds",
             "ud2",
         }, .{ .prefix = as.symbol_prefix });

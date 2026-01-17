@@ -336,9 +336,11 @@ const Function = struct {
         end_label.place(as);
         as.print(
             \\.size {[symbol_prefix]s}{[name]s}, {[label]s} - {[symbol_prefix]s}{[name]s} 
-            \\# .cfi_endproc
-            \\
-        , .{ .symbol_prefix = as.symbol_prefix, .name = func_name, .label = end_label.name() });
+        ++ "\n\t.cfi_endproc\n", .{
+            .symbol_prefix = as.symbol_prefix,
+            .name = func_name,
+            .label = end_label.name(),
+        });
         as.function_name = null;
         func.* = undefined;
     }
@@ -360,9 +362,7 @@ pub fn startFunction(
         \\.p2align {[alignment]d}
         \\.type {[symbol_prefix]s}{[name]s}, @function
         \\{[symbol_prefix]s}{[name]s}:
-        \\# .cfi_startproc
-        \\
-    , .{
+    ++ "\n\t.cfi_startproc\n", .{
         .symbol_prefix = as.symbol_prefix,
         .name = name,
         .alignment = @intFromEnum(alignment),
@@ -402,6 +402,19 @@ pub fn writeInstrs(as: *AsmWriter, lines: []const []const u8) void {
 pub const OpcodeHandler = struct {
     function: Function,
     out_of_fuel: Label,
+
+    pub fn writeStartingCfiDirectives(as: *AsmWriter) void {
+        as.writeInstrs(&.{
+            ".cfi_offset rbp, -16",
+            ".cfi_def_cfa rbp, 16",
+        });
+        for (3.., Gpr.system_v_callee_saved) |i, saved| {
+            as.printInstrs(
+                &.{".cfi_offset {f}, {d}"},
+                .{ saved, -@as(isize, @intCast(i * 8)) },
+            );
+        }
+    }
 
     pub fn end(handler: *OpcodeHandler, as: *AsmWriter) void {
         handler.out_of_fuel.place(as);
@@ -481,8 +494,8 @@ pub const PreservedRegisters = struct {
     }
 
     pub fn preserve(info: *const PreservedRegisters, as: *AsmWriter) void {
-        // TODO: if register is .disp, can use lea of dispatch table instead of pop
         for (info.registers, info.comments) |reg, comment| {
+            // No CFI directives needed here, right?
             as.printInstrs(&.{"push {[reg]f} # {[comment]s}"}, .{ .reg = reg, .comment = comment });
         }
     }
@@ -490,6 +503,7 @@ pub const PreservedRegisters = struct {
     pub fn restore(info: *const PreservedRegisters, as: *AsmWriter) void {
         for (0..info.comments.len) |forward_idx| {
             const i = info.comments.len - forward_idx - 1;
+            // No CFI directives needed here, right?
             as.printInstrs(
                 &.{"pop {[reg]f} # {[comment]s}"},
                 .{ .reg = info.registers[i], .comment = info.comments[i] },
@@ -506,13 +520,20 @@ pub fn defineOpcodeHandler(
 ) OpcodeHandler {
     const func = as.startFunction(name, alignment);
     zig.defineOpcodeHandler(name);
+    OpcodeHandler.writeStartingCfiDirectives(as);
     return .{ .function = func, .out_of_fuel = as.label(&.{"out_of_fuel"}) };
 }
 
 pub fn pushSystemVSavedRegisters(as: *AsmWriter) void {
     as.write("\t# save System V callee-saved registers\n");
-    for (Gpr.system_v_callee_saved) |gpr| {
-        as.printInstrs(&.{"push {[saved]f}"}, .{ .saved = gpr });
+    for (3.., Gpr.system_v_callee_saved) |i, gpr| {
+        as.printInstrs(&.{
+            "push {[saved]f}",
+            ".cfi_offset {[saved]f}, {[offset]d}",
+        }, .{
+            .offset = -@as(isize, @intCast(i * 8)),
+            .saved = gpr,
+        });
     }
 }
 
