@@ -725,7 +725,7 @@ fn buildSpecificationTests(
             "test-spec-regression",
             "Run WAST test cases to check bug fixes",
         );
-        const regression_test_names = [_][]const u8{ "const.wast", "table_grow.wast" };
+        const regression_test_names = [_][]const u8{"x86_64_sysv.wast"};
         const regression_test_dir = b.path("tests/regression");
         for (regression_test_names) |name| {
             test_regression_step.dependOn(
