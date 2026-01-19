@@ -68,7 +68,7 @@ pub fn main() noreturn {
     defineReferenceOpcodeHandlers(&asm_writer);
     definePrefixOpcodeHandlers(&asm_writer, optimize);
     defineBulkMemoryOpcodeHandlers(&asm_writer);
-    // @import("simd.zig").defineAllOpcodes(&asm_writer);
+    @import("simd.zig").defineAllOpcodes(&asm_writer);
 
     defineOpcodeDispatchTables(&asm_writer, optimize);
 
@@ -2410,10 +2410,11 @@ fn defineReferenceOpcodeHandlers(as: *AsmWriter) void {
 }
 
 fn definePrefixOpcodeHandlers(as: *AsmWriter, optimize: std.builtin.OptimizeMode) void {
-    for (&[_]struct { opcodes.ByteOpcode, []const u8 }{
-        .{ .@"0xFC", "fc_prefix_dispatch_table" },
+    for (&[_]struct { opcodes.ByteOpcode, DispatchTable }{
+        .{ .@"0xFC", .fc_prefix_dispatch_table },
+        .{ .@"0xFD", .fd_prefix_dispatch_table },
     }) |info| {
-        const opcode, const table_name = info;
+        const opcode, const table = info;
         var op = as.startFunction(@tagName(opcode), .{ .binding = .local, .alignment = .@"32" });
         as.addOpcodeToLookup(.{ .byte = opcode });
         AsmWriter.OpcodeHandler.writeStartingCfiDirectives(as);
@@ -2423,13 +2424,14 @@ fn definePrefixOpcodeHandlers(as: *AsmWriter, optimize: std.builtin.OptimizeMode
             }, .{ .invalid_ip = Gpr.prefix_opcode_base_ip, .vip = Gpr.vip }),
             .ReleaseFast, .ReleaseSmall => {},
         }
+        // TODO: Custom ULEB decoder here, with a `jmp _table` for each byte width
         var decode_opcode = DecodeUlebIdx.fastPath(as, .r13, .{ .r14, .r15 }, "opcode");
         as.printInstrs(
             &.{
-                "jmp [{[symbol_prefix]s}{[table_name]s} + r13*8]",
+                "jmp [{[symbol_prefix]s}{[table]t} + r13*8]",
                 "ud2",
             },
-            .{ .symbol_prefix = as.symbol_prefix, .table_name = table_name },
+            .{ .symbol_prefix = as.symbol_prefix, .table = table },
         );
         decode_opcode.writeSlowPath(as);
         op.end(as);
@@ -3559,11 +3561,13 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter) void {
 const DispatchTable = enum {
     byte_dispatch_table,
     fc_prefix_dispatch_table,
+    fd_prefix_dispatch_table,
 
     fn OpcodeType(comptime table: DispatchTable) type {
         return switch (table) {
             .byte_dispatch_table => opcodes.ByteOpcode,
             .fc_prefix_dispatch_table => opcodes.FCPrefixOpcode,
+            .fd_prefix_dispatch_table => opcodes.FDPrefixOpcode,
         };
     }
 
@@ -3571,6 +3575,19 @@ const DispatchTable = enum {
         return switch (table) {
             .byte_dispatch_table => .byte_opcode_lookup,
             .fc_prefix_dispatch_table => .fc_opcode_lookup,
+            .fd_prefix_dispatch_table => .fd_opcode_lookup,
+        };
+    }
+
+    fn size(table: DispatchTable, optimize: std.builtin.OptimizeMode) usize {
+        const safe = switch (optimize) {
+            .Debug, .ReleaseSafe => true,
+            .ReleaseFast, .ReleaseSmall => false,
+        };
+        return switch (table) {
+            .byte_dispatch_table => 256,
+            .fc_prefix_dispatch_table => if (safe) 64 else 17,
+            .fd_prefix_dispatch_table => if (safe) 256 else 128,
         };
     }
 
@@ -3609,15 +3626,12 @@ fn defineOpcodeDispatchTables(as: *AsmWriter, optimize: std.builtin.OptimizeMode
         .ReleaseFast, .ReleaseSmall => "invalidByteOpcode",
     };
 
-    inline for (&[_]struct { DispatchTable, usize }{
-        .{ .byte_dispatch_table, 256 },
-        .{ .fc_prefix_dispatch_table, 32 },
-    }) |info| {
-        const table, const size = info;
+    inline for (comptime std.enums.values(DispatchTable)) |table| {
         const invalid = switch (table) {
             .byte_dispatch_table => "invalidByteOpcode",
             else => invalid_prefixed_opcode,
         };
+        const size = table.size(optimize);
 
         as.print(
             \\.global {[symbol_prefix]s}{[name]t}

@@ -6,8 +6,43 @@ function_arena: *std.heap.ArenaAllocator,
 function_name: ?[]const u8 = null,
 label_counter: u16 = 0,
 
-byte_opcode_lookup: std.EnumSet(opcodes.ByteOpcode) = .initEmpty(),
-fc_opcode_lookup: std.EnumSet(opcodes.FCPrefixOpcode) = .initEmpty(),
+byte_opcode_lookup: EnumSet(opcodes.ByteOpcode) = .initEmpty(),
+fc_opcode_lookup: EnumSet(opcodes.FCPrefixOpcode) = .initEmpty(),
+fd_opcode_lookup: EnumSet(opcodes.FDPrefixOpcode) = .initEmpty(),
+
+// Bug in `std.EnumSet` causes "error: evaluation exceeded 4967 backwards branches"
+fn EnumSet(comptime E: type) type {
+    return struct {
+        const max_value: comptime_int = max: {
+            var maximum: comptime_int = 0;
+            for (@typeInfo(E).@"enum".fields) |field| {
+                maximum = @max(maximum, field.value);
+            }
+            break :max maximum;
+        };
+
+        bits: std.StaticBitSet(max_value + 1),
+
+        const Self = @This();
+
+        pub fn initEmpty() Self {
+            return .{ .bits = .initEmpty() };
+        }
+
+        pub fn contains(set: Self, key: E) bool {
+            return set.bits.isSet(@intFromEnum(key));
+        }
+
+        pub fn insert(set: *Self, key: E) void {
+            set.bits.set(@intFromEnum(key));
+        }
+    };
+}
+
+const FDOpcodeLookup = lookup: {
+    @setEvalBranchQuota(9000);
+    break :lookup std.EnumSet(opcodes.FDPrefixOpcode);
+};
 
 const AsmWriter = @This();
 
@@ -532,6 +567,7 @@ pub const PreservedRegisters = struct {
 pub const Opcode = union(enum) {
     byte: opcodes.ByteOpcode,
     fc: opcodes.FCPrefixOpcode,
+    fd: opcodes.FDPrefixOpcode,
 
     pub fn init(comptime Type: type, opcode: Type) Opcode {
         return @unionInit(
@@ -539,7 +575,8 @@ pub const Opcode = union(enum) {
             switch (Type) {
                 opcodes.ByteOpcode => "byte",
                 opcodes.FCPrefixOpcode => "fc",
-                else => unreachable,
+                opcodes.FDPrefixOpcode => "fd",
+                else => @compileError(@typeName(Type)),
             },
             opcode,
         );
@@ -559,6 +596,7 @@ pub fn addOpcodeToLookup(as: *AsmWriter, opcode: Opcode) void {
             const lookup = switch (comptime tag) {
                 .byte => &as.byte_opcode_lookup,
                 .fc => &as.fc_opcode_lookup,
+                .fd => &as.fd_opcode_lookup,
             };
             std.debug.assert(!lookup.contains(n));
             lookup.insert(n);
