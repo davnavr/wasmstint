@@ -368,11 +368,11 @@ const Modules = struct {
                 //run_codegen.addArg(options.target.query.serializeCpuAlloc(b.allocator) catch @panic("oom"));
                 run_codegen.addArg(b.fmt("{t}", .{options.optimize_interpreter}));
                 root_module.addAssemblyFile(run_codegen.addOutputFileArg("x86_64_sysv.s"));
-                root_module.addAnonymousImport("asm_generated", .{
-                    .root_source_file = run_codegen.addOutputFileArg("x86_64_sys_decls.zig"),
-                    .target = options.target,
-                    .optimize = options.optimize_interpreter,
-                });
+                // root_module.addAnonymousImport("asm_generated", .{
+                //     .root_source_file = run_codegen.addOutputFileArg("x86_64_sys_decls.zig"),
+                //     .target = options.target,
+                //     .optimize = options.optimize_interpreter,
+                // });
                 wasmstint_options.addOption([]const u8, "symbol_prefix", x64_asm_interp_symbol_prefix);
             }
 

@@ -892,7 +892,7 @@ pub const byte_dispatch_table = @extern(
 );
 
 comptime {
-    _ = @import("asm_generated");
+    // _ = @import("asm_generated");
 
     for (&[_][]const u8{
         "interruptOutOfFuel",
