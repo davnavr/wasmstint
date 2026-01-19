@@ -553,9 +553,7 @@ fn memoryGrowReallocate(
 
 fn tableGrowReallocate(
     new_len: u32, // rdi
-    /// `sp[0]` is the element to replicate.
-    ///
-    /// `sp - 1` refers to `(i32.const -1)`, indicating growth failure.
+    /// `sp - 1` is the element to replicate, and where the `i32` result is stored.
     sp: Sp, // rsi
     ip: Ip, // rdx,
     eip: Eip, // rcx
@@ -568,14 +566,12 @@ fn tableGrowReallocate(
     _: usize, // `rbp + 40`
     _: usize, // `rbp + 48`
 ) callconv(sysvcc) Transition {
-    const result = &(sp.ptr - 1)[0];
-    std.debug.assert(result.i32 == -1);
     return Transition.interrupted(.init(ip, eip), sp, stp, interp, .{
         .table_grow = .{
             .old_len = table.len,
             .new_len = @intCast(new_len),
             .table = table,
-            .elem = &sp.ptr[0],
+            .elem = &(sp.ptr - 1)[0],
         },
     });
 }

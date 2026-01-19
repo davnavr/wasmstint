@@ -3307,7 +3307,6 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter) void {
             "cmp r13d, dword ptr [r11 + {[table_cap_off]d}] # check against capacity",
             "jbe {[within_capacity]f}",
 
-            "mov dword ptr [{[vsp]f} - 0x10], -1 # assume growth failure",
             "# Setup parameters",
             "mov rdi, r13 #0 new length, clobbers locals",
             "#1 VSP is already in rsi",
