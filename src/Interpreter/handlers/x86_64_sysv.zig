@@ -1,11 +1,5 @@
 //! X86-64 assembly implementation of WebAssembly opcode handlers.
 
-// TODO: restructure handlers
-// handlers/zig
-// handlers/portable.zig
-// handlers/portable/simd.zig
-// handlers/x86_64_sysv.zig
-
 /// - %rax - `Ip`, `Transition`
 /// - %rbx - `Stp`
 /// - %rcx - `*Fuel`

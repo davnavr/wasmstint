@@ -1454,7 +1454,7 @@ const fc_prefixed_dispatch = prefixDispatchTable(
     std.math.maxInt(u5),
 );
 
-const simd_handlers = @import("simd/portable.zig");
+const simd_handlers = @import("portable/simd.zig");
 const fd_prefixed_dispatch = prefixDispatchTable(
     .@"0xFD",
     opcodes.FDPrefixOpcode,
