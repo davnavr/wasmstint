@@ -68,6 +68,7 @@ pub fn main() noreturn {
     defineReferenceOpcodeHandlers(&asm_writer);
     definePrefixOpcodeHandlers(&asm_writer, optimize);
     defineBulkMemoryOpcodeHandlers(&asm_writer);
+    // @import("simd.zig").defineAllOpcodes(&asm_writer);
 
     defineOpcodeDispatchTables(&asm_writer, optimize);
 
@@ -3555,25 +3556,43 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter) void {
     }
 }
 
-fn printOpcodeHandlerAddress(
-    as: *AsmWriter,
-    comptime OpcodeType: type,
-    comptime lookup_field: std.meta.FieldEnum(AsmWriter),
-    invalid: []const u8,
-    opcode: usize,
-) void {
-    as.print("\t.quad {s}", .{as.symbol_prefix});
-    if (std.meta.intToEnum(OpcodeType, opcode) catch null) |defined| {
-        const name = AsmWriter.Opcode.init(OpcodeType, defined).name();
-        if (@field(as, @tagName(lookup_field)).contains(defined)) {
-            as.print("{s}\n", .{name});
-        } else {
-            as.print("{s} # {s} is not defined\n", .{ invalid, name });
-        }
-    } else {
-        as.print("{s}\n", .{invalid});
+const DispatchTable = enum {
+    byte_dispatch_table,
+    fc_prefix_dispatch_table,
+
+    fn OpcodeType(comptime table: DispatchTable) type {
+        return switch (table) {
+            .byte_dispatch_table => opcodes.ByteOpcode,
+            .fc_prefix_dispatch_table => opcodes.FCPrefixOpcode,
+        };
     }
-}
+
+    fn lookupField(table: DispatchTable) std.meta.FieldEnum(AsmWriter) {
+        return switch (table) {
+            .byte_dispatch_table => .byte_opcode_lookup,
+            .fc_prefix_dispatch_table => .fc_opcode_lookup,
+        };
+    }
+
+    fn printOpcodeHandlerAddress(
+        comptime table: DispatchTable,
+        as: *AsmWriter,
+        invalid: []const u8,
+        opcode: usize,
+    ) void {
+        as.print("\t.quad {s}", .{as.symbol_prefix});
+        if (std.meta.intToEnum(table.OpcodeType(), opcode) catch null) |defined| {
+            const name = AsmWriter.Opcode.init(table.OpcodeType(), defined).name();
+            if (@field(as, @tagName(table.lookupField())).contains(defined)) {
+                as.print("{s}\n", .{name});
+            } else {
+                as.print("{s} # {s} is not defined\n", .{ invalid, name });
+            }
+        } else {
+            as.print("{s}\n", .{invalid});
+        }
+    }
+};
 
 fn defineOpcodeDispatchTables(as: *AsmWriter, optimize: std.builtin.OptimizeMode) void {
     // Different section if PIC is true:
@@ -3581,62 +3600,38 @@ fn defineOpcodeDispatchTables(as: *AsmWriter, optimize: std.builtin.OptimizeMode
     as.print(
         \\
         \\.section .rodata, "a", @progbits
-        \\
+        \\.p2align 7
         \\
     , .{});
-    {
-        as.print(
-            \\.global {[symbol_prefix]s}byte_dispatch_table
-            \\.p2align 7
-            \\.type {[symbol_prefix]s}byte_dispatch_table, @object
-            \\{[symbol_prefix]s}byte_dispatch_table:
-            \\
-        , .{ .symbol_prefix = as.symbol_prefix });
-        const size = 256;
-        for (0..size) |i| {
-            printOpcodeHandlerAddress(
-                as,
-                opcodes.ByteOpcode,
-                .byte_opcode_lookup,
-                "invalidByteOpcode",
-                i,
-            );
-        }
-        as.print(
-            \\.size {[symbol_prefix]s}byte_dispatch_table, {[size]d}
-            \\
-        , .{ .symbol_prefix = as.symbol_prefix, .size = size * 8 });
-    }
+
     const invalid_prefixed_opcode = switch (optimize) {
         .Debug, .ReleaseSafe => "invalidPrefixedOpcode",
         .ReleaseFast, .ReleaseSmall => "invalidByteOpcode",
     };
-    {
-        as.print(
-            \\.global {[symbol_prefix]s}fc_prefix_dispatch_table
-            \\.p2align 5
-            \\.type {[symbol_prefix]s}fc_prefix_dispatch_table, @object
-            \\{[symbol_prefix]s}fc_prefix_dispatch_table:
-            \\
-        , .{ .symbol_prefix = as.symbol_prefix });
-        const size: usize = switch (optimize) {
-            .Debug, .ReleaseSafe, .ReleaseSmall => 18,
-            .ReleaseFast => 31,
+
+    inline for (&[_]struct { DispatchTable, usize }{
+        .{ .byte_dispatch_table, 256 },
+        .{ .fc_prefix_dispatch_table, 32 },
+    }) |info| {
+        const table, const size = info;
+        const invalid = switch (table) {
+            .byte_dispatch_table => "invalidByteOpcode",
+            else => invalid_prefixed_opcode,
         };
 
+        as.print(
+            \\.global {[symbol_prefix]s}{[name]t}
+            \\.type {[symbol_prefix]s}{[name]t}, @object
+            \\{[symbol_prefix]s}{[name]t}:
+            \\
+        , .{ .symbol_prefix = as.symbol_prefix, .name = table });
         for (0..size) |i| {
-            printOpcodeHandlerAddress(
-                as,
-                opcodes.FCPrefixOpcode,
-                .fc_opcode_lookup,
-                invalid_prefixed_opcode,
-                i,
-            );
+            table.printOpcodeHandlerAddress(as, invalid, i);
         }
         as.print(
-            \\.size {[symbol_prefix]s}fc_prefix_dispatch_table, {[size]d}
+            \\.size {[symbol_prefix]s}{[name]t}, {[size]d}
             \\
-        , .{ .symbol_prefix = as.symbol_prefix, .size = size * 8 });
+        , .{ .symbol_prefix = as.symbol_prefix, .name = table, .size = size * 8 });
     }
 }
 
