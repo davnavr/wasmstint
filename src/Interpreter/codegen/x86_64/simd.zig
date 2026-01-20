@@ -36,7 +36,7 @@ fn defineMemoryStoreOpcodes(as: *AsmWriter) void {
 
 fn defineBitwiseOpcodes(as: *AsmWriter) void {
     {
-        var op = as.defineOpcodeHandler(.{ .fd = .@"v128.not" }, .@"64");
+        var op = as.defineOpcodeHandler(.{ .fd = .@"v128.not" }, .@"32");
         as.printInstrs(&.{
             "pcmpeqd xmm0, xmm0 # all ones",
             "pxor xmm0, xmmword ptr [{[vsp]f} - 0x10] # bitwise NOT",
@@ -45,7 +45,7 @@ fn defineBitwiseOpcodes(as: *AsmWriter) void {
         op.end(as);
     }
     for (&[_]FDPrefixOpcode{ .@"v128.and", .@"v128.or", .@"v128.xor" }) |opcode| {
-        var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 1",
             "p{[operation]s} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
@@ -55,7 +55,7 @@ fn defineBitwiseOpcodes(as: *AsmWriter) void {
         op.end(as);
     }
     {
-        var op = as.defineOpcodeHandler(.{ .fd = .@"v128.andnot" }, .@"64");
+        var op = as.defineOpcodeHandler(.{ .fd = .@"v128.andnot" }, .@"32");
         as.printInstrs(&.{
             "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20]",
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
@@ -118,7 +118,7 @@ const IntInterp = enum {
 
 fn defineBooleanOpcodes(as: *AsmWriter) void {
     {
-        var any_true = as.defineOpcodeHandler(.{ .fd = .@"v128.any_true" }, .@"64");
+        var any_true = as.defineOpcodeHandler(.{ .fd = .@"v128.any_true" }, .@"32");
         as.printInstrs(&.{
             "xor r13d, r13d",
             "mov r11, qword ptr [{[vsp]f} - 0x10] # low 64-bits",
@@ -136,7 +136,7 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
     }) |opcode| {
         const interp = IntInterp.fromOpcodeName(opcode);
         {
-            var all_true = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+            var all_true = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
             as.printInstrs(&.{
                 "xor r13d, r13d",
                 "xorps xmm0, xmm0",
@@ -161,7 +161,7 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
 
     // PCMPEQQ and PCMPGTQ require SSE4.1
     {
-        var all_true = as.defineOpcodeHandler(.{ .fd = .@"i64x2.all_true" }, .@"64");
+        var all_true = as.defineOpcodeHandler(.{ .fd = .@"i64x2.all_true" }, .@"32");
         as.printInstrs(&.{
             "xor r11d, r11d",
             "xor r13d, r13d",
@@ -176,7 +176,7 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
     }
 
     {
-        var bitmask = as.defineOpcodeHandler(.{ .fd = .@"i8x16.bitmask" }, .@"64");
+        var bitmask = as.defineOpcodeHandler(.{ .fd = .@"i8x16.bitmask" }, .@"32");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
             "pmovmskb r11d, xmm0",
@@ -186,7 +186,7 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
     }
     {
         // No 16-bit pmovmsk/movmsk
-        var bitmask = as.defineOpcodeHandler(.{ .fd = .@"i16x8.bitmask" }, .@"64");
+        var bitmask = as.defineOpcodeHandler(.{ .fd = .@"i16x8.bitmask" }, .@"32");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
             "packsswb xmm0, xmm0 # high 64-bits contain the 8 high bytes of each 16-bit lane",
@@ -197,7 +197,7 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
         bitmask.end(as);
     }
     {
-        var bitmask = as.defineOpcodeHandler(.{ .fd = .@"i32x4.bitmask" }, .@"64");
+        var bitmask = as.defineOpcodeHandler(.{ .fd = .@"i32x4.bitmask" }, .@"32");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
             "movmskps r11d, xmm0",
@@ -206,7 +206,7 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
         bitmask.end(as);
     }
     {
-        var bitmask = as.defineOpcodeHandler(.{ .fd = .@"i64x2.bitmask" }, .@"64");
+        var bitmask = as.defineOpcodeHandler(.{ .fd = .@"i64x2.bitmask" }, .@"32");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
             "movmskpd r11d, xmm0",
@@ -218,7 +218,7 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
 
 fn defineConstOpcodes(as: *AsmWriter) void {
     {
-        var op = as.defineOpcodeHandler(.{ .fd = .@"v128.const" }, .@"64");
+        var op = as.defineOpcodeHandler(.{ .fd = .@"v128.const" }, .@"32");
         as.printInstrs(&.{
             "movdqu xmm0, xmmword ptr [{[vip]f}] # load 16-byte immediate",
             "movdqa xmmword ptr [{[vsp]f}], xmm0 # store v128",
