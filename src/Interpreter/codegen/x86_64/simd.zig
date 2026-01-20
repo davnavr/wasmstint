@@ -3,6 +3,7 @@
 pub fn defineAllOpcodes(as: *AsmWriter) void {
     defineMemoryLoadOpcodes(as);
     defineBitwiseOpcodes(as);
+    defineBooleanOpcodes(as);
     defineIntegerOpcodes(as);
 }
 
@@ -65,6 +66,27 @@ fn defineBitwiseOpcodes(as: *AsmWriter) void {
         }, .{ .vsp = Gpr.vsp });
         op.end(as);
     }
+}
+
+fn defineBooleanOpcodes(as: *AsmWriter) void {
+    {
+        var any_true = as.defineOpcodeHandler(.{ .fd = .@"v128.any_true" }, .@"64");
+        as.printInstrs(&.{
+            "xor r13d, r13d",
+            "mov r11, qword ptr [{[vsp]f} - 0x10] # low 64-bits",
+            "or r11, qword ptr [{[vsp]f} - 0x08] # high 64-bits",
+            "setnz r13b",
+            "mov dword ptr [{[vsp]f} - 0x10], r13d",
+        }, .{ .vsp = Gpr.vsp });
+        any_true.end(as);
+    }
+    // {
+    //     var all_true = as.defineOpcodeHandler(.{ .fd = .@"i8x16.all_true" }, .@"64");
+    //     as.printInstrs(&.{
+    //     }, .{ .vsp = Gpr.vsp });
+    //     all_true.end(as);
+    // }
+    // PCMPEQQ requires SSE4.1
 }
 
 const IntInterp = enum {
