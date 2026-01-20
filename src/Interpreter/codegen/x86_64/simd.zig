@@ -2,6 +2,7 @@
 
 pub fn defineAllOpcodes(as: *AsmWriter) void {
     defineMemoryLoadOpcodes(as);
+    defineBitwiseOpcodes(as);
     defineIntegerOpcodes(as);
 }
 
@@ -14,6 +15,28 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
             "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # write loaded value",
         }, .{ .vsp = Gpr.vsp });
         access.end(&load, as);
+    }
+}
+
+fn defineBitwiseOpcodes(as: *AsmWriter) void {
+    {
+        var op = as.defineOpcodeHandler(.{ .fd = .@"v128.not" }, .@"64");
+        as.printInstrs(&.{
+            "pcmpeqd xmm0, xmm0 # all ones",
+            "pxor xmm0, xmmword ptr [{[vsp]f} - 0x10] # bitwise NOT",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # write result",
+        }, .{ .vsp = Gpr.vsp });
+        op.end(as);
+    }
+    for (&[_]FDPrefixOpcode{ .@"v128.and", .@"v128.or", .@"v128.xor" }) |opcode| {
+        var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 1",
+            "p{[operation]s} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # write result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+        }, .{ .vsp = Gpr.vsp, .operation = @tagName(opcode)[5..] });
+        op.end(as);
     }
 }
 
