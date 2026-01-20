@@ -144,8 +144,21 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
         }
     }
 
-    // PCMPEQQ requires SSE4.1
-    //i64x2.all_true
+    // PCMPEQQ and PCMPGTQ require SSE4.1
+    {
+        var all_true = as.defineOpcodeHandler(.{ .fd = .@"i64x2.all_true" }, .@"64");
+        as.printInstrs(&.{
+            "xor r11d, r11d",
+            "xor r13d, r13d",
+            "cmp qword ptr [{[vsp]f} - 0x10], 0 # low 64-bits",
+            "setne r11b",
+            "cmp qword ptr [{[vsp]f} - 0x08], 0 # high 64-bits",
+            "setne r13b",
+            "and r11d, r13d",
+            "mov dword ptr [{[vsp]f} - 0x10], r11d # store result",
+        }, .{ .vsp = Gpr.vsp });
+        all_true.end(as);
+    }
 
     {
         var bitmask = as.defineOpcodeHandler(.{ .fd = .@"i8x16.bitmask" }, .@"64");
@@ -173,6 +186,15 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
             "movmskps r11d, xmm0",
+            "mov dword ptr [{[vsp]f} - 0x10], r11d",
+        }, .{ .vsp = Gpr.vsp });
+        bitmask.end(as);
+    }
+    {
+        var bitmask = as.defineOpcodeHandler(.{ .fd = .@"i64x2.bitmask" }, .@"64");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movmskpd r11d, xmm0",
             "mov dword ptr [{[vsp]f} - 0x10], r11d",
         }, .{ .vsp = Gpr.vsp });
         bitmask.end(as);
