@@ -1,7 +1,20 @@
 //! Writes definitions for all SIMD opcodes
 
 pub fn defineAllOpcodes(as: *AsmWriter) void {
+    defineMemoryLoadOpcodes(as);
     defineIntegerOpcodes(as);
+}
+
+fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
+    {
+        var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load" }, .@"64");
+        var access = LinearMemoryAccess.start(as, .@"0x10", .@"16");
+        as.printInstrs(&.{
+            "movups xmm0, xmmword ptr [r13 + r15] # load from memory",
+            "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # write loaded value",
+        }, .{ .vsp = Gpr.vsp });
+        access.end(&load, as);
+    }
 }
 
 const IntInterp = enum {
@@ -135,3 +148,4 @@ const AsmWriter = @import("AsmWriter.zig");
 const SystemVParam = AsmWriter.SystemVParam;
 const FDPrefixOpcode = @import("opcodes").FDPrefixOpcode;
 const Gpr = AsmWriter.Gpr;
+const LinearMemoryAccess = @import("LinearMemoryAccess.zig");
