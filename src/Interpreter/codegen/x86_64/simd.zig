@@ -242,7 +242,7 @@ pub fn defineIntegerOpcodes(as: *AsmWriter) void {
     as.print("\n.L{[symbol_prefix]s}i8x16_odd_lanes:\n", .{ .symbol_prefix = as.symbol_prefix });
     as.writeInstrs(&@as([8][]const u8, @splat(".word 0xFF00")));
 
-    as.print("\n.L{[symbol_prefix]s}i64x2_max:\n", .{ .symbol_prefix = as.symbol_prefix });
+    as.print("\n.L{[symbol_prefix]s}i64x2_sign_bits:\n", .{ .symbol_prefix = as.symbol_prefix });
     as.writeInstrs(&@as([2][]const u8, @splat(".quad 0x8000" ++ "0000" ++ "0000" ++ "0000")));
 
     as.write("\n.text\n");
@@ -314,7 +314,7 @@ pub fn defineIntegerOpcodes(as: *AsmWriter) void {
             .@"i64x2.shl" => as.writeInstrs(&.{"psllq xmm0, xmm1"}),
             // .@"i64x2.shr_s" => as.writeInstrs(&.{"vpsraq xmm0, xmm1"}), // AVX512F?
             .@"i64x2.shr_s" => as.printInstrs(&.{
-                "movdqa xmm2, xmmword ptr [.L{[symbol_prefix]s}i64x2_max]",
+                "movdqa xmm2, xmmword ptr [.L{[symbol_prefix]s}i64x2_sign_bits]",
                 "movdqa xmm3, xmm2",
                 "pand xmm2, xmm0 # sign bits",
                 "psrlq xmm0, xmm1 # logical shift",
@@ -336,6 +336,47 @@ pub fn defineIntegerOpcodes(as: *AsmWriter) void {
         }, .{ .vsp = Gpr.vsp });
         op.jmpToNextHandler(as);
         op.end(as);
+    }
+
+    for (&[_]FDPrefixOpcode{
+        .@"i8x16.add",
+        .@"i16x8.add",
+        .@"i32x4.add",
+        .@"i64x2.add",
+
+        .@"i8x16.sub",
+        .@"i16x8.sub",
+        .@"i32x4.sub",
+        .@"i64x2.sub",
+    }) |opcode| {
+        var add = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        const interp = IntInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 1",
+            "p{[op]s}{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .op = @tagName(opcode)[6..], .suffix = interp.suffix() });
+        add.jmpToNextHandler(as);
+        add.end(as);
+    }
+
+    // SSSE3 introduces PSIGNB/PSIGNW/PSIGND
+    for (&[_]FDPrefixOpcode{
+        .@"i8x16.neg",
+        .@"i16x8.neg",
+        .@"i32x4.neg",
+        .@"i64x2.neg",
+    }) |opcode| {
+        var neg = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        const interp = IntInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "pxor xmm0, xmm0 # zero",
+            "psub{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
+        neg.jmpToNextHandler(as);
+        neg.end(as);
     }
 }
 
