@@ -8,14 +8,14 @@ const IntInterp = enum {
     i8x16,
     i16x8,
     i32x4,
-    // i64x2,
+    i64x2,
 
     fn bitSize(interp: IntInterp) u7 {
         return switch (interp) {
             .i8x16 => 8,
             .i16x8 => 16,
             .i32x4 => 32,
-            // .i64x2 => 64,
+            .i64x2 => 64,
         };
     }
 };
@@ -33,6 +33,9 @@ pub fn defineIntegerOpcodes(as: *AsmWriter) void {
     as.print("\n.L{[symbol_prefix]s}i8x16_odd_lanes:\n", .{ .symbol_prefix = as.symbol_prefix });
     as.writeInstrs(&@as([8][]const u8, @splat(".word 0xFF00")));
 
+    as.print("\n.L{[symbol_prefix]s}i64x2_max:\n", .{ .symbol_prefix = as.symbol_prefix });
+    as.writeInstrs(&@as([2][]const u8, @splat(".quad 0x8000" ++ "0000" ++ "0000" ++ "0000")));
+
     as.write("\n.text\n");
 
     for (&[_]FDPrefixOpcode{
@@ -48,9 +51,9 @@ pub fn defineIntegerOpcodes(as: *AsmWriter) void {
         .@"i32x4.shr_s",
         .@"i32x4.shr_u",
 
-        // .@"i64x2.shl",
-        // .@"i64x2.shr_s",
-        // .@"i64x2.shr_u",
+        .@"i64x2.shl",
+        .@"i64x2.shr_s",
+        .@"i64x2.shr_u",
     }) |opcode| {
         var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
         const interp = std.meta.stringToEnum(IntInterp, @tagName(opcode)[0..5]).?;
@@ -99,10 +102,22 @@ pub fn defineIntegerOpcodes(as: *AsmWriter) void {
             .@"i32x4.shr_s" => as.writeInstrs(&.{"psrad xmm0, xmm1"}),
             .@"i32x4.shr_u" => as.writeInstrs(&.{"psrld xmm0, xmm1"}),
 
-            // AVX512F?
-            // .@"i64x2.shl" => as.writeInstrs(&.{"vpsllq xmm0, xmm1"}),
-            // .@"i64x2.shr_s" => as.writeInstrs(&.{"vpsraq xmm0, xmm1"}),
-            // .@"i64x2.shr_u" => as.writeInstrs(&.{"vpsrlq xmm0, xmm1"}),
+            .@"i64x2.shl" => as.writeInstrs(&.{"psllq xmm0, xmm1"}),
+            // .@"i64x2.shr_s" => as.writeInstrs(&.{"vpsraq xmm0, xmm1"}), // AVX512F?
+            .@"i64x2.shr_s" => as.printInstrs(&.{
+                "movdqa xmm2, xmmword ptr [.L{[symbol_prefix]s}i64x2_max]",
+                "movdqa xmm3, xmm2",
+                "pand xmm2, xmm0 # sign bits",
+                "psrlq xmm0, xmm1 # logical shift",
+                "pcmpeqq xmm2, xmm3 # all ones if sign bit is set, all zeroes otherwise",
+                "movdqa xmm5, xmm2",
+                "psrlq xmm2, xmm1 # logical shift of sign bits",
+                "pcmpeqq xmm4, xmm4 # all ones",
+                "pxor xmm2, xmm4 # bitwise NOT of sign bits to get shifted-in ones",
+                "pand xmm2, xmm5 # shifted ones bits if sign bit is set, all zeroes otherwise",
+                "por xmm0, xmm2",
+            }, .{ .symbol_prefix = as.symbol_prefix }),
+            .@"i64x2.shr_u" => as.writeInstrs(&.{"psrlq xmm0, xmm1"}),
 
             else => unreachable,
         }
