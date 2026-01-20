@@ -6,6 +6,8 @@ pub fn defineAllOpcodes(as: *AsmWriter) void {
     defineBitwiseOpcodes(as);
     defineBooleanOpcodes(as);
     defineConstOpcodes(as);
+    defineConversionOpcodes(as);
+
     defineIntegerOpcodes(as);
 }
 
@@ -229,7 +231,26 @@ fn defineConstOpcodes(as: *AsmWriter) void {
     }
 }
 
-pub fn defineIntegerOpcodes(as: *AsmWriter) void {
+fn defineConversionOpcodes(as: *AsmWriter) void {
+    {
+        var demote = as.defineOpcodeHandler(.{ .fd = .@"f32x4.demote_f64x2_zero" }, .@"32");
+        as.printInstrs(&.{
+            "cvtpd2ps xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        demote.end(as);
+    }
+    {
+        var promote = as.defineOpcodeHandler(.{ .fd = .@"f64x2.promote_low_f32x4" }, .@"32");
+        as.printInstrs(&.{
+            "cvtps2pd xmm0, qword ptr [{[vsp]f} - 0x10]",
+            "movapd xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        promote.end(as);
+    }
+}
+
+fn defineIntegerOpcodes(as: *AsmWriter) void {
     as.write(
         \\.section .rodata.cst16, "aM", @progbits, 16
         \\.p2align 4, 0x00
