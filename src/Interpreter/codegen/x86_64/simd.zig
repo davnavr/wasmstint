@@ -2,6 +2,7 @@
 
 pub fn defineAllOpcodes(as: *AsmWriter) void {
     defineMemoryLoadOpcodes(as);
+    defineMemoryStoreOpcodes(as);
     defineBitwiseOpcodes(as);
     defineBooleanOpcodes(as);
     defineConstOpcodes(as);
@@ -15,6 +16,19 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
         as.printInstrs(&.{
             "movups xmm0, xmmword ptr [r13 + r15] # load from memory",
             "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # write loaded value",
+        }, .{ .vsp = Gpr.vsp });
+        access.end(&load, as);
+    }
+}
+
+fn defineMemoryStoreOpcodes(as: *AsmWriter) void {
+    {
+        var load = as.defineOpcodeHandler(.{ .fd = .@"v128.store" }, .@"64");
+        var access = LinearMemoryAccess.start(as, .@"0x20", .@"16");
+        as.printInstrs(&.{
+            "movaps xmm0, xmmword ptr [{[vsp]f} - 0x10] # get vector to store",
+            "movups xmmword ptr [r13 + r15], xmm0 # write into linear memory",
+            "lea {[vsp]f}, [{[vsp]f} - 0x20] # vsp",
         }, .{ .vsp = Gpr.vsp });
         access.end(&load, as);
     }
