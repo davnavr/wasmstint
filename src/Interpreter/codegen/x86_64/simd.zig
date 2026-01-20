@@ -68,6 +68,39 @@ fn defineBitwiseOpcodes(as: *AsmWriter) void {
     }
 }
 
+const IntInterp = enum {
+    i8x16,
+    i16x8,
+    i32x4,
+    i64x2,
+
+    fn suffix(interp: IntInterp) u7 {
+        return switch (interp) {
+            .i8x16 => 'b',
+            .i16x8 => 'w',
+            .i32x4 => 'd',
+            .i64x2 => 'q',
+        };
+    }
+
+    fn bitSize(interp: IntInterp) u7 {
+        return switch (interp) {
+            .i8x16 => 8,
+            .i16x8 => 16,
+            .i32x4 => 32,
+            .i64x2 => 64,
+        };
+    }
+
+    fn laneCount(interp: IntInterp) u5 {
+        return @intCast(@divExact(128, interp.bitSize()));
+    }
+
+    fn fromOpcodeName(opcode: FDPrefixOpcode) IntInterp {
+        return std.meta.stringToEnum(IntInterp, @tagName(opcode)[0..5]).?;
+    }
+};
+
 fn defineBooleanOpcodes(as: *AsmWriter) void {
     {
         var any_true = as.defineOpcodeHandler(.{ .fd = .@"v128.any_true" }, .@"64");
@@ -80,30 +113,26 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
         }, .{ .vsp = Gpr.vsp });
         any_true.end(as);
     }
-    // {
-    //     var all_true = as.defineOpcodeHandler(.{ .fd = .@"i8x16.all_true" }, .@"64");
-    //     as.printInstrs(&.{
-    //     }, .{ .vsp = Gpr.vsp });
-    //     all_true.end(as);
-    // }
-    // PCMPEQQ requires SSE4.1
-}
 
-const IntInterp = enum {
-    i8x16,
-    i16x8,
-    i32x4,
-    i64x2,
-
-    fn bitSize(interp: IntInterp) u7 {
-        return switch (interp) {
-            .i8x16 => 8,
-            .i16x8 => 16,
-            .i32x4 => 32,
-            .i64x2 => 64,
-        };
+    for (&[_]FDPrefixOpcode{.@"i8x16.all_true"}) |opcode| {
+        const interp = IntInterp.fromOpcodeName(opcode);
+        var all_true = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        as.printInstrs(&.{
+            "xor r13d, r13d",
+            "xorps xmm0, xmm0",
+            "pcmpeq{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]" ++
+                "# lane is set to all one's when zero (false)",
+            "pmovmskb r11d, xmm0 # all zeroes if no lane was zero",
+            "test r11d, r11d",
+            "setz r13b",
+            "mov dword ptr [{[vsp]f} - 0x10], r13d",
+        }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
+        all_true.end(as);
     }
-};
+
+    // PCMPEQQ requires SSE4.1
+    //i64x2.all_true
+}
 
 pub fn defineIntegerOpcodes(as: *AsmWriter) void {
     as.write(
@@ -141,7 +170,7 @@ pub fn defineIntegerOpcodes(as: *AsmWriter) void {
         .@"i64x2.shr_u",
     }) |opcode| {
         var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
-        const interp = std.meta.stringToEnum(IntInterp, @tagName(opcode)[0..5]).?;
+        const interp = IntInterp.fromOpcodeName(opcode);
         as.printInstrs(&.{
             "mov r14d, dword ptr [{[vsp]f} - 0x10] # amt to shift",
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # vector to shift",
