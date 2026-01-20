@@ -232,6 +232,31 @@ fn defineConstOpcodes(as: *AsmWriter) void {
 }
 
 fn defineConversionOpcodes(as: *AsmWriter) void {
+    for (&[_]FDPrefixOpcode{
+        .@"i8x16.narrow_i16x8_s",
+        .@"i8x16.narrow_i16x8_u",
+        .@"i16x8.narrow_i32x4_s",
+        .@"i16x8.narrow_i32x4_u",
+    }) |opcode| {
+        var narrow = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        const interp = IntInterp.fromOpcodeName(opcode);
+        const opcode_name = @tagName(opcode);
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # load 1st operand",
+            "pack{[sign]c}s{[suffix]s} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+        }, .{
+            .vsp = Gpr.vsp,
+            .sign = opcode_name[opcode_name.len - 1],
+            .suffix = switch (interp) {
+                .i8x16 => "wb",
+                .i16x8 => "dw",
+                else => unreachable,
+            },
+        });
+        narrow.end(as);
+    }
     {
         var convert = as.defineOpcodeHandler(.{ .fd = .@"f32x4.convert_i32x4_s" }, .@"32");
         as.printInstrs(&.{
