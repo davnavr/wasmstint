@@ -285,6 +285,39 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         convert.end(as);
     }
     {
+        var convert = as.defineOpcodeHandler(.{ .fd = .@"f64x2.convert_low_i32x4_s" }, .@"32");
+        as.printInstrs(&.{
+            "cvtdq2pd xmm0, qword ptr [{[vsp]f} - 0x10]",
+            "movapd xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        convert.end(as);
+    }
+    {
+        var convert = as.defineOpcodeHandler(.{ .fd = .@"f64x2.convert_low_i32x4_u" }, .@"32");
+        as.writeInstrs(&.{"# Taken from LLVM output for Zig @floatFromInt"});
+
+        as.write(
+            \\.section .rodata.cst16, "aM", @progbits, 16
+            \\.p2align 4, 0x00
+            \\
+        );
+        var const_0 = as.label(&.{"const"});
+        const_0.place(as);
+        as.writeInstrs(&@as([2][]const u8, @splat(".quad 0x4330000000000000")));
+
+        as.write(".text\n");
+        as.printInstrs(&.{
+            "movapd xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
+            "xorpd xmm1, xmm1",
+            "unpcklps xmm0, xmm1",
+            "movapd xmm1, xmmword ptr [{[const_0]f}]",
+            "orpd xmm0, xmm1",
+            "subpd xmm0, xmm1",
+            "movapd xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp, .const_0 = const_0 });
+        convert.end(as);
+    }
+    {
         var demote = as.defineOpcodeHandler(.{ .fd = .@"f32x4.demote_f64x2_zero" }, .@"32");
         as.printInstrs(&.{
             "cvtpd2ps xmm0, xmmword ptr [{[vsp]f} - 0x10]",
