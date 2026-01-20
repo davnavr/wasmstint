@@ -38,6 +38,22 @@ fn defineBitwiseOpcodes(as: *AsmWriter) void {
         }, .{ .vsp = Gpr.vsp, .operation = @tagName(opcode)[5..] });
         op.end(as);
     }
+    {
+        var op = as.defineOpcodeHandler(.{ .fd = .@"v128.bitselect" }, .@"64");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x30] # operand A",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand B",
+            "movdqa xmm2, xmmword ptr [{[vsp]f} - 0x10] # mask operand",
+            "pand xmm0, xmm2",
+            "pcmpeqd xmm3, xmm3 # all ones",
+            "pxor xmm2, xmm3 # bitwise NOT",
+            "pand xmm1, xmm2",
+            "por xmm0, xmm1",
+            "movdqa xmmword ptr [{[vsp]f} - 0x30], xmm0 # write result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x20] # update VSP",
+        }, .{ .vsp = Gpr.vsp });
+        op.end(as);
+    }
 }
 
 const IntInterp = enum {
