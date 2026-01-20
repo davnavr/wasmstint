@@ -109,29 +109,74 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
             "mov r11, qword ptr [{[vsp]f} - 0x10] # low 64-bits",
             "or r11, qword ptr [{[vsp]f} - 0x08] # high 64-bits",
             "setnz r13b",
-            "mov dword ptr [{[vsp]f} - 0x10], r13d",
+            "mov dword ptr [{[vsp]f} - 0x10], r13d # store result",
         }, .{ .vsp = Gpr.vsp });
         any_true.end(as);
     }
 
-    for (&[_]FDPrefixOpcode{.@"i8x16.all_true"}) |opcode| {
+    for (&[_]FDPrefixOpcode{
+        .@"i8x16.all_true",
+        .@"i16x8.all_true",
+        .@"i32x4.all_true",
+    }) |opcode| {
         const interp = IntInterp.fromOpcodeName(opcode);
-        var all_true = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
-        as.printInstrs(&.{
-            "xor r13d, r13d",
-            "xorps xmm0, xmm0",
-            "pcmpeq{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]" ++
-                "# lane is set to all one's when zero (false)",
-            "pmovmskb r11d, xmm0 # all zeroes if no lane was zero",
-            "test r11d, r11d",
-            "setz r13b",
-            "mov dword ptr [{[vsp]f} - 0x10], r13d",
-        }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
-        all_true.end(as);
+        {
+            var all_true = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+            as.printInstrs(&.{
+                "xor r13d, r13d",
+                "xorps xmm0, xmm0",
+                "pcmpeq{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]" ++
+                    "# lane is set to all one's when zero (false)",
+                "{[mask_instr]s} r11d, xmm0 # all zeroes if no lane was zero",
+                "test r11d, r11d",
+                "setz r13b",
+                "mov dword ptr [{[vsp]f} - 0x10], r13d # store result",
+            }, .{
+                .vsp = Gpr.vsp,
+                .mask_instr = switch (opcode) {
+                    .@"i32x4.all_true" => "movmskps",
+                    .@"i8x16.all_true", .@"i16x8.all_true" => "pmovmskb",
+                    else => unreachable,
+                },
+                .suffix = interp.suffix(),
+            });
+            all_true.end(as);
+        }
     }
 
     // PCMPEQQ requires SSE4.1
     //i64x2.all_true
+
+    {
+        var bitmask = as.defineOpcodeHandler(.{ .fd = .@"i8x16.bitmask" }, .@"64");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "pmovmskb r11d, xmm0",
+            "mov dword ptr [{[vsp]f} - 0x10], r11d",
+        }, .{ .vsp = Gpr.vsp });
+        bitmask.end(as);
+    }
+    {
+        // No 16-bit pmovmsk/movmsk
+        var bitmask = as.defineOpcodeHandler(.{ .fd = .@"i16x8.bitmask" }, .@"64");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "packsswb xmm0, xmm0 # high 64-bits contain the 8 high bytes of each 16-bit lane",
+            "pmovmskb r11d, xmm0",
+            "and r11w, 0xFF",
+            "mov dword ptr [{[vsp]f} - 0x10], r11d",
+        }, .{ .vsp = Gpr.vsp });
+        bitmask.end(as);
+    }
+    {
+        var bitmask = as.defineOpcodeHandler(.{ .fd = .@"i32x4.bitmask" }, .@"64");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movmskps r11d, xmm0",
+            "mov dword ptr [{[vsp]f} - 0x10], r11d",
+        }, .{ .vsp = Gpr.vsp });
+        bitmask.end(as);
+    }
 }
 
 pub fn defineIntegerOpcodes(as: *AsmWriter) void {
