@@ -233,6 +233,58 @@ fn defineConstOpcodes(as: *AsmWriter) void {
 
 fn defineConversionOpcodes(as: *AsmWriter) void {
     {
+        var convert = as.defineOpcodeHandler(.{ .fd = .@"f32x4.convert_i32x4_s" }, .@"32");
+        as.printInstrs(&.{
+            "cvtdq2ps xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        convert.end(as);
+    }
+    {
+        var convert = as.defineOpcodeHandler(.{ .fd = .@"f32x4.convert_i32x4_u" }, .@"32");
+        as.writeInstrs(&.{"# Taken from LLVM output for Zig @floatFromInt"});
+        as.write(
+            \\.section .rodata.cst16, "aM", @progbits, 16
+            \\.p2align 4, 0x00
+            \\
+        );
+        var const_0 = as.label(&.{"i32x4_max_u16"});
+        const_0.place(as);
+        as.writeInstrs(&@as([4][]const u8, @splat(".long 0xFFFF")));
+
+        var const_1 = as.label(&.{"const"});
+        const_1.place(as);
+        as.writeInstrs(&@as([4][]const u8, @splat(".long 0x4B00" ++ "0000")));
+
+        var const_2 = as.label(&.{"const"});
+        const_2.place(as);
+        as.writeInstrs(&@as([4][]const u8, @splat(".long 0x5300" ++ "0000")));
+
+        var const_3 = as.label(&.{"const"});
+        const_3.place(as);
+        as.writeInstrs(&@as([4][]const u8, @splat(".long 0x5300" ++ "0080")));
+
+        as.write(".text\n");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
+            "movdqa xmm1, xmmword ptr [{[const_0]f}]",
+            "pand xmm1, xmm0 # get low 16-bits of operand",
+            "por xmm1, xmmword ptr [{[const_1]f}]",
+            "psrld xmm0, 16 # shift away low 16-bits of operand",
+            "por xmm0, xmmword ptr [{[const_2]f}]",
+            "subps xmm0, xmmword ptr [{[const_3]f}]",
+            "addps xmm0, xmm1",
+            "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{
+            .vsp = Gpr.vsp,
+            .const_0 = const_0,
+            .const_1 = const_1,
+            .const_2 = const_2,
+            .const_3 = const_3,
+        });
+        convert.end(as);
+    }
+    {
         var demote = as.defineOpcodeHandler(.{ .fd = .@"f32x4.demote_f64x2_zero" }, .@"32");
         as.printInstrs(&.{
             "cvtpd2ps xmm0, xmmword ptr [{[vsp]f} - 0x10]",
