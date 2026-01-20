@@ -39,6 +39,17 @@ fn defineBitwiseOpcodes(as: *AsmWriter) void {
         op.end(as);
     }
     {
+        var op = as.defineOpcodeHandler(.{ .fd = .@"v128.andnot" }, .@"64");
+        as.printInstrs(&.{
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20]",
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "pandn xmm0, xmm1",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # write result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+        }, .{ .vsp = Gpr.vsp });
+        op.end(as);
+    }
+    {
         var op = as.defineOpcodeHandler(.{ .fd = .@"v128.bitselect" }, .@"64");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x30] # operand A",
