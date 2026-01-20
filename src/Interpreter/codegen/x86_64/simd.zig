@@ -6,15 +6,17 @@ pub fn defineAllOpcodes(as: *AsmWriter) void {
 
 const IntInterp = enum {
     i8x16,
+    i16x8,
+    i32x4,
+    // i64x2,
 
     fn bitSize(interp: IntInterp) u7 {
         return switch (interp) {
             .i8x16 => 8,
+            .i16x8 => 16,
+            .i32x4 => 32,
+            // .i64x2 => 64,
         };
-    }
-
-    fn shiftMask(interp: IntInterp) u63 {
-        return interp.bitSize() - 1;
     }
 };
 
@@ -37,6 +39,18 @@ pub fn defineIntegerOpcodes(as: *AsmWriter) void {
         .@"i8x16.shl",
         .@"i8x16.shr_s",
         .@"i8x16.shr_u",
+
+        .@"i16x8.shl",
+        .@"i16x8.shr_s",
+        .@"i16x8.shr_u",
+
+        .@"i32x4.shl",
+        .@"i32x4.shr_s",
+        .@"i32x4.shr_u",
+
+        // .@"i64x2.shl",
+        // .@"i64x2.shr_s",
+        // .@"i64x2.shr_u",
     }) |opcode| {
         var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
         const interp = std.meta.stringToEnum(IntInterp, @tagName(opcode)[0..5]).?;
@@ -45,7 +59,7 @@ pub fn defineIntegerOpcodes(as: *AsmWriter) void {
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # vector to shift",
             "and r14d, 0x{[shift_mask]X} # mod 2 of shift amt",
             "movd xmm1, r14d # shift amount in bottom 64 bits",
-        }, .{ .vsp = Gpr.vsp, .shift_mask = interp.shiftMask() });
+        }, .{ .vsp = Gpr.vsp, .shift_mask = interp.bitSize() - 1 });
         switch (opcode) {
             // x86-64 has no packed shift instruction for bytes
             .@"i8x16.shl" => as.printInstrs(&.{
@@ -56,8 +70,7 @@ pub fn defineIntegerOpcodes(as: *AsmWriter) void {
                 "psllw xmm3, xmm1 # mask for odd lanes", // vpsllw xmm1, xmmword ptr [i8x16_odd_lanes], xmm2
                 "pand xmm0, xmm3 # result odd lanes",
                 "por xmm0, xmm2",
-                "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
-            }, .{ .symbol_prefix = as.symbol_prefix, .vsp = Gpr.vsp }),
+            }, .{ .symbol_prefix = as.symbol_prefix }),
             .@"i8x16.shr_s" => as.printInstrs(&.{
                 "movdqa xmm2, xmm0",
                 "psraw xmm0, xmm1 # shift values in odd lanes",
@@ -67,8 +80,7 @@ pub fn defineIntegerOpcodes(as: *AsmWriter) void {
                 "psrlw xmm2, 8 # move even lanes back to their final position",
                 "pand xmm2, xmmword ptr [.L{[symbol_prefix]s}i8x16_even_lanes] # result even lanes",
                 "por xmm0, xmm2",
-                "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
-            }, .{ .symbol_prefix = as.symbol_prefix, .vsp = Gpr.vsp }),
+            }, .{ .symbol_prefix = as.symbol_prefix }),
             .@"i8x16.shr_u" => as.printInstrs(&.{
                 "psrlw xmm0, xmm1 # shift values in odd lanes",
                 "movdqa xmm2, xmm0",
@@ -77,11 +89,27 @@ pub fn defineIntegerOpcodes(as: *AsmWriter) void {
                 "psrlw xmm3, xmm1 # mask for even lanes",
                 "pand xmm0, xmm3 # result even lanes",
                 "por xmm0, xmm2",
-                "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
-            }, .{ .symbol_prefix = as.symbol_prefix, .vsp = Gpr.vsp }),
+            }, .{ .symbol_prefix = as.symbol_prefix }),
+
+            .@"i16x8.shl" => as.writeInstrs(&.{"psllw xmm0, xmm1"}),
+            .@"i16x8.shr_s" => as.writeInstrs(&.{"psraw xmm0, xmm1"}),
+            .@"i16x8.shr_u" => as.writeInstrs(&.{"psrlw xmm0, xmm1"}),
+
+            .@"i32x4.shl" => as.writeInstrs(&.{"pslld xmm0, xmm1"}),
+            .@"i32x4.shr_s" => as.writeInstrs(&.{"psrad xmm0, xmm1"}),
+            .@"i32x4.shr_u" => as.writeInstrs(&.{"psrld xmm0, xmm1"}),
+
+            // AVX512F?
+            // .@"i64x2.shl" => as.writeInstrs(&.{"vpsllq xmm0, xmm1"}),
+            // .@"i64x2.shr_s" => as.writeInstrs(&.{"vpsraq xmm0, xmm1"}),
+            // .@"i64x2.shr_u" => as.writeInstrs(&.{"vpsrlq xmm0, xmm1"}),
+
             else => unreachable,
         }
-        as.printInstrs(&.{"lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP"}, .{ .vsp = Gpr.vsp });
+        as.printInstrs(&.{
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
         op.jmpToNextHandler(as);
         op.end(as);
     }
