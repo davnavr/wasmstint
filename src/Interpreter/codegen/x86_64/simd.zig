@@ -4,6 +4,7 @@ pub fn defineAllOpcodes(as: *AsmWriter) void {
     defineMemoryLoadOpcodes(as);
     defineBitwiseOpcodes(as);
     defineBooleanOpcodes(as);
+    defineConstOpcodes(as);
     defineIntegerOpcodes(as);
 }
 
@@ -198,6 +199,19 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
             "mov dword ptr [{[vsp]f} - 0x10], r11d",
         }, .{ .vsp = Gpr.vsp });
         bitmask.end(as);
+    }
+}
+
+fn defineConstOpcodes(as: *AsmWriter) void {
+    {
+        var op = as.defineOpcodeHandler(.{ .fd = .@"v128.const" }, .@"64");
+        as.printInstrs(&.{
+            "movdqu xmm0, xmmword ptr [{[vip]f}] # load 16-byte immediate",
+            "movdqa xmmword ptr [{[vsp]f}], xmm0 # store v128",
+            "lea {[vip]f}, [{[vip]f} + 0x10] # update VIP",
+            "lea {[vsp]f}, [{[vsp]f} + 0x10] # update VSP",
+        }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
+        op.end(as);
     }
 }
 
