@@ -672,6 +672,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     for (&[_]struct { FDPrefixOpcode, []const u8 }{
         .{ .@"i16x8.min_s", "pminsw" },
         .{ .@"i8x16.min_u", "pminub" },
+        .{ .@"i8x16.max_u", "pmaxub" },
     }) |info| {
         var min = as.defineOpcodeHandler(.{ .fd = info[0] }, .@"32");
         as.printInstrs(&.{
@@ -685,22 +686,32 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     }
 
     // pminsb (for i8x16) & pminsd (for i32x4) requires SSE4_1
-    // pminsq (for i64x2) requires AVX512F
-    for (&[_]FDPrefixOpcode{ .@"i8x16.min_s", .@"i32x4.min_s" }) |opcode| {
+    for (&[_]FDPrefixOpcode{
+        .@"i8x16.min_s",
+        .@"i8x16.max_s",
+        .@"i32x4.min_s",
+    }) |opcode| {
         var min = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         const interp = IntInterp.fromOpcodeName(opcode);
-        as.printInstrs(&.{
+        const opcode_name = @tagName(opcode);
+        const is_max = std.mem.eql(u8, "max", opcode_name[opcode_name.len - 5 ..][0..3]);
+        as.printInstrs(&[_][]const u8{
             "# Taken from what LLVM emits for Zig's @min builtin",
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
             "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
-            "movdqa xmm2, xmm1",
-            "pcmpgt{[suffix]c} xmm2, xmm0 # lane set to 1's if operand 1 > operand 0",
+            "movdqa xmm2, {[cmp_mov_src]s}",
+            "pcmpgt{[suffix]c} xmm2, {[cmp_reg]s} # lane set to 1's if operand 1 > operand 0",
             "pand xmm0, xmm2 # only keep lane in operand 0 if it is less than value in operand 1",
             "pandn xmm2, xmm1",
             "por xmm0, xmm2",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
-        }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
+        }, .{
+            .vsp = Gpr.vsp,
+            .cmp_mov_src = if (is_max) "xmm0" else "xmm1",
+            .cmp_reg = if (is_max) "xmm1" else "xmm0",
+            .suffix = interp.suffix(),
+        });
         min.jmpToNextHandler(as);
         min.end(as);
     }
@@ -742,8 +753,6 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         min.jmpToNextHandler(as);
         min.end(as);
     }
-
-    // pminuq requires AVX512F
 }
 
 const std = @import("std");
