@@ -505,6 +505,36 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
 }
 
 fn defineIntegerOpcodes(as: *AsmWriter) void {
+    for (&[_]FDPrefixOpcode{ .@"i8x16.eq", .@"i16x8.eq", .@"i32x4.eq" }) |opcode| {
+        var eq = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        const interp = IntInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20]",
+            "pcmpeq{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
+        eq.jmpToNextHandler(as);
+        eq.end(as);
+    }
+
+    // pcmpeqq requires SSE4_1
+
+    for (&[_]FDPrefixOpcode{ .@"i8x16.ne", .@"i16x8.ne", .@"i32x4.ne" }) |opcode| {
+        var ne = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        const interp = IntInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20]",
+            "pcmpeq{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "pcmpeqd xmm1, xmm1 # all ones",
+            "pxor xmm0, xmm1 # bitwise NOT of result",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
+        ne.jmpToNextHandler(as);
+        ne.end(as);
+    }
+
     // SSSE3 introduces PSIGNB/PSIGNW/PSIGND
     for (&[_]FDPrefixOpcode{
         .@"i8x16.neg",
