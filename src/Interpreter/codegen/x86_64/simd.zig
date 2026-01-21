@@ -26,6 +26,9 @@ fn defineCommonConstants(as: *AsmWriter) void {
     as.print("\n.L{[symbol_prefix]s}i8x16_odd_lanes:\n", .{ .symbol_prefix = as.symbol_prefix });
     as.writeInstrs(&@as([8][]const u8, @splat(".word 0xFF00")));
 
+    as.print("\n.L{[symbol_prefix]s}i16x8_sign_bits:\n", .{ .symbol_prefix = as.symbol_prefix });
+    as.writeInstrs(&@as([8][]const u8, @splat(".word 0x8000")));
+
     as.print("\n.L{[symbol_prefix]s}i32x4_sign_bits:\n", .{ .symbol_prefix = as.symbol_prefix });
     as.writeInstrs(&@as([4][]const u8, @splat(".long 0x8000" ++ "0000")));
 
@@ -578,6 +581,53 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
         lt_s.jmpToNextHandler(as);
         lt_s.end(as);
+    }
+
+    {
+        var lt_u = as.defineOpcodeHandler(.{ .fd = .@"i8x16.lt_u" }, .@"32");
+        as.printInstrs(&.{
+            "# Taken from LLVM output for Zig < operator",
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "pmaxub xmm1, xmm0",
+            "pcmpeqb xmm1, xmm0",
+            "pcmpeqd xmm0, xmm0 # all 1's",
+            "pxor xmm0, xmm1 # bitwise NOT?",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        lt_u.jmpToNextHandler(as);
+        lt_u.end(as);
+    }
+    {
+        var lt_u = as.defineOpcodeHandler(.{ .fd = .@"i16x8.lt_u" }, .@"64");
+        as.printInstrs(&.{
+            "# Taken from LLVM output for Zig < operator",
+            "movdqa xmm0, xmmword ptr [.L{[symbol_prefix]s}i16x8_sign_bits]",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "pxor xmm1, xmm0",
+            "pxor xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "pcmpgtw xmm0, xmm1",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        lt_u.jmpToNextHandler(as);
+        lt_u.end(as);
+    }
+    {
+        var lt_u = as.defineOpcodeHandler(.{ .fd = .@"i32x4.lt_u" }, .@"32");
+        as.printInstrs(&.{
+            "# Taken from LLVM output for Zig < operator",
+            "movdqa xmm0, xmmword ptr [.L{[symbol_prefix]s}i32x4_sign_bits]",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "pxor xmm1, xmm0",
+            "pxor xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "pcmpgtd xmm0, xmm1",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        lt_u.jmpToNextHandler(as);
+        lt_u.end(as);
     }
 
     for (&[_]struct { FDPrefixOpcode, []const u8 }{
