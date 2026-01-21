@@ -506,7 +506,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
 
 fn defineIntegerOpcodes(as: *AsmWriter) void {
     for (&[_]FDPrefixOpcode{ .@"i8x16.eq", .@"i16x8.eq", .@"i32x4.eq" }) |opcode| {
-        var eq = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        var eq = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         const interp = IntInterp.fromOpcodeName(opcode);
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20]",
@@ -520,7 +520,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
 
     {
         // pcmpeqq requires SSE4_1
-        var eq = as.defineOpcodeHandler(.{ .fd = .@"i64x2.eq" }, .@"64");
+        var eq = as.defineOpcodeHandler(.{ .fd = .@"i64x2.eq" }, .@"32");
         as.printInstrs(&.{
             "# Taken from LLVM output for Zig == operator",
             "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20]",
@@ -535,7 +535,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     }
 
     for (&[_]FDPrefixOpcode{ .@"i8x16.ne", .@"i16x8.ne", .@"i32x4.ne" }) |opcode| {
-        var ne = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        var ne = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         const interp = IntInterp.fromOpcodeName(opcode);
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20]",
@@ -551,7 +551,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
 
     {
         // pcmpeqq requires SSE4_1
-        var ne = as.defineOpcodeHandler(.{ .fd = .@"i64x2.ne" }, .@"64");
+        var ne = as.defineOpcodeHandler(.{ .fd = .@"i64x2.ne" }, .@"32");
         as.printInstrs(&.{
             "# Taken from LLVM output for Zig == operator",
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20]",
@@ -565,6 +565,19 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         }, .{ .vsp = Gpr.vsp });
         ne.jmpToNextHandler(as);
         ne.end(as);
+    }
+
+    for (&[_]FDPrefixOpcode{ .@"i8x16.lt_s", .@"i16x8.lt_s", .@"i32x4.lt_s" }) |opcode| {
+        var lt = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        const interp = IntInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "pcmpgt{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x20]",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
+        lt.jmpToNextHandler(as);
+        lt.end(as);
     }
 
     // SSSE3 introduces PSIGNB/PSIGNW/PSIGND
