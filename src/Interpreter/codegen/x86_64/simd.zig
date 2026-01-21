@@ -668,6 +668,24 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         mul.jmpToNextHandler(as);
         mul.end(as);
     }
+    {
+        // vpmullq requires AVX512?
+        var mul = as.defineOpcodeHandler(.{ .fd = .@"i64x2.mul" }, .@"64");
+        as.printInstrs(&.{
+            "# smaller code size if regular instructions are used",
+            "mov r11, qword ptr [{[vsp]f} - 0x20] # operand 0, low qword",
+            "mov r14, qword ptr [{[vsp]f} - 0x10] # operand 1, low qword",
+            "imul r11, r14 # low qword product",
+            "mov r13, qword ptr [{[vsp]f} - 0x18] # operand 0, high qword",
+            "mov r15, qword ptr [{[vsp]f} - 0x08] # operand 1, high qword",
+            "imul r13, r15 # high qword product",
+            "mov qword ptr [{[vsp]f} - 0x20], r11 # store low qword result",
+            "mov qword ptr [{[vsp]f} - 0x18], r13 # store high qword result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        mul.jmpToNextHandler(as);
+        mul.end(as);
+    }
 
     for (&[_]struct { FDPrefixOpcode, []const u8 }{
         .{ .@"i8x16.min_u", "pminub" },
