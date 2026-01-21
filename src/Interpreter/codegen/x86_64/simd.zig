@@ -771,6 +771,45 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         min.jmpToNextHandler(as);
         min.end(as);
     }
+
+    for (&[_]struct { FDPrefixOpcode, []const u8 }{
+        .{ .@"i8x16.abs", "pminub" },
+        .{ .@"i16x8.abs", "pmaxsw" },
+    }) |info| {
+        const opcode, const cmp_instr = info;
+        // PABSB/PABSW requires SSSE3
+        var min = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        const interp = IntInterp.fromOpcodeName(opcode);
+        as.printInstrs(&[_][]const u8{
+            "# Taken from what LLVM emits for Zig's @abs builtin",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10]",
+            "pxor xmm0, xmm0",
+            "psub{[suffix]c} xmm0, xmm1" ++
+                " # if lane value is negative, make it positive by subtracting from zero",
+            "{[cmp_instr]s} xmm0, xmm1" ++
+                " # if value was negative, pick the positive version, otherwise keep it",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix(), .cmp_instr = cmp_instr });
+        min.jmpToNextHandler(as);
+        min.end(as);
+    }
+    {
+        // PABSD requires SSSE3
+        var min = as.defineOpcodeHandler(.{ .fd = .@"i32x4.abs" }, .@"32");
+        as.printInstrs(&[_][]const u8{
+            "# Taken from what LLVM emits for Zig's @abs builtin",
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movdqa xmm1, xmm0",
+            "psrad xmm1, 31 # obtain sign bits, lane is all 1's if value was negative",
+            "pxor xmm0, xmm1",
+            "psubd xmm0, xmm1",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        min.jmpToNextHandler(as);
+        min.end(as);
+    }
+
+    // PABSQ requires SSSE3
 }
 
 const std = @import("std");
