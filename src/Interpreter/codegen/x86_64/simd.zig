@@ -736,7 +736,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     }
     {
         // pmaxuw requires SSE4_1
-        var min = as.defineOpcodeHandler(.{ .fd = .@"i16x8.max_u" }, .@"32");
+        var max = as.defineOpcodeHandler(.{ .fd = .@"i16x8.max_u" }, .@"32");
         as.printInstrs(&.{
             "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
@@ -746,8 +746,27 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
         }, .{ .vsp = Gpr.vsp });
-        min.jmpToNextHandler(as);
-        min.end(as);
+        max.jmpToNextHandler(as);
+        max.end(as);
+    }
+    {
+        // pmaxsd requires SSE4_1
+        var max = as.defineOpcodeHandler(.{ .fd = .@"i32x4.max_s" }, .@"32");
+        as.printInstrs(&.{
+            "# Taken from what LLVM emits for Zig's @max builtin",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "movdqa xmm2, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "movdqa xmm0, xmm1",
+            "pcmpgtd xmm0, xmm2",
+            "pand xmm1, xmm0",
+            "pandn xmm0, xmm2",
+            "por xmm0, xmm1",
+            "",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        max.jmpToNextHandler(as);
+        max.end(as);
     }
     {
         // pminud requires SSE4_1
@@ -771,6 +790,28 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         min.jmpToNextHandler(as);
         min.end(as);
     }
+    {
+        // pmaxud requires SSE4_1
+        var max = as.defineOpcodeHandler(.{ .fd = .@"i32x4.max_u" }, .@"32");
+        as.printInstrs(&.{
+            "# Taken from what LLVM emits for Zig's @max builtin",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "movdqa xmm2, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "movdqa xmm0, xmmword ptr [.L{[symbol_prefix]s}i32x4_sign_bits]",
+            "movdqa xmm3, xmm2",
+            "pxor xmm3, xmm0 # toggle sign bits in operand 1",
+            "pxor xmm0, xmm1 # toggle sign bits in operand 0",
+            "pcmpgtd xmm0, xmm3",
+            "pand xmm1, xmm0",
+            "pandn xmm0, xmm2",
+            "por xmm0, xmm1",
+            "",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        max.jmpToNextHandler(as);
+        max.end(as);
+    }
 
     for (&[_]struct { FDPrefixOpcode, []const u8 }{
         .{ .@"i8x16.abs", "pminub" },
@@ -778,7 +819,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     }) |info| {
         const opcode, const cmp_instr = info;
         // PABSB/PABSW requires SSSE3
-        var min = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        var abs = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         const interp = IntInterp.fromOpcodeName(opcode);
         as.printInstrs(&[_][]const u8{
             "# Taken from what LLVM emits for Zig's @abs builtin",
@@ -790,12 +831,12 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
                 " # if value was negative, pick the positive version, otherwise keep it",
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix(), .cmp_instr = cmp_instr });
-        min.jmpToNextHandler(as);
-        min.end(as);
+        abs.jmpToNextHandler(as);
+        abs.end(as);
     }
     {
         // PABSD requires SSSE3
-        var min = as.defineOpcodeHandler(.{ .fd = .@"i32x4.abs" }, .@"32");
+        var abs = as.defineOpcodeHandler(.{ .fd = .@"i32x4.abs" }, .@"32");
         as.printInstrs(&[_][]const u8{
             "# Taken from what LLVM emits for Zig's @abs builtin",
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
@@ -803,10 +844,10 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             "psrad xmm1, 31 # obtain sign bits, lane is all 1's if value was negative",
             "pxor xmm0, xmm1",
             "psubd xmm0, xmm1",
-            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp });
-        min.jmpToNextHandler(as);
-        min.end(as);
+        abs.jmpToNextHandler(as);
+        abs.end(as);
     }
 
     // PABSQ requires SSSE3
