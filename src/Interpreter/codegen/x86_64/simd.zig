@@ -492,8 +492,19 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         add.end(as);
     }
 
-    // PMULLD requires SSE4_1
     {
+        var mul = as.defineOpcodeHandler(.{ .fd = .@"i16x8.mul" }, .@"64");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "pmullw xmm0, xmmword ptr [{[vsp]f} - 0x20]",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        mul.jmpToNextHandler(as);
+        mul.end(as);
+    }
+    {
+        // PMULLD requires SSE4_1
         var mul = as.defineOpcodeHandler(.{ .fd = .@"i32x4.mul" }, .@"64");
         as.printInstrs(&.{
             "# Taken from LLVM output for Zig's *% operator on @Vector(4, i32)",
