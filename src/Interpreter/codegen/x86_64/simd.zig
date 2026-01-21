@@ -674,6 +674,8 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         .{ .@"i8x16.max_u", "pmaxub" },
         .{ .@"i16x8.min_s", "pminsw" },
         .{ .@"i16x8.max_s", "pmaxsw" },
+        .{ .@"i8x16.avgr_u", "pavgb" },
+        .{ .@"i16x8.avgr_u", "pavgw" },
     }) |info| {
         var min = as.defineOpcodeHandler(.{ .fd = info[0] }, .@"32");
         as.printInstrs(&.{
