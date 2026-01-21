@@ -505,6 +505,24 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
 }
 
 fn defineIntegerOpcodes(as: *AsmWriter) void {
+    // SSSE3 introduces PSIGNB/PSIGNW/PSIGND
+    for (&[_]FDPrefixOpcode{
+        .@"i8x16.neg",
+        .@"i16x8.neg",
+        .@"i32x4.neg",
+        .@"i64x2.neg",
+    }) |opcode| {
+        var neg = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        const interp = IntInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "pxor xmm0, xmm0 # zero",
+            "psub{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
+        neg.jmpToNextHandler(as);
+        neg.end(as);
+    }
+
     for (&[_]FDPrefixOpcode{
         .@"i8x16.shl",
         .@"i8x16.shr_s",
@@ -651,23 +669,62 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         mul.end(as);
     }
 
-    // SSSE3 introduces PSIGNB/PSIGNW/PSIGND
-    for (&[_]FDPrefixOpcode{
-        .@"i8x16.neg",
-        .@"i16x8.neg",
-        .@"i32x4.neg",
-        .@"i64x2.neg",
-    }) |opcode| {
-        var neg = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+    for (&[_]struct { FDPrefixOpcode, []const u8 }{
+        .{ .@"i16x8.min_s", "pminsw" },
+        .{ .@"i8x16.min_u", "pminub" },
+    }) |info| {
+        var min = as.defineOpcodeHandler(.{ .fd = info[0] }, .@"32");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "{[instr]s} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .instr = info[1] });
+        min.jmpToNextHandler(as);
+        min.end(as);
+    }
+
+    // pminsb (for i8x16) & pminsd (for i32x4) requires SSE4_1
+    // pminsq (for i64x2) requires AVX512F
+    for (&[_]FDPrefixOpcode{ .@"i8x16.min_s", .@"i32x4.min_s" }) |opcode| {
+        var min = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         const interp = IntInterp.fromOpcodeName(opcode);
         as.printInstrs(&.{
-            "pxor xmm0, xmm0 # zero",
-            "psub{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
-            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+            "# Taken from what LLVM emits for Zig's @min builtin",
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "movdqa xmm2, xmm1",
+            "pcmpgt{[suffix]c} xmm2, xmm0 # lane set to 1's if operand 1 > operand 0",
+            "pand xmm0, xmm2 # only keep lane in operand 0 if it is less than value in operand 1",
+            "pandn xmm2, xmm1",
+            "por xmm0, xmm2",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
         }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
-        neg.jmpToNextHandler(as);
-        neg.end(as);
+        min.jmpToNextHandler(as);
+        min.end(as);
     }
+
+    {
+        // pminuw requires SSE4_1
+        var min = as.defineOpcodeHandler(.{ .fd = .@"i16x8.min_u" }, .@"32");
+        as.printInstrs(&.{
+            "# Taken from what LLVM emits for Zig's @min builtin",
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "movdqa xmm1, xmm0",
+            "psubusw xmm1, xmmword ptr [{[vsp]f} - 0x10]",
+            "psubw xmm0, xmm1 # selects minimum value in lane based on difference",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        min.jmpToNextHandler(as);
+        min.end(as);
+    }
+    {
+        // pminud requires SSE4_1
+    }
+
+    // pminuq requires AVX512F
 }
 
 const std = @import("std");
