@@ -7,6 +7,7 @@ pub fn defineAllOpcodes(as: *AsmWriter) void {
     defineBooleanOpcodes(as);
     defineConstOpcodes(as);
     defineConversionOpcodes(as);
+    defineFloatOpcodes(as);
 
     defineIntegerOpcodes(as);
 }
@@ -400,6 +401,47 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "movapd xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp });
         promote.end(as);
+    }
+}
+
+const FloatInterp = enum {
+    f32x4,
+    f64x2,
+
+    fn suffix(interp: FloatInterp) u7 {
+        return switch (interp) {
+            .f32x4 => 's',
+            .f64x2 => 'd',
+        };
+    }
+
+    fn fromOpcodeName(opcode: FDPrefixOpcode) FloatInterp {
+        return std.meta.stringToEnum(FloatInterp, @tagName(opcode)[0..5]).?;
+    }
+};
+
+fn defineFloatOpcodes(as: *AsmWriter) void {
+    for (&[_]FDPrefixOpcode{
+        .@"f32x4.add",
+        .@"f32x4.sub",
+        .@"f32x4.mul",
+        .@"f32x4.div",
+
+        .@"f64x2.add",
+        .@"f64x2.sub",
+        .@"f64x2.mul",
+        .@"f64x2.div",
+    }) |opcode| {
+        var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        const interp = FloatInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "movap{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 1",
+            "{[op]s}p{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x20], xmm0",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+        }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix(), .op = @tagName(opcode)[6..] });
+        op.jmpToNextHandler(as);
+        op.end(as);
     }
 }
 
