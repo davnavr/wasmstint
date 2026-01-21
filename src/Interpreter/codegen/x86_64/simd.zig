@@ -518,7 +518,21 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         eq.end(as);
     }
 
-    // pcmpeqq requires SSE4_1
+    {
+        // pcmpeqq requires SSE4_1
+        var eq = as.defineOpcodeHandler(.{ .fd = .@"i64x2.eq" }, .@"64");
+        as.printInstrs(&.{
+            "# Taken from LLVM output for Zig == operator",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20]",
+            "pcmpeqd xmm1, xmmword ptr [{[vsp]f} - 0x10]",
+            "pshufd xmm0, xmm1, 0xB1",
+            "pand xmm0, xmm1",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        eq.jmpToNextHandler(as);
+        eq.end(as);
+    }
 
     for (&[_]FDPrefixOpcode{ .@"i8x16.ne", .@"i16x8.ne", .@"i32x4.ne" }) |opcode| {
         var ne = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
@@ -531,6 +545,24 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
         }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
+        ne.jmpToNextHandler(as);
+        ne.end(as);
+    }
+
+    {
+        // pcmpeqq requires SSE4_1
+        var ne = as.defineOpcodeHandler(.{ .fd = .@"i64x2.ne" }, .@"64");
+        as.printInstrs(&.{
+            "# Taken from LLVM output for Zig == operator",
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20]",
+            "pcmpeqd xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "pshufd xmm1, xmm0, 0xB1",
+            "pand xmm1, xmm0",
+            "pcmpeqd xmm0, xmm0 # all 1's",
+            "pxor xmm0, xmm1 # bitwise NOT",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
         ne.jmpToNextHandler(as);
         ne.end(as);
     }
