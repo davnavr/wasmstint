@@ -867,8 +867,21 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         abs.jmpToNextHandler(as);
         abs.end(as);
     }
-
-    // PABSQ requires SSSE3
+    {
+        // PABSQ requires SSSE3
+        var abs = as.defineOpcodeHandler(.{ .fd = .@"i64x2.abs" }, .@"32");
+        as.printInstrs(&[_][]const u8{
+            "# Taken from what LLVM emits for Zig's @abs builtin",
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "pshufd xmm1, xmm0, 0xF5",
+            "psrad xmm1, 31",
+            "pxor xmm0, xmm1",
+            "psubq xmm0, xmm1",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        abs.jmpToNextHandler(as);
+        abs.end(as);
+    }
 
     {
         // pshufb requires SSSE3
