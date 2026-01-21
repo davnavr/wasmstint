@@ -670,9 +670,10 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     }
 
     for (&[_]struct { FDPrefixOpcode, []const u8 }{
-        .{ .@"i16x8.min_s", "pminsw" },
         .{ .@"i8x16.min_u", "pminub" },
         .{ .@"i8x16.max_u", "pmaxub" },
+        .{ .@"i16x8.min_s", "pminsw" },
+        .{ .@"i16x8.max_s", "pmaxsw" },
     }) |info| {
         var min = as.defineOpcodeHandler(.{ .fd = info[0] }, .@"32");
         as.printInstrs(&.{
@@ -696,7 +697,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         const opcode_name = @tagName(opcode);
         const is_max = std.mem.eql(u8, "max", opcode_name[opcode_name.len - 5 ..][0..3]);
         as.printInstrs(&[_][]const u8{
-            "# Taken from what LLVM emits for Zig's @min builtin",
+            "# Taken from what LLVM emits for Zig's @min/@max builtin",
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
             "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
             "movdqa xmm2, {[cmp_mov_src]s}",
@@ -725,6 +726,21 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             "movdqa xmm1, xmm0",
             "psubusw xmm1, xmmword ptr [{[vsp]f} - 0x10]",
             "psubw xmm0, xmm1 # selects minimum value in lane based on difference",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        min.jmpToNextHandler(as);
+        min.end(as);
+    }
+    {
+        // pmaxuw requires SSE4_1
+        var min = as.defineOpcodeHandler(.{ .fd = .@"i16x8.max_u" }, .@"32");
+        as.printInstrs(&.{
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "psubusw xmm0, xmm1",
+            "paddw xmm0, xmm1",
+            "",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
         }, .{ .vsp = Gpr.vsp });
