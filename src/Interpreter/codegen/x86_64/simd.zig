@@ -1,6 +1,7 @@
 //! Writes definitions for all SIMD opcodes
 
 pub fn defineAllOpcodes(as: *AsmWriter) void {
+    defineCommonConstants(as);
     defineMemoryLoadOpcodes(as);
     defineMemoryStoreOpcodes(as);
     defineBitwiseOpcodes(as);
@@ -10,6 +11,28 @@ pub fn defineAllOpcodes(as: *AsmWriter) void {
     defineFloatOpcodes(as);
 
     defineIntegerOpcodes(as);
+}
+
+fn defineCommonConstants(as: *AsmWriter) void {
+    as.write(
+        \\.section .rodata.cst16, "aM", @progbits, 16
+        \\.p2align 4, 0x00
+        \\
+    );
+
+    as.print("\n.L{[symbol_prefix]s}i8x16_even_lanes:\n", .{ .symbol_prefix = as.symbol_prefix });
+    as.writeInstrs(&@as([8][]const u8, @splat(".word 0x00FF")));
+
+    as.print("\n.L{[symbol_prefix]s}i8x16_odd_lanes:\n", .{ .symbol_prefix = as.symbol_prefix });
+    as.writeInstrs(&@as([8][]const u8, @splat(".word 0xFF00")));
+
+    as.print("\n.L{[symbol_prefix]s}i32x4_sign_bits:\n", .{ .symbol_prefix = as.symbol_prefix });
+    as.writeInstrs(&@as([4][]const u8, @splat(".long 0x8000" ++ "0000")));
+
+    as.print("\n.L{[symbol_prefix]s}i64x2_sign_bits:\n", .{ .symbol_prefix = as.symbol_prefix });
+    as.writeInstrs(&@as([2][]const u8, @splat(".quad 0x8000" ++ "0000" ++ "0000" ++ "0000")));
+
+    as.write("\n.text\n");
 }
 
 fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
@@ -408,6 +431,13 @@ const FloatInterp = enum {
     f32x4,
     f64x2,
 
+    fn toInt(interp: FloatInterp) IntInterp {
+        return switch (interp) {
+            .f32x4 => .i32x4,
+            .f64x2 => .i64x2,
+        };
+    }
+
     fn suffix(interp: FloatInterp) u7 {
         return switch (interp) {
             .f32x4 => 's',
@@ -444,11 +474,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
         op.end(as);
     }
 
-    for (&[_]FDPrefixOpcode{
-        .@"f32x4.sqrt",
-
-        .@"f64x2.sqrt",
-    }) |opcode| {
+    for (&[_]FDPrefixOpcode{ .@"f32x4.sqrt", .@"f64x2.sqrt" }) |opcode| {
         var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         const interp = FloatInterp.fromOpcodeName(opcode);
         as.printInstrs(&.{
@@ -458,26 +484,27 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
         op.jmpToNextHandler(as);
         op.end(as);
     }
+
+    for (&[_]FDPrefixOpcode{ .@"f32x4.neg", .@"f64x2.neg" }) |opcode| {
+        var neg = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        const interp = FloatInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "movap{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "xorp{[suffix]c} xmm0, xmmword ptr [.L{[symbol_prefix]s}{[int_interp]t}_sign_bits]" ++
+                " # toggle sign bit",
+            "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{
+            .vsp = Gpr.vsp,
+            .symbol_prefix = as.symbol_prefix,
+            .suffix = interp.suffix(),
+            .int_interp = interp.toInt(),
+        });
+        neg.jmpToNextHandler(as);
+        neg.end(as);
+    }
 }
 
 fn defineIntegerOpcodes(as: *AsmWriter) void {
-    as.write(
-        \\.section .rodata.cst16, "aM", @progbits, 16
-        \\.p2align 4, 0x00
-        \\
-    );
-
-    as.print("\n.L{[symbol_prefix]s}i8x16_even_lanes:\n", .{ .symbol_prefix = as.symbol_prefix });
-    as.writeInstrs(&@as([8][]const u8, @splat(".word 0x00FF")));
-
-    as.print("\n.L{[symbol_prefix]s}i8x16_odd_lanes:\n", .{ .symbol_prefix = as.symbol_prefix });
-    as.writeInstrs(&@as([8][]const u8, @splat(".word 0xFF00")));
-
-    as.print("\n.L{[symbol_prefix]s}i64x2_sign_bits:\n", .{ .symbol_prefix = as.symbol_prefix });
-    as.writeInstrs(&@as([2][]const u8, @splat(".quad 0x8000" ++ "0000" ++ "0000" ++ "0000")));
-
-    as.write("\n.text\n");
-
     for (&[_]FDPrefixOpcode{
         .@"i8x16.shl",
         .@"i8x16.shr_s",
