@@ -568,7 +568,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     }
 
     for (&[_]FDPrefixOpcode{ .@"i8x16.lt_s", .@"i16x8.lt_s", .@"i32x4.lt_s" }) |opcode| {
-        var lt = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        var lt_s = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         const interp = IntInterp.fromOpcodeName(opcode);
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
@@ -576,8 +576,34 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
         }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
-        lt.jmpToNextHandler(as);
-        lt.end(as);
+        lt_s.jmpToNextHandler(as);
+        lt_s.end(as);
+    }
+
+    {
+        // pcmpgtq requires SSE4_2
+        var lt_s = as.defineOpcodeHandler(.{ .fd = .@"i64x2.lt_s" }, .@"32");
+        as.printInstrs(&.{
+            "# slightly smalelr code size compared to using SSE instructions",
+            "xor r11d, r11d",
+            "mov r13, -1",
+            "mov r14, qword ptr [{[vsp]f} - 0x20] # operand 0, low qword",
+            "mov r15, qword ptr [{[vsp]f} - 0x10] # operand 1, low qword",
+            "cmp r14, r15",
+            "cmovl r11, r13",
+            "mov qword ptr [{[vsp]f} - 0x20], r11 # low qword result",
+
+            "xor r11d, r11d",
+            "mov r14, qword ptr [{[vsp]f} - 0x18] # operand 0, high qword",
+            "mov r15, qword ptr [{[vsp]f} - 0x08] # operand 1, high qword",
+            "cmp r14, r15",
+            "cmovl r11, r13",
+            "mov qword ptr [{[vsp]f} - 0x18], r11 # high qword result",
+
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        lt_s.jmpToNextHandler(as);
+        lt_s.end(as);
     }
 
     // SSSE3 introduces PSIGNB/PSIGNW/PSIGND
