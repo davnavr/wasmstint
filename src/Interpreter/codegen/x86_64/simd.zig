@@ -851,6 +851,56 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     }
 
     // PABSQ requires SSSE3
+
+    {
+        // pshufb requires SSSE3
+        var popcnt = as.defineOpcodeHandler(.{ .fd = .@"i8x16.popcnt" }, .@"64");
+        // Maybe this is faster: https://github.com/llvm/llvm-project/issues/79823
+        as.write(
+            \\.section .rodata.cst16, "aM", @progbits, 16
+            \\.p2align 4, 0x00
+            \\
+        );
+        var const_0 = as.label(&.{"const"});
+        const_0.place(as);
+        as.writeInstrs(&.{".skip 16, 0x55"});
+
+        var const_1 = as.label(&.{"const"});
+        const_1.place(as);
+        as.writeInstrs(&.{".skip 16, 0x33"});
+
+        var const_2 = as.label(&.{"const"});
+        const_2.place(as);
+        as.writeInstrs(&.{".skip 16, 0x0F"});
+
+        as.write("\n.text\n");
+        as.printInstrs(&[_][]const u8{
+            "# Taken from what LLVM emits for Zig's @popcnt builtin",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand",
+            "movdqa xmm0, xmm1",
+            "psrlw xmm0, 1",
+            "pand xmm0, xmmword ptr [{[const_0]f}]",
+            "psubb xmm1, xmm0",
+            "movdqa xmm0, xmmword ptr [{[const_1]f}]",
+            "movdqa xmm2, xmm1",
+            "pand xmm2, xmm0",
+            "psrlw xmm1, 2",
+            "pand xmm1, xmm0",
+            "paddb xmm1, xmm2",
+            "movdqa xmm0, xmm1",
+            "psrlw xmm0, 4",
+            "paddb xmm0, xmm1",
+            "pand xmm0, xmmword ptr [{[const_2]f}]",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{
+            .vsp = Gpr.vsp,
+            .const_0 = const_0,
+            .const_1 = const_1,
+            .const_2 = const_2,
+        });
+        popcnt.jmpToNextHandler(as);
+        popcnt.end(as);
+    }
 }
 
 const std = @import("std");
