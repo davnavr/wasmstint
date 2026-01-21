@@ -722,6 +722,25 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     }
     {
         // pminud requires SSE4_1
+        var min = as.defineOpcodeHandler(.{ .fd = .@"i32x4.min_u" }, .@"32");
+        as.printInstrs(&.{
+            "# Taken from what LLVM emits for Zig's @min builtin",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "movdqa xmm2, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "movdqa xmm0, xmmword ptr [.L{[symbol_prefix]s}i32x4_sign_bits]",
+            "movdqa xmm3, xmm1",
+            "pxor xmm3, xmm0 # toggles sign bit in operand 0",
+            "pxor xmm0, xmm2 # toggles sign bit in operand 1",
+            "pcmpgtd xmm0, xmm3",
+            "pand xmm1, xmm0",
+            "pandn xmm0, xmm2",
+            "por xmm0, xmm1",
+
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        min.jmpToNextHandler(as);
+        min.end(as);
     }
 
     // pminuq requires AVX512F
