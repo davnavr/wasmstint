@@ -258,6 +258,27 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         narrow.end(as);
     }
     {
+        var extend = as.defineOpcodeHandler(.{ .fd = .@"i16x8.extend_low_i8x16_s" }, .@"32");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
+            "punpcklbw xmm0, xmm0 # move 8 x 8-bit lane to high 8-bits of 8 x 16-bit lane",
+            "# lower 8-bits of 8 x 16-bit lanes are ignored",
+            "psraw xmm0, 8 # fill high 8-bits with sign bit of lane",
+            "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        extend.end(as);
+    }
+    {
+        var extend = as.defineOpcodeHandler(.{ .fd = .@"i16x8.extend_low_i8x16_u" }, .@"32");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
+            "pxor xmm1, xmm1 # zeroes to be put in low 8-bits of 8 x 16-bit lanes",
+            "punpcklbw xmm0, xmm1 # mov high 8 x 8-bit lanes into low 8-bits of 8 x 16-bit lanes",
+            "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        extend.end(as);
+    }
+    {
         var convert = as.defineOpcodeHandler(.{ .fd = .@"f32x4.convert_i32x4_s" }, .@"32");
         as.printInstrs(&.{
             "cvtdq2ps xmm0, xmmword ptr [{[vsp]f} - 0x10]",
