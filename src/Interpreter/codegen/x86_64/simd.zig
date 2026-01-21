@@ -630,6 +630,21 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         lt_u.end(as);
     }
 
+    for (&[_]FDPrefixOpcode{ .@"i8x16.le_s", .@"i16x8.le_s", .@"i32x4.le_s" }) |opcode| {
+        var le_s = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        const interp = IntInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "pcmpgt{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "pcmpeqd xmm1, xmm1 # all 1's",
+            "pxor xmm0, xmm1 # bitwise NOT, <= is opposite of >",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
+        le_s.jmpToNextHandler(as);
+        le_s.end(as);
+    }
+
     for (&[_]struct { FDPrefixOpcode, []const u8 }{
         .{ .@"i64x2.lt_s", "l" },
         .{ .@"i64x2.le_s", "le" },
