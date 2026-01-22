@@ -1275,6 +1275,75 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         popcnt.jmpToNextHandler(as);
         popcnt.end(as);
     }
+
+    {
+        var extmul_low = as.defineOpcodeHandler(.{ .fd = .@"i16x8.extmul_low_i8x16_s" }, .@"64");
+        as.printInstrs(&.{
+            "pxor xmm0, xmm0",
+            "pxor xmm1, xmm1",
+            "punpcklbw xmm0, xmmword ptr [{[vsp]f} - 0x20]" ++
+                " # move low 8 x 8-bit lanes of operand 0 into high 8-bits of 8 x 16-bit lanes",
+            "punpcklbw xmm1, xmmword ptr [{[vsp]f} - 0x10] # same but for operand 1",
+            "psraw xmm0, 8 # fill high 8-bits with sign bit",
+            "psraw xmm1, 8",
+            "pmullw xmm0, xmm1",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        extmul_low.jmpToNextHandler(as);
+        extmul_low.end(as);
+    }
+    {
+        var extmul_high = as.defineOpcodeHandler(.{ .fd = .@"i16x8.extmul_high_i8x16_s" }, .@"64");
+        as.printInstrs(&.{
+            "pxor xmm0, xmm0",
+            "pxor xmm1, xmm1",
+            "punpckhbw xmm0, xmmword ptr [{[vsp]f} - 0x20]" ++
+                " # move high 8 x 8-bit lanes of operand 0 into high 8-bits of 8 x 16-bit lanes",
+            "punpckhbw xmm1, xmmword ptr [{[vsp]f} - 0x10] # same but for operand 1",
+            "psraw xmm0, 8 # fill high 8-bits with sign bit",
+            "psraw xmm1, 8",
+            "pmullw xmm0, xmm1",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        extmul_high.jmpToNextHandler(as);
+        extmul_high.end(as);
+    }
+    {
+        var extmul_low = as.defineOpcodeHandler(.{ .fd = .@"i16x8.extmul_low_i8x16_u" }, .@"64");
+        as.printInstrs(&.{
+            "pxor xmm0, xmm0",
+            "pxor xmm1, xmm1",
+            "punpcklbw xmm0, xmmword ptr [{[vsp]f} - 0x20]" ++
+                " # move low 8 x 8-bit lanes of operand 0 into high 8-bits of 8 x 16-bit lanes",
+            "punpcklbw xmm1, xmmword ptr [{[vsp]f} - 0x10] # same but for operand 1",
+            "psrlw xmm0, 8 # fill high 8-bits with zero",
+            "psrlw xmm1, 8",
+            "pmullw xmm0, xmm1",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        extmul_low.jmpToNextHandler(as);
+        extmul_low.end(as);
+    }
+    {
+        var extmul_high = as.defineOpcodeHandler(.{ .fd = .@"i16x8.extmul_high_i8x16_u" }, .@"64");
+        as.printInstrs(&.{
+            "pxor xmm0, xmm0",
+            "pxor xmm1, xmm1",
+            "punpckhbw xmm0, xmmword ptr [{[vsp]f} - 0x20]" ++
+                " # move high 8 x 8-bit lanes of operand 0 into high 8-bits of 8 x 16-bit lanes",
+            "punpckhbw xmm1, xmmword ptr [{[vsp]f} - 0x10] # same but for operand 1",
+            "psrlw xmm0, 8 # fill high 8-bits with sign bit",
+            "psrlw xmm1, 8",
+            "pmullw xmm0, xmm1",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        extmul_high.jmpToNextHandler(as);
+        extmul_high.end(as);
+    }
 }
 
 const std = @import("std");
