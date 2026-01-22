@@ -83,7 +83,6 @@ pub inline fn callOpcodeHandler(
     module: runtime.ModuleInst,
     interp: *Interpreter,
 ) Transition {
-    std.log.debug("IP={*}", .{instr.next}); // TODO: remove
     var transition = opcodeHandlerTrampoline(
         locals,
         interp.stack_top,
