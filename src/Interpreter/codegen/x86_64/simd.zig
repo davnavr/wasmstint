@@ -645,6 +645,54 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         le_s.end(as);
     }
 
+    {
+        var le_u = as.defineOpcodeHandler(.{ .fd = .@"i8x16.le_u" }, .@"32");
+        as.printInstrs(&.{
+            "# Taken from LLVM output for Zig <= operator",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "pminub xmm0, xmm1",
+            "pcmpeqb xmm0, xmm1",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        le_u.jmpToNextHandler(as);
+        le_u.end(as);
+    }
+    {
+        var le_u = as.defineOpcodeHandler(.{ .fd = .@"i16x8.le_u" }, .@"64");
+        as.printInstrs(&.{
+            "# Taken from LLVM output for Zig <= operator",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "psubusw xmm1, xmmword ptr [{[vsp]f} - 0x10]",
+            "pxor xmm0, xmm0",
+            "pcmpeqw xmm0, xmm1",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        le_u.jmpToNextHandler(as);
+        le_u.end(as);
+    }
+    {
+        var le_u = as.defineOpcodeHandler(.{ .fd = .@"i32x4.le_u" }, .@"32");
+        as.printInstrs(&.{
+            "# Taken from LLVM output for Zig <= operator",
+            "movdqa xmm1, xmmword ptr [.L{[symbol_prefix]s}i32x4_sign_bits]",
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "pxor xmm0, xmm1",
+            "pxor xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "pcmpgtd xmm1, xmm0",
+            "pcmpeqd xmm0, xmm0 # all 1's",
+            "pxor xmm0, xmm1 # bitwise NOT?",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        le_u.jmpToNextHandler(as);
+        le_u.end(as);
+    }
+
+    // TODO: other integer comparisons (not i64x2, those are done)
+
     for (&[_]struct { FDPrefixOpcode, []const u8 }{
         .{ .@"i64x2.lt_s", "l" },
         .{ .@"i64x2.le_s", "le" },
