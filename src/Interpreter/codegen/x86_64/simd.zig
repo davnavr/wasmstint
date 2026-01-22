@@ -751,6 +751,22 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         gt_u.end(as);
     }
 
+    for (&[_]FDPrefixOpcode{ .@"i8x16.ge_s", .@"i16x8.ge_s", .@"i32x4.ge_s" }) |opcode| {
+        var ge_s = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        const interp = IntInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "# Basically what LLVM outputs for Zig >= operator",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "pcmpgt{[suffix]c} xmm1, xmmword ptr [{[vsp]f} - 0x20]",
+            "pcmpeqd xmm0, xmm0 # all 1's",
+            "pxor xmm0, xmm1 # bitwise NOT, a >= b is opposite of b > a",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
+        ge_s.jmpToNextHandler(as);
+        ge_s.end(as);
+    }
+
     {
         var ge_u = as.defineOpcodeHandler(.{ .fd = .@"i8x16.ge_u" }, .@"32");
         as.printInstrs(&.{
@@ -797,6 +813,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         ge_u.jmpToNextHandler(as);
         ge_u.end(as);
     }
+
     // TODO: other integer comparisons (not i64x2, those are done)
 
     for (&[_]struct { FDPrefixOpcode, []const u8 }{
