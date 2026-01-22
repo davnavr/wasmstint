@@ -704,6 +704,53 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         gt_s.end(as);
     }
 
+    {
+        var gt_u = as.defineOpcodeHandler(.{ .fd = .@"i8x16.gt_u" }, .@"32");
+        as.printInstrs(&.{
+            "# Taken from LLVM output for Zig > operator",
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "pminub xmm1, xmm0",
+            "pcmpeqb xmm1, xmm0",
+            "pcmpeqd xmm0, xmm0 # all 1's",
+            "pxor xmm0, xmm1 # bitwise NOT, > is opposite of <=",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        gt_u.jmpToNextHandler(as);
+        gt_u.end(as);
+    }
+    {
+        var gt_u = as.defineOpcodeHandler(.{ .fd = .@"i16x8.gt_u" }, .@"32");
+        as.printInstrs(&.{
+            "# Taken from LLVM output for Zig > operator",
+            "movdqa xmm0, xmmword ptr [.L{[symbol_prefix]s}i16x8_sign_bits]",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "pxor xmm1, xmm0",
+            "pxor xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 1",
+            "pcmpgtw xmm0, xmm1",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        gt_u.jmpToNextHandler(as);
+        gt_u.end(as);
+    }
+    {
+        var gt_u = as.defineOpcodeHandler(.{ .fd = .@"i32x4.gt_u" }, .@"32");
+        as.printInstrs(&.{
+            "# Taken from LLVM output for Zig > operator",
+            "movdqa xmm0, xmmword ptr [.L{[symbol_prefix]s}i32x4_sign_bits]",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "pxor xmm1, xmm0",
+            "pxor xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 1",
+            "pcmpgtd xmm0, xmm1",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        gt_u.jmpToNextHandler(as);
+        gt_u.end(as);
+    }
+
     // TODO: other integer comparisons (not i64x2, those are done)
 
     for (&[_]struct { FDPrefixOpcode, []const u8 }{
