@@ -691,6 +691,19 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         le_u.end(as);
     }
 
+    for (&[_]FDPrefixOpcode{ .@"i8x16.gt_s", .@"i16x8.gt_s", .@"i32x4.gt_s" }) |opcode| {
+        var gt_s = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        const interp = IntInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20]",
+            "pcmpgt{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
+        gt_s.jmpToNextHandler(as);
+        gt_s.end(as);
+    }
+
     // TODO: other integer comparisons (not i64x2, those are done)
 
     for (&[_]struct { FDPrefixOpcode, []const u8 }{
