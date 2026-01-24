@@ -1344,6 +1344,72 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         extmul_high.jmpToNextHandler(as);
         extmul_high.end(as);
     }
+
+    for (&[_]FDPrefixOpcode{
+        .@"i32x4.extmul_low_i16x8_s",
+        .@"i32x4.extmul_high_i16x8_s",
+    }) |opcode| {
+        var extmul = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        as.printInstrs(&.{
+            // pmulld requires SSE4_1
+            // "pxor xmm0, xmm0",
+            // "pxor xmm1, xmm1",
+            // "punpcklwd xmm0, xmmword ptr [{[vsp]f} - 0x20]" ++
+            //     " # move low 4 x 16-bit lanes of operand 0 into high 16-bits of 4 x 32-bit lanes",
+            // "punpcklwd xmm1, xmmword ptr [{[vsp]f} - 0x10] # same but for operand 1",
+
+            "# Taken from LLVM output for Zig's *% operator",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "pxor xmm2, xmm2",
+            "punpck{[target]c}wd xmm1, xmm2" ++
+                "# move target 4 x 16-bit lanes of operand 0 to 4 x 32-bit lanes, zero extended",
+            "punpck{[target]c}wd xmm0, xmm0" ++
+                " # low and high 16-bits containing the 16-bit lane from operand 1",
+            "pmaddwd xmm0, xmm1",
+
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .target = @tagName(opcode)[13] });
+        extmul.jmpToNextHandler(as);
+        extmul.end(as);
+    }
+    {
+        // pmulld requires SSE4_1
+        var extmul_low = as.defineOpcodeHandler(.{ .fd = .@"i32x4.extmul_low_i16x8_u" }, .@"64");
+        as.printInstrs(&.{
+            "# Taken from LLVM output for Zig's *% operator",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "movdqa xmm2, xmm0",
+            "pmulhuw xmm2, xmm1 # calculate high 16-bits of product?",
+            "pmullw xmm0, xmm1 # calculate low 16-bits of product?",
+            "punpcklwd xmm0, xmm2",
+
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        extmul_low.jmpToNextHandler(as);
+        extmul_low.end(as);
+    }
+    {
+        // pmulld requires SSE4_1
+        var extmul_high = as.defineOpcodeHandler(.{ .fd = .@"i32x4.extmul_high_i16x8_u" }, .@"64");
+        as.printInstrs(&.{
+            "# Taken from LLVM output for Zig's *% operator",
+            "pshufd xmm1, xmmword ptr [{[vsp]f} - 0x20], 0xEE # operand 0, high lanes",
+            "pshufd xmm0, xmmword ptr [{[vsp]f} - 0x10], 0xEE # operand 1, high lanes",
+            "movdqa xmm2, xmm0",
+            "pmulhuw xmm2, xmm1 # calculate high 16-bits of product?",
+            "pmullw xmm0, xmm1 # calculate low 16-bits of product?",
+            "punpcklwd xmm0, xmm2",
+
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        extmul_high.jmpToNextHandler(as);
+        extmul_high.end(as);
+    }
 }
 
 const std = @import("std");
