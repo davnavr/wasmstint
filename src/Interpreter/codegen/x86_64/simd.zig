@@ -323,47 +323,62 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         });
         narrow.end(as);
     }
-    {
-        var extend = as.defineOpcodeHandler(.{ .fd = .@"i16x8.extend_low_i8x16_s" }, .@"32");
+    for ([2]FDPrefixOpcode{
+        .@"i16x8.extend_low_i8x16_s",
+        .@"i16x8.extend_high_i8x16_s",
+    }) |opcode| {
+        var extend = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
-            "punpcklbw xmm0, xmm0 # move 8 x 8-bit lane to high 8-bits of 8 x 16-bit lane",
+            "punpck{[pos]c}bw xmm0, xmm0" ++
+                " # move 8 x 8-bit lane to high 8-bits of target 8 x 16-bit lane",
             "# lower 8-bits of 8 x 16-bit lanes are ignored",
             "psraw xmm0, 8 # fill high 8-bits with sign bit of lane",
             "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp });
+        }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
         extend.end(as);
     }
-    {
-        var extend = as.defineOpcodeHandler(.{ .fd = .@"i16x8.extend_low_i8x16_u" }, .@"32");
+    for ([2]FDPrefixOpcode{
+        .@"i16x8.extend_low_i8x16_u",
+        .@"i16x8.extend_high_i8x16_u",
+    }) |opcode| {
+        var extend = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
             "pxor xmm1, xmm1 # zeroes to be put in high 8-bits of 8 x 16-bit lanes",
-            "punpcklbw xmm0, xmm1 # move high 8 x 8-bit lanes into low 8-bits of 8 x 16-bit lanes",
+            "punpck{[pos]c}bw xmm0, xmm1" ++
+                " # move high 8 x 8-bit lanes into low 8-bits of target 8 x 16-bit lanes",
             "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp });
+        }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
         extend.end(as);
     }
-    {
-        var extend = as.defineOpcodeHandler(.{ .fd = .@"i32x4.extend_low_i16x8_s" }, .@"32");
+    for ([2]FDPrefixOpcode{
+        .@"i32x4.extend_low_i16x8_s",
+        .@"i32x4.extend_high_i16x8_s",
+    }) |opcode| {
+        var extend = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
-            "punpcklwd xmm0, xmm0 # move 4 x 16-bit lane to high 16-bits of 4 x 32-bit lanes",
+            "punpck{[pos]c}wd xmm0, xmm0" ++
+                " # move 4 x 16-bit lane to high 16-bits of target 4 x 32-bit lanes",
             "# lower 16-bits of 4 x 32-bit lanes are ignored",
             "psrad xmm0, 16 # fill high 16-bits with sign bit of lane",
             "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp });
+        }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
         extend.end(as);
     }
-    {
-        var extend = as.defineOpcodeHandler(.{ .fd = .@"i32x4.extend_low_i16x8_u" }, .@"32");
+    for ([2]FDPrefixOpcode{
+        .@"i32x4.extend_low_i16x8_u",
+        .@"i32x4.extend_high_i16x8_u",
+    }) |opcode| {
+        var extend = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
             "pxor xmm1, xmm1 # zeroes to be put in high 16-bits of 4 x 32-bit lanes",
-            "punpcklwd xmm0, xmm1" ++
-                " # move high 4 x 16-bit lanes into low 16-bits of 4 x 32-bit lanes",
+            "punpck{[pos]c}wd xmm0, xmm1" ++
+                " # move high 4 x 16-bit lanes into low 16-bits of target 4 x 32-bit lanes",
             "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp });
+        }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
         extend.end(as);
     }
     {
