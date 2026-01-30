@@ -1019,6 +1019,44 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         add.end(as);
     }
 
+    for ([_]FDPrefixOpcode{
+        .@"i8x16.add_sat_s",
+        .@"i8x16.sub_sat_s",
+
+        .@"i16x8.add_sat_s",
+        .@"i16x8.sub_sat_s",
+    }) |opcode| {
+        var op_s = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        const interp = IntInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 1",
+            "p{[op]s}s{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .op = @tagName(opcode)[6..9], .suffix = interp.suffix() });
+        op_s.jmpToNextHandler(as);
+        op_s.end(as);
+    }
+
+    for ([_]FDPrefixOpcode{
+        .@"i8x16.add_sat_u",
+        .@"i8x16.sub_sat_u",
+
+        .@"i16x8.add_sat_u",
+        .@"i16x8.sub_sat_u",
+    }) |opcode| {
+        var op_s = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        const interp = IntInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 1",
+            "p{[op]s}us{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .op = @tagName(opcode)[6..9], .suffix = interp.suffix() });
+        op_s.jmpToNextHandler(as);
+        op_s.end(as);
+    }
+
     {
         var mul = as.defineOpcodeHandler(.{ .fd = .@"i16x8.mul" }, .@"64");
         as.printInstrs(&.{
