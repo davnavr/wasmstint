@@ -334,7 +334,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
                 " # move 8 x 8-bit lane to high 8-bits of target 8 x 16-bit lane",
             "# lower 8-bits of 8 x 16-bit lanes are ignored",
             "psraw xmm0, 8 # fill high 8-bits with sign bit of lane",
-            "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
         extend.end(as);
     }
@@ -348,7 +348,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "pxor xmm1, xmm1 # zeroes to be put in high 8-bits of 8 x 16-bit lanes",
             "punpck{[pos]c}bw xmm0, xmm1" ++
                 " # move high 8 x 8-bit lanes into low 8-bits of target 8 x 16-bit lanes",
-            "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
         extend.end(as);
     }
@@ -363,7 +363,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
                 " # move 4 x 16-bit lane to high 16-bits of target 4 x 32-bit lanes",
             "# lower 16-bits of 4 x 32-bit lanes are ignored",
             "psrad xmm0, 16 # fill high 16-bits with sign bit of lane",
-            "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
         extend.end(as);
     }
@@ -377,7 +377,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "pxor xmm1, xmm1 # zeroes to be put in high 16-bits of 4 x 32-bit lanes",
             "punpck{[pos]c}wd xmm0, xmm1" ++
                 " # move high 4 x 16-bit lanes into low 16-bits of target 4 x 32-bit lanes",
-            "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
         extend.end(as);
     }
