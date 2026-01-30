@@ -6,7 +6,7 @@ pub fn defineAllOpcodes(as: *AsmWriter) void {
     defineMemoryStoreOpcodes(as);
     defineBitwiseOpcodes(as);
     defineBooleanOpcodes(as);
-    defineConstOpcodes(as);
+    defineConstructionOpcodes(as);
     defineConversionOpcodes(as);
     defineFloatOpcodes(as);
 
@@ -245,7 +245,7 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
     }
 }
 
-fn defineConstOpcodes(as: *AsmWriter) void {
+fn defineConstructionOpcodes(as: *AsmWriter) void {
     {
         var op = as.defineOpcodeHandler(.{ .fd = .@"v128.const" }, .@"32");
         as.printInstrs(&.{
@@ -255,6 +255,45 @@ fn defineConstOpcodes(as: *AsmWriter) void {
             "lea {[vsp]f}, [{[vsp]f} + 0x10] # update VSP",
         }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
         op.end(as);
+    }
+    // splat could use vpbroadcast on AVX2
+    {
+        var splat = as.defineOpcodeHandler(.{ .fd = .@"i8x16.splat" }, .@"32");
+        as.printInstrs(&.{
+            "movd xmm0, dword ptr [{[vsp]f} - 0x10]",
+            "punpcklbw xmm0, xmm0 # replicate byte value to low 2 x 8-bit lanes",
+            "pshuflw xmm0, xmm0, 0 # replicate byte value across low 8 x 8-bit lanes",
+            "pshufd xmm0, xmm0, 0 # fill high 8 x 8-bit lanes",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        splat.end(as);
+    }
+    {
+        var splat = as.defineOpcodeHandler(.{ .fd = .@"i16x8.splat" }, .@"32");
+        as.printInstrs(&.{
+            "movd xmm0, dword ptr [{[vsp]f} - 0x10]",
+            "pshuflw xmm0, xmm0, 0 # replicate word across low 4 x 16-bit lanes",
+            "pshufd xmm0, xmm0, 0 # fill high 4 x 16-bit lanes",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        splat.end(as);
+    }
+    for ([2]FDPrefixOpcode{ .@"i32x4.splat", .@"f32x4.splat" }) |opcode| {
+        var splat = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        as.printInstrs(&.{
+            "movd xmm0, dword ptr [{[vsp]f} - 0x10]",
+            "pshufd xmm0, xmm0, 0",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        splat.end(as);
+    }
+    for ([2]FDPrefixOpcode{ .@"i64x2.splat", .@"f64x2.splat" }) |opcode| {
+        var splat = as.defineOpcodeHandler(.{ .fd = opcode }, .@"16");
+        as.printInstrs(&.{
+            "mov r13, qword ptr [{[vsp]f} - 0x10]",
+            "mov qword ptr [{[vsp]f} - 0x08], r13 # store high lane",
+        }, .{ .vsp = Gpr.vsp });
+        splat.end(as);
     }
 }
 
