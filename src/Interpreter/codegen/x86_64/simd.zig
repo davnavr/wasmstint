@@ -1410,6 +1410,50 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         extmul_high.jmpToNextHandler(as);
         extmul_high.end(as);
     }
+
+    {
+        // https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#saturating-integer-q-format-rounding-multiplication
+        // pmulhrsw requires SSSE3, but requires additional overflow checks anyway
+        var q15mulr_sat_s = as.defineOpcodeHandler(.{ .fd = .@"i16x8.q15mulr_sat_s" }, .@"64");
+
+        as.write(
+            \\.section .rodata.cst16, "aM", @progbits, 16
+            \\.p2align 4, 0x00
+            \\
+        );
+        var const_0 = as.label(&.{"const"});
+        const_0.place(as);
+        as.writeInstrs(&@as([4][]const u8, @splat(".long 0x0000" ++ "4000")));
+        as.write("\n.text\n");
+
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "movdqa xmm4, xmmword ptr [{[const_0]f}]",
+            "movdqa xmm2, xmm0",
+            "pmullw xmm0, xmm1 # product, low bits",
+            "pmulhw xmm2, xmm1 # product, high bits",
+            "movdqa xmm3, xmm0",
+            "# i32x4 of the products from original low 4 lanes",
+            "punpcklwd xmm0, xmm2",
+            "# i32x4 of the products from original high 4 lanes",
+            "punpckhwd xmm3, xmm2",
+            "# saturating must occur as last step",
+            "paddd xmm0, xmm4",
+            "paddd xmm3, xmm4",
+            "psrad xmm0, 15",
+            "psrad xmm3, 15",
+            "packssdw xmm0, xmm3",
+
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp, .const_0 = const_0 });
+        q15mulr_sat_s.jmpToNextHandler(as);
+        q15mulr_sat_s.end(as);
+    }
+
+    // .@"i32x4.dot_i16x8_s"
+    // phaddsw (horizontal add, saturating) requires SSSE3
 }
 
 const std = @import("std");
