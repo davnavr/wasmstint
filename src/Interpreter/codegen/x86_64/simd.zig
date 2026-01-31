@@ -1724,6 +1724,46 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         q15mulr_sat_s.end(as);
     }
 
+    {
+        var extadd = as.defineOpcodeHandler(.{ .fd = .@"i32x4.extadd_pairwise_i16x8_s" }, .@"64");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
+            "movdqa xmm1, xmm0",
+            "pslld xmm0, 16 # low 16-bits of pair, moved to high 16-bits",
+            "psrad xmm0, 16 # low 16-bits of pair",
+            "psrad xmm1, 16 # high 16-bits of pair",
+            "paddd xmm0, xmm1",
+
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        extadd.jmpToNextHandler(as);
+        extadd.end(as);
+    }
+    {
+        var extadd = as.defineOpcodeHandler(.{ .fd = .@"i32x4.extadd_pairwise_i16x8_u" }, .@"64");
+        as.write(
+            \\.section .rodata.cst16, "aM", @progbits, 16
+            \\.p2align 4, 0x00
+            \\
+        );
+        var low_16_bits = as.label(&.{"low_16_bits"});
+        low_16_bits.place(as);
+        as.writeInstrs(&@as([4][]const u8, @splat(".long 0x0000FFFF")));
+
+        as.write(".text\n");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
+            "movdqa xmm1, xmm0",
+            "pand xmm0, xmmword ptr [{[low_16_bits]f}] # low 16-bits of pair",
+            "psrld xmm1, 16 # high 16-bits of pair",
+            "paddd xmm0, xmm1",
+
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp, .low_16_bits = low_16_bits });
+        extadd.jmpToNextHandler(as);
+        extadd.end(as);
+    }
+
     // .@"i32x4.dot_i16x8_s"
     // phaddsw (horizontal add, saturating) requires SSSE3
 }
