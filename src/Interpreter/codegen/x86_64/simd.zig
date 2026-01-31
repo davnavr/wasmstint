@@ -1695,6 +1695,58 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         extmul_high.end(as);
     }
 
+    for ([4]FDPrefixOpcode{
+        .@"i64x2.extmul_low_i32x4_s",
+        .@"i64x2.extmul_high_i32x4_s",
+        .@"i64x2.extmul_low_i32x4_u",
+        .@"i64x2.extmul_high_i32x4_u",
+    }) |opcode| {
+        // Copied from code to generate handlers for i64x2.extend_*
+        var extend = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        const opcode_name = @tagName(opcode);
+        const low_lane_offset: u4 = switch (opcode_name[13]) {
+            'l' => 0,
+            'h' => 8,
+            else => unreachable,
+        };
+        const sign = opcode_name[opcode_name.len - 1];
+        const reg_size: Gpr.Size = switch (sign) {
+            's' => .qword,
+            'u' => .dword,
+            else => unreachable,
+        };
+        as.printInstrs(&.{
+            "{[mov]s} {[r11]f}, dword ptr [{[vsp]f} - 0x20 + {[low_lane_offset]X}]" ++
+                " # operand 0, low lane",
+            "{[mov]s} {[r13]f}, dword ptr [{[vsp]f} - 0x20 + {[low_lane_offset]X} + 4]" ++
+                " # operand 0, high lane",
+            "{[mov]s} {[r14]f}, dword ptr [{[vsp]f} - 0x10 + {[low_lane_offset]X}]" ++
+                " # operand 1, low lane",
+            "{[mov]s} {[r15]f}, dword ptr [{[vsp]f} - 0x10 + {[low_lane_offset]X} + 4]" ++
+                " # operand 1, high lane",
+
+            "imul r11, r14",
+            "imul r13, r15",
+
+            "mov qword ptr [{[vsp]f} - 0x20], r11 # store result low lane",
+            "mov qword ptr [{[vsp]f} - 0x20 + 8], r13 # store result high lane",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{
+            .mov = switch (sign) {
+                's' => "movsxd",
+                'u' => "mov",
+                else => unreachable,
+            },
+            .r11 = Gpr.r11.withSize(reg_size),
+            .r13 = Gpr.r13.withSize(reg_size),
+            .r14 = Gpr.r14.withSize(reg_size),
+            .r15 = Gpr.r15.withSize(reg_size),
+            .vsp = Gpr.vsp,
+            .low_lane_offset = low_lane_offset,
+        });
+        extend.end(as);
+    }
+
     {
         // https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#saturating-integer-q-format-rounding-multiplication
         // pmulhrsw requires SSSE3, but requires additional overflow checks anyway
