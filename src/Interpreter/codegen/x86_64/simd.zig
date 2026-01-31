@@ -254,6 +254,7 @@ fn defineConstructionOpcodes(as: *AsmWriter) void {
             "lea {[vip]f}, [{[vip]f} + 0x10] # update VIP",
             "lea {[vsp]f}, [{[vsp]f} + 0x10] # update VSP",
         }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
+        op.jmpToNextHandler(as);
         op.end(as);
     }
     // splat could use vpbroadcast on AVX2
@@ -266,6 +267,7 @@ fn defineConstructionOpcodes(as: *AsmWriter) void {
             "pshufd xmm0, xmm0, 0 # fill high 8 x 8-bit lanes",
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp });
+        splat.jmpToNextHandler(as);
         splat.end(as);
     }
     {
@@ -276,6 +278,7 @@ fn defineConstructionOpcodes(as: *AsmWriter) void {
             "pshufd xmm0, xmm0, 0 # fill high 4 x 16-bit lanes",
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp });
+        splat.jmpToNextHandler(as);
         splat.end(as);
     }
     for ([2]FDPrefixOpcode{ .@"i32x4.splat", .@"f32x4.splat" }) |opcode| {
@@ -285,6 +288,7 @@ fn defineConstructionOpcodes(as: *AsmWriter) void {
             "pshufd xmm0, xmm0, 0",
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp });
+        splat.jmpToNextHandler(as);
         splat.end(as);
     }
     for ([2]FDPrefixOpcode{ .@"i64x2.splat", .@"f64x2.splat" }) |opcode| {
@@ -293,6 +297,7 @@ fn defineConstructionOpcodes(as: *AsmWriter) void {
             "mov r13, qword ptr [{[vsp]f} - 0x10]",
             "mov qword ptr [{[vsp]f} - 0x08], r13 # store high lane",
         }, .{ .vsp = Gpr.vsp });
+        splat.jmpToNextHandler(as);
         splat.end(as);
     }
 }
@@ -321,6 +326,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
                 else => unreachable,
             },
         });
+        narrow.jmpToNextHandler(as);
         narrow.end(as);
     }
     for ([2]FDPrefixOpcode{
@@ -336,6 +342,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "psraw xmm0, 8 # fill high 8-bits with sign bit of lane",
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
+        extend.jmpToNextHandler(as);
         extend.end(as);
     }
     for ([2]FDPrefixOpcode{
@@ -350,6 +357,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
                 " # move high 8 x 8-bit lanes into low 8-bits of target 8 x 16-bit lanes",
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
+        extend.jmpToNextHandler(as);
         extend.end(as);
     }
     for ([2]FDPrefixOpcode{
@@ -365,6 +373,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "psrad xmm0, 16 # fill high 16-bits with sign bit of lane",
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
+        extend.jmpToNextHandler(as);
         extend.end(as);
     }
     for ([2]FDPrefixOpcode{
@@ -379,6 +388,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
                 " # move high 4 x 16-bit lanes into low 16-bits of target 4 x 32-bit lanes",
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
+        extend.jmpToNextHandler(as);
         extend.end(as);
     }
     for ([4]FDPrefixOpcode{
@@ -416,6 +426,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             .vsp = Gpr.vsp,
             .low_lane_offset = low_lane_offset,
         });
+        extend.jmpToNextHandler(as);
         extend.end(as);
     }
     // Based on the assembly generated for the scalar versions, which are based on the code
@@ -482,8 +493,34 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "por xmm5, xmm6",
 
             "movaps xmmword ptr [{[vsp]f} - 0x10], xmm5 # store result",
-        }, .{ .vsp = Gpr.vsp, .max_i32s_f32x4 = max_i32s_f32x4, .i32x4_max_signed = i32x4_max_signed });
+        }, .{
+            .vsp = Gpr.vsp,
+            .max_i32s_f32x4 = max_i32s_f32x4,
+            .i32x4_max_signed = i32x4_max_signed,
+        });
+        trunc_sat.jmpToNextHandler(as);
         trunc_sat.end(as);
+    }
+    {
+        // var trunc_sat = as.defineOpcodeHandler(.{ .fc = .@"i32.trunc_sat_f32_u" }, .@"64");
+        // as.printInstrs(&.{
+        //     "# based on what LLVM generates for its `@llvm.fptoui.sat.i32.f32` intrinsic",
+        //     "movss xmm0, dword ptr [{[vsp]f} - 0x10] # load f32",
+        //     "cvttss2si r11, xmm0",
+        //     "xor r13d, r13d",
+        //     "xorps xmm1, xmm1",
+        //     "ucomiss xmm0, xmm1",
+        //     "cmovae r13d, r11d",
+        //     "mov r14d, 0x4F7F" ++ "FFFF",
+        //     "movd xmm2, r14d",
+        //     "ucomiss xmm0, xmm2",
+        //     "mov r11d, -1",
+        //     "cmovbe r11d, r13d # If max u32 exceeded, this clamps it?",
+        //     "mov dword ptr [{[vsp]f} - 0x10], r11d # store result",
+        // }, .{ .vsp = Gpr.vsp });
+        // trunc_sat.jmpToNextHandler(as);
+        // trunc_sat.jmpToNextHandler(as);
+        // trunc_sat.end(as);
     }
     {
         var convert = as.defineOpcodeHandler(.{ .fd = .@"f32x4.convert_i32x4_s" }, .@"32");
@@ -491,6 +528,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "cvtdq2ps xmm0, xmmword ptr [{[vsp]f} - 0x10]",
             "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp });
+        convert.jmpToNextHandler(as);
         convert.end(as);
     }
     {
@@ -535,6 +573,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             .const_2 = const_2,
             .const_3 = const_3,
         });
+        convert.jmpToNextHandler(as);
         convert.end(as);
     }
     {
@@ -543,6 +582,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "cvtdq2pd xmm0, qword ptr [{[vsp]f} - 0x10]",
             "movapd xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp });
+        convert.jmpToNextHandler(as);
         convert.end(as);
     }
     {
@@ -568,6 +608,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "subpd xmm0, xmm1",
             "movapd xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp, .const_0 = const_0 });
+        convert.jmpToNextHandler(as);
         convert.end(as);
     }
     {
@@ -576,6 +617,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "cvtpd2ps xmm0, xmmword ptr [{[vsp]f} - 0x10]",
             "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp });
+        demote.jmpToNextHandler(as);
         demote.end(as);
     }
     {
@@ -584,6 +626,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "cvtps2pd xmm0, qword ptr [{[vsp]f} - 0x10]",
             "movapd xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp });
+        promote.jmpToNextHandler(as);
         promote.end(as);
     }
 }
