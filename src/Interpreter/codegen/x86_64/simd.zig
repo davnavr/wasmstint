@@ -418,6 +418,73 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         });
         extend.end(as);
     }
+    // Based on the assembly generated for the scalar versions, which are based on the code
+    // generated for LLVM intrinsics:
+    // - https://llvm.org/docs/LangRef.html#llvm-fptosi-sat-intrinsic
+    // - https://llvm.org/docs/LangRef.html#llvm-fptoui-sat-intrinsic
+    {
+        // cvttps2pi only works with MMX registers
+        var trunc_sat = as.defineOpcodeHandler(.{ .fd = .@"i32x4.trunc_sat_f32x4_s" }, .@"64");
+        as.write(
+            \\.section .rodata.cst16, "aM", @progbits, 16
+            \\.p2align 4, 0x00
+            \\
+        );
+
+        var max_i32s_f32x4 = as.label(&.{"max_i32s_f32x4"});
+        max_i32s_f32x4.place(as);
+        as.writeInstrs(&@as([4][]const u8, @splat(".long 0x4EFF" ++ "FFFF")));
+
+        var i32x4_max_signed = as.label(&.{"i32x4_max_signed"});
+        i32x4_max_signed.place(as);
+        as.writeInstrs(&@as([4][]const u8, @splat(".long 0x7FFF" ++ "FFFF")));
+
+        as.write(".text\n");
+        as.printInstrs(&.{
+            "movaps xmm0, xmmword ptr [{[vsp]f} - 0x10] # f32x4 to convert",
+            "movaps xmm5, xmmword ptr [{[max_i32s_f32x4]f}]",
+            "cmpltps xmm5, xmm0 # check for values exceeding max bounds",
+
+            "movaps xmm7, xmm0",
+            "cmpordps xmm7, xmm7 # detect non-NaN values",
+            "andps xmm0, xmm7 # lane set to zero if NaN",
+            "movaps xmm4, xmm0",
+
+            "# lane 0",
+            "cvttss2si r11d, xmm0",
+            "movd xmm0, r11d # other lanes set to zero",
+
+            "# lane 1",
+            "pshufd xmm1, xmm4, 0x01",
+            "cvttss2si r13d, xmm1",
+            "movd xmm1, r13d",
+            "pshufd xmm1, xmm1, 0xA2 # other lanes set to zero",
+
+            "# lane 2",
+            "pshufd xmm2, xmm4, 0x02",
+            "cvttss2si r14d, xmm2",
+            "movd xmm2, r14d",
+            "pshufd xmm2, xmm2, 0x8A # other lanes set to zero",
+
+            "# lane 3",
+            "pshufd xmm3, xmm4, 0x03",
+            "cvttss2si r15d, xmm3",
+            "movd xmm3, r15d",
+            "pshufd xmm3, xmm3, 0x2A # other lanes set to zero",
+
+            "pxor xmm0, xmm1",
+            "pxor xmm2, xmm3",
+            "pxor xmm0, xmm2",
+
+            "movdqa xmm6, xmm5",
+            "andps xmm5, xmmword ptr [{[i32x4_max_signed]f}] # if max bounds exceeded, saturate",
+            "pandn xmm6, xmm0 # keep lanes that did not exceed the maximum",
+            "por xmm5, xmm6",
+
+            "movaps xmmword ptr [{[vsp]f} - 0x10], xmm5 # store result",
+        }, .{ .vsp = Gpr.vsp, .max_i32s_f32x4 = max_i32s_f32x4, .i32x4_max_signed = i32x4_max_signed });
+        trunc_sat.end(as);
+    }
     {
         var convert = as.defineOpcodeHandler(.{ .fd = .@"f32x4.convert_i32x4_s" }, .@"32");
         as.printInstrs(&.{
