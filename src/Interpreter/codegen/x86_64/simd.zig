@@ -1519,6 +1519,36 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     }
 
     {
+        var extadd = as.defineOpcodeHandler(.{ .fd = .@"i16x8.extadd_pairwise_i8x16_s" }, .@"64");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
+            "movdqa xmm1, xmm0",
+            "psllw xmm0, 8 # low 8-bits of pair, moved to high 8-bits",
+            "psraw xmm0, 8 # low 8-bits of pair",
+            "psraw xmm1, 8 # high 8-bits of pair",
+            "paddw xmm0, xmm1",
+
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        extadd.jmpToNextHandler(as);
+        extadd.end(as);
+    }
+    {
+        var extadd = as.defineOpcodeHandler(.{ .fd = .@"i16x8.extadd_pairwise_i8x16_u" }, .@"64");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
+            "movdqa xmm1, xmm0",
+            "pand xmm0, xmmword ptr [.L{[symbol_prefix]s}i8x16_even_lanes] # low 8-bits of pair",
+            "psrlw xmm1, 8 # high 8-bits of pair",
+            "paddw xmm0, xmm1",
+
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        extadd.jmpToNextHandler(as);
+        extadd.end(as);
+    }
+
+    {
         var extmul_low = as.defineOpcodeHandler(.{ .fd = .@"i16x8.extmul_low_i8x16_s" }, .@"64");
         as.printInstrs(&.{
             "pxor xmm0, xmm0",
