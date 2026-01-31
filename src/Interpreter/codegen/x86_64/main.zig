@@ -1711,9 +1711,9 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: FloatType) void {
         as.printInstrs(&.{
             "mov{[int_suffix]c} xmm0, {[size]t} ptr [{[vsp]f} - 0x10] # first",
             "mov{[int_suffix]c} xmm1, {[size]t} ptr [{[vsp]f} - 0x20] # second",
-            "movaps xmm2, xmm0",
-            "movaps xmm3, xmm1",
-            "movaps xmm4, xmm0",
+            "movap{[float_suffix]c} xmm2, xmm0",
+            "movap{[float_suffix]c} xmm3, xmm1",
+            "movap{[float_suffix]c} xmm4, xmm0",
             "mins{[float_suffix]c} xmm2, xmm1",
             "mins{[float_suffix]c} xmm3, xmm0",
             "orp{[float_suffix]c} xmm2, xmm3 # handles non-NaN case correctly",
