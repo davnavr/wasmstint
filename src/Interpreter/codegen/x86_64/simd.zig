@@ -554,7 +554,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
         .@"f64x2.lt",
         .@"f64x2.le",
     }) |opcode| {
-        var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        var cmp = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
         const interp = FloatInterp.fromOpcodeName(opcode);
         as.printInstrs(&.{
             "movap{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
@@ -562,12 +562,12 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
             "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
         }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix(), .op = @tagName(opcode)[6..] });
-        op.jmpToNextHandler(as);
-        op.end(as);
+        cmp.jmpToNextHandler(as);
+        cmp.end(as);
     }
 
     for (&[_]FDPrefixOpcode{ .@"f32x4.ne", .@"f64x2.ne" }) |opcode| {
-        var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        var ne = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
         const interp = FloatInterp.fromOpcodeName(opcode);
         as.printInstrs(&.{
             "movap{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 0",
@@ -575,8 +575,8 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
             "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
         }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
-        op.jmpToNextHandler(as);
-        op.end(as);
+        ne.jmpToNextHandler(as);
+        ne.end(as);
     }
 
     for (&[_]FDPrefixOpcode{
@@ -586,7 +586,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
         .@"f64x2.gt",
         .@"f64x2.ge",
     }) |opcode| {
-        var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        var cmp = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
         const interp = FloatInterp.fromOpcodeName(opcode);
         const opcode_name = @tagName(opcode);
         as.printInstrs(&.{
@@ -598,6 +598,30 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
             .vsp = Gpr.vsp,
             .suffix = interp.suffix(),
             .op = opcode_name[opcode_name.len - 1],
+        });
+        cmp.jmpToNextHandler(as);
+        cmp.end(as);
+    }
+
+    for (&[_]FDPrefixOpcode{
+        .@"f32x4.pmin",
+        .@"f32x4.pmax",
+
+        .@"f64x2.pmin",
+        .@"f64x2.pmax",
+    }) |opcode| {
+        var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        const interp = FloatInterp.fromOpcodeName(opcode);
+        const opcode_name = @tagName(opcode);
+        as.printInstrs(&.{
+            "movap{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "{[op]s}p{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x20]",
+            "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+        }, .{
+            .vsp = Gpr.vsp,
+            .suffix = interp.suffix(),
+            .op = opcode_name[opcode_name.len - 3 ..][0..3],
         });
         op.jmpToNextHandler(as);
         op.end(as);
