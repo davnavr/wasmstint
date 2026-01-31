@@ -646,10 +646,20 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
         });
         as.writeInstrs(&@as([4][]const u8, @splat(".long 0xFFC0" ++ "0000")));
 
+        as.print("\n.L{[symbol_prefix]s}f64x2_canonical_nan_mask:\n", .{
+            .symbol_prefix = as.symbol_prefix,
+        });
+        as.writeInstrs(&@as([2][]const u8, @splat(".quad 0xFFF8" ++ "0000" ++ "0000" ++ "0000")));
+
         as.print("\n.L{[symbol_prefix]s}f32x4_canonical_nan_bit:\n", .{
             .symbol_prefix = as.symbol_prefix,
         });
         as.writeInstrs(&@as([4][]const u8, @splat(".long 0x0040" ++ "0000")));
+
+        as.print("\n.L{[symbol_prefix]s}f64x2_canonical_nan_bit:\n", .{
+            .symbol_prefix = as.symbol_prefix,
+        });
+        as.writeInstrs(&@as([2][]const u8, @splat(".quad 0x0008" ++ "0000" ++ "0000" ++ "0000")));
 
         as.write("\n.text\n");
     }
@@ -669,7 +679,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
             "minp{[suffix]c} xmm3, xmm0",
             "orp{[suffix]c} xmm2, xmm3 # handles non-NaN case correctly",
 
-            "movap{[suffix]c} xmm3, .L{[symbol_prefix]s}f32x4_canonical_nan_mask" ++
+            "movap{[suffix]c} xmm3, .L{[symbol_prefix]s}{[interp]t}_canonical_nan_mask" ++
                 " # canonical NaN mask",
 
             "cmpordp{[suffix]c} xmm4, xmm1 # all 1's if NaN was NOT present",
@@ -677,7 +687,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
             "orp{[suffix]c} xmm3, xmm4",
             "andp{[suffix]c} xmm2, xmm3 # If NaN, mask away non-canonical NaN bits",
 
-            "movap{[suffix]c} xmm3, .L{[symbol_prefix]s}f32x4_canonical_nan_bit" ++
+            "movap{[suffix]c} xmm3, .L{[symbol_prefix]s}{[interp]t}_canonical_nan_bit" ++
                 " # canonical NaN bit",
             "andnp{[suffix]c} xmm4, xmm3 # canonical NaN bit if NaN is present",
             "# If NaNs are present, set the canonical NaN bit",
@@ -685,9 +695,67 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
 
             "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x20], xmm2 # write result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
-        }, .{ .suffix = interp.suffix(), .symbol_prefix = as.symbol_prefix, .vsp = Gpr.vsp });
+        }, .{
+            .suffix = interp.suffix(),
+            .interp = interp,
+            .symbol_prefix = as.symbol_prefix,
+            .vsp = Gpr.vsp,
+        });
         min.jmpToNextHandler(as);
         min.end(as);
+    }
+
+    for ([2]FDPrefixOpcode{ .@"f32x4.max", .@"f64x2.max" }) |opcode| {
+        // Based on assembly generated for `f32.max`/`f64.max` handlers
+        var max = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        const interp = FloatInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "movap{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10] # first",
+            "movap{[suffix]c} xmm1, xmmword ptr [{[vsp]f} - 0x20] # second",
+            "movap{[suffix]c} xmm2, xmm0",
+            "movap{[suffix]c} xmm3, xmm1",
+            "movap{[suffix]c} xmm4, xmm0",
+            "maxp{[suffix]c} xmm2, xmm1",
+            "maxp{[suffix]c} xmm3, xmm0",
+            "orp{[suffix]c} xmm2, xmm3" ++
+                " # almost handles non-NaN case correctly, sign may be wrong",
+
+            "movap{[suffix]c} xmm3, xmmword ptr [.L{[symbol_prefix]s}{[int_interp]t}_sign_bits]" ++
+                " # sign bit",
+            "movap{[suffix]c} xmm5, xmm3",
+            "andnp{[suffix]c} xmm3, xmm2 # remove sign bit",
+
+            "andp{[suffix]c} xmm4, xmm5 # sign of first input",
+            "andp{[suffix]c} xmm5, xmm1 # sign of second input",
+            "andp{[suffix]c} xmm4, xmm5 # final sign",
+            "orp{[suffix]c} xmm3, xmm4 # apply correct sign bit",
+
+            "movap{[suffix]c} xmm2, .L{[symbol_prefix]s}{[interp]t}_canonical_nan_mask" ++
+                " # canonical NaN mask",
+
+            "movap{[suffix]c} xmm4, xmm0",
+            "cmpordp{[suffix]c} xmm4, xmm1 # all 1's if NaN was NOT present",
+            "# mask of all 1's if no NaN, canonical_nan_mask if there is NaN",
+            "orp{[suffix]c} xmm2, xmm4",
+            "andp{[suffix]c} xmm3, xmm2 # If NaN, mask away non-canonical NaN bits",
+
+            "movap{[suffix]c} xmm2, .L{[symbol_prefix]s}{[interp]t}_canonical_nan_bit" ++
+                " # canonical NaN bit",
+            "andnp{[suffix]c} xmm4, xmm2 # canonical NaN bit if NaN is present",
+            "# If NaNs are present, set the canonical NaN bit",
+            "orp{[suffix]c} xmm3, xmm4",
+
+            "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x20], xmm3 # write result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
+        }, .{
+            .suffix = interp.suffix(),
+            .interp = interp,
+            .int_interp = interp.toInt(),
+            .symbol_prefix = as.symbol_prefix,
+            .vsp = Gpr.vsp,
+        });
+        max.jmpToNextHandler(as);
+        max.end(as);
     }
 
     for (&[_]FDPrefixOpcode{
