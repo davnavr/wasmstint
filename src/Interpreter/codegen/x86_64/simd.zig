@@ -546,6 +546,64 @@ const FloatInterp = enum {
 
 fn defineFloatOpcodes(as: *AsmWriter) void {
     for (&[_]FDPrefixOpcode{
+        .@"f32x4.eq",
+        .@"f32x4.lt",
+        .@"f32x4.le",
+
+        .@"f64x2.eq",
+        .@"f64x2.lt",
+        .@"f64x2.le",
+    }) |opcode| {
+        var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        const interp = FloatInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "movap{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+            "cmp{[op]s}p{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+        }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix(), .op = @tagName(opcode)[6..] });
+        op.jmpToNextHandler(as);
+        op.end(as);
+    }
+
+    for (&[_]FDPrefixOpcode{ .@"f32x4.ne", .@"f64x2.ne" }) |opcode| {
+        var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        const interp = FloatInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "movap{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 0",
+            "cmpneqp{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x20]",
+            "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+        }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix() });
+        op.jmpToNextHandler(as);
+        op.end(as);
+    }
+
+    for (&[_]FDPrefixOpcode{
+        .@"f32x4.gt",
+        .@"f32x4.ge",
+
+        .@"f64x2.gt",
+        .@"f64x2.ge",
+    }) |opcode| {
+        var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        const interp = FloatInterp.fromOpcodeName(opcode);
+        const opcode_name = @tagName(opcode);
+        as.printInstrs(&.{
+            "movap{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "cmpl{[op]c}p{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x20]",
+            "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+        }, .{
+            .vsp = Gpr.vsp,
+            .suffix = interp.suffix(),
+            .op = opcode_name[opcode_name.len - 1],
+        });
+        op.jmpToNextHandler(as);
+        op.end(as);
+    }
+
+    for (&[_]FDPrefixOpcode{
         .@"f32x4.add",
         .@"f32x4.sub",
         .@"f32x4.mul",
