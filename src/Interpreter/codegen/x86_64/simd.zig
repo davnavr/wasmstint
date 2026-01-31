@@ -1416,6 +1416,18 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         max.end(as);
     }
 
+    {
+        var dot = as.defineOpcodeHandler(.{ .fd = .@"i32x4.dot_i16x8_s" }, .@"32");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            "pmaddwd xmm0, xmmword ptr [{[vsp]f} - 0x20]",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+        }, .{ .vsp = Gpr.vsp });
+        dot.jmpToNextHandler(as);
+        dot.end(as);
+    }
+
     for (&[_]struct { FDPrefixOpcode, []const u8 }{
         .{ .@"i8x16.abs", "pminub" },
         .{ .@"i16x8.abs", "pmaxsw" },
