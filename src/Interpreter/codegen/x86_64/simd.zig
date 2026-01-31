@@ -603,6 +603,37 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
         cmp.end(as);
     }
 
+    // When only SSE2 is available, LLVM calls libc functions via @PLT
+    for (&[_]FDPrefixOpcode{
+        .@"f32x4.ceil",
+        .@"f32x4.floor",
+        .@"f32x4.trunc",
+        .@"f32x4.nearest",
+
+        .@"f64x2.ceil",
+        .@"f64x2.floor",
+        .@"f64x2.trunc",
+        .@"f64x2.nearest",
+    }) |opcode| {
+        var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        const interp = FloatInterp.fromOpcodeName(opcode);
+        const rounding_mode = std.meta.stringToEnum(
+            AsmWriter.RoundingControl,
+            @tagName(opcode)[6..],
+        ).?;
+        as.printInstrs(&.{
+            "roundp{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10], 0x{[rounding_mode]X}" ++
+                " # TODO: Requires SSE4.1",
+            "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{
+            .suffix = interp.suffix(),
+            .vsp = Gpr.vsp,
+            .rounding_mode = 0b1000 | @as(u8, @intFromEnum(rounding_mode)),
+        });
+        op.jmpToNextHandler(as);
+        op.end(as);
+    }
+
     for (&[_]FDPrefixOpcode{
         .@"f32x4.pmin",
         .@"f32x4.pmax",
