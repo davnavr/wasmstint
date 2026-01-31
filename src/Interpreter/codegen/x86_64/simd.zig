@@ -805,6 +805,23 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
         op.end(as);
     }
 
+    for ([2]FDPrefixOpcode{ .@"f32x4.abs", .@"f64x2.abs" }) |opcode| {
+        var abs = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        const interp = FloatInterp.fromOpcodeName(opcode);
+        as.printInstrs(&.{
+            "movap{[suffix]c} xmm0, xmmword ptr [.L{[symbol_prefix]s}{[int_interp]t}_sign_bits]",
+            "andnp{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{
+            .vsp = Gpr.vsp,
+            .suffix = interp.suffix(),
+            .symbol_prefix = as.symbol_prefix,
+            .int_interp = interp.toInt(),
+        });
+        abs.jmpToNextHandler(as);
+        abs.end(as);
+    }
+
     for (&[_]FDPrefixOpcode{ .@"f32x4.sqrt", .@"f64x2.sqrt" }) |opcode| {
         var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         const interp = FloatInterp.fromOpcodeName(opcode);
