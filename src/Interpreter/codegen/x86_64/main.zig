@@ -1653,13 +1653,9 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: FloatType) void {
     }
 
     // When only SSE2 is available, LLVM calls libc functions via @PLT
-    for (&[_]struct { []const u8, u2 }{
-        .{ ".ceil", 0b10 }, // ceilf/ceill
-        .{ ".floor", 0b01 }, // floorf/floorl
-        .{ ".trunc", 0b11 }, // trunc/truncl?
-        .{ ".nearest", 0b00 }, // roundevenf/roundeevenl
-    }) |info| {
-        var op = as.defineOpcodeHandler(opcode_name.name(info[0]), .@"64");
+    for (&[_][]const u8{ ".ceil", ".floor", ".trunc", ".nearest" }) |name| {
+        var op = as.defineOpcodeHandler(opcode_name.name(name), .@"64");
+        const mode = std.meta.stringToEnum(AsmWriter.RoundingControl, name[1..]).?;
         as.printInstrs(&.{
             "rounds{[suffix]c} xmm0, {[size]t} ptr [{[vsp]f} - 0x10], 0x{[rounding_mode]X}" ++
                 " # TODO: Requires SSE4.1",
@@ -1668,7 +1664,7 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: FloatType) void {
             .suffix = float_suffix,
             .size = size,
             .vsp = Gpr.vsp,
-            .rounding_mode = 0b1000 | @as(u8, info[1]),
+            .rounding_mode = 0b1000 | @as(u8, @intFromEnum(mode)),
         });
         op.jmpToNextHandler(as);
         op.end(as);

@@ -638,6 +638,13 @@ pub fn popSystemVSavedRegisters(as: *AsmWriter) void {
     }
 }
 
+pub const RoundingControl = enum(u2) {
+    ceil = 0b10, // ceilf/ceill
+    floor = 0b01, // floorf/floorl
+    trunc = 0b11, // trunc/truncl?
+    nearest = 0b00, // roundevenf/roundeevenl (introduced in C23)
+};
+
 const std = @import("std");
 const Writer = std.Io.Writer;
 const opcodes = @import("opcodes");
