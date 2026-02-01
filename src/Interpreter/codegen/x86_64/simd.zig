@@ -680,7 +680,48 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         trunc_sat.jmpToNextHandler(as);
         trunc_sat.end(as);
     }
-    // TODO: i32x4.trunc_sat_f64x2_u_zero
+    {
+        var trunc_sat = as.defineOpcodeHandler(
+            .{ .fd = .@"i32x4.trunc_sat_f64x2_u_zero" },
+            .@"64",
+        );
+        as.write(
+            \\.section .rodata.cst16, "aM", @progbits, 16
+            \\.p2align 4, 0x00
+            \\
+        );
+
+        var max_bound = as.label(&.{"max_bound"});
+        max_bound.place(as);
+        as.writeInstrs(&@as([2][]const u8, @splat(".quad 0x41EF" ++ "FFFF" ++ "FFE0" ++ "0000")));
+
+        as.write(".text\n");
+        as.printInstrs(&.{
+            "movapd xmm0, xmmword ptr [{[vsp]f} - 0x10] # f64x2 to convert",
+
+            "movapd xmm1, xmm0",
+            "cmpordpd xmm1, xmm1 # detect non-NaN values",
+            "andpd xmm0, xmm1 # lane set to zero if NaN",
+
+            "xorpd xmm2, xmm2",
+            "maxpd xmm0, xmm2 # clamp negative values to zero",
+            "minpd xmm0, xmmword ptr [{[max_bound]f}] # clamp to max bound",
+
+            "pshufd xmm3, xmm0, 0x0E # move high f64 to low lane",
+
+            "# no instruction to convert f64x2 to i64x2, so scalar versions are used",
+            "# only low 32-bits of high i64 results are used",
+            "cvttsd2si r11, xmm0 # low i64 result",
+            "cvttsd2si r13, xmm3 # high i64 result",
+            "xor r14d, r14d",
+
+            "mov dword ptr [{[vsp]f} - 0x10], r11d # store low u32 result",
+            "mov dword ptr [{[vsp]f} - 0x10 + 4], r13d # store high u32 result",
+            "mov qword ptr [{[vsp]f} - 0x10 + 8], r14 # store high 64-bit zeroes",
+        }, .{ .vsp = Gpr.vsp, .max_bound = max_bound });
+        trunc_sat.jmpToNextHandler(as);
+        trunc_sat.end(as);
+    }
     {
         var demote = as.defineOpcodeHandler(.{ .fd = .@"f32x4.demote_f64x2_zero" }, .@"32");
         as.printInstrs(&.{
