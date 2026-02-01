@@ -502,13 +502,14 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "cmpordps xmm7, xmm7 # detect non-NaN values",
             "andps xmm0, xmm7 # lane set to zero if NaN",
 
-            // TODO: use minpd
             "xorps xmm7, xmm7",
-            "cmpltps xmm7, xmm0 # detect values below zero",
-            "andps xmm0, xmm7 # lane set to zero if negative",
+            "maxps xmm0, xmm7 # set lane to zero if negative",
             "movaps xmm4, xmm0",
 
+            "# no instruction to convert f32x4 to i64x2, " ++
+                "so scalar version is used to convert to i64",
             "# high 32-bits of resulting i64 are ignored, saturation check occurs later",
+
             "# lane 0",
             "cvttss2si r11, xmm0",
             "movd xmm0, r11d # other lanes set to zero",
@@ -536,7 +537,6 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "pxor xmm0, xmm2",
 
             "movdqa xmm6, xmm5",
-            // TODO: use maxpd
             "andps xmm5, xmmword ptr [{[i32x4_max_unsigned]f}] # if max bounds exceeded, saturate",
             "pandn xmm6, xmm0 # keep lanes that did not exceed the maximum",
             "por xmm5, xmm6",
