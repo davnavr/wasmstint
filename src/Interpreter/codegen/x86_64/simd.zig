@@ -808,8 +808,8 @@ fn defineLaneAccessOpcodes(as: *AsmWriter) void {
         extract_lane.end(as);
     }
 
-    {
-        var extract_lane = as.defineOpcodeHandler(.{ .fd = .@"i32x4.extract_lane" }, .@"32");
+    for (&[2]FDPrefixOpcode{ .@"i32x4.extract_lane", .@"f32x4.extract_lane" }) |opcode| {
+        var extract_lane = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         as.printInstrs(&.{
             "movzx r13, byte ptr [{[vip]f}] # lane immediate",
             "mov r14d, dword ptr [{[vsp]f} - 0x10 + 4*r13]",
@@ -819,8 +819,9 @@ fn defineLaneAccessOpcodes(as: *AsmWriter) void {
         extract_lane.jmpToNextHandler(as);
         extract_lane.end(as);
     }
-    {
-        var extract_lane = as.defineOpcodeHandler(.{ .fd = .@"i64x2.extract_lane" }, .@"32");
+
+    for (&[2]FDPrefixOpcode{ .@"i64x2.extract_lane", .@"f64x2.extract_lane" }) |opcode| {
+        var extract_lane = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         as.printInstrs(&.{
             "movzx r13, byte ptr [{[vip]f}] # lane immediate",
             "mov r14, qword ptr [{[vsp]f} - 0x10 + 8*r13]",
