@@ -786,6 +786,27 @@ fn defineLaneAccessOpcodes(as: *AsmWriter) void {
         extract_lane.jmpToNextHandler(as);
         extract_lane.end(as);
     }
+
+    for (&[2]FDPrefixOpcode{ .@"i16x8.extract_lane_s", .@"i16x8.extract_lane_u" }) |opcode| {
+        var extract_lane = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        const opcode_name = @tagName(opcode);
+        as.printInstrs(&.{
+            "movzx r13, byte ptr [{[vip]f}] # lane immediate",
+            "mov{[sign]c}x r14d, word ptr [{[vsp]f} - 0x10 + 2*r13]",
+            "inc {[vip]f} # vip",
+            "mov dword ptr [{[vsp]f} - 0x10], r14d # store result",
+        }, .{
+            .sign = @as(u7, switch (opcode_name[opcode_name.len - 1]) {
+                's' => 's',
+                'u' => 'z',
+                else => unreachable,
+            }),
+            .vip = Gpr.vip,
+            .vsp = Gpr.vsp,
+        });
+        extract_lane.jmpToNextHandler(as);
+        extract_lane.end(as);
+    }
 }
 
 fn defineFloatOpcodes(as: *AsmWriter) void {
