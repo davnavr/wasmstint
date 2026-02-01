@@ -831,6 +831,57 @@ fn defineLaneAccessOpcodes(as: *AsmWriter) void {
         extract_lane.jmpToNextHandler(as);
         extract_lane.end(as);
     }
+
+    {
+        var replace_lane = as.defineOpcodeHandler(.{ .fd = .@"i8x16.replace_lane" }, .@"32");
+        as.printInstrs(&.{
+            "movzx r11, byte ptr [{[vip]f}] # lane immediate",
+            "mov r13d, dword ptr [{[vsp]f} - 0x10] # new lane value",
+            "mov byte ptr [{[vsp]f} - 0x20 + r11], r13b # store new lane value",
+            "inc {[vip]f} # vip",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+        }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
+        replace_lane.jmpToNextHandler(as);
+        replace_lane.end(as);
+    }
+    {
+        var replace_lane = as.defineOpcodeHandler(.{ .fd = .@"i16x8.replace_lane" }, .@"32");
+        as.printInstrs(&.{
+            "movzx r11, byte ptr [{[vip]f}] # lane immediate",
+            "mov r13d, dword ptr [{[vsp]f} - 0x10] # new lane value",
+            "mov word ptr [{[vsp]f} - 0x20 + 2*r11], r13w # store new lane value",
+            "inc {[vip]f} # vip",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+        }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
+        replace_lane.jmpToNextHandler(as);
+        replace_lane.end(as);
+    }
+
+    for (&[2]FDPrefixOpcode{ .@"i32x4.replace_lane", .@"f32x4.replace_lane" }) |opcode| {
+        var replace_lane = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        as.printInstrs(&.{
+            "movzx r11, byte ptr [{[vip]f}] # lane immediate",
+            "mov r13d, dword ptr [{[vsp]f} - 0x10] # new lane value",
+            "mov dword ptr [{[vsp]f} - 0x20 + 4*r11], r13d # store new lane value",
+            "inc {[vip]f} # vip",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+        }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
+        replace_lane.jmpToNextHandler(as);
+        replace_lane.end(as);
+    }
+
+    for (&[2]FDPrefixOpcode{ .@"i64x2.replace_lane", .@"f64x2.replace_lane" }) |opcode| {
+        var replace_lane = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        as.printInstrs(&.{
+            "movzx r11, byte ptr [{[vip]f}] # lane immediate",
+            "mov r13, qword ptr [{[vsp]f} - 0x10] # new lane value",
+            "mov qword ptr [{[vsp]f} - 0x20 + 8*r11], r13 # store new lane value",
+            "inc {[vip]f} # vip",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+        }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
+        replace_lane.jmpToNextHandler(as);
+        replace_lane.end(as);
+    }
 }
 
 fn defineFloatOpcodes(as: *AsmWriter) void {
