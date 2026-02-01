@@ -8,8 +8,8 @@ pub fn defineAllOpcodes(as: *AsmWriter) void {
     defineBooleanOpcodes(as);
     defineConstructionOpcodes(as);
     defineConversionOpcodes(as);
+    defineLaneAccessOpcodes(as);
     defineFloatOpcodes(as);
-
     defineIntegerOpcodes(as);
 }
 
@@ -764,6 +764,29 @@ const FloatInterp = enum {
         return std.meta.stringToEnum(FloatInterp, @tagName(opcode)[0..5]).?;
     }
 };
+
+fn defineLaneAccessOpcodes(as: *AsmWriter) void {
+    for (&[2]FDPrefixOpcode{ .@"i8x16.extract_lane_s", .@"i8x16.extract_lane_u" }) |opcode| {
+        var extract_lane = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        const opcode_name = @tagName(opcode);
+        as.printInstrs(&.{
+            "movzx r13, byte ptr [{[vip]f}] # lane immediate",
+            "mov{[sign]c}x r14d, byte ptr [{[vsp]f} - 0x10 + r13]",
+            "inc {[vip]f} # vip",
+            "mov dword ptr [{[vsp]f} - 0x10], r14d # store result",
+        }, .{
+            .sign = @as(u7, switch (opcode_name[opcode_name.len - 1]) {
+                's' => 's',
+                'u' => 'z',
+                else => unreachable,
+            }),
+            .vip = Gpr.vip,
+            .vsp = Gpr.vsp,
+        });
+        extract_lane.jmpToNextHandler(as);
+        extract_lane.end(as);
+    }
+}
 
 fn defineFloatOpcodes(as: *AsmWriter) void {
     for (&[_]FDPrefixOpcode{
