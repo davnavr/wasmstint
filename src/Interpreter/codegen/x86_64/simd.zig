@@ -488,6 +488,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "pxor xmm0, xmm2",
 
             "movdqa xmm6, xmm5",
+            // TODO: use maxpd
             "andps xmm5, xmmword ptr [{[i32x4_max_signed]f}] # if max bounds exceeded, saturate",
             "pandn xmm6, xmm0 # keep lanes that did not exceed the maximum",
             "por xmm5, xmm6",
@@ -527,6 +528,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "cmpordps xmm7, xmm7 # detect non-NaN values",
             "andps xmm0, xmm7 # lane set to zero if NaN",
 
+            // TODO: use minpd
             "xorps xmm7, xmm7",
             "cmpltps xmm7, xmm0 # detect values below zero",
             "andps xmm0, xmm7 # lane set to zero if negative",
@@ -560,6 +562,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "pxor xmm0, xmm2",
 
             "movdqa xmm6, xmm5",
+            // TODO: use maxpd
             "andps xmm5, xmmword ptr [{[i32x4_max_unsigned]f}] # if max bounds exceeded, saturate",
             "pandn xmm6, xmm0 # keep lanes that did not exceed the maximum",
             "por xmm5, xmm6",
@@ -662,6 +665,48 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         convert.jmpToNextHandler(as);
         convert.end(as);
     }
+    // Based on the assembly generated for the scalar versions, which are based on the code
+    // generated for LLVM intrinsics:
+    // - https://llvm.org/docs/LangRef.html#llvm-fptosi-sat-intrinsic
+    // - https://llvm.org/docs/LangRef.html#llvm-fptoui-sat-intrinsic
+    {
+        var trunc_sat = as.defineOpcodeHandler(
+            .{ .fd = .@"i32x4.trunc_sat_f64x2_s_zero" },
+            .@"64",
+        );
+        as.write(
+            \\.section .rodata.cst16, "aM", @progbits, 16
+            \\.p2align 4, 0x00
+            \\
+        );
+
+        var min_bound = as.label(&.{"min_bound"});
+        min_bound.place(as);
+        as.writeInstrs(&@as([2][]const u8, @splat(".quad 0xC1E0" ++ "0000" ++ "0000" ++ "0000")));
+
+        var max_bound = as.label(&.{"max_bound"});
+        max_bound.place(as);
+        as.writeInstrs(&@as([2][]const u8, @splat(".quad 0x41DF" ++ "FFFF" ++ "FFC0" ++ "0000")));
+
+        as.write(".text\n");
+        as.printInstrs(&.{
+            "movapd xmm0, xmmword ptr [{[vsp]f} - 0x10] # f64x2 to convert",
+
+            "movapd xmm1, xmm0",
+            "cmpordpd xmm1, xmm1 # detect non-NaN values",
+            "andpd xmm0, xmm1 # lane set to zero if NaN",
+
+            "maxpd xmm0, xmmword ptr [{[min_bound]f}] # clamp to min bound",
+            "minpd xmm0, xmmword ptr [{[max_bound]f}] # clamp to max bound",
+
+            "cvttpd2dq xmm0, xmm0",
+
+            "movapd xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp, .min_bound = min_bound, .max_bound = max_bound });
+        trunc_sat.jmpToNextHandler(as);
+        trunc_sat.end(as);
+    }
+    // TODO: i32x4.trunc_sat_f64x2_u_zero
     {
         var demote = as.defineOpcodeHandler(.{ .fd = .@"f32x4.demote_f64x2_zero" }, .@"32");
         as.printInstrs(&.{
