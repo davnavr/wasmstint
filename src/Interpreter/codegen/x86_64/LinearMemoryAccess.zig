@@ -9,16 +9,17 @@ const LinearMemoryAccess = @This();
 pub fn start(
     as: *AsmWriter,
     /// Offset from value stack pointer to `i32` memory offset.
-    offset: enum { @"0x10", @"0x20" },
+    offset: u16,
     size: std.mem.Alignment,
 ) LinearMemoryAccess {
+    std.debug.assert(offset % 16 == 0);
     const oob = as.label(&.{"oob"});
     const align_skip = SkipUlebIdx.fastPath(as, .r13, "align");
     const offset_decode = DecodeUlebIdx.fastPath(as, .r13, .{ .r14, .r15 }, "offset");
     as.printInstrs(&.{
         "mov r14, qword ptr [{[mems]f}] # Pointer to MemInst",
         "mov r15, qword ptr [r14] # Base pointer",
-        "add r13d, dword ptr [{[vsp]f} - {[offset]t}] # offset",
+        "add r13d, dword ptr [{[vsp]f} - 0x{[offset]X}] # offset",
         "jc {[oob]f} # target address overflowed",
         "lea r11, [r13 + {[access_size]d}]",
         "cmp r11, qword ptr [r14 + {[size_field_off]d}]",

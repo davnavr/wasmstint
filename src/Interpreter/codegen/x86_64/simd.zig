@@ -41,7 +41,7 @@ fn defineCommonConstants(as: *AsmWriter) void {
 fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
     {
         var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load" }, .@"64");
-        var access = LinearMemoryAccess.start(as, .@"0x10", .@"16");
+        var access = LinearMemoryAccess.start(as, 0x10, .@"16");
         as.printInstrs(&.{
             "movups xmm0, xmmword ptr [r13 + r15] # load from memory",
             "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # write loaded value",
@@ -53,7 +53,7 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
 fn defineMemoryStoreOpcodes(as: *AsmWriter) void {
     {
         var load = as.defineOpcodeHandler(.{ .fd = .@"v128.store" }, .@"64");
-        var access = LinearMemoryAccess.start(as, .@"0x20", .@"16");
+        var access = LinearMemoryAccess.start(as, 0x20, .@"16");
         as.printInstrs(&.{
             "movaps xmm0, xmmword ptr [{[vsp]f} - 0x10] # get vector to store",
             "movups xmmword ptr [r13 + r15], xmm0 # write into linear memory",

@@ -879,7 +879,7 @@ fn defineMemoryLoadOpcodeHandlers(as: *AsmWriter) void {
     }) |info| {
         const opcode, const access_size, const instr, const addr_size = info;
         var load = as.defineOpcodeHandler(.{ .byte = opcode }, .@"64");
-        var access = LinearMemoryAccess.start(as, .@"0x10", access_size);
+        var access = LinearMemoryAccess.start(as, 0x10, access_size);
         as.printInstrs(&.{
             "{[instr]s} r13d, {[size]t} ptr [r13 + r15]",
             "mov dword ptr [{[vsp]f} - 16], r13d",
@@ -898,7 +898,7 @@ fn defineMemoryLoadOpcodeHandlers(as: *AsmWriter) void {
     }) |info| {
         const opcode, const access_size, const instr, const addr_size = info;
         var load = as.defineOpcodeHandler(.{ .byte = opcode }, .@"64");
-        var access = LinearMemoryAccess.start(as, .@"0x10", access_size);
+        var access = LinearMemoryAccess.start(as, 0x10, access_size);
         as.printInstrs(&.{
             "{[instr]s} r13, {[size]t} ptr [r13 + r15] # load from memory",
             "mov qword ptr [{[vsp]f} - 16], r13 # write loaded value",
@@ -908,7 +908,7 @@ fn defineMemoryLoadOpcodeHandlers(as: *AsmWriter) void {
 
     {
         var load = as.defineOpcodeHandler(.{ .byte = .@"i64.load32_u" }, .@"64");
-        var access = LinearMemoryAccess.start(as, .@"0x10", .@"4");
+        var access = LinearMemoryAccess.start(as, 0x10, .@"4");
         as.printInstrs(&.{
             "mov r13d, dword ptr [r13 + r15] # load from memory",
             "mov qword ptr [{[vsp]f} - 0x10], r13 # write loaded value",
@@ -931,7 +931,7 @@ fn defineMemoryStoreOpcodeHandlers(as: *AsmWriter) void {
     }) |info| {
         const opcode, const access_size, const load_size, const instr, const store_size = info;
         var store = as.defineOpcodeHandler(.{ .byte = opcode }, .@"64");
-        var access = LinearMemoryAccess.start(as, .@"0x20", access_size);
+        var access = LinearMemoryAccess.start(as, 0x20, access_size);
         as.printInstrs(&.{
             "mov {[load_reg]f}, {[load_size]t} ptr [{[vsp]f} - 0x10] # get value to store ",
             "{[instr]s} {[store_size]t} ptr [r13 + r15], {[store_reg]f}" ++
