@@ -192,6 +192,38 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
         }, .{ .vsp = Gpr.vsp });
         access.end(&load_splat, as);
     }
+    {
+        var load_splat = as.defineOpcodeHandler(.{ .fd = .@"v128.load16_splat" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x10, .@"2");
+        as.printInstrs(&.{
+            "movzx r14d, word ptr [r13 + r15] # load from memory",
+            "movd xmm0, r14d",
+            "pshuflw xmm0, xmm0, 0x00 # low 64-bits are byte pattern to replicate",
+            "pshufd xmm0, xmm0, 0x00 # set high 64-bits",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        access.end(&load_splat, as);
+    }
+    {
+        var load_splat = as.defineOpcodeHandler(.{ .fd = .@"v128.load32_splat" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x10, .@"4");
+        as.printInstrs(&.{
+            "movd xmm0, dword ptr [r13 + r15] # load from memory",
+            "pshufd xmm0, xmm0, 0x00 # set high 64-bits",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        access.end(&load_splat, as);
+    }
+    {
+        var load_splat = as.defineOpcodeHandler(.{ .fd = .@"v128.load64_splat" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x10, .@"8");
+        as.printInstrs(&.{
+            "movq xmm0, qword ptr [r13 + r15] # load from memory",
+            "pshufd xmm0, xmm0, 0x44 # set high 64-bits",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        access.end(&load_splat, as);
+    }
 }
 
 fn defineMemoryStoreOpcodes(as: *AsmWriter) void {
