@@ -256,6 +256,55 @@ fn defineMemoryStoreOpcodes(as: *AsmWriter) void {
         }, .{ .vsp = Gpr.vsp });
         access.end(&load, as);
     }
+
+    {
+        var store_lane = as.defineOpcodeHandler(.{ .fd = .@"v128.store8_lane" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x20, .@"16");
+        as.printInstrs(&.{
+            "movzx r14d, byte ptr [{[vip]f}] # lane index",
+            "movzx r14d, byte ptr [{[vsp]f} - 0x10 + r14] # get lane to store",
+            "mov byte ptr [r13 + r15], r14b # write into linear memory",
+            "inc {[vip]f}",
+            "lea {[vsp]f}, [{[vsp]f} - 0x20] # vsp",
+        }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
+        access.end(&store_lane, as);
+    }
+    {
+        var store_lane = as.defineOpcodeHandler(.{ .fd = .@"v128.store16_lane" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x20, .@"16");
+        as.printInstrs(&.{
+            "movzx r14d, byte ptr [{[vip]f}] # lane index",
+            "movzx r14d, word ptr [{[vsp]f} - 0x10 + 2*r14] # get lane to store",
+            "mov word ptr [r13 + r15], r14w # write into linear memory",
+            "inc {[vip]f}",
+            "lea {[vsp]f}, [{[vsp]f} - 0x20] # vsp",
+        }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
+        access.end(&store_lane, as);
+    }
+    {
+        var store_lane = as.defineOpcodeHandler(.{ .fd = .@"v128.store32_lane" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x20, .@"16");
+        as.printInstrs(&.{
+            "movzx r14d, byte ptr [{[vip]f}] # lane index",
+            "mov r14d, dword ptr [{[vsp]f} - 0x10 + 4*r14] # get lane to store",
+            "mov dword ptr [r13 + r15], r14d # write into linear memory",
+            "inc {[vip]f}",
+            "lea {[vsp]f}, [{[vsp]f} - 0x20] # vsp",
+        }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
+        access.end(&store_lane, as);
+    }
+    {
+        var store_lane = as.defineOpcodeHandler(.{ .fd = .@"v128.store64_lane" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x20, .@"16");
+        as.printInstrs(&.{
+            "movzx r14d, byte ptr [{[vip]f}] # lane index",
+            "mov r14, qword ptr [{[vsp]f} - 0x10 + 8*r14] # get lane to store",
+            "mov qword ptr [r13 + r15], r14 # write into linear memory",
+            "inc {[vip]f}",
+            "lea {[vsp]f}, [{[vsp]f} - 0x20] # vsp",
+        }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
+        access.end(&store_lane, as);
+    }
 }
 
 fn defineBitwiseOpcodes(as: *AsmWriter) void {
