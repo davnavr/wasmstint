@@ -882,6 +882,43 @@ fn defineLaneAccessOpcodes(as: *AsmWriter) void {
         replace_lane.jmpToNextHandler(as);
         replace_lane.end(as);
     }
+
+    {
+        // seems to follow pshufb semantics, but requires SSSE3
+        var swizzle = as.defineOpcodeHandler(.{ .fd = .@"i8x16.swizzle" }, .@"32");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # indices",
+            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20]",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm1 # prevent clobbering src bytes",
+            "xor r15d, r15d",
+            "movq r11, xmm0 # indices 0-7",
+        }, .{ .vsp = Gpr.vsp });
+
+        for (0..16) |index| {
+            as.printInstrs(&.{
+                "mov r13d, r11d # index {[index]d}",
+                "mov r14d, r11d",
+                "and r14d, 0xF # prevent accessing undefined memory if bounds check fails",
+                "movzx r14d, byte ptr [{[vsp]f} - 0x10 + r14] # read byte from source",
+                "cmp r13d, 16",
+                "cmovb r14d, r15d # store zero if index is out of bounds",
+                "mov byte ptr [{[vsp]f} - 0x20 + {[index]d}], r14b",
+            }, .{ .vsp = Gpr.vsp, .index = index });
+
+            if (index == 7) {
+                as.writeInstrs(&.{
+                    "pshufd xmm2, xmm0, 0x0E",
+                    "movq r11, xmm2 # indices 8-15",
+                });
+            } else if (index < 15) {
+                as.writeInstrs(&.{"shr r11, 8"});
+            }
+        }
+
+        as.printInstrs(&.{"lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP"}, .{ .vsp = Gpr.vsp });
+        swizzle.jmpToNextHandler(as);
+        swizzle.end(as);
+    }
 }
 
 fn defineFloatOpcodes(as: *AsmWriter) void {
