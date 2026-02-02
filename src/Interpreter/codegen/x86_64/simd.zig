@@ -50,7 +50,7 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
     }
     {
         var load_lane = as.defineOpcodeHandler(.{ .fd = .@"v128.load8_lane" }, .@"64");
-        var access = LinearMemoryAccess.start(as, 0x20, .@"16");
+        var access = LinearMemoryAccess.start(as, 0x20, .@"1");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # vector to replace a lane of",
             "movzx r14d, byte ptr [r13 + r15] # load from memory",
@@ -64,7 +64,7 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
     }
     {
         var load_lane = as.defineOpcodeHandler(.{ .fd = .@"v128.load16_lane" }, .@"64");
-        var access = LinearMemoryAccess.start(as, 0x20, .@"16");
+        var access = LinearMemoryAccess.start(as, 0x20, .@"2");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # vector to replace a lane of",
             "movzx r14d, word ptr [r13 + r15] # load from memory",
@@ -78,7 +78,7 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
     }
     {
         var load_lane = as.defineOpcodeHandler(.{ .fd = .@"v128.load32_lane" }, .@"64");
-        var access = LinearMemoryAccess.start(as, 0x20, .@"16");
+        var access = LinearMemoryAccess.start(as, 0x20, .@"4");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # vector to replace a lane of",
             "mov r14d, dword ptr [r13 + r15] # load from memory",
@@ -92,7 +92,7 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
     }
     {
         var load_lane = as.defineOpcodeHandler(.{ .fd = .@"v128.load64_lane" }, .@"64");
-        var access = LinearMemoryAccess.start(as, 0x20, .@"16");
+        var access = LinearMemoryAccess.start(as, 0x20, .@"8");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # vector to replace a lane of",
             "mov r14, qword ptr [r13 + r15] # load from memory",
