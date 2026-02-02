@@ -112,7 +112,7 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
         as.printInstrs(&.{
             "movq xmm0, qword ptr [r13 + r15] # load from memory",
             "punpcklbw xmm0, xmm0 # move original 8-bit lanes to high 8-bits of 16-bit lanes",
-            "psraw xmm0, 8 # sign-extend original 8-bit values",
+            "psraw xmm0, 8 # sign-extend original 8-bit values to 16-bits",
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp });
         access.end(&load, as);
@@ -124,7 +124,31 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
         as.printInstrs(&.{
             "movq xmm0, qword ptr [r13 + r15] # load from memory",
             "pxor xmm1, xmm1",
-            "punpcklbw xmm0, xmm1 # fill high 8-bit with zero",
+            "punpcklbw xmm0, xmm1 # fill high 8 bits with zero",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        access.end(&load, as);
+    }
+    {
+        // pmovsx requires SSE4_1
+        var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load16x4_s" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x10, .@"8");
+        as.printInstrs(&.{
+            "movq xmm0, qword ptr [r13 + r15] # load from memory",
+            "punpcklwd xmm0, xmm0 # move original 16-bit lanes to high 16-bits of 32-bit lanes",
+            "psrad xmm0, 16 # sign-extend original 16-bit values to 32-bits",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        access.end(&load, as);
+    }
+    {
+        // pmovzx requires SSE4_1
+        var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load16x4_u" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x10, .@"8");
+        as.printInstrs(&.{
+            "movq xmm0, qword ptr [r13 + r15] # load from memory",
+            "pxor xmm1, xmm1",
+            "punpcklwd xmm0, xmm1 # fill high 16 bits with zero",
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp });
         access.end(&load, as);
