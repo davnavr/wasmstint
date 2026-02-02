@@ -48,7 +48,20 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
         }, .{ .vsp = Gpr.vsp });
         access.end(&load, as);
     }
-    // TODO: load8
+    {
+        var load_lane = as.defineOpcodeHandler(.{ .fd = .@"v128.load8_lane" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x20, .@"16");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # vector to replace a lane of",
+            "movzx r14d, byte ptr [r13 + r15] # load from memory",
+            "movzx r11d, byte ptr [{[vip]f}] # lane index",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # write vector result",
+            "mov byte ptr [{[vsp]f} - 0x20 + r11], r14b # write loaded byte into selected lane",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+            "inc {[vip]f} # update VIP",
+        }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
+        access.end(&load_lane, as);
+    }
     {
         var load_lane = as.defineOpcodeHandler(.{ .fd = .@"v128.load16_lane" }, .@"64");
         var access = LinearMemoryAccess.start(as, 0x20, .@"16");
@@ -58,6 +71,34 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
             "movzx r11d, byte ptr [{[vip]f}] # lane index",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # write vector result",
             "mov word ptr [{[vsp]f} - 0x20 + 2*r11], r14w # write loaded value into selected lane",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+            "inc {[vip]f} # update VIP",
+        }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
+        access.end(&load_lane, as);
+    }
+    {
+        var load_lane = as.defineOpcodeHandler(.{ .fd = .@"v128.load32_lane" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x20, .@"16");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # vector to replace a lane of",
+            "mov r14d, dword ptr [r13 + r15] # load from memory",
+            "movzx r11d, byte ptr [{[vip]f}] # lane index",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # write vector result",
+            "mov dword ptr [{[vsp]f} - 0x20 + 4*r11], r14d # write loaded value into selected lane",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+            "inc {[vip]f} # update VIP",
+        }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
+        access.end(&load_lane, as);
+    }
+    {
+        var load_lane = as.defineOpcodeHandler(.{ .fd = .@"v128.load64_lane" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x20, .@"16");
+        as.printInstrs(&.{
+            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # vector to replace a lane of",
+            "mov r14, qword ptr [r13 + r15] # load from memory",
+            "movzx r11d, byte ptr [{[vip]f}] # lane index",
+            "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # write vector result",
+            "mov qword ptr [{[vsp]f} - 0x20 + 8*r11], r14 # write loaded value into selected lane",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
             "inc {[vip]f} # update VIP",
         }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
