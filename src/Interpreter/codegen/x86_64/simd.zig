@@ -178,6 +178,20 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
         }, .{ .vsp = Gpr.vsp });
         access.end(&load, as);
     }
+
+    {
+        var load_splat = as.defineOpcodeHandler(.{ .fd = .@"v128.load8_splat" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x10, .@"1");
+        as.printInstrs(&.{
+            "movzx r14d, byte ptr [r13 + r15] # load from memory",
+            "movd xmm0, r14d",
+            "punpcklbw xmm0, xmm0 # low 16-bits are byte pattern to replicate",
+            "pshuflw xmm0, xmm0, 0x00 # low 64-bits are byte pattern to replicate",
+            "pshufd xmm0, xmm0, 0x00 # set high 64-bits",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        access.end(&load_splat, as);
+    }
 }
 
 fn defineMemoryStoreOpcodes(as: *AsmWriter) void {
