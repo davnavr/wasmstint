@@ -898,6 +898,39 @@ fn defineLaneAccessOpcodes(as: *AsmWriter) void {
         as.write("\n.text\n");
     }
     {
+        // pshufb requires SSSE3
+        // - might require 2 pshufb for both inputs
+        var shuffle = as.defineOpcodeHandler(.{ .fd = .@"i8x16.shuffle" }, .fromByteUnits(128));
+        as.writeInstrs(&.{
+            "xor r11d, r11d # low 64-bits of result",
+            "xor r15d, r15d # high 64-bits of result",
+        });
+
+        for (0..16) |index| {
+            as.printInstrs(&.{
+                "movzx r13d, byte ptr [{[vip]f} + {[index]d}] # index {[index]d}",
+                "movzx r14d, byte ptr [{[vsp]f} - 0x20 + r13] # read byte from source",
+                "or {[dst]f}, r14",
+                "ror {[dst]f}, 8",
+            }, .{
+                .vip = Gpr.vip,
+                .vsp = Gpr.vsp,
+                .index = index,
+                .dst = if (index < 8) Gpr.r11 else Gpr.r15,
+            });
+        }
+
+        as.printInstrs(&.{
+            "mov qword ptr [{[vsp]f} - 0x20], r11 # store low 64-bits of result",
+            "mov qword ptr [{[vsp]f} - 0x20 + 8], r15 # store high 64-bits of result",
+            "lea {[vip]f}, [{[vip]f} + 0x10] # update VIP",
+            "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
+        }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
+
+        shuffle.jmpToNextHandler(as);
+        shuffle.end(as);
+    }
+    {
         // seems to follow pshufb semantics, but requires SSSE3
         var swizzle = as.defineOpcodeHandler(.{ .fd = .@"i8x16.swizzle" }, .fromByteUnits(128));
         as.printInstrs(&.{
