@@ -153,6 +153,31 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
         }, .{ .vsp = Gpr.vsp });
         access.end(&load, as);
     }
+    {
+        // pmovsx requires SSE4_1
+        var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load32x2_s" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x10, .@"8");
+        as.printInstrs(&.{
+            "# no psraq",
+            "movsxd r11, dword ptr [r13 + r15] # load low 32-bits from memory",
+            "movsxd r14, dword ptr [r13 + r15 + 4] # load high 32-bits from memory",
+            "mov qword ptr [{[vsp]f} - 0x10], r11 # store low 64-bit result",
+            "mov qword ptr [{[vsp]f} - 0x10 + 8], r14 # store high 64-bit result",
+        }, .{ .vsp = Gpr.vsp });
+        access.end(&load, as);
+    }
+    {
+        // pmovzx requires SSE4_1
+        var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load32x2_u" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x10, .@"8");
+        as.printInstrs(&.{
+            "movq xmm0, qword ptr [r13 + r15] # load from memory",
+            "pxor xmm1, xmm1",
+            "punpckldq xmm0, xmm1 # fill high 16 bits with zero",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        access.end(&load, as);
+    }
 }
 
 fn defineMemoryStoreOpcodes(as: *AsmWriter) void {
