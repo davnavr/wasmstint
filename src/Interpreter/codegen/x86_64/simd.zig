@@ -224,6 +224,25 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
         }, .{ .vsp = Gpr.vsp });
         access.end(&load_splat, as);
     }
+
+    {
+        var load_zero = as.defineOpcodeHandler(.{ .fd = .@"v128.load32_zero" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x10, .@"4");
+        as.printInstrs(&.{
+            "movd xmm0, dword ptr [r13 + r15] # load from memory",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        access.end(&load_zero, as);
+    }
+    {
+        var load_zero = as.defineOpcodeHandler(.{ .fd = .@"v128.load64_zero" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x10, .@"8");
+        as.printInstrs(&.{
+            "movq xmm0, qword ptr [r13 + r15] # load from memory",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        access.end(&load_zero, as);
+    }
 }
 
 fn defineMemoryStoreOpcodes(as: *AsmWriter) void {
