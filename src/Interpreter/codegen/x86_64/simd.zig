@@ -117,6 +117,18 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
         }, .{ .vsp = Gpr.vsp });
         access.end(&load, as);
     }
+    {
+        // pmovzx requires SSE4_1
+        var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load8x8_u" }, .@"64");
+        var access = LinearMemoryAccess.start(as, 0x10, .@"8");
+        as.printInstrs(&.{
+            "movq xmm0, qword ptr [r13 + r15] # load from memory",
+            "pxor xmm1, xmm1",
+            "punpcklbw xmm0, xmm1 # fill high 8-bit with zero",
+            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+        }, .{ .vsp = Gpr.vsp });
+        access.end(&load, as);
+    }
 }
 
 fn defineMemoryStoreOpcodes(as: *AsmWriter) void {
