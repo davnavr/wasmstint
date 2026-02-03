@@ -571,6 +571,49 @@ fn tailCallWithinWasm(
     );
 }
 
+fn tailCallWithinWasmIndirect(
+    call_ip: Ip, // rdi
+    /// Does not have the `i32` index popped.
+    sp: Sp, // rsi
+    callee: runtime.FuncRef, // rdx,
+    fuel: *Interpreter.Fuel, // rcx
+    expected_signature: *const Module.FuncType, // r8
+    interp: *Interpreter, // r9
+    ip: Ip, // `rbp + 16`
+    stp: Stp, // `rbp + 24`
+    eip: Eip, // `rbp + 32`
+    _: usize, // `rbp + 40`
+    _: usize, // `rbp + 48`
+) callconv(sysvcc) Transition {
+    const pop_count = 1 + expected_signature.param_count;
+    const saved_sp = Stack.Saved.pop(
+        Stack.Values.init(sp, &interp.stack, pop_count, pop_count),
+        pop_count,
+    );
+
+    const actual_signature = callee.signature();
+    if (!expected_signature.matches(actual_signature)) {
+        const info = Interpreter.Trap.init(
+            .indirect_call_signature_mismatch,
+            .{ .expected = expected_signature, .actual = actual_signature },
+        );
+
+        return Transition.trap(ip, .none, eip, sp, stp, interp, info);
+    }
+
+    return common.performTailCall(
+        Instr.init(ip, eip),
+        call_ip,
+        saved_sp,
+        1,
+        fuel,
+        stp,
+        interp,
+        callee.funcInst(),
+        resumeAfterInvokeWithinWasmIndirect,
+    );
+}
+
 const ConstructedFuncRef = extern struct {
     func: runtime.FuncRef.Nullable, // rax
     current_module: runtime.ModuleInst, // stays in rdx
@@ -971,6 +1014,7 @@ comptime {
         "invokeWithinWasm",
         "invokeWithinWasmIndirect",
         "tailCallWithinWasm",
+        "tailCallWithinWasmIndirect",
         "constructFuncRef",
         "memoryGrowReallocate",
         "tableGrowReallocate",

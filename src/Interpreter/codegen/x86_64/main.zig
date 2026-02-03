@@ -366,7 +366,7 @@ fn defineControlOpcodeHandlers(as: *AsmWriter) void {
 
 fn defineCallOpcodeHandlers(as: *AsmWriter) void {
     {
-        var call = as.defineOpcodeHandler(.{ .byte = .call }, .@"32");
+        var call = as.defineOpcodeHandler(.{ .byte = .call }, .@"64");
         as.printInstrs(&.{
             "lea r15, [{[vip]f} - 1] # save VIP to call byte",
             "# stack parameters",
@@ -395,8 +395,12 @@ fn defineCallOpcodeHandlers(as: *AsmWriter) void {
         idx_decode.writeSlowPath(as);
         call.end(as);
     }
-    {
-        var call_indirect = as.defineOpcodeHandler(.{ .byte = .call_indirect }, .@"32");
+    for (&[2]struct { opcodes.ByteOpcode, []const u8 }{
+        .{ .call_indirect, "invokeWithinWasmIndirect" },
+        .{ .return_call_indirect, "tailCallWithinWasmIndirect" },
+    }) |info| {
+        const opcode, const function_name = info;
+        var call_indirect = as.defineOpcodeHandler(.{ .byte = opcode }, .fromByteUnits(128));
         as.printInstrs(&.{
             "lea rdi, [{[vip]f} - 1] #0 save ip to call_indirect byte, clobbers locals",
             "# clobbers mems",
@@ -449,9 +453,9 @@ fn defineCallOpcodeHandlers(as: *AsmWriter) void {
             "# rsp already refers to saved rbp",
             "pop rbp",
             ".cfi_def_cfa rsp, 8",
-            "jmp {[prefix]s}invokeWithinWasmIndirect",
+            "jmp {[prefix]s}{[function_name]s}",
             "ud2",
-        }, .{ .prefix = as.symbol_prefix });
+        }, .{ .prefix = as.symbol_prefix, .function_name = function_name });
         type_idx_decode.writeSlowPath(as);
         table_idx_decode.writeSlowPath(as);
 
@@ -491,7 +495,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter) void {
         call_indirect.end(as);
     }
     {
-        var return_call = as.defineOpcodeHandler(.{ .byte = .return_call }, .@"32");
+        var return_call = as.defineOpcodeHandler(.{ .byte = .return_call }, .@"64");
         as.printInstrs(
             &.{"lea r8, [{[vip]f} - 1] #4 save VIP to call byte, clobbers mems"},
             .{ .vip = Gpr.vip },
