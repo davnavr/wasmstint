@@ -490,6 +490,40 @@ fn defineCallOpcodeHandlers(as: *AsmWriter) void {
         }, .{ .prefix = as.symbol_prefix });
         call_indirect.end(as);
     }
+    {
+        var return_call = as.defineOpcodeHandler(.{ .byte = .return_call }, .@"32");
+        as.printInstrs(
+            &.{"lea r8, [{[vip]f} - 1] #4 save VIP to call byte, clobbers mems"},
+            .{ .vip = Gpr.vip },
+        );
+        var idx_decode = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "func");
+        as.writeInstrs(&.{
+            "mov rdi, r11 #0 function index, clobbers locals",
+            "# stack parameters",
+        });
+        for (
+            Gpr.system_v_parameters.len..,
+            &[3]Gpr{ .vip, .stp, .eip },
+            &[3][]const u8{ "VIP", "STP", "EIP" },
+        ) |i, src, comment| {
+            as.printInstrs(&.{"mov {[dst]f}, {[src]f} #{[i]d} {[comment]s}"}, .{
+                .dst = SystemVParam{ .index = @intCast(i) },
+                .src = src,
+                .i = i,
+                .comment = comment,
+            });
+        }
+        as.popSystemVSavedRegisters();
+        as.printInstrs(&.{
+            "# rsp already refers to saved rbp",
+            "pop rbp",
+            ".cfi_def_cfa rsp, 8",
+            "jmp {[prefix]s}tailCallWithinWasm # call into Zig",
+            "ud2",
+        }, .{ .prefix = as.symbol_prefix });
+        idx_decode.writeSlowPath(as);
+        return_call.end(as);
+    }
 }
 
 fn writeSelectHandler(as: *AsmWriter) void {

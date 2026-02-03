@@ -499,6 +499,78 @@ fn invokeWithinWasmIndirect(
     );
 }
 
+inline fn resumeAfterTailCallWithinWasm(
+    old_instr: Instr,
+    sp: Sp,
+    fuel: *Interpreter.Fuel,
+    stp: Stp,
+    locals: common.Locals,
+    module: runtime.ModuleInst,
+    interp: *Interpreter,
+) Transition {
+    if (builtin.zig_backend == .stage2_x86_64) {
+        // trampoline continues execution
+        return Transition.interrupted(old_instr, sp, stp, interp, .out_of_fuel);
+    } else {
+        var instr = old_instr;
+        const handler = instr.readNextOpcodeHandler(fuel, locals, module, interp);
+        // TODO: inlineLlvmTailCallToHandler()
+        return @call(
+            .always_tail,
+            @as(@TypeOf(&tailCallWithinWasm), @ptrCast(opcodeHandlerTrampoline)),
+            .{
+                @intFromPtr(locals.ptr),
+                sp,
+                module,
+                fuel,
+                @as(Ip, @ptrCast(module.header().mems)),
+                interp,
+                instr.next,
+                stp,
+                instr.end,
+                @intFromPtr(handler),
+                undefined,
+            },
+        );
+    }
+}
+
+fn tailCallWithinWasm(
+    func_idx: usize, // rdi
+    sp: Sp, // rsi
+    module: runtime.ModuleInst, // rdx,
+    fuel: *Interpreter.Fuel, // rcx
+    call_ip: Ip, // r8
+    interp: *Interpreter, // r9
+    // These parameters are passed on the stack
+    ip: Ip, // `rbp + 16`
+    stp: Stp, // `rbp + 24`
+    eip: Eip, // `rbp + 32`
+    _: usize, // `rbp + 40`
+    _: usize, // `rbp + 48`
+) callconv(sysvcc) Transition {
+    std.debug.assert(@as(opcodes.ByteOpcode, @enumFromInt(call_ip[0])) == .return_call);
+
+    const callee = module.inner.funcInst(@enumFromInt(func_idx));
+    const arg_count = callee.signature().param_count;
+    const saved_sp = Stack.Saved.pop(
+        Stack.Values.init(sp, &interp.stack, arg_count, arg_count),
+        arg_count,
+    );
+
+    return common.performTailCall(
+        Instr.init(ip, eip),
+        call_ip,
+        saved_sp,
+        0,
+        fuel,
+        stp,
+        interp,
+        callee,
+        resumeAfterTailCallWithinWasm,
+    );
+}
+
 const ConstructedFuncRef = extern struct {
     func: runtime.FuncRef.Nullable, // rax
     current_module: runtime.ModuleInst, // stays in rdx
@@ -898,6 +970,7 @@ comptime {
         "returnFromWasm",
         "invokeWithinWasm",
         "invokeWithinWasmIndirect",
+        "tailCallWithinWasm",
         "constructFuncRef",
         "memoryGrowReallocate",
         "tableGrowReallocate",

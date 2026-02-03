@@ -303,91 +303,6 @@ fn returnFromWasm(
     );
 }
 
-/// Entrypoint for performing a tail call within a WebAssembly function.
-///
-/// Implements support for the [tail call proposal].
-///
-/// [tail call proposal]: https://github.com/WebAssembly/tail-call/
-inline fn performTailCall(
-    old_instr: Instr,
-    /// Pointer to the byte containing the `return_call` opcode.
-    call_ip: Ip,
-    /// Stores the stack before the `return_call` instruction was executed. Parameters to pass to the
-    /// `callee` begin at the bottom at index `0`.
-    ///
-    /// Restored if a `.call_stack_exhausted` interrupt occurred.
-    saved_sp: Stack.Saved,
-    pop: u1,
-    fuel: *Fuel,
-    old_stp: Stp,
-    interp: *Interpreter,
-    callee: runtime.FuncInst,
-) Transition {
-    var coz_begin = coz.begin("wasmstint.Interpreter.performTailCall");
-    defer coz_begin.end();
-
-    const signature = callee.signature();
-    if (builtin.mode == .Debug) {
-        std.debug.assert( // validation should prevent result mismatch
-            interp.stack.currentFrame().?.signature.result_count == signature.result_count,
-        );
-    }
-
-    const args_dst: [*]align(@sizeOf(Value)) const Value =
-        interp.stack.currentFrame().?.localValues(&interp.stack).ptr;
-
-    const new_frame = interp.stack.replaceFrameWithinCapacity(
-        Stack.Top{ .ptr = saved_sp.saved_top.ptr - pop },
-        callee,
-    ) catch |e| switch (e) {
-        error.OutOfMemory => {
-            // Not enough room for new stack frame
-            return Transition.callStackExhaustion(
-                call_ip,
-                old_instr.end,
-                saved_sp,
-                old_stp,
-                interp,
-                callee,
-            );
-        },
-        error.ValidationNeeded => @panic("TODO: awaiting_validation"),
-    };
-
-    const new_frame_locals: []align(@sizeOf(Value)) Value =
-        new_frame.frame.localValues(&interp.stack);
-
-    if (builtin.mode == .Debug) {
-        std.debug.assert(@intFromPtr(args_dst) == @intFromPtr(new_frame_locals.ptr));
-        std.debug.assert(signature.param_count <= new_frame_locals.len);
-    }
-
-    // Duplicate code from `invokeWithimWasm()`
-    switch (callee.expanded()) {
-        .wasm => |wasm| {
-            return dispatchNextOpcode(
-                Instr.init(new_frame.frame.wasm.ip, new_frame.frame.wasm.eip),
-                new_frame.top(),
-                fuel,
-                new_frame.frame.wasm.stp,
-                Locals{ .ptr = new_frame_locals.ptr },
-                wasm.module,
-                interp,
-            );
-        },
-        .host => |host| {
-            return Transition.awaitingHost(
-                new_frame.top(),
-                interp,
-                &host.signature,
-                .calling_host,
-                // Frame was replaced, so IP and STP don't need saving
-                .wrote_ip_and_stp_to_the_current_stack_frame,
-            );
-        },
-    }
-}
-
 pub const MemArg = struct {
     mem: *const runtime.MemInst,
     idx: Module.MemIdx,
@@ -1884,7 +1799,17 @@ const opcode_handlers = struct {
             arg_count,
         );
 
-        return performTailCall(instr, return_call_ip, saved_sp, 0, fuel, stp, interp, callee);
+        return common.performTailCall(
+            instr,
+            return_call_ip,
+            saved_sp,
+            0,
+            fuel,
+            stp,
+            interp,
+            callee,
+            dispatchNextOpcode,
+        );
     }
 
     pub fn return_call_indirect(
@@ -1945,7 +1870,7 @@ const opcode_handlers = struct {
             return Transition.trap(ip, .none, eip, sp, stp, interp, info);
         }
 
-        return performTailCall(
+        return common.performTailCall(
             instr,
             return_call_indirect_ip,
             saved_sp,
@@ -1954,6 +1879,7 @@ const opcode_handlers = struct {
             stp,
             interp,
             callee.funcInst(),
+            dispatchNextOpcode,
         );
     }
 
