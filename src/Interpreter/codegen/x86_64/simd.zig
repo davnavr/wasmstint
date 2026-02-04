@@ -713,13 +713,13 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "cmpordps xmm1, xmm1 # detect non-NaN values, set lane to all 1's if non-NaN",
             "andps xmm0, xmm1 # set lane to zero if NaN, preserve otherwise",
 
-            "movaps xmm2, xmmword ptr [{[max_i32s_f32x4]f}]",
+            "movaps xmm2, xmmword ptr [rip + {[max_i32s_f32x4]f}]",
             "cmpltps xmm2, xmm0 # check for values exceeding max bounds",
 
             "cvttps2dq xmm3, xmm0",
 
             "movdqa xmm4, xmm2",
-            "andps xmm2, xmmword ptr [{[i32x4_max_signed]f}] # if max bounds exceeded, saturate",
+            "andps xmm2, xmmword ptr [rip + {[i32x4_max_signed]f}] # if max bounds exceeded, saturate",
             "pandn xmm4, xmm3 # keep lanes that did not exceed the maximum",
             "por xmm2, xmm4",
 
@@ -751,7 +751,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         as.write(".text\n");
         as.printInstrs(&.{
             "movaps xmm0, xmmword ptr [{[vsp]f} - 0x10] # f32x4 to convert",
-            "movaps xmm5, xmmword ptr [{[max_u32s_f32x4]f}]",
+            "movaps xmm5, xmmword ptr [rip + {[max_u32s_f32x4]f}]",
             "cmpltps xmm5, xmm0 # check for values exceeding max bounds",
 
             "movaps xmm7, xmm0",
@@ -793,7 +793,8 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "pxor xmm0, xmm2",
 
             "movdqa xmm6, xmm5",
-            "andps xmm5, xmmword ptr [{[i32x4_max_unsigned]f}] # if max bounds exceeded, saturate",
+            "andps xmm5, xmmword ptr [rip + {[i32x4_max_unsigned]f}]" ++
+                " # if max bounds exceeded, saturate",
             "pandn xmm6, xmm0 # keep lanes that did not exceed the maximum",
             "por xmm5, xmm6",
 
@@ -842,12 +843,12 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         as.write(".text\n");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
-            "movdqa xmm1, xmmword ptr [{[const_0]f}]",
+            "movdqa xmm1, xmmword ptr [rip + {[const_0]f}]",
             "pand xmm1, xmm0 # get low 16-bits of operand",
-            "por xmm1, xmmword ptr [{[const_1]f}]",
+            "por xmm1, xmmword ptr [rip + {[const_1]f}]",
             "psrld xmm0, 16 # shift away low 16-bits of operand",
-            "por xmm0, xmmword ptr [{[const_2]f}]",
-            "subps xmm0, xmmword ptr [{[const_3]f}]",
+            "por xmm0, xmmword ptr [rip + {[const_2]f}]",
+            "subps xmm0, xmmword ptr [rip + {[const_3]f}]",
             "addps xmm0, xmm1",
             "movaps xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{
@@ -887,7 +888,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "movapd xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
             "xorpd xmm1, xmm1",
             "unpcklps xmm0, xmm1",
-            "movapd xmm1, xmmword ptr [{[const_0]f}]",
+            "movapd xmm1, xmmword ptr [rip + {[const_0]f}]",
             "orpd xmm0, xmm1",
             "subpd xmm0, xmm1",
             "movapd xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
@@ -926,8 +927,8 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             "cmpordpd xmm1, xmm1 # detect non-NaN values",
             "andpd xmm0, xmm1 # lane set to zero if NaN",
 
-            "maxpd xmm0, xmmword ptr [{[min_bound]f}] # clamp to min bound",
-            "minpd xmm0, xmmword ptr [{[max_bound]f}] # clamp to max bound",
+            "maxpd xmm0, xmmword ptr [rip + {[min_bound]f}] # clamp to min bound",
+            "minpd xmm0, xmmword ptr [rip + {[max_bound]f}] # clamp to max bound",
 
             "cvttpd2dq xmm0, xmm0",
 
@@ -961,7 +962,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
 
             "xorpd xmm2, xmm2",
             "maxpd xmm0, xmm2 # clamp negative values to zero",
-            "minpd xmm0, xmmword ptr [{[max_bound]f}] # clamp to max bound",
+            "minpd xmm0, xmmword ptr [rip + {[max_bound]f}] # clamp to max bound",
 
             "pshufd xmm3, xmm0, 0x0E # move high f64 to low lane",
 
@@ -1191,7 +1192,7 @@ fn defineLaneAccessOpcodes(as: *AsmWriter) void {
         var swizzle = as.defineOpcodeHandler(.{ .fd = .@"i8x16.swizzle" }, .fromByteUnits(128));
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # indices",
-            "pminub xmm0, xmmword ptr [.L{[symbol_prefix]s}i8x16_lane_index_bounds]",
+            "pminub xmm0, xmmword ptr [rip + .L{[symbol_prefix]s}i8x16_lane_index_bounds]",
             "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20]",
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm1 # prevent clobbering src bytes",
             "mov byte ptr [{[vsp]f}], 0x00 # src byte used when index is out of bound",
@@ -1358,7 +1359,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
             "minp{[suffix]c} xmm3, xmm0",
             "orp{[suffix]c} xmm2, xmm3 # handles non-NaN case correctly",
 
-            "movap{[suffix]c} xmm3, .L{[symbol_prefix]s}{[interp]t}_canonical_nan_mask" ++
+            "movap{[suffix]c} xmm3, [rip + .L{[symbol_prefix]s}{[interp]t}_canonical_nan_mask]" ++
                 " # canonical NaN mask",
 
             "cmpordp{[suffix]c} xmm4, xmm1 # all 1's if NaN was NOT present",
@@ -1366,7 +1367,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
             "orp{[suffix]c} xmm3, xmm4",
             "andp{[suffix]c} xmm2, xmm3 # If NaN, mask away non-canonical NaN bits",
 
-            "movap{[suffix]c} xmm3, .L{[symbol_prefix]s}{[interp]t}_canonical_nan_bit" ++
+            "movap{[suffix]c} xmm3, [rip + .L{[symbol_prefix]s}{[interp]t}_canonical_nan_bit]" ++
                 " # canonical NaN bit",
             "andnp{[suffix]c} xmm4, xmm3 # canonical NaN bit if NaN is present",
             "# If NaNs are present, set the canonical NaN bit",
@@ -1399,7 +1400,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
             "orp{[suffix]c} xmm2, xmm3" ++
                 " # almost handles non-NaN case correctly, sign may be wrong",
 
-            "movap{[suffix]c} xmm3, xmmword ptr [.L{[symbol_prefix]s}{[int_interp]t}_sign_bits]" ++
+            "movap{[suffix]c} xmm3, [rip + .L{[symbol_prefix]s}{[int_interp]t}_sign_bits]" ++
                 " # sign bit",
             "movap{[suffix]c} xmm5, xmm3",
             "andnp{[suffix]c} xmm3, xmm2 # remove sign bit",
@@ -1409,7 +1410,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
             "andp{[suffix]c} xmm4, xmm5 # final sign",
             "orp{[suffix]c} xmm3, xmm4 # apply correct sign bit",
 
-            "movap{[suffix]c} xmm2, .L{[symbol_prefix]s}{[interp]t}_canonical_nan_mask" ++
+            "movap{[suffix]c} xmm2, [rip + .L{[symbol_prefix]s}{[interp]t}_canonical_nan_mask]" ++
                 " # canonical NaN mask",
 
             "movap{[suffix]c} xmm4, xmm0",
@@ -1418,7 +1419,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
             "orp{[suffix]c} xmm2, xmm4",
             "andp{[suffix]c} xmm3, xmm2 # If NaN, mask away non-canonical NaN bits",
 
-            "movap{[suffix]c} xmm2, .L{[symbol_prefix]s}{[interp]t}_canonical_nan_bit" ++
+            "movap{[suffix]c} xmm2, [rip + .L{[symbol_prefix]s}{[interp]t}_canonical_nan_bit]" ++
                 " # canonical NaN bit",
             "andnp{[suffix]c} xmm4, xmm2 # canonical NaN bit if NaN is present",
             "# If NaNs are present, set the canonical NaN bit",
@@ -1488,7 +1489,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
         var abs = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         const interp = FloatInterp.fromOpcodeName(opcode);
         as.printInstrs(&.{
-            "movap{[suffix]c} xmm0, xmmword ptr [.L{[symbol_prefix]s}{[int_interp]t}_sign_bits]",
+            "movap{[suffix]c} xmm0, xmmword ptr [rip + .L{[symbol_prefix]s}{[int_interp]t}_sign_bits]",
             "andnp{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
             "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{
@@ -1517,7 +1518,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
         const interp = FloatInterp.fromOpcodeName(opcode);
         as.printInstrs(&.{
             "movap{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10]",
-            "xorp{[suffix]c} xmm0, xmmword ptr [.L{[symbol_prefix]s}{[int_interp]t}_sign_bits]" ++
+            "xorp{[suffix]c} xmm0, xmmword ptr [rip + .L{[symbol_prefix]s}{[int_interp]t}_sign_bits]" ++
                 " # toggle sign bit",
             "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{
@@ -1628,7 +1629,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         var lt_u = as.defineOpcodeHandler(.{ .fd = .@"i16x8.lt_u" }, .@"64");
         as.printInstrs(&.{
             "# Taken from LLVM output for Zig < operator",
-            "movdqa xmm0, xmmword ptr [.L{[symbol_prefix]s}i16x8_sign_bits]",
+            "movdqa xmm0, xmmword ptr [rip + .L{[symbol_prefix]s}i16x8_sign_bits]",
             "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
             "pxor xmm1, xmm0",
             "pxor xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
@@ -1643,7 +1644,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         var lt_u = as.defineOpcodeHandler(.{ .fd = .@"i32x4.lt_u" }, .@"32");
         as.printInstrs(&.{
             "# Taken from LLVM output for Zig < operator",
-            "movdqa xmm0, xmmword ptr [.L{[symbol_prefix]s}i32x4_sign_bits]",
+            "movdqa xmm0, xmmword ptr [rip + .L{[symbol_prefix]s}i32x4_sign_bits]",
             "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
             "pxor xmm1, xmm0",
             "pxor xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
@@ -1702,7 +1703,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         var le_u = as.defineOpcodeHandler(.{ .fd = .@"i32x4.le_u" }, .@"32");
         as.printInstrs(&.{
             "# Taken from LLVM output for Zig <= operator",
-            "movdqa xmm1, xmmword ptr [.L{[symbol_prefix]s}i32x4_sign_bits]",
+            "movdqa xmm1, xmmword ptr [rip + .L{[symbol_prefix]s}i32x4_sign_bits]",
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
             "pxor xmm0, xmm1",
             "pxor xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
@@ -1749,7 +1750,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         var gt_u = as.defineOpcodeHandler(.{ .fd = .@"i16x8.gt_u" }, .@"32");
         as.printInstrs(&.{
             "# Taken from LLVM output for Zig > operator",
-            "movdqa xmm0, xmmword ptr [.L{[symbol_prefix]s}i16x8_sign_bits]",
+            "movdqa xmm0, xmmword ptr [rip + .L{[symbol_prefix]s}i16x8_sign_bits]",
             "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
             "pxor xmm1, xmm0",
             "pxor xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 1",
@@ -1764,7 +1765,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         var gt_u = as.defineOpcodeHandler(.{ .fd = .@"i32x4.gt_u" }, .@"32");
         as.printInstrs(&.{
             "# Taken from LLVM output for Zig > operator",
-            "movdqa xmm0, xmmword ptr [.L{[symbol_prefix]s}i32x4_sign_bits]",
+            "movdqa xmm0, xmmword ptr [rip + .L{[symbol_prefix]s}i32x4_sign_bits]",
             "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
             "pxor xmm1, xmm0",
             "pxor xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 1",
@@ -1824,7 +1825,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         var ge_u = as.defineOpcodeHandler(.{ .fd = .@"i32x4.ge_u" }, .@"32");
         as.printInstrs(&.{
             "# Taken from LLVM output for Zig >= operator",
-            "movdqa xmm1, xmmword ptr [.L{[symbol_prefix]s}i32x4_sign_bits]",
+            "movdqa xmm1, xmmword ptr [rip + .L{[symbol_prefix]s}i32x4_sign_bits]",
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
             "pxor xmm0, xmm1 # toggle sign bits",
             "pxor xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1, sign bits toggled",
@@ -1921,27 +1922,31 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             .@"i8x16.shl" => as.printInstrs(&.{
                 "psllw xmm0, xmm1 # shift values in even lanes",
                 "movdqa xmm2, xmm0",
-                "pand xmm2, xmmword ptr [.L{[symbol_prefix]s}i8x16_even_lanes] # result even lanes",
-                "movdqa xmm3, xmmword ptr [.L{[symbol_prefix]s}i8x16_odd_lanes]",
-                "psllw xmm3, xmm1 # mask for odd lanes", // vpsllw xmm1, xmmword ptr [i8x16_odd_lanes], xmm2
+                "pand xmm2, xmmword ptr [rip + .L{[symbol_prefix]s}i8x16_even_lanes]" ++
+                    " # result even lanes",
+                "movdqa xmm3, xmmword ptr [rip + .L{[symbol_prefix]s}i8x16_odd_lanes]",
+                "psllw xmm3, xmm1 # mask for odd lanes", // vpsllw xmm1, xmmword ptr [rip + i8x16_odd_lanes], xmm2
                 "pand xmm0, xmm3 # result odd lanes",
                 "por xmm0, xmm2",
             }, .{ .symbol_prefix = symbol_prefix }),
             .@"i8x16.shr_s" => as.printInstrs(&.{
                 "movdqa xmm2, xmm0",
                 "psraw xmm0, xmm1 # shift values in odd lanes",
-                "pand xmm0, xmmword ptr [.L{[symbol_prefix]s}i8x16_odd_lanes] # result odd lanes",
+                "pand xmm0, xmmword ptr [rip + .L{[symbol_prefix]s}i8x16_odd_lanes]" ++
+                    " # result odd lanes",
                 "psllw xmm2, 8 # move even lanes into odd lanes (low 8-bits to high 8-bits)",
                 "psraw xmm2, xmm1 # shift values in even lanes",
                 "psrlw xmm2, 8 # move even lanes back to their final position",
-                "pand xmm2, xmmword ptr [.L{[symbol_prefix]s}i8x16_even_lanes] # result even lanes",
+                "pand xmm2, xmmword ptr [rip + .L{[symbol_prefix]s}i8x16_even_lanes]" ++
+                    " # result even lanes",
                 "por xmm0, xmm2",
             }, .{ .symbol_prefix = symbol_prefix }),
             .@"i8x16.shr_u" => as.printInstrs(&.{
                 "psrlw xmm0, xmm1 # shift values in odd lanes",
                 "movdqa xmm2, xmm0",
-                "pand xmm2, xmmword ptr [.L{[symbol_prefix]s}i8x16_odd_lanes] # result odd lanes",
-                "movdqa xmm3, xmmword ptr [.L{[symbol_prefix]s}i8x16_even_lanes]",
+                "pand xmm2, xmmword ptr [rip + .L{[symbol_prefix]s}i8x16_odd_lanes]" ++
+                    " # result odd lanes",
+                "movdqa xmm3, xmmword ptr [rip + .L{[symbol_prefix]s}i8x16_even_lanes]",
                 "psrlw xmm3, xmm1 # mask for even lanes",
                 "pand xmm0, xmm3 # result even lanes",
                 "por xmm0, xmm2",
@@ -1958,7 +1963,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             .@"i64x2.shl" => as.writeInstrs(&.{"psllq xmm0, xmm1"}),
             // .@"i64x2.shr_s" => as.writeInstrs(&.{"vpsraq xmm0, xmm1"}), // AVX512F?
             .@"i64x2.shr_s" => as.printInstrs(&.{
-                "movdqa xmm2, xmmword ptr [.L{[symbol_prefix]s}i64x2_sign_bits]",
+                "movdqa xmm2, xmmword ptr [rip + .L{[symbol_prefix]s}i64x2_sign_bits]",
                 "movdqa xmm3, xmm2",
                 "pand xmm2, xmm0 # sign bits",
                 "psrlq xmm0, xmm1 # logical shift",
@@ -2199,7 +2204,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             "# Taken from what LLVM emits for Zig's @min builtin",
             "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
             "movdqa xmm2, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
-            "movdqa xmm0, xmmword ptr [.L{[symbol_prefix]s}i32x4_sign_bits]",
+            "movdqa xmm0, xmmword ptr [rip + .L{[symbol_prefix]s}i32x4_sign_bits]",
             "movdqa xmm3, xmm1",
             "pxor xmm3, xmm0 # toggles sign bit in operand 0",
             "pxor xmm0, xmm2 # toggles sign bit in operand 1",
@@ -2221,7 +2226,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             "# Taken from what LLVM emits for Zig's @max builtin",
             "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
             "movdqa xmm2, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
-            "movdqa xmm0, xmmword ptr [.L{[symbol_prefix]s}i32x4_sign_bits]",
+            "movdqa xmm0, xmmword ptr [rip + .L{[symbol_prefix]s}i32x4_sign_bits]",
             "movdqa xmm3, xmm2",
             "pxor xmm3, xmm0 # toggle sign bits in operand 1",
             "pxor xmm0, xmm1 # toggle sign bits in operand 0",
@@ -2328,9 +2333,9 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand",
             "movdqa xmm0, xmm1",
             "psrlw xmm0, 1",
-            "pand xmm0, xmmword ptr [{[const_0]f}]",
+            "pand xmm0, xmmword ptr [rip + {[const_0]f}]",
             "psubb xmm1, xmm0",
-            "movdqa xmm0, xmmword ptr [{[const_1]f}]",
+            "movdqa xmm0, xmmword ptr [rip + {[const_1]f}]",
             "movdqa xmm2, xmm1",
             "pand xmm2, xmm0",
             "psrlw xmm1, 2",
@@ -2339,7 +2344,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             "movdqa xmm0, xmm1",
             "psrlw xmm0, 4",
             "paddb xmm0, xmm1",
-            "pand xmm0, xmmword ptr [{[const_2]f}]",
+            "pand xmm0, xmmword ptr [rip + {[const_2]f}]",
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{
             .vsp = Gpr.vsp,
@@ -2371,7 +2376,8 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
             "movdqa xmm1, xmm0",
-            "pand xmm0, xmmword ptr [.L{[symbol_prefix]s}i8x16_even_lanes] # low 8-bits of pair",
+            "pand xmm0, xmmword ptr [rip + .L{[symbol_prefix]s}i8x16_even_lanes]" ++
+                " # low 8-bits of pair",
             "psrlw xmm1, 8 # high 8-bits of pair",
             "paddw xmm0, xmm1",
 
@@ -2587,7 +2593,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
             "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
-            "movdqa xmm4, xmmword ptr [{[const_0]f}]",
+            "movdqa xmm4, xmmword ptr [rip + {[const_0]f}]",
             "movdqa xmm2, xmm0",
             "pmullw xmm0, xmm1 # product, low bits",
             "pmulhw xmm2, xmm1 # product, high bits",
@@ -2640,7 +2646,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
             "movdqa xmm1, xmm0",
-            "pand xmm0, xmmword ptr [{[low_16_bits]f}] # low 16-bits of pair",
+            "pand xmm0, xmmword ptr [rip + {[low_16_bits]f}] # low 16-bits of pair",
             "psrld xmm1, 16 # high 16-bits of pair",
             "paddd xmm0, xmm1",
 

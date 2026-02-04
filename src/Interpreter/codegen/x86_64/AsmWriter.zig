@@ -1,7 +1,7 @@
 pub const Options = struct {
     optimize: std.builtin.OptimizeMode,
     symbol_prefix: []const u8,
-    pic: bool,
+    // pic: bool,
 };
 
 out: std.fs.File.Writer,
@@ -297,19 +297,6 @@ pub const Gpr = packed struct(u6) {
     pub fn format(reg: Gpr, writer: *Writer) Writer.Error!void {
         try writer.writeAll(reg.name());
     }
-};
-
-/// All 15 are System V scratch registers.
-const Xmm = enum(u3) {
-    xmm0,
-    xmm1,
-    xmm2,
-    xmm3,
-    xmm4,
-    xmm5,
-    xmm6,
-    xmm7,
-    // can add 7 more if needed
 };
 
 fn nextNumberedLabel(as: *AsmWriter) u16 {

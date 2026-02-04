@@ -15,6 +15,7 @@ const ProjectOptions = struct {
     link_libc: ?bool,
     /// Implies `link_libc`.
     enable_coz: bool,
+    pic: ?bool,
 
     fn init(b: *Build) ProjectOptions {
         const optimize = b.standardOptimizeOption(.{});
@@ -53,6 +54,11 @@ const ProjectOptions = struct {
                 .other = llvm == .always,
             },
             .enable_coz = enable_coz,
+            .pic = b.option(
+                bool,
+                "pic",
+                "Require generating Position Independent Code",
+            ),
         };
     }
 };
@@ -348,11 +354,12 @@ const Modules = struct {
                     .pic = false,
                     // .code_model = .small, // Forces usage of LLVM backend
                 }),
-                .max_rss = ByteSize.mib(158).bytes,
+                .max_rss = ByteSize.mib(159).bytes,
             });
             codegen_x64_sysv_exe.root_module.addImport("opcodes", opcodes_module);
 
             const x64_asm_interp_symbol_prefix = "wasmstint.x86_64_sysv.";
+            // const err_no_pic_flag = "pass -Dpic or -Dpic=false to use ASM backend";
 
             if (use_assembly_interpreter == .assembly and
                 options.target.result.cpu.arch == .x86_64)
@@ -360,6 +367,7 @@ const Modules = struct {
                 const Options = struct {
                     optimize: std.builtin.OptimizeMode,
                     symbol_prefix: []const u8,
+                    // pic: bool,
                 };
 
                 var options_writer = std.Io.Writer.Allocating.init(b.allocator);
@@ -370,6 +378,7 @@ const Modules = struct {
                         //options.target.query.serializeCpuAlloc(b.allocator) catch @panic("oom")
                         .optimize = options.optimize_interpreter,
                         .symbol_prefix = x64_asm_interp_symbol_prefix,
+                        // .pic = options.pic orelse true,
                     },
                     .{},
                     &options_writer.writer,
@@ -385,6 +394,10 @@ const Modules = struct {
                 //     .optimize = options.optimize_interpreter,
                 // });
                 wasmstint_options.addOption([]const u8, "symbol_prefix", x64_asm_interp_symbol_prefix);
+
+                // if (options.pic == null) {
+                //     run_codegen.step.dependOn(&b.addFail(err_no_pic_flag).step);
+                // }
             }
 
             const tests = b.addTest(.{
@@ -539,6 +552,7 @@ const SpectestInterp = struct {
             .root_source_file = b.path("src/spectest/main.zig"),
             .target = proj_opts.target,
             .optimize = proj_opts.optimize,
+            .pic = proj_opts.pic,
         });
         Modules.addAsImportTo(Modules.FileContent, imports.file_content, module);
         Modules.addAsImportTo(Modules.Wasmstint, imports.wasmstint, module);
@@ -769,6 +783,7 @@ const Wasip1Interp = struct {
             .root_source_file = b.path("src/WasiPreview1/main.zig"),
             .target = proj_opts.target,
             .optimize = proj_opts.optimize,
+            .pic = proj_opts.pic,
         });
         Modules.addAsImportTo(Modules.FileContent, imports.file_content, module);
         Modules.addAsImportTo(Modules.Wasmstint, imports.wasmstint, module);
@@ -918,6 +933,7 @@ fn buildFuzzers(
                 .root_source_file = b.path("fuzz/harness/libfuzzer.zig"),
                 .target = options.project.target,
                 .optimize = options.project.optimize,
+                .pic = true, // afl-clang-lto seems to require PIC
             }),
             .max_rss = ByteSize.mib(319).bytes,
             .use_llvm = true,
@@ -934,9 +950,15 @@ fn buildFuzzers(
             &.{ "afl-clang-lto", "-g", "-Wall", "-fsanitize=fuzzer", "-lwasmstint_fuzz_ffi", "-v" },
         );
         afl_clang_lto.disable_zig_progress = true;
+
         if (fail_no_rust_include) |fail| {
             afl_clang_lto.step.dependOn(fail);
         }
+
+        // if (options.project.pic != true) {
+        //     afl_clang_lto.step.dependOn(&b.addFail("AFL fuzz harness requires -Dpic=true").step);
+        // }
+
         { // Unfortunately, filtering by file seems to be broken
             afl_clang_lto.addFileInput(b.path("fuzz/denylist.txt"));
             afl_clang_lto.setEnvironmentVariable(
@@ -966,6 +988,7 @@ fn buildFuzzers(
                 .root_source_file = b.path("fuzz/harness/main.zig"),
                 .target = options.project.target,
                 .optimize = options.project.optimize,
+                .pic = options.project.pic,
             }),
             .max_rss = ByteSize.mib(373).bytes,
             .use_llvm = options.project.use_llvm.interpreter,

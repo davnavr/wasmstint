@@ -107,7 +107,7 @@ fn defineSupportRoutines(as: *AsmWriter) void {
             "mov r15, {[stack_3]f} #9 opcode handler",
 
             "# jump to next handler",
-            "lea {[dispatch]f}, {[symbol_prefix]s}byte_dispatch_table",
+            "lea {[dispatch]f}, [rip + {[symbol_prefix]s}byte_dispatch_table]",
             "jmp r15",
             "ud2",
         }, .{
@@ -652,7 +652,8 @@ fn defineGlobalOpcodeHandlers(as: *AsmWriter) void {
             "sub r14b, 0x6F # index into jump table",
             "mov r15, qword ptr [{[module]f} + {[module_globals_off]d}] # ptr to globals",
             "mov r15, qword ptr [r15 + r11*8] # ptr to value",
-            "jmp qword ptr [{[jump_table]f} + r14*8]",
+            "lea r13, [rip + {[jump_table]f}] # clobbers ptr to global types",
+            "jmp qword ptr [r13 + r14*8]",
             "ud2",
         }, .{
             .module = Gpr.module,
@@ -734,7 +735,8 @@ fn defineGlobalOpcodeHandlers(as: *AsmWriter) void {
             "sub r14b, 0x6F # index into jump table",
             "mov r15, qword ptr [{[module]f} + {[module_globals_off]d}] # ptr to globals",
             "mov r15, qword ptr [r15 + r11*8] # ptr to value",
-            "jmp qword ptr [{[jump_table]f} + r14*8]",
+            "lea r13, [rip + {[jump_table]f}] # clobbers ptr to global types",
+            "jmp qword ptr [r13 + r14*8]",
             "ud2",
         }, .{
             .module = Gpr.module,
@@ -1478,7 +1480,7 @@ fn defineIntegerOpcodeHandlers(as: *AsmWriter, int_type: IntType) void {
         });
         if (kind == .rem and signedness == .signed) {
             as.printInstrs(
-                &.{"lea {[dispatch]f}, {[prefix]s}byte_dispatch_table # restore dispatch table"},
+                &.{"lea {[dispatch]f}, [rip + {[prefix]s}byte_dispatch_table] # restore dispatch table"},
                 .{ .prefix = as.options.symbol_prefix, .dispatch = Gpr.disp },
             );
         }
@@ -2158,8 +2160,8 @@ fn defineNumericConversionOpcodeHandlers(as: *AsmWriter) void {
         as.printInstrs(&.{
             "# Based on what LLVM compilers for Zig's @floatFromInt",
             "movsd xmm0, qword ptr [{[vsp]f} - 0x10] # load integer to convert",
-            "unpcklps xmm0, xmmword ptr [{[const_dwords]f}]",
-            "subpd xmm0, xmmword ptr [{[const_qwords]f}]",
+            "unpcklps xmm0, xmmword ptr [rip + {[const_dwords]f}]",
+            "subpd xmm0, xmmword ptr [rip + {[const_qwords]f}]",
             "movapd xmm1, xmm0",
             "unpckhpd xmm1, xmm0",
             "addsd xmm1, xmm0",
@@ -2470,7 +2472,8 @@ fn definePrefixOpcodeHandlers(as: *AsmWriter) void {
         var decode_opcode = DecodeUlebIdx.fastPath(as, .r13, .{ .r14, .r15 }, "opcode");
         as.printInstrs(
             &.{
-                "jmp [{[symbol_prefix]s}{[table]t} + r13*8]",
+                "lea r15, [rip + {[symbol_prefix]s}{[table]t}]",
+                "jmp [r15 + r13*8]",
                 "ud2",
             },
             .{ .symbol_prefix = as.options.symbol_prefix, .table = table },
