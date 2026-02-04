@@ -12,8 +12,21 @@ pub fn main() noreturn {
         @panic("oom");
     _ = cli_args.next().?;
 
-    const symbol_prefix = arena.allocator().dupe(u8, cli_args.next().?) catch @panic("oom");
-    const optimize = std.meta.stringToEnum(std.builtin.OptimizeMode, cli_args.next().?).?;
+    const Options = struct {
+        optimize: std.builtin.OptimizeMode,
+        symbol_prefix: []const u8,
+    };
+
+    const options = std.zon.parse.fromSliceAlloc(
+        Options,
+        arena.allocator(),
+        cli_args.next().?,
+        null,
+        .{ .free_on_error = false },
+    ) catch |e| switch (e) {
+        error.OutOfMemory => @panic("oom"),
+        error.ParseZon => @panic("malformed options"),
+    };
 
     const cwd = std.Io.Dir.cwd();
     const file_flags = std.Io.File.CreateFlags{ .exclusive = true };
@@ -35,7 +48,7 @@ pub fn main() noreturn {
         std.fs.File.adaptFromNewApi(asm_file).writerStreaming(
             std.heap.page_allocator.alloc(u8, writer_buf_size) catch @panic("oom"),
         ),
-        symbol_prefix,
+        options.symbol_prefix,
         &scratch,
     );
     // var zig_writer = std.fs.File.adaptFromNewApi(zig_file).writerStreaming(
@@ -49,6 +62,7 @@ pub fn main() noreturn {
     //     \\
     // ) catch std.debug.panic("{t}", .{zig_writer.err.?});
 
+    const optimize = options.optimize;
     defineSupportRoutines(&asm_writer, optimize);
     defineControlOpcodeHandlers(&asm_writer);
     defineCallOpcodeHandlers(&asm_writer);

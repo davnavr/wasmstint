@@ -348,7 +348,7 @@ const Modules = struct {
                     .pic = false,
                     // .code_model = .small, // Forces usage of LLVM backend
                 }),
-                .max_rss = ByteSize.mib(149).bytes,
+                .max_rss = ByteSize.mib(150).bytes,
             });
             codegen_x64_sysv_exe.root_module.addImport("opcodes", opcodes_module);
 
@@ -357,16 +357,27 @@ const Modules = struct {
             if (use_assembly_interpreter == .assembly and
                 options.target.result.cpu.arch == .x86_64)
             {
-                // TODO: Provide `opcodes` module as import to codegen, so only dispatch table needs
-                // to be exposed, and opcode handlers can be marked as local symbols
-                // ^ use .local instead of .globl
+                const Options = struct {
+                    optimize: std.builtin.OptimizeMode,
+                    symbol_prefix: []const u8,
+                };
+
+                var options_writer = std.Io.Writer.Allocating.init(b.allocator);
+                std.zon.stringify.serialize(
+                    Options{
+                        // TODO: cpu and flags info
+                        //options.target.query.zigTriple(b.allocator) catch @panic("oom")
+                        //options.target.query.serializeCpuAlloc(b.allocator) catch @panic("oom")
+                        .optimize = options.optimize_interpreter,
+                        .symbol_prefix = x64_asm_interp_symbol_prefix,
+                    },
+                    .{},
+                    &options_writer.writer,
+                ) catch @panic("oom");
+
                 const run_codegen = b.addRunArtifact(codegen_x64_sysv_exe);
-                run_codegen.step.max_rss = ByteSize.mib(2).bytes; // arbitrary amount
-                run_codegen.addArg(x64_asm_interp_symbol_prefix);
-                // TODO: cpu and flags info
-                //run_codegen.addArg(options.target.query.zigTriple(b.allocator) catch @panic("oom"));
-                //run_codegen.addArg(options.target.query.serializeCpuAlloc(b.allocator) catch @panic("oom"));
-                run_codegen.addArg(b.fmt("{t}", .{options.optimize_interpreter}));
+                run_codegen.step.max_rss = ByteSize.mib(3).bytes;
+                run_codegen.addArg(options_writer.written());
                 root_module.addAssemblyFile(run_codegen.addOutputFileArg("x86_64_sysv.s"));
                 // root_module.addAnonymousImport("asm_generated", .{
                 //     .root_source_file = run_codegen.addOutputFileArg("x86_64_sys_decls.zig"),
