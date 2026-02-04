@@ -309,13 +309,14 @@ fn defineMemoryStoreOpcodes(as: *AsmWriter) void {
 
 fn defineBitwiseOpcodes(as: *AsmWriter) void {
     {
-        var op = as.defineOpcodeHandler(.{ .fd = .@"v128.not" }, .@"32");
+        var not = as.defineOpcodeHandler(.{ .fd = .@"v128.not" }, .@"32");
         as.printInstrs(&.{
             "pcmpeqd xmm0, xmm0 # all ones",
             "pxor xmm0, xmmword ptr [{[vsp]f} - 0x10] # bitwise NOT",
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # write result",
         }, .{ .vsp = Gpr.vsp });
-        op.end(as);
+        not.jmpToNextHandler(as);
+        not.end(as);
     }
     for (&[_]FDPrefixOpcode{ .@"v128.and", .@"v128.or", .@"v128.xor" }) |opcode| {
         var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
@@ -325,10 +326,11 @@ fn defineBitwiseOpcodes(as: *AsmWriter) void {
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # write result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
         }, .{ .vsp = Gpr.vsp, .operation = @tagName(opcode)[5..] });
+        op.jmpToNextHandler(as);
         op.end(as);
     }
     {
-        var op = as.defineOpcodeHandler(.{ .fd = .@"v128.andnot" }, .@"32");
+        var andnot = as.defineOpcodeHandler(.{ .fd = .@"v128.andnot" }, .@"32");
         as.printInstrs(&.{
             "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20]",
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
@@ -336,10 +338,11 @@ fn defineBitwiseOpcodes(as: *AsmWriter) void {
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # write result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
         }, .{ .vsp = Gpr.vsp });
-        op.end(as);
+        andnot.jmpToNextHandler(as);
+        andnot.end(as);
     }
     {
-        var op = as.defineOpcodeHandler(.{ .fd = .@"v128.bitselect" }, .@"64");
+        var bitselect = as.defineOpcodeHandler(.{ .fd = .@"v128.bitselect" }, .@"64");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x30] # operand A",
             "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand B",
@@ -352,7 +355,8 @@ fn defineBitwiseOpcodes(as: *AsmWriter) void {
             "movdqa xmmword ptr [{[vsp]f} - 0x30], xmm0 # write result",
             "lea {[vsp]f}, [{[vsp]f} - 0x20] # update VSP",
         }, .{ .vsp = Gpr.vsp });
-        op.end(as);
+        bitselect.jmpToNextHandler(as);
+        bitselect.end(as);
     }
 }
 
@@ -399,6 +403,7 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
             "setnz r13b",
             "mov dword ptr [{[vsp]f} - 0x10], r13d # store result",
         }, .{ .vsp = Gpr.vsp });
+        any_true.jmpToNextHandler(as);
         any_true.end(as);
     }
 
@@ -428,6 +433,7 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
                 },
                 .suffix = interp.suffix(),
             });
+            all_true.jmpToNextHandler(as);
             all_true.end(as);
         }
     }
@@ -445,6 +451,7 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
             "and r11d, r13d",
             "mov dword ptr [{[vsp]f} - 0x10], r11d # store result",
         }, .{ .vsp = Gpr.vsp });
+        all_true.jmpToNextHandler(as);
         all_true.end(as);
     }
 
@@ -455,6 +462,7 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
             "pmovmskb r11d, xmm0",
             "mov dword ptr [{[vsp]f} - 0x10], r11d",
         }, .{ .vsp = Gpr.vsp });
+        bitmask.jmpToNextHandler(as);
         bitmask.end(as);
     }
     {
@@ -467,6 +475,7 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
             "and r11w, 0xFF",
             "mov dword ptr [{[vsp]f} - 0x10], r11d",
         }, .{ .vsp = Gpr.vsp });
+        bitmask.jmpToNextHandler(as);
         bitmask.end(as);
     }
     {
@@ -476,6 +485,7 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
             "movmskps r11d, xmm0",
             "mov dword ptr [{[vsp]f} - 0x10], r11d",
         }, .{ .vsp = Gpr.vsp });
+        bitmask.jmpToNextHandler(as);
         bitmask.end(as);
     }
     {
@@ -485,6 +495,7 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
             "movmskpd r11d, xmm0",
             "mov dword ptr [{[vsp]f} - 0x10], r11d",
         }, .{ .vsp = Gpr.vsp });
+        bitmask.jmpToNextHandler(as);
         bitmask.end(as);
     }
 }
@@ -2509,7 +2520,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         .@"i64x2.extmul_high_i32x4_u",
     }) |opcode| {
         // Copied from code to generate handlers for i64x2.extend_*
-        var extend = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+        var extmul = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         const opcode_name = @tagName(opcode);
         const low_lane_offset: u4 = switch (opcode_name[13]) {
             'l' => 0,
@@ -2551,7 +2562,8 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             .vsp = Gpr.vsp,
             .low_lane_offset = low_lane_offset,
         });
-        extend.end(as);
+        extmul.jmpToNextHandler(as);
+        extmul.end(as);
     }
 
     {
@@ -2634,9 +2646,6 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         extadd.jmpToNextHandler(as);
         extadd.end(as);
     }
-
-    // .@"i32x4.dot_i16x8_s"
-    // phaddsw (horizontal add, saturating) requires SSSE3
 }
 
 const std = @import("std");
