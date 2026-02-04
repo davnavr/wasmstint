@@ -3618,10 +3618,11 @@ const DispatchTable = enum {
             .Debug, .ReleaseSafe => true,
             .ReleaseFast, .ReleaseSmall => false,
         };
+
         return switch (table) {
             .byte_dispatch_table => 256,
-            .fc_prefix_dispatch_table => if (safe) 64 else 17,
-            .fd_prefix_dispatch_table => if (safe) 256 else 128,
+            .fc_prefix_dispatch_table => if (safe) 64 else 18,
+            .fd_prefix_dispatch_table => 256,
         };
     }
 
