@@ -12,13 +12,8 @@ pub fn main() noreturn {
         @panic("oom");
     _ = cli_args.next().?;
 
-    const Options = struct {
-        optimize: std.builtin.OptimizeMode,
-        symbol_prefix: []const u8,
-    };
-
     const options = std.zon.parse.fromSliceAlloc(
-        Options,
+        AsmWriter.Options,
         arena.allocator(),
         cli_args.next().?,
         null,
@@ -48,7 +43,7 @@ pub fn main() noreturn {
         std.fs.File.adaptFromNewApi(asm_file).writerStreaming(
             std.heap.page_allocator.alloc(u8, writer_buf_size) catch @panic("oom"),
         ),
-        options.symbol_prefix,
+        options,
         &scratch,
     );
     // var zig_writer = std.fs.File.adaptFromNewApi(zig_file).writerStreaming(
@@ -62,11 +57,10 @@ pub fn main() noreturn {
     //     \\
     // ) catch std.debug.panic("{t}", .{zig_writer.err.?});
 
-    const optimize = options.optimize;
-    defineSupportRoutines(&asm_writer, optimize);
+    defineSupportRoutines(&asm_writer);
     defineControlOpcodeHandlers(&asm_writer);
     defineCallOpcodeHandlers(&asm_writer);
-    defineParametericOpcodeHandlers(&asm_writer, optimize);
+    defineParametericOpcodeHandlers(&asm_writer);
     defineLocalOpcodeHandlers(&asm_writer);
     defineGlobalOpcodeHandlers(&asm_writer);
     defineTableAccessOpcodeHandlers(&asm_writer);
@@ -80,18 +74,18 @@ pub fn main() noreturn {
     defineFloatOpcodeHandlers(&asm_writer, .f64);
     defineNumericConversionOpcodeHandlers(&asm_writer);
     defineReferenceOpcodeHandlers(&asm_writer);
-    definePrefixOpcodeHandlers(&asm_writer, optimize);
+    definePrefixOpcodeHandlers(&asm_writer);
     defineBulkMemoryOpcodeHandlers(&asm_writer);
     @import("simd.zig").defineAllOpcodes(&asm_writer);
 
-    defineOpcodeDispatchTables(&asm_writer, optimize);
+    defineOpcodeDispatchTables(&asm_writer);
 
     asm_writer.finish();
     // zig_writer.interface.flush() catch unreachable;
     std.process.exit(0);
 }
 
-fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) void {
+fn defineSupportRoutines(as: *AsmWriter) void {
     {
         // TODO: Could detect if build script uses LLVM backend, meaning RegCall calling
         // convention could be used instead of System V
@@ -125,20 +119,20 @@ fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) voi
             .stack_2 = SystemVParam{ .index = 8 },
             .stack_3 = SystemVParam{ .index = 9 },
             .dispatch = Gpr.disp,
-            .symbol_prefix = as.symbol_prefix,
+            .symbol_prefix = as.options.symbol_prefix,
         });
         trampoline.end(as);
     }
     {
         var invalid = as.startFunction("invalidByteOpcode", .{
             .binding = .local,
-            .alignment = switch (optimize) {
+            .alignment = switch (as.options.optimize) {
                 .Debug, .ReleaseSafe => .@"16",
                 .ReleaseFast, .ReleaseSmall => .@"1",
             },
         });
         AsmWriter.OpcodeHandler.writeStartingCfiDirectives(as);
-        switch (optimize) {
+        switch (as.options.optimize) {
             .Debug, .ReleaseSafe => as.printInstrs(&.{
                 "mov {[param_0]f}, {[vip]f} #0 VIP",
                 "mov {[param_1]f}, {[eip]f} #1 EIP",
@@ -149,7 +143,7 @@ fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) voi
                 .vip = Gpr.vip,
                 .param_1 = SystemVParam{ .index = 1 },
                 .eip = Gpr.eip,
-                .symbol_prefix = as.symbol_prefix,
+                .symbol_prefix = as.options.symbol_prefix,
             }),
             .ReleaseFast, .ReleaseSmall => {},
         }
@@ -181,10 +175,10 @@ fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) voi
             ".cfi_def_cfa rsp, 8",
             "jmp {[symbol_prefix]s}interruptOutOfFuel",
             "ud2",
-        }, .{ .symbol_prefix = as.symbol_prefix });
+        }, .{ .symbol_prefix = as.options.symbol_prefix });
         oof.end(as);
     }
-    switch (optimize) {
+    switch (as.options.optimize) {
         .Debug, .ReleaseSafe => {
             var invalid = as.startFunction("invalidPrefixedOpcode", .{
                 .binding = .local,
@@ -201,7 +195,7 @@ fn defineSupportRoutines(as: *AsmWriter, optimize: std.builtin.OptimizeMode) voi
                 "# doesn't `jmp`, so stack trace is better",
                 "call {[symbol_prefix]s}panicInvalidPrefixedOpcode",
                 "ud2",
-            }, .{ .symbol_prefix = as.symbol_prefix });
+            }, .{ .symbol_prefix = as.options.symbol_prefix });
             invalid.end(as);
         },
         .ReleaseFast, .ReleaseSmall => {},
@@ -240,7 +234,7 @@ fn defineControlOpcodeHandlers(as: *AsmWriter) void {
             ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapUnreachable",
             "ud2",
-        }, .{ .prefix = as.symbol_prefix });
+        }, .{ .prefix = as.options.symbol_prefix });
         handler.end(as);
     }
     {
@@ -301,7 +295,7 @@ fn defineControlOpcodeHandlers(as: *AsmWriter) void {
             "# IP - 1 == EIP indicates end of function",
             "cmp {[vip]f}, {[eip]f}",
             "ja {[prefix]s}return # Slow path is returning from the function",
-        }, .{ .vip = Gpr.vip, .eip = Gpr.eip, .prefix = as.symbol_prefix });
+        }, .{ .vip = Gpr.vip, .eip = Gpr.eip, .prefix = as.options.symbol_prefix });
         end.jmpToNextHandler(as);
         end.end(as);
     }
@@ -373,7 +367,7 @@ fn defineControlOpcodeHandlers(as: *AsmWriter) void {
             ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}returnFromWasm",
             "ud2",
-        }, .{ .prefix = as.symbol_prefix });
+        }, .{ .prefix = as.options.symbol_prefix });
         @"return".end(as);
     }
 }
@@ -405,7 +399,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter) void {
             ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}invokeWithinWasm # call into Zig",
             "ud2",
-        }, .{ .prefix = as.symbol_prefix });
+        }, .{ .prefix = as.options.symbol_prefix });
         idx_decode.writeSlowPath(as);
         call.end(as);
     }
@@ -469,7 +463,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter) void {
             ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}{[function_name]s}",
             "ud2",
-        }, .{ .prefix = as.symbol_prefix, .function_name = function_name });
+        }, .{ .prefix = as.options.symbol_prefix, .function_name = function_name });
         type_idx_decode.writeSlowPath(as);
         table_idx_decode.writeSlowPath(as);
 
@@ -488,7 +482,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter) void {
             ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapCallIndirectAccessOob",
             "ud2",
-        }, .{ .prefix = as.symbol_prefix });
+        }, .{ .prefix = as.options.symbol_prefix });
 
         as.write(".p2align 4\n");
         null_elem.place(as);
@@ -505,7 +499,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter) void {
             ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapIndirectCallToNull",
             "ud2",
-        }, .{ .prefix = as.symbol_prefix });
+        }, .{ .prefix = as.options.symbol_prefix });
         call_indirect.end(as);
     }
     {
@@ -538,7 +532,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter) void {
             ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}tailCallWithinWasm # call into Zig",
             "ud2",
-        }, .{ .prefix = as.symbol_prefix });
+        }, .{ .prefix = as.options.symbol_prefix });
         idx_decode.writeSlowPath(as);
         return_call.end(as);
     }
@@ -557,7 +551,7 @@ fn writeSelectHandler(as: *AsmWriter) void {
     }, .{ .vsp = Gpr.vsp });
 }
 
-fn defineParametericOpcodeHandlers(as: *AsmWriter, optimize: std.builtin.OptimizeMode) void {
+fn defineParametericOpcodeHandlers(as: *AsmWriter) void {
     {
         var drop = as.defineOpcodeHandler(.{ .byte = .drop }, .@"16");
         as.printInstrs(&.{"lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp"}, .{ .vsp = Gpr.vsp });
@@ -569,7 +563,7 @@ fn defineParametericOpcodeHandlers(as: *AsmWriter, optimize: std.builtin.Optimiz
         AsmWriter.OpcodeHandler.writeStartingCfiDirectives(as);
         var type_count = DecodeUlebIdx.fastPath(as, .r11, .{ .r13, .r14 }, "count");
         var bad_type_count: AsmWriter.Label = undefined;
-        const has_type_count_check = switch (optimize) {
+        const has_type_count_check = switch (as.options.optimize) {
             .Debug, .ReleaseSafe => true,
             .ReleaseFast, .ReleaseSmall => false,
         };
@@ -855,7 +849,7 @@ fn defineTableAccessOpcodeHandlers(as: *AsmWriter) void {
             ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapTableAccessOutOfBounds",
             "ud2",
-        }, .{ .prefix = as.symbol_prefix });
+        }, .{ .prefix = as.options.symbol_prefix });
 
         get.end(as);
     }
@@ -914,7 +908,7 @@ fn defineTableAccessOpcodeHandlers(as: *AsmWriter) void {
             ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapTableAccessOutOfBounds",
             "ud2",
-        }, .{ .prefix = as.symbol_prefix });
+        }, .{ .prefix = as.options.symbol_prefix });
 
         set.end(as);
     }
@@ -1063,7 +1057,7 @@ fn defineMemoryManagementOpcodeHandlers(as: *AsmWriter) void {
             ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}memoryGrowReallocate",
             "ud2",
-        }, .{ .prefix = as.symbol_prefix });
+        }, .{ .prefix = as.options.symbol_prefix });
 
         var to_next = as.label(&.{"next_opcode"});
         as.write(".p2align 4\n");
@@ -1275,7 +1269,7 @@ fn numericOperationTrapJmp(as: *AsmWriter, handler: []const u8) void {
         ".cfi_def_cfa rsp, 8",
         "jmp {[prefix]s}{[name]s}",
         "ud2",
-    }, .{ .prefix = as.symbol_prefix, .name = handler });
+    }, .{ .prefix = as.options.symbol_prefix, .name = handler });
 }
 
 fn defineIntegerOpcodeHandlers(as: *AsmWriter, int_type: IntType) void {
@@ -1485,7 +1479,7 @@ fn defineIntegerOpcodeHandlers(as: *AsmWriter, int_type: IntType) void {
         if (kind == .rem and signedness == .signed) {
             as.printInstrs(
                 &.{"lea {[dispatch]f}, {[prefix]s}byte_dispatch_table # restore dispatch table"},
-                .{ .prefix = as.symbol_prefix, .dispatch = Gpr.disp },
+                .{ .prefix = as.options.symbol_prefix, .dispatch = Gpr.disp },
             );
         }
         op.jmpToNextHandler(as);
@@ -2436,7 +2430,7 @@ fn defineReferenceOpcodeHandlers(as: *AsmWriter) void {
             "lea {[temp_vsp]f}, [{[temp_vsp]f} + 0x10] # vsp",
         }, .{
             .param_0 = SystemVParam{ .index = 0 },
-            .symbol_prefix = as.symbol_prefix,
+            .symbol_prefix = as.options.symbol_prefix,
             .temp_vsp = Gpr.system_v_callee_saved[2],
         });
         comptime std.debug.assert(callee_saved_registers[2].tag == Gpr.vsp.tag);
@@ -2457,7 +2451,7 @@ fn defineReferenceOpcodeHandlers(as: *AsmWriter) void {
     }
 }
 
-fn definePrefixOpcodeHandlers(as: *AsmWriter, optimize: std.builtin.OptimizeMode) void {
+fn definePrefixOpcodeHandlers(as: *AsmWriter) void {
     for (&[_]struct { opcodes.ByteOpcode, DispatchTable }{
         .{ .@"0xFC", .fc_prefix_dispatch_table },
         .{ .@"0xFD", .fd_prefix_dispatch_table },
@@ -2466,7 +2460,7 @@ fn definePrefixOpcodeHandlers(as: *AsmWriter, optimize: std.builtin.OptimizeMode
         var op = as.startFunction(@tagName(opcode), .{ .binding = .local, .alignment = .@"32" });
         as.addOpcodeToLookup(.{ .byte = opcode });
         AsmWriter.OpcodeHandler.writeStartingCfiDirectives(as);
-        switch (optimize) {
+        switch (as.options.optimize) {
             .Debug, .ReleaseSafe => as.printInstrs(&.{
                 "lea {[invalid_ip]f}, [{[vip]f} - 1] # save IP in case of invalid opcode",
             }, .{ .invalid_ip = Gpr.prefix_opcode_base_ip, .vip = Gpr.vip }),
@@ -2479,7 +2473,7 @@ fn definePrefixOpcodeHandlers(as: *AsmWriter, optimize: std.builtin.OptimizeMode
                 "jmp [{[symbol_prefix]s}{[table]t} + r13*8]",
                 "ud2",
             },
-            .{ .symbol_prefix = as.symbol_prefix, .table = table },
+            .{ .symbol_prefix = as.options.symbol_prefix, .table = table },
         );
         decode_opcode.writeSlowPath(as);
         op.end(as);
@@ -2633,7 +2627,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter) void {
             ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapMemoryInitOutOfBounds",
             "ud2",
-        }, .{ .prefix = as.symbol_prefix });
+        }, .{ .prefix = as.options.symbol_prefix });
 
         memory_init.end(as);
     }
@@ -2909,7 +2903,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter) void {
                 ".cfi_def_cfa rsp, 8",
                 "jmp {[prefix]s}trapMemoryCopyOutOfBounds",
                 "ud2",
-            }, .{ .prefix = as.symbol_prefix });
+            }, .{ .prefix = as.options.symbol_prefix });
         }
 
         memmove.end(as);
@@ -3078,7 +3072,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter) void {
             ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapMemoryFillOutOfBounds",
             "ud2",
-        }, .{ .prefix = as.symbol_prefix });
+        }, .{ .prefix = as.options.symbol_prefix });
         memset.end(as);
     }
     {
@@ -3118,7 +3112,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter) void {
             ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}tableInit",
             "ud2",
-        }, .{ .prefix = as.symbol_prefix });
+        }, .{ .prefix = as.options.symbol_prefix });
         elem_idx.writeSlowPath(as);
         table_idx.writeSlowPath(as);
         table_init.end(as);
@@ -3332,7 +3326,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter) void {
                 ".cfi_def_cfa rsp, 8",
                 "jmp {[prefix]s}trapTableCopyOutOfBounds",
                 "ud2",
-            }, .{ .prefix = as.symbol_prefix });
+            }, .{ .prefix = as.options.symbol_prefix });
         }
 
         table_copy.end(as);
@@ -3387,7 +3381,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter) void {
             ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}tableGrowReallocate",
             "ud2",
-        }, .{ .prefix = as.symbol_prefix });
+        }, .{ .prefix = as.options.symbol_prefix });
 
         as.write(".p2align 4\n");
         within_capacity.place(as);
@@ -3600,7 +3594,7 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter) void {
             ".cfi_def_cfa rsp, 8",
             "jmp {[prefix]s}trapTableFillOutOfBounds",
             "ud2",
-        }, .{ .prefix = as.symbol_prefix });
+        }, .{ .prefix = as.options.symbol_prefix });
 
         table_fill.end(as);
     }
@@ -3627,8 +3621,8 @@ const DispatchTable = enum {
         };
     }
 
-    fn size(table: DispatchTable, optimize: std.builtin.OptimizeMode) usize {
-        const safe = switch (optimize) {
+    fn size(table: DispatchTable, as: *const AsmWriter) usize {
+        const safe = switch (as.options.optimize) {
             .Debug, .ReleaseSafe => true,
             .ReleaseFast, .ReleaseSmall => false,
         };
@@ -3646,7 +3640,7 @@ const DispatchTable = enum {
         invalid: []const u8,
         opcode: usize,
     ) void {
-        as.print("\t.quad {s}", .{as.symbol_prefix});
+        as.print("\t.quad {s}", .{as.options.symbol_prefix});
         if (std.meta.intToEnum(table.OpcodeType(), opcode) catch null) |defined| {
             const name = AsmWriter.Opcode.init(table.OpcodeType(), defined).name();
             if (@field(as, @tagName(table.lookupField())).contains(defined)) {
@@ -3660,7 +3654,7 @@ const DispatchTable = enum {
     }
 };
 
-fn defineOpcodeDispatchTables(as: *AsmWriter, optimize: std.builtin.OptimizeMode) void {
+fn defineOpcodeDispatchTables(as: *AsmWriter) void {
     // Different section if PIC is true:
     // .section .data.rel.ro, "aw", @progbits
     as.print(
@@ -3670,7 +3664,7 @@ fn defineOpcodeDispatchTables(as: *AsmWriter, optimize: std.builtin.OptimizeMode
         \\
     , .{});
 
-    const invalid_prefixed_opcode = switch (optimize) {
+    const invalid_prefixed_opcode = switch (as.options.optimize) {
         .Debug, .ReleaseSafe => "invalidPrefixedOpcode",
         .ReleaseFast, .ReleaseSmall => "invalidByteOpcode",
     };
@@ -3680,21 +3674,21 @@ fn defineOpcodeDispatchTables(as: *AsmWriter, optimize: std.builtin.OptimizeMode
             .byte_dispatch_table => "invalidByteOpcode",
             else => invalid_prefixed_opcode,
         };
-        const size = table.size(optimize);
+        const size = table.size(as);
 
         as.print(
             \\.global {[symbol_prefix]s}{[name]t}
             \\.type {[symbol_prefix]s}{[name]t}, @object
             \\{[symbol_prefix]s}{[name]t}:
             \\
-        , .{ .symbol_prefix = as.symbol_prefix, .name = table });
+        , .{ .symbol_prefix = as.options.symbol_prefix, .name = table });
         for (0..size) |i| {
             table.printOpcodeHandlerAddress(as, invalid, i);
         }
         as.print(
             \\.size {[symbol_prefix]s}{[name]t}, {[size]d}
             \\
-        , .{ .symbol_prefix = as.symbol_prefix, .name = table, .size = size * 8 });
+        , .{ .symbol_prefix = as.options.symbol_prefix, .name = table, .size = size * 8 });
     }
 }
 

@@ -79,7 +79,7 @@ pub fn end(access: *LinearMemoryAccess, op: *AsmWriter.OpcodeHandler, as: *AsmWr
         ".cfi_def_cfa rsp, 8",
         "jmp {[prefix]s}trapMemoryAccessOutOfBounds",
         "ud2",
-    }, .{ .prefix = as.symbol_prefix });
+    }, .{ .prefix = as.options.symbol_prefix });
     access.* = undefined;
     op.end(as);
 }

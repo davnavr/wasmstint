@@ -1,5 +1,11 @@
+pub const Options = struct {
+    optimize: std.builtin.OptimizeMode,
+    symbol_prefix: []const u8,
+    pic: bool,
+};
+
 out: std.fs.File.Writer,
-symbol_prefix: []const u8,
+options: Options,
 
 /// Only reset when a function is finished.
 function_arena: *std.heap.ArenaAllocator,
@@ -65,14 +71,15 @@ pub fn print(as: *AsmWriter, comptime fmt: []const u8, args: anytype) void {
 
 pub fn init(
     writer: std.fs.File.Writer,
-    symbol_prefix: []const u8,
+    options: Options,
     arena: *std.heap.ArenaAllocator,
 ) AsmWriter {
     var as = AsmWriter{
         .out = writer,
-        .symbol_prefix = symbol_prefix,
+        .options = options,
         .function_arena = arena,
     };
+
     as.write(
         \\# WASM opcodes implemented in x86-64 assembly, used in the wasmstint interpreter
         \\#
@@ -337,7 +344,7 @@ pub fn label(as: *AsmWriter, name: []const []const u8) Label {
     const prefix = ".L";
     const num = as.nextNumberedLabel();
     const buf = as.function_arena.allocator().alloc(u8, size: {
-        var size = prefix.len + as.symbol_prefix.len + function_name.len + 1 +
+        var size = prefix.len + as.options.symbol_prefix.len + function_name.len + 1 +
             (if (num == 0) 1 else std.math.log10_int(num) + 1);
 
         for (name) |s| {
@@ -349,7 +356,7 @@ pub fn label(as: *AsmWriter, name: []const []const u8) Label {
 
     var writer = Writer.fixed(buf);
     writer.writeAll(prefix) catch unreachable;
-    writer.writeAll(as.symbol_prefix) catch unreachable;
+    writer.writeAll(as.options.symbol_prefix) catch unreachable;
     writer.writeAll(function_name) catch unreachable;
     writer.writeByte('_') catch unreachable;
     for (name) |s| {
@@ -376,7 +383,7 @@ const Function = struct {
         as.print(
             \\.size {[symbol_prefix]s}{[name]s}, {[label]s} - {[symbol_prefix]s}{[name]s} 
         ++ "\n\t.cfi_endproc\n", .{
-            .symbol_prefix = as.symbol_prefix,
+            .symbol_prefix = as.options.symbol_prefix,
             .name = func_name,
             .label = end_label.name(),
         });
@@ -407,7 +414,7 @@ pub fn startFunction(
     as.label_counter = 0;
     as.print("\n.{[binding]t} {[symbol_prefix]s}{[name]s}\n", .{
         .binding = options.binding,
-        .symbol_prefix = as.symbol_prefix,
+        .symbol_prefix = as.options.symbol_prefix,
         .name = name,
     });
     if (options.alignment != .@"1") {
@@ -417,7 +424,7 @@ pub fn startFunction(
         \\.type {[symbol_prefix]s}{[name]s}, @function
         \\{[symbol_prefix]s}{[name]s}:
         \\
-    , .{ .symbol_prefix = as.symbol_prefix, .name = name });
+    , .{ .symbol_prefix = as.options.symbol_prefix, .name = name });
     as.printInstrs(&.{".cfi_startproc{s}"}, .{switch (options.cfi_kind) {
         .simple => " simple",
         .default => "",
@@ -482,7 +489,7 @@ pub const OpcodeHandler = struct {
             "jmp {[symbol_prefix]s}outOfFuelHandler",
             "ud2",
         }, .{
-            .symbol_prefix = as.symbol_prefix,
+            .symbol_prefix = as.options.symbol_prefix,
         });
 
         handler.function.end(as);

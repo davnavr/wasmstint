@@ -20,19 +20,20 @@ fn defineCommonConstants(as: *AsmWriter) void {
         \\
     );
 
-    as.print("\n.L{[symbol_prefix]s}i8x16_even_lanes:\n", .{ .symbol_prefix = as.symbol_prefix });
+    const symbol_prefix = .{ .symbol_prefix = as.options.symbol_prefix };
+    as.print("\n.L{[symbol_prefix]s}i8x16_even_lanes:\n", symbol_prefix);
     as.writeInstrs(&@as([8][]const u8, @splat(".word 0x00FF")));
 
-    as.print("\n.L{[symbol_prefix]s}i8x16_odd_lanes:\n", .{ .symbol_prefix = as.symbol_prefix });
+    as.print("\n.L{[symbol_prefix]s}i8x16_odd_lanes:\n", symbol_prefix);
     as.writeInstrs(&@as([8][]const u8, @splat(".word 0xFF00")));
 
-    as.print("\n.L{[symbol_prefix]s}i16x8_sign_bits:\n", .{ .symbol_prefix = as.symbol_prefix });
+    as.print("\n.L{[symbol_prefix]s}i16x8_sign_bits:\n", symbol_prefix);
     as.writeInstrs(&@as([8][]const u8, @splat(".word 0x8000")));
 
-    as.print("\n.L{[symbol_prefix]s}i32x4_sign_bits:\n", .{ .symbol_prefix = as.symbol_prefix });
+    as.print("\n.L{[symbol_prefix]s}i32x4_sign_bits:\n", symbol_prefix);
     as.writeInstrs(&@as([4][]const u8, @splat(".long 0x8000" ++ "0000")));
 
-    as.print("\n.L{[symbol_prefix]s}i64x2_sign_bits:\n", .{ .symbol_prefix = as.symbol_prefix });
+    as.print("\n.L{[symbol_prefix]s}i64x2_sign_bits:\n", symbol_prefix);
     as.writeInstrs(&@as([2][]const u8, @splat(".quad 0x8000" ++ "0000" ++ "0000" ++ "0000")));
 
     as.write("\n.text\n");
@@ -1146,7 +1147,7 @@ fn defineLaneAccessOpcodes(as: *AsmWriter) void {
         );
 
         as.print("\n.L{[symbol_prefix]s}i8x16_lane_index_bounds:\n", .{
-            .symbol_prefix = as.symbol_prefix,
+            .symbol_prefix = as.options.symbol_prefix,
         });
         as.writeInstrs(&.{".skip 16, 16"});
 
@@ -1195,7 +1196,7 @@ fn defineLaneAccessOpcodes(as: *AsmWriter) void {
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm1 # prevent clobbering src bytes",
             "mov byte ptr [{[vsp]f}], 0x00 # src byte used when index is out of bound",
             "movq r11, xmm0 # indices 0-7",
-        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.options.symbol_prefix });
 
         for (0..16) |index| {
             as.printInstrs(&.{
@@ -1222,6 +1223,7 @@ fn defineLaneAccessOpcodes(as: *AsmWriter) void {
 }
 
 fn defineFloatOpcodes(as: *AsmWriter) void {
+    const symbol_prefix = as.options.symbol_prefix;
     for (&[_]FDPrefixOpcode{
         .@"f32x4.eq",
         .@"f32x4.lt",
@@ -1319,22 +1321,22 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
         );
 
         as.print("\n.L{[symbol_prefix]s}f32x4_canonical_nan_mask:\n", .{
-            .symbol_prefix = as.symbol_prefix,
+            .symbol_prefix = symbol_prefix,
         });
         as.writeInstrs(&@as([4][]const u8, @splat(".long 0xFFC0" ++ "0000")));
 
         as.print("\n.L{[symbol_prefix]s}f64x2_canonical_nan_mask:\n", .{
-            .symbol_prefix = as.symbol_prefix,
+            .symbol_prefix = symbol_prefix,
         });
         as.writeInstrs(&@as([2][]const u8, @splat(".quad 0xFFF8" ++ "0000" ++ "0000" ++ "0000")));
 
         as.print("\n.L{[symbol_prefix]s}f32x4_canonical_nan_bit:\n", .{
-            .symbol_prefix = as.symbol_prefix,
+            .symbol_prefix = symbol_prefix,
         });
         as.writeInstrs(&@as([4][]const u8, @splat(".long 0x0040" ++ "0000")));
 
         as.print("\n.L{[symbol_prefix]s}f64x2_canonical_nan_bit:\n", .{
-            .symbol_prefix = as.symbol_prefix,
+            .symbol_prefix = symbol_prefix,
         });
         as.writeInstrs(&@as([2][]const u8, @splat(".quad 0x0008" ++ "0000" ++ "0000" ++ "0000")));
 
@@ -1375,7 +1377,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
         }, .{
             .suffix = interp.suffix(),
             .interp = interp,
-            .symbol_prefix = as.symbol_prefix,
+            .symbol_prefix = symbol_prefix,
             .vsp = Gpr.vsp,
         });
         min.jmpToNextHandler(as);
@@ -1428,7 +1430,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
             .suffix = interp.suffix(),
             .interp = interp,
             .int_interp = interp.toInt(),
-            .symbol_prefix = as.symbol_prefix,
+            .symbol_prefix = symbol_prefix,
             .vsp = Gpr.vsp,
         });
         max.jmpToNextHandler(as);
@@ -1492,7 +1494,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
         }, .{
             .vsp = Gpr.vsp,
             .suffix = interp.suffix(),
-            .symbol_prefix = as.symbol_prefix,
+            .symbol_prefix = symbol_prefix,
             .int_interp = interp.toInt(),
         });
         abs.jmpToNextHandler(as);
@@ -1520,7 +1522,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
             "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{
             .vsp = Gpr.vsp,
-            .symbol_prefix = as.symbol_prefix,
+            .symbol_prefix = symbol_prefix,
             .suffix = interp.suffix(),
             .int_interp = interp.toInt(),
         });
@@ -1530,6 +1532,7 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
 }
 
 fn defineIntegerOpcodes(as: *AsmWriter) void {
+    const symbol_prefix = as.options.symbol_prefix;
     for (&[_]FDPrefixOpcode{ .@"i8x16.eq", .@"i16x8.eq", .@"i32x4.eq" }) |opcode| {
         var eq = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         const interp = IntInterp.fromOpcodeName(opcode);
@@ -1632,7 +1635,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             "pcmpgtw xmm0, xmm1",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
-        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = symbol_prefix });
         lt_u.jmpToNextHandler(as);
         lt_u.end(as);
     }
@@ -1647,7 +1650,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             "pcmpgtd xmm0, xmm1",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
-        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = symbol_prefix });
         lt_u.jmpToNextHandler(as);
         lt_u.end(as);
     }
@@ -1708,7 +1711,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             "pxor xmm0, xmm1 # bitwise NOT?",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
-        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = symbol_prefix });
         le_u.jmpToNextHandler(as);
         le_u.end(as);
     }
@@ -1753,7 +1756,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             "pcmpgtw xmm0, xmm1",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
-        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = symbol_prefix });
         gt_u.jmpToNextHandler(as);
         gt_u.end(as);
     }
@@ -1768,7 +1771,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             "pcmpgtd xmm0, xmm1",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
-        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = symbol_prefix });
         gt_u.jmpToNextHandler(as);
         gt_u.end(as);
     }
@@ -1831,7 +1834,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
 
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
-        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = symbol_prefix });
         ge_u.jmpToNextHandler(as);
         ge_u.end(as);
     }
@@ -1923,7 +1926,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
                 "psllw xmm3, xmm1 # mask for odd lanes", // vpsllw xmm1, xmmword ptr [i8x16_odd_lanes], xmm2
                 "pand xmm0, xmm3 # result odd lanes",
                 "por xmm0, xmm2",
-            }, .{ .symbol_prefix = as.symbol_prefix }),
+            }, .{ .symbol_prefix = symbol_prefix }),
             .@"i8x16.shr_s" => as.printInstrs(&.{
                 "movdqa xmm2, xmm0",
                 "psraw xmm0, xmm1 # shift values in odd lanes",
@@ -1933,7 +1936,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
                 "psrlw xmm2, 8 # move even lanes back to their final position",
                 "pand xmm2, xmmword ptr [.L{[symbol_prefix]s}i8x16_even_lanes] # result even lanes",
                 "por xmm0, xmm2",
-            }, .{ .symbol_prefix = as.symbol_prefix }),
+            }, .{ .symbol_prefix = symbol_prefix }),
             .@"i8x16.shr_u" => as.printInstrs(&.{
                 "psrlw xmm0, xmm1 # shift values in odd lanes",
                 "movdqa xmm2, xmm0",
@@ -1942,7 +1945,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
                 "psrlw xmm3, xmm1 # mask for even lanes",
                 "pand xmm0, xmm3 # result even lanes",
                 "por xmm0, xmm2",
-            }, .{ .symbol_prefix = as.symbol_prefix }),
+            }, .{ .symbol_prefix = symbol_prefix }),
 
             .@"i16x8.shl" => as.writeInstrs(&.{"psllw xmm0, xmm1"}),
             .@"i16x8.shr_s" => as.writeInstrs(&.{"psraw xmm0, xmm1"}),
@@ -1966,7 +1969,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
                 "pxor xmm2, xmm4 # bitwise NOT of sign bits to get shifted-in ones",
                 "pand xmm2, xmm5 # shifted ones bits if sign bit is set, all zeroes otherwise",
                 "por xmm0, xmm2",
-            }, .{ .symbol_prefix = as.symbol_prefix }),
+            }, .{ .symbol_prefix = symbol_prefix }),
             .@"i64x2.shr_u" => as.writeInstrs(&.{"psrlq xmm0, xmm1"}),
 
             else => unreachable,
@@ -2207,7 +2210,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
 
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
-        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = symbol_prefix });
         min.jmpToNextHandler(as);
         min.end(as);
     }
@@ -2229,7 +2232,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             "",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
-        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = symbol_prefix });
         max.jmpToNextHandler(as);
         max.end(as);
     }
@@ -2373,7 +2376,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             "paddw xmm0, xmm1",
 
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.symbol_prefix });
+        }, .{ .vsp = Gpr.vsp, .symbol_prefix = symbol_prefix });
         extadd.jmpToNextHandler(as);
         extadd.end(as);
     }
