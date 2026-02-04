@@ -1,7 +1,7 @@
 pub const Options = struct {
     optimize: std.builtin.OptimizeMode,
     symbol_prefix: []const u8,
-    // pic: bool,
+    pic: bool,
 };
 
 out: std.fs.File.Writer,
@@ -298,6 +298,18 @@ pub const Gpr = packed struct(u6) {
         try writer.writeAll(reg.name());
     }
 };
+
+/// Sections containing function pointers are written to a writeable data section if PIC is true.
+///
+/// https://users.rust-lang.org/t/why-do-function-pointers-wind-up-in-data-instead-of-rodata/100029
+/// https://chromium.googlesource.com/chromium/src/+/HEAD/docs/native_relocations.md
+pub fn functionPointersSection(as: *AsmWriter) void {
+    as.write("\n.section ");
+    as.write(if (as.options.pic) ".data.rel.ro" else ".rodata");
+    as.write(", \"a");
+    as.write(if (as.options.pic) "w" else "");
+    as.write("\", @progbits\n");
+}
 
 fn nextNumberedLabel(as: *AsmWriter) u16 {
     const num = as.label_counter;

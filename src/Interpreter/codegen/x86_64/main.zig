@@ -692,11 +692,8 @@ fn defineGlobalOpcodeHandlers(as: *AsmWriter) void {
         }, .{ .vsp = Gpr.vsp });
         get.jmpToNextHandler(as);
 
-        as.write(
-            \\.section .rodata, "a", @progbits
-            \\.p2align 6
-            \\
-        );
+        as.functionPointersSection();
+        as.write(".p2align 6\n");
         jump_table.place(as);
         as.printInstrs(&(.{
             ".quad {[load_8]f} # externref",
@@ -775,11 +772,8 @@ fn defineGlobalOpcodeHandlers(as: *AsmWriter) void {
         }, .{ .vsp = Gpr.vsp });
         set.jmpToNextHandler(as);
 
-        as.write(
-            \\.section .rodata, "a", @progbits
-            \\.p2align 6
-            \\
-        );
+        as.functionPointersSection();
+        as.write(".p2align 6\n");
         jump_table.place(as);
         as.printInstrs(&(.{
             ".quad {[store_8]f} # externref",
@@ -3658,14 +3652,10 @@ const DispatchTable = enum {
 };
 
 fn defineOpcodeDispatchTables(as: *AsmWriter) void {
-    // Different section if PIC is true:
-    // .section .data.rel.ro, "aw", @progbits
-    as.print(
-        \\
-        \\.section .rodata, "a", @progbits
-        \\.p2align 7
-        \\
-    , .{});
+    as.write("\n");
+    as.functionPointersSection();
+
+    as.write(".p2align 7\n");
 
     const invalid_prefixed_opcode = switch (as.options.optimize) {
         .Debug, .ReleaseSafe => "invalidPrefixedOpcode",

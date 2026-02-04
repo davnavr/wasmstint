@@ -359,7 +359,7 @@ const Modules = struct {
             codegen_x64_sysv_exe.root_module.addImport("opcodes", opcodes_module);
 
             const x64_asm_interp_symbol_prefix = "wasmstint.x86_64_sysv.";
-            // const err_no_pic_flag = "pass -Dpic or -Dpic=false to use ASM backend";
+            const err_no_pic_flag = "pass -Dpic or -Dpic=false to use ASM backend";
 
             if (use_assembly_interpreter == .assembly and
                 options.target.result.cpu.arch == .x86_64)
@@ -367,7 +367,7 @@ const Modules = struct {
                 const Options = struct {
                     optimize: std.builtin.OptimizeMode,
                     symbol_prefix: []const u8,
-                    // pic: bool,
+                    pic: bool,
                 };
 
                 var options_writer = std.Io.Writer.Allocating.init(b.allocator);
@@ -378,7 +378,7 @@ const Modules = struct {
                         //options.target.query.serializeCpuAlloc(b.allocator) catch @panic("oom")
                         .optimize = options.optimize_interpreter,
                         .symbol_prefix = x64_asm_interp_symbol_prefix,
-                        // .pic = options.pic orelse true,
+                        .pic = options.pic orelse true,
                     },
                     .{},
                     &options_writer.writer,
@@ -395,9 +395,9 @@ const Modules = struct {
                 // });
                 wasmstint_options.addOption([]const u8, "symbol_prefix", x64_asm_interp_symbol_prefix);
 
-                // if (options.pic == null) {
-                //     run_codegen.step.dependOn(&b.addFail(err_no_pic_flag).step);
-                // }
+                if (options.pic == null) {
+                    run_codegen.step.dependOn(&b.addFail(err_no_pic_flag).step);
+                }
             }
 
             const tests = b.addTest(.{
@@ -955,9 +955,9 @@ fn buildFuzzers(
             afl_clang_lto.step.dependOn(fail);
         }
 
-        // if (options.project.pic != true) {
-        //     afl_clang_lto.step.dependOn(&b.addFail("AFL fuzz harness requires -Dpic=true").step);
-        // }
+        if (options.project.pic != true) {
+            afl_clang_lto.step.dependOn(&b.addFail("AFL fuzz harness requires -Dpic=true").step);
+        }
 
         { // Unfortunately, filtering by file seems to be broken
             afl_clang_lto.addFileInput(b.path("fuzz/denylist.txt"));
