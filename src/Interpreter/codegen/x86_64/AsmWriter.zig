@@ -388,11 +388,11 @@ const Function = struct {
     pub const Options = packed struct {
         alignment: std.mem.Alignment = .@"1",
         binding: Binding = .global,
+        cfi_kind: CfiKind = .default,
 
-        pub const Binding = enum(u1) {
-            global,
-            local,
-        };
+        pub const CfiKind = enum(u1) { simple, default };
+
+        pub const Binding = enum(u1) { global, local };
     };
 };
 
@@ -418,7 +418,10 @@ pub fn startFunction(
         \\{[symbol_prefix]s}{[name]s}:
         \\
     , .{ .symbol_prefix = as.symbol_prefix, .name = name });
-    as.writeInstrs(&.{".cfi_startproc"});
+    as.printInstrs(&.{".cfi_startproc{s}"}, .{switch (options.cfi_kind) {
+        .simple => " simple",
+        .default => "",
+    }});
 
     return Function{ .name = name.ptr };
 }
@@ -457,8 +460,13 @@ pub const OpcodeHandler = struct {
 
     pub fn writeStartingCfiDirectives(as: *AsmWriter) void {
         as.writeInstrs(&.{
-            ".cfi_offset rbp, -16",
+            // Prevents LLDB from producing a bad stack trace
+            // (saved register is interpreted to be a frame, through rest of backtrace is fine)
+            // TODO: directives must come after the first instruction!?
+            "nop # no standard function prologue",
+            ".cfi_same_value rbp",
             ".cfi_def_cfa rbp, 16",
+            ".cfi_offset rbp, -16",
         });
         for (3.., Gpr.system_v_callee_saved) |i, saved| {
             as.printInstrs(
@@ -609,7 +617,11 @@ pub fn defineOpcodeHandler(
     opcode: Opcode,
     alignment: std.mem.Alignment,
 ) OpcodeHandler {
-    const func = as.startFunction(opcode.name(), .{ .binding = .local, .alignment = alignment });
+    const func = as.startFunction(opcode.name(), .{
+        .binding = .local,
+        .alignment = alignment,
+        .cfi_kind = .simple,
+    });
     as.addOpcodeToLookup(opcode);
     OpcodeHandler.writeStartingCfiDirectives(as);
     return .{ .function = func, .out_of_fuel = as.label(&.{"out_of_fuel"}) };
