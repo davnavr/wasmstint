@@ -1392,42 +1392,32 @@ fn defineIntegerOpcodeHandlers(as: *AsmWriter, int_type: IntType) void {
         var signed_overflow: AsmWriter.Label = undefined;
         switch (signedness) {
             .signed => {
-                as.printInstrs(&.{
-                    "mov {[rdx]f}, {[rax]f}",
-                    "xor {[rdx]f}, {[r13]f} # overflow check ({[min_int]s} ^ {[neg_one]s})",
-                }, .{
-                    .rdx = rdx,
-                    .rax = rax,
-                    .r13 = r13,
-                    .min_int = switch (int_type) {
-                        .i32 => "0x8000_0000",
-                        .i64 => "0x8000_0000_0000_0000",
-                    },
-                    .neg_one = switch (int_type) {
-                        .i32 => "0xFFFF_FFFF",
-                        .i64 => "0xFFFF_FFFF_FFFF_FFFF",
-                    },
-                });
-
-                as.writeInstrs(switch (int_type) {
-                    .i32 => &.{"xor edx, 0x7FFF" ++ "FFFF"},
-                    .i64 => &.{
-                        "movabs r11, 0x7FFF" ++ "FFFF" ++ "FFFF" ++ "FFFF",
-                        "xor rdx, r11",
-                    },
-                });
-
                 signed_overflow = as.label(&.{"overflow"});
-                switch (kind) {
-                    .div => as.printInstrs(&.{"je {[trap_overflow]f}"}, .{
-                        .trap_overflow = signed_overflow,
-                    }),
-                    .rem => {
-                        as.printInstrs(&.{
-                            "jz {[overflow]f}",
-                            "mov {[r12]f}, {[rax]f} # clobbers dispatch table register",
-                        }, .{ .overflow = signed_overflow, .r12 = r12, .rax = rax });
+                as.writeInstrs(&.{"# overflow check"});
+                as.writeInstrs(switch (int_type) {
+                    .i32 => &.{
+                        "xor edx, edx",
+                        "cmp eax, 0x8000" ++ "0000 # is numerator minimum?",
                     },
+                    .i64 => &.{
+                        "movabs r11, 0x8000" ++ "0000" ++ "0000" ++ "0000",
+                        "cmp rax, r11 # is numerator minimum?",
+                    },
+                });
+                as.printInstrs(&.{
+                    "sete dl",
+
+                    "cmp {[r13]f}, -1 # check denominator",
+                    "sete r11b",
+
+                    "test dl, r11b",
+                    "jnz {[signed_overflow]f}",
+                }, .{ .r13 = r13, .signed_overflow = signed_overflow });
+
+                if (kind == .rem) {
+                    as.printInstrs(&.{
+                        "mov {[r12]f}, {[rax]f} # clobbers dispatch table register",
+                    }, .{ .r12 = r12, .rax = rax });
                 }
 
                 as.writeInstrs(switch (int_type) {
@@ -1486,6 +1476,7 @@ fn defineIntegerOpcodeHandlers(as: *AsmWriter, int_type: IntType) void {
             switch (kind) {
                 .rem => {
                     as.printInstrs(&.{
+                        "xor edx, edx",
                         "mov {[size]t} ptr [{[vsp]f} - 0x20], {[rdx]f}",
                         "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
                         "mov {[vip]f}, r14 # restore IP",
