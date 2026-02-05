@@ -503,8 +503,11 @@ pub const OpcodeHandler = struct {
 
         as.printInstrs(&.{
             "movzx r11, byte ptr [{[vip]f}] # read next opcode byte",
-            "sub qword ptr [{[fuel]f}], 1 # fuel check",
-            "jb {[out_of_fuel]s}",
+            "mov r15, qword ptr [{[fuel]f}] # load current fuel value",
+            "test r15, r15",
+            "jz {[out_of_fuel]s} # detect out-of-fuel condition",
+            "dec r15 # fuel",
+            "mov qword ptr [{[fuel]f}], r15 # store decremented fuel",
 
             "# jump to the next handler",
             "inc {[vip]f}",
