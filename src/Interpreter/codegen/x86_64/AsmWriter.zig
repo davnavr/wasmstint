@@ -626,7 +626,7 @@ pub fn defineOpcodeHandler(
     const func = as.startFunction(opcode.name(), .{
         .binding = .local,
         .alignment = alignment,
-        .cfi_kind = .simple,
+        // .cfi_kind = .simple, // messes up Zig backtraces
     });
     as.addOpcodeToLookup(opcode);
     OpcodeHandler.writeStartingCfiDirectives(as);
