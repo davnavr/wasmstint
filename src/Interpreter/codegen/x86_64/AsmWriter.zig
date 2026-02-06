@@ -670,10 +670,29 @@ pub fn popSystemVSavedRegisters(as: *AsmWriter) void {
     }
 }
 
+pub const FloatType = enum {
+    f32,
+    f64,
+
+    pub fn size(float_type: FloatType) Gpr.Size {
+        return switch (float_type) {
+            .f32 => .dword,
+            .f64 => .qword,
+        };
+    }
+
+    pub fn cSuffix(float_type: FloatType) u7 {
+        return switch (float_type) {
+            .f32 => 'f',
+            .f64 => 'l',
+        };
+    }
+};
+
 pub const RoundingControl = enum(u2) {
     ceil = 0b10, // ceilf/ceill
     floor = 0b01, // floorf/floorl
-    trunc = 0b11, // trunc/truncl?
+    trunc = 0b11, // truncf/truncl?
     nearest = 0b00, // roundevenf/roundeevenl (introduced in C23)
 };
 
