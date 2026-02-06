@@ -1171,7 +1171,7 @@ fn floatOpcodeHandlers(comptime F: type) type {
                 const z = makeArithmeticNan(f);
 
                 if (std.math.isNan(z) or
-                    std.math.isInf(z) or
+                    // std.math.isInf(z) or // normal case handles infinity inputs
                     std.math.isPositiveZero(z) or
                     std.math.isNegativeZero(z))
                 {
@@ -1182,33 +1182,33 @@ fn floatOpcodeHandlers(comptime F: type) type {
                     return -0.0;
                 }
 
-                const left_int = @round(z);
-                const right_int = @round(if (std.math.signbit(z)) z + 1.0 else z - 1.0);
+                const int_away_from_0 = @round(z);
+                const int_to_0 = @round(if (std.math.signbit(z)) z + 1.0 else z - 1.0);
 
-                const left_dist = @abs(left_int - z);
-                const right_dist = @abs(right_int - z);
+                const dist_away_from_0 = @abs(int_away_from_0 - z);
+                const dist_to_0 = @abs(int_to_0 - z);
 
-                if (left_dist < right_dist) {
-                    return left_int;
-                } else if (right_dist < left_dist) {
-                    return right_dist;
+                if (dist_away_from_0 < dist_to_0) {
+                    return int_away_from_0;
+                } else if (dist_to_0 < dist_away_from_0) {
+                    return dist_to_0;
                 } else if (-@as(F, precise_int_limit) < z and z < @as(F, precise_int_limit)) {
                     const RoundedInt = std.math.IntFittingRange(-precise_int_limit, precise_int_limit);
 
                     // Both candidates are the same distance from `z`, so pick the even one
-                    const left_i: RoundedInt = @intFromFloat(left_int);
-                    const right_i: RoundedInt = @intFromFloat(right_int);
-                    std.debug.assert(left_i != right_i);
+                    const rounded_away_from_0: RoundedInt = @intFromFloat(int_away_from_0);
+                    const rounded_to_0: RoundedInt = @intFromFloat(int_to_0);
+                    std.debug.assert(rounded_away_from_0 != rounded_to_0);
 
-                    if (@rem(left_i, 2) == 0) {
-                        std.debug.assert(@rem(right_i, 2) != 0);
-                        return left_int;
+                    if (@rem(rounded_away_from_0, 2) == 0) {
+                        std.debug.assert(@rem(rounded_to_0, 2) != 0);
+                        return int_away_from_0;
                     } else {
-                        return right_int;
+                        return int_to_0;
                     }
                 } else {
-                    std.debug.assert(left_int == right_int);
-                    return left_int;
+                    std.debug.assert(int_away_from_0 == int_to_0);
+                    return int_away_from_0;
                 }
             }
 
