@@ -735,9 +735,8 @@ fn buildSpecificationTests(
 
     {
         const test_fuzzed_step = b.step("test-fuzzed", "Run WAST test cases discovered by fuzzing");
-        const fuzzed_test_names = [_][]const u8{ "validation.wast", "wasmi_diff.wast" };
         const fuzzed_test_dir = b.path("tests/fuzzed");
-        for (fuzzed_test_names) |name| {
+        for (&[_][]const u8{ "validation.wast", "wasmi_diff.wast", "execution.wast" }) |name| {
             test_fuzzed_step.dependOn(
                 buildWastTest(b, interpreter, fuzzed_test_dir.path(b, name), wabt, name),
             );
