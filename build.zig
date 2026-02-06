@@ -368,19 +368,33 @@ const Modules = struct {
                     optimize: std.builtin.OptimizeMode,
                     symbol_prefix: []const u8,
                     pic: bool,
+                    features: []const std.Target.x86.Feature,
                 };
+
+                const cpu_feature_set = options.target.result.cpu.features;
+                var cpu_features = std.ArrayList(std.Target.x86.Feature).initCapacity(
+                    b.allocator,
+                    cpu_feature_set.count(),
+                ) catch @panic("oom");
+
+                for (std.enums.values(std.Target.x86.Feature)) |feat| {
+                    if (std.Target.x86.featureSetHas(cpu_feature_set, feat)) {
+                        cpu_features.appendAssumeCapacity(feat);
+                    } else if (cpu_features.items.len == cpu_features.capacity) {
+                        break;
+                    }
+                }
 
                 var options_writer = std.Io.Writer.Allocating.init(b.allocator);
                 std.zon.stringify.serialize(
                     Options{
-                        // TODO: cpu and flags info
-                        //options.target.query.zigTriple(b.allocator) catch @panic("oom")
-                        //options.target.query.serializeCpuAlloc(b.allocator) catch @panic("oom")
                         .optimize = options.optimize_interpreter,
                         .symbol_prefix = x64_asm_interp_symbol_prefix,
                         .pic = options.pic orelse true,
+                        // .target_triple = options.target.query.zigTriple(b.allocator) catch @panic("oom"),
+                        .features = cpu_features.items,
                     },
-                    .{},
+                    .{ .whitespace = false },
                     &options_writer.writer,
                 ) catch @panic("oom");
 

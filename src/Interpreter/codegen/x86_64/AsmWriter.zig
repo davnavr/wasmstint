@@ -2,10 +2,12 @@ pub const Options = struct {
     optimize: std.builtin.OptimizeMode,
     symbol_prefix: []const u8,
     pic: bool,
+    features: []const std.Target.x86.Feature,
 };
 
 out: std.fs.File.Writer,
 options: Options,
+features: std.Target.Cpu.Feature.Set,
 
 /// Only reset when a function is finished.
 function_arena: *std.heap.ArenaAllocator,
@@ -77,6 +79,7 @@ pub fn init(
     var as = AsmWriter{
         .out = writer,
         .options = options,
+        .features = std.Target.x86.featureSet(options.features),
         .function_arena = arena,
     };
 
@@ -90,6 +93,10 @@ pub fn init(
         \\
     );
     return as;
+}
+
+pub fn hasFeature(as: *const AsmWriter, feature: std.Target.x86.Feature) bool {
+    return std.Target.x86.featureSetHas(as.features, feature);
 }
 
 pub const Gpr = packed struct(u6) {
