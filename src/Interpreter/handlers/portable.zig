@@ -1124,9 +1124,16 @@ fn floatOpcodeHandlers(comptime F: type) type {
                 return -z;
             }
 
+            inline fn makeArithmeticNan(z: F) F {
+                return if (std.math.isNan(z))
+                    @bitCast(@as(Bits, @bitCast(z)) | canonical_nan_bit)
+                else
+                    z;
+            }
+
             /// https://webassembly.github.io/spec/core/exec/numerics.html#op-fceil
             fn ceil(z: F) F {
-                return @ceil(z);
+                return @ceil(makeArithmeticNan(z));
             }
 
             /// https://webassembly.github.io/spec/core/exec/numerics.html#op-ffloor
@@ -1135,16 +1142,17 @@ fn floatOpcodeHandlers(comptime F: type) type {
                 // On `x86_64-linux`, uses `vroundss $0x11`
                 // On `x86_64-windows`, uses `vroundss $0x9`
                 // Correct rounding on windows on higher versions (e.g. x86-64-v2)
-                return @floor(z);
+                return @floor(makeArithmeticNan(z));
             }
 
             /// https://webassembly.github.io/spec/core/exec/numerics.html#op-ftrunc
             fn trunc(z: F) F {
-                return if (z <= -0.0) @ceil(z) else @floor(z);
+                const f = makeArithmeticNan(z);
+                return if (f <= -0.0) @ceil(f) else @floor(f);
             }
 
             /// https://webassembly.github.io/spec/core/exec/numerics.html#op-fnearest
-            fn nearest(z: F) F {
+            fn nearest(f: F) F {
                 // WASM requires rounds-to-nearest-ties-even
 
                 // '@round' compiles to 'llvm.round.*', but what is needed is 'llvm.roundeven.*'
@@ -1160,9 +1168,10 @@ fn floatOpcodeHandlers(comptime F: type) type {
                 // extern "c" fn roundevenf(arg: f32);
                 // extern "c" fn roundevenf(arg: f32);
 
-                if (std.math.isNan(z)) {
-                    return @bitCast(@as(Bits, @bitCast(z)) | canonical_nan_bit);
-                } else if (std.math.isInf(z) or
+                const z = makeArithmeticNan(f);
+
+                if (std.math.isNan(z) or
+                    std.math.isInf(z) or
                     std.math.isPositiveZero(z) or
                     std.math.isNegativeZero(z))
                 {
