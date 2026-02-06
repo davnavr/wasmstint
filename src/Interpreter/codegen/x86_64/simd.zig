@@ -1548,14 +1548,21 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     }
 
     {
-        // pcmpeqq requires SSE4_1
         var eq = as.defineOpcodeHandler(.{ .fd = .@"i64x2.eq" }, .@"32");
+        as.printInstrs(&.{"movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20]"}, .{ .vsp = Gpr.vsp });
+        if (as.hasFeature(.sse4_1)) {
+            as.printInstrs(&.{
+                "pcmpeqq xmm0, xmmword ptr [{[vsp]f} - 0x10] # requires SSE4.1",
+            }, .{ .vsp = Gpr.vsp });
+        } else {
+            as.printInstrs(&.{
+                "# Taken from LLVM output for Zig == operator",
+                "pcmpeqd xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+                "pshufd xmm1, xmm0, 0xB1",
+                "pand xmm0, xmm1",
+            }, .{ .vsp = Gpr.vsp });
+        }
         as.printInstrs(&.{
-            "# Taken from LLVM output for Zig == operator",
-            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20]",
-            "pcmpeqd xmm1, xmmword ptr [{[vsp]f} - 0x10]",
-            "pshufd xmm0, xmm1, 0xB1",
-            "pand xmm0, xmm1",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
         }, .{ .vsp = Gpr.vsp });
@@ -1967,6 +1974,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
                 "movdqa xmm3, xmm2",
                 "pand xmm2, xmm0 # sign bits",
                 "psrlq xmm0, xmm1 # logical shift",
+                // Requires SSE4.1
                 "pcmpeqq xmm2, xmm3 # all ones if sign bit is set, all zeroes otherwise",
                 "movdqa xmm5, xmm2",
                 "psrlq xmm2, xmm1 # logical shift of sign bits",
