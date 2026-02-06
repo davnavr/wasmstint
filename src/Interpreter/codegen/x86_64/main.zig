@@ -108,8 +108,6 @@ fn defineSupportRoutines(as: *AsmWriter) void {
 
             "# jump to next handler",
             "lea {[dispatch]f}, [rip + {[symbol_prefix]s}byte_dispatch_table]",
-            "jmp r15",
-            "ud2",
         }, .{
             .vip = Gpr.vip,
             .stack_0 = SystemVParam{ .index = 6 },
@@ -120,6 +118,14 @@ fn defineSupportRoutines(as: *AsmWriter) void {
             .stack_3 = SystemVParam{ .index = 9 },
             .dispatch = Gpr.disp,
             .symbol_prefix = as.options.symbol_prefix,
+        });
+        if (as.hasFeature(.avx)) {
+            as.writeInstrs(&.{"vzeroupper # TODO: use VEX prefix for vector instructions"});
+        }
+
+        as.writeInstrs(&.{
+            "jmp r15",
+            "ud2",
         });
         trampoline.end(as);
     }
@@ -2430,6 +2436,10 @@ fn defineReferenceOpcodeHandlers(as: *AsmWriter) void {
 
         for (Gpr.system_v_callee_saved[0..3], callee_saved_registers) |src, dst| {
             as.printInstrs(&.{"mov {f}, {f}"}, .{ dst, src });
+        }
+
+        if (as.hasFeature(.avx)) {
+            as.writeInstrs(&.{"vzeroupper # remove later"});
         }
 
         ref_func.jmpToNextHandler(as);

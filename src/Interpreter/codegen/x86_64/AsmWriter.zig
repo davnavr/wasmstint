@@ -99,6 +99,10 @@ pub fn hasFeature(as: *const AsmWriter, feature: std.Target.x86.Feature) bool {
     return std.Target.x86.featureSetHas(as.features, feature);
 }
 
+// pub fn hasAnyFeature(as: *const AsmWriter, feature: []const std.Target.x86.Feature) bool {
+//     return std.Target.x86.featureSetHasAny(as.features, feature);
+// }
+
 pub const Gpr = packed struct(u6) {
     tag: Tag,
     size: Size,
