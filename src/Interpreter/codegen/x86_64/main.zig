@@ -1570,6 +1570,9 @@ fn defineIntegerOpcodeHandlers(as: *AsmWriter, int_type: IntType) void {
     }
 }
 
+const i32_sign_bit: *const [8]u8 = "8000" ++ "0000";
+const i64_sign_bit: *const [16]u8 = "8000" ++ "0000" ++ "0000" ++ "0000";
+
 fn defineFloatConstants(as: *AsmWriter) void {
     as.write(
         \\.section .rodata.cst16, "aM", @progbits, 16
@@ -1577,15 +1580,33 @@ fn defineFloatConstants(as: *AsmWriter) void {
         \\
     );
 
-    as.print(".L{[symbol_prefix]s}f32_canonical_nan_bit:\n", .{
-        .symbol_prefix = as.options.symbol_prefix,
-    });
-    as.writeInstrs(&(.{".long 0x0040" ++ "0000"} ++ @as([3][]const u8, @splat(".long 0"))));
+    const constant = struct {
+        fn single(w: *AsmWriter, name: []const u8, digits: *const [8]u8) void {
+            w.print(".L{[symbol_prefix]s}f32_{[name]s}:\n", .{
+                .symbol_prefix = w.options.symbol_prefix,
+                .name = name,
+            });
+            w.printInstrs(&(.{".long 0x{[digits]s}"} ++ @as([3][]const u8, @splat(".long 0"))), .{
+                .digits = digits,
+            });
+        }
 
-    as.print(".L{[symbol_prefix]s}f64_canonical_nan_bit:\n", .{
-        .symbol_prefix = as.options.symbol_prefix,
-    });
-    as.writeInstrs(&.{ ".quad 0x0008" ++ "0000" ++ "0000" ++ "0000", ".quad 0" });
+        fn double(w: *AsmWriter, name: []const u8, digits: *const [16]u8) void {
+            w.print(".L{[symbol_prefix]s}f64_{[name]s}:\n", .{
+                .symbol_prefix = w.options.symbol_prefix,
+                .name = name,
+            });
+            w.printInstrs(&.{ ".quad 0x{[digits]s}", ".quad 0" }, .{ .digits = digits });
+        }
+    };
+
+    constant.single(as, "canonical_nan_bit", "0040" ++ "0000");
+    constant.single(as, "canonical_nan_mask", "FFC0" ++ "0000");
+    constant.single(as, "sign_bit", i32_sign_bit);
+
+    constant.double(as, "canonical_nan_bit", "0008" ++ "0000" ++ "0000" ++ "0000");
+    constant.double(as, "canonical_nan_mask", "FFF8" ++ "0000" ++ "0000" ++ "0000");
+    constant.double(as, "sign_bit", i64_sign_bit);
 
     as.write("\n.text\n");
 }
@@ -1605,20 +1626,8 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
     const r13 = Gpr.r13.withSize(size);
     const r14 = Gpr.r14.withSize(size);
     const sign_bit = switch (float_type) {
-        .f32 => "0x8000" ++ "0000",
-        .f64 => "0x8000" ++ "0000" ++ "0000" ++ "0000",
-    };
-    const non_sign_mask = switch (float_type) {
-        .f32 => "0x7FFF" ++ "FFFF",
-        .f64 => "0x7FFF" ++ "FFFF" ++ "FFFF" ++ "FFFF",
-    };
-    const canonical_nan_mask = switch (float_type) {
-        .f32 => "0xFFC0" ++ "0000",
-        .f64 => "0xFFF8" ++ "0000" ++ "0000" ++ "0000",
-    };
-    const canonical_nan_bit = switch (float_type) {
-        .f32 => "0x0040" ++ "0000",
-        .f64 => "0x0008" ++ "0000" ++ "0000" ++ "0000",
+        .f32 => "0x" ++ i32_sign_bit,
+        .f64 => "0x" ++ i64_sign_bit,
     };
 
     // Zig/LLVM uses vmovs(s|d) when targeting x86_64_v3
@@ -1686,7 +1695,15 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
         as.printInstrs(&.{
             "mov {[r13]f}, {[mask]s}",
             "and {[size]t} ptr [{[vsp]f} - 0x10], {[r13]f} # clear sign bit",
-        }, .{ .r13 = r13, .size = size, .vsp = Gpr.vsp, .mask = non_sign_mask });
+        }, .{
+            .r13 = r13,
+            .size = size,
+            .vsp = Gpr.vsp,
+            .mask = switch (float_type) {
+                .f32 => "0x7FFF" ++ "FFFF",
+                .f64 => "0x7FFF" ++ "FFFF" ++ "FFFF" ++ "FFFF",
+            },
+        });
         abs.jmpToNextHandler(as);
         abs.end(as);
     }
@@ -1726,7 +1743,7 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
                     "movap{[suffix]c} xmm1, xmm0",
                     "cmpunords{[suffix]c} xmm1, xmm0 # all 1's if output is NaN",
                     "andp{[suffix]c} xmm1, xmmword ptr " ++
-                        "[.L{[symbol_prefix]s}{[float]t}_canonical_nan_bit]",
+                        "[rip + .L{[symbol_prefix]s}{[float]t}_canonical_nan_bit]",
                     "orp{[suffix]c} xmm0, xmm1 # set canonical NaN bit",
                 }, .{
                     .suffix = float_suffix,
@@ -1831,16 +1848,14 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
             "mins{[float_suffix]c} xmm3, xmm0",
             "orp{[float_suffix]c} xmm2, xmm3 # handles non-NaN case correctly",
 
-            "mov {[r13]f}, {[canonical_nan_mask]s}",
-            "mov{[int_suffix]c} xmm3, {[r13]f} # canonical NaN mask",
+            "movap{[float_suffix]c} xmm3, [rip + .L{[symbol_prefix]s}{[float]t}_canonical_nan_mask]",
 
             "cmpords{[float_suffix]c} xmm4, xmm1 # all 1's if NaN was NOT present",
             "# mask of all 1's if no NaN, canonical_nan_mask if there is NaN",
             "orp{[float_suffix]c} xmm3, xmm4",
             "andp{[float_suffix]c} xmm2, xmm3 # If NaN, mask away non-canonical NaN bits",
 
-            "mov {[r13]f}, {[canonical_nan_bit]s}",
-            "mov{[int_suffix]c} xmm3, {[r13]f} # canonical NaN bit",
+            "movap{[float_suffix]c} xmm3, [rip + .L{[symbol_prefix]s}{[float]t}_canonical_nan_bit]",
             "andnp{[float_suffix]c} xmm4, xmm3 # canonical NaN bit if NaN is present",
             "# If NaNs are present, set the canonical NaN bit",
             "orp{[float_suffix]c} xmm2, xmm4",
@@ -1848,9 +1863,8 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
             "mov{[int_suffix]c} {[size]t} ptr [{[vsp]f} - 0x20], xmm2 # write result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
         }, .{
-            .r13 = r13,
-            .canonical_nan_mask = canonical_nan_mask,
-            .canonical_nan_bit = canonical_nan_bit,
+            .symbol_prefix = as.options.symbol_prefix,
+            .float = float_type,
             .int_suffix = int_suffix,
             .float_suffix = float_suffix,
             .size = size,
@@ -1864,16 +1878,15 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
         as.printInstrs(&.{
             "mov{[int_suffix]c} xmm0, {[size]t} ptr [{[vsp]f} - 0x10] # first",
             "mov{[int_suffix]c} xmm1, {[size]t} ptr [{[vsp]f} - 0x20] # second",
-            "movaps xmm2, xmm0",
-            "movaps xmm3, xmm1",
-            "movaps xmm4, xmm0",
+            "movap{[float_suffix]c} xmm2, xmm0",
+            "movap{[float_suffix]c} xmm3, xmm1",
+            "movap{[float_suffix]c} xmm4, xmm0",
             "maxs{[float_suffix]c} xmm2, xmm1",
             "maxs{[float_suffix]c} xmm3, xmm0",
             "orp{[float_suffix]c} xmm2, xmm3" ++
                 " # almost handles non-NaN case correctly, sign may be wrong",
 
-            "mov {[r13]f}, {[sign_bit]s}",
-            "mov{[int_suffix]c} xmm3, {[r13]f} # sign bit",
+            "movap{[float_suffix]c} xmm3, [rip + .L{[symbol_prefix]s}{[float]t}_sign_bit]",
             "movaps xmm5, xmm3",
             "andnp{[float_suffix]c} xmm3, xmm2 # remove sign bit",
 
@@ -1882,8 +1895,8 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
             "andp{[float_suffix]c} xmm4, xmm5 # final sign",
             "orp{[float_suffix]c} xmm3, xmm4 # apply correct sign bit",
 
-            "mov {[r13]f}, {[canonical_nan_mask]s}",
-            "mov{[int_suffix]c} xmm2, {[r13]f} # canonical NaN mask",
+            "movap{[float_suffix]c} xmm2, " ++
+                "[rip + .L{[symbol_prefix]s}{[float]t}_canonical_nan_mask]",
 
             "movaps xmm4, xmm0",
             "cmpords{[float_suffix]c} xmm4, xmm1 # all 1's if NaN was NOT present",
@@ -1891,8 +1904,7 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
             "orp{[float_suffix]c} xmm2, xmm4",
             "andp{[float_suffix]c} xmm3, xmm2 # If NaN, mask away non-canonical NaN bits",
 
-            "mov {[r13]f}, {[canonical_nan_bit]s}",
-            "mov{[int_suffix]c} xmm2, {[r13]f} # canonical NaN bit",
+            "movap{[float_suffix]c} xmm2, [rip + .L{[symbol_prefix]s}{[float]t}_canonical_nan_bit]",
             "andnp{[float_suffix]c} xmm4, xmm2 # canonical NaN bit if NaN is present",
             "# If NaNs are present, set the canonical NaN bit",
             "orp{[float_suffix]c} xmm3, xmm4",
@@ -1900,10 +1912,8 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
             "mov{[int_suffix]c} {[size]t} ptr [{[vsp]f} - 0x20], xmm3 # write result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # vsp",
         }, .{
-            .r13 = r13,
-            .sign_bit = sign_bit,
-            .canonical_nan_mask = canonical_nan_mask,
-            .canonical_nan_bit = canonical_nan_bit,
+            .symbol_prefix = as.options.symbol_prefix,
+            .float = float_type,
             .int_suffix = int_suffix,
             .float_suffix = float_suffix,
             .size = size,
