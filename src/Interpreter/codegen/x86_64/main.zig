@@ -1724,7 +1724,7 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
             if (mode != .nearest) {
                 as.printInstrs(&.{
                     "movap{[suffix]c} xmm1, xmm0",
-                    "cmpunordss xmm1, xmm0 # all 1's if output is NaN",
+                    "cmpunords{[suffix]c} xmm1, xmm0 # all 1's if output is NaN",
                     "andp{[suffix]c} xmm1, xmmword ptr " ++
                         "[.L{[symbol_prefix]s}{[float]t}_canonical_nan_bit]",
                     "orp{[suffix]c} xmm0, xmm1 # set canonical NaN bit",
