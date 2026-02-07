@@ -1069,11 +1069,6 @@ const i64_opcode_handlers = integerOpcodeHandlers(i64);
 fn floatOpcodeHandlers(comptime F: type) type {
     return struct {
         const value_field = @field(Value.Tag, @typeName(F));
-        const Bits = std.meta.Int(.unsigned, @typeInfo(F).float.bits);
-
-        const canonical_nan_bit: Bits = 1 << (std.math.floatMantissaBits(F) - 1);
-
-        const precise_int_limit = 1 << (std.math.floatMantissaBits(F) + 1);
 
         const operators = struct {
             fn convert_s(i: anytype) !F {
@@ -1124,93 +1119,12 @@ fn floatOpcodeHandlers(comptime F: type) type {
                 return -z;
             }
 
-            inline fn makeArithmeticNan(z: F) F {
-                return if (std.math.isNan(z))
-                    @bitCast(@as(Bits, @bitCast(z)) | canonical_nan_bit)
-                else
-                    z;
-            }
+            const rounding = @import("../../round.zig").operations(F);
 
-            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-fceil
-            fn ceil(z: F) F {
-                return @ceil(makeArithmeticNan(z));
-            }
-
-            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-ffloor
-            fn floor(z: F) F {
-                // TODO: Consistent rounding behavior for `floor`
-                // On `x86_64-linux`, uses `vroundss $0x11`
-                // On `x86_64-windows`, uses `vroundss $0x9`
-                // Correct rounding on windows on higher versions (e.g. x86-64-v2)
-                return @floor(makeArithmeticNan(z));
-            }
-
-            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-ftrunc
-            fn trunc(z: F) F {
-                const f = makeArithmeticNan(z);
-                return if (f <= -0.0) @ceil(f) else @floor(f);
-            }
-
-            /// https://webassembly.github.io/spec/core/exec/numerics.html#op-fnearest
-            fn nearest(f: F) F {
-                // WASM requires rounds-to-nearest-ties-even
-
-                // '@round' compiles to 'llvm.round.*', but what is needed is 'llvm.roundeven.*'
-                // See also:
-                // - https://github.com/ziglang/zig/issues/767
-                // - https://github.com/ziglang/zig/issues/2535
-
-                // Caution, might get error: "Invalid user of intrinsic instruction!"
-                // extern fn @"llvm.roundeven.f32"(z: f32) callconv(.c) f32;
-                // extern fn @"llvm.roundeven.f64"(z: f64) callconv(.c) f64;
-
-                // Also seems to be available in C23, but that's too new:
-                // extern "c" fn roundevenf(arg: f32);
-                // extern "c" fn roundevenf(arg: f32);
-
-                const z = makeArithmeticNan(f);
-
-                if (std.math.isNan(z) or
-                    // std.math.isInf(z) or // normal case handles infinity inputs
-                    std.math.isPositiveZero(z) or
-                    std.math.isNegativeZero(z))
-                {
-                    return z;
-                } else if (0 < z and z <= 0.5) {
-                    return 0.0;
-                } else if (-0.5 <= z and z < 0) {
-                    return -0.0;
-                }
-
-                const int_away_from_0 = @round(z);
-                const int_to_0 = @round(if (std.math.signbit(z)) z + 1.0 else z - 1.0);
-
-                const dist_away_from_0 = @abs(int_away_from_0 - z);
-                const dist_to_0 = @abs(int_to_0 - z);
-
-                if (dist_away_from_0 < dist_to_0) {
-                    return int_away_from_0;
-                } else if (dist_to_0 < dist_away_from_0) {
-                    return dist_to_0;
-                } else if (-@as(F, precise_int_limit) < z and z < @as(F, precise_int_limit)) {
-                    const RoundedInt = std.math.IntFittingRange(-precise_int_limit, precise_int_limit);
-
-                    // Both candidates are the same distance from `z`, so pick the even one
-                    const rounded_away_from_0: RoundedInt = @intFromFloat(int_away_from_0);
-                    const rounded_to_0: RoundedInt = @intFromFloat(int_to_0);
-                    std.debug.assert(rounded_away_from_0 != rounded_to_0);
-
-                    if (@rem(rounded_away_from_0, 2) == 0) {
-                        std.debug.assert(@rem(rounded_to_0, 2) != 0);
-                        return int_away_from_0;
-                    } else {
-                        return int_to_0;
-                    }
-                } else {
-                    std.debug.assert(int_away_from_0 == int_to_0);
-                    return int_away_from_0;
-                }
-            }
+            const ceil = rounding.ceil;
+            const floor = rounding.floor;
+            const trunc = rounding.trunc;
+            const nearest = rounding.nearest;
 
             /// https://webassembly.github.io/spec/core/exec/numerics.html#op-fsqrt
             fn sqrt(z: F) F {
