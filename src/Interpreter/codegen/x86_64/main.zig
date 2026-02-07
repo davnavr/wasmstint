@@ -1754,12 +1754,14 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
 
             as.writeInstrs(&.{"# stack is 16-byte aligned at this point"});
             if (mode != .nearest) {
-                as.printInstrs(&.{"call {[mode]t}{[func_suffix]c}"}, .{
+                as.printInstrs(&.{"call {[mode]t}{[func_suffix]s} # result in xmm0"}, .{
                     .mode = (mode),
                     .func_suffix = float_type.cSuffix(),
                 });
             } else {
-                as.printInstrs(&.{"call {[symbol_prefix]s}roundeven.{[float]t} # call into Zig"}, .{
+                as.printInstrs(&.{
+                    "call {[symbol_prefix]s}roundeven.{[float]t} # call into Zig, result in xmm0",
+                }, .{
                     .symbol_prefix = as.options.symbol_prefix,
                     .float = float_type,
                 });

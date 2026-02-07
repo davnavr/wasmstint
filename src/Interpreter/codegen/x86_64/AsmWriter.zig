@@ -681,10 +681,10 @@ pub const FloatType = enum {
         };
     }
 
-    pub fn cSuffix(float_type: FloatType) u7 {
+    pub fn cSuffix(float_type: FloatType) []const u8 {
         return switch (float_type) {
-            .f32 => 'f',
-            .f64 => 'l',
+            .f32 => "f",
+            .f64 => "",
         };
     }
 };
