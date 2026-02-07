@@ -1715,23 +1715,31 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
             });
         } else {
             // calls into libc/compiler_rt
-            as.printInstrs(&.{
-                "movs{[suffix]c} xmm0, {[size]t} ptr [{[vsp]f} - 0x10] # operand",
-                "movap{[suffix]c} xmm1, xmm0",
-                "cmpunordss xmm1, xmm0 # all 1's if output is NaN",
-                "andp{[suffix]c} xmm1, xmmword ptr " ++
-                    "[.L{[symbol_prefix]s}{[float]t}_canonical_nan_bit]",
-                "orp{[suffix]c} xmm0, xmm1 # set canonical NaN bit",
-                "# callee-saved registers",
-            }, .{
+            as.printInstrs(&.{"movs{[suffix]c} xmm0, {[size]t} ptr [{[vsp]f} - 0x10] # operand"}, .{
                 .suffix = float_suffix,
                 .size = size,
                 .vsp = Gpr.vsp,
-                .float = float_type,
-                .symbol_prefix = as.options.symbol_prefix,
             });
 
-            const callee_saved_registers = [3]Gpr{ .vsp, .fuel, .module };
+            if (mode != .nearest) {
+                as.printInstrs(&.{
+                    "movap{[suffix]c} xmm1, xmm0",
+                    "cmpunordss xmm1, xmm0 # all 1's if output is NaN",
+                    "andp{[suffix]c} xmm1, xmmword ptr " ++
+                        "[.L{[symbol_prefix]s}{[float]t}_canonical_nan_bit]",
+                    "orp{[suffix]c} xmm0, xmm1 # set canonical NaN bit",
+                }, .{
+                    .suffix = float_suffix,
+                    .float = float_type,
+                    .symbol_prefix = as.options.symbol_prefix,
+                });
+            } else {
+                as.writeInstrs(&.{"# NaN canonicalization handled in runtime helper function"});
+            }
+
+            as.writeInstrs(&.{"# callee-saved registers"});
+
+            const callee_saved_registers = [3]Gpr{ .vip, .fuel, .module };
             for (Gpr.system_v_callee_saved[0..3], &callee_saved_registers) |dst, src| {
                 as.printInstrs(&.{"mov {[dst]f}, {[src]f}"}, .{ .dst = dst, .src = src });
             }
@@ -1739,7 +1747,7 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
             as.writeInstrs(&.{
                 "# save scratch registers, stack is not 16-byte aligned on opcode handler entry",
             });
-            const saved_scratch_registers = [5]Gpr{ .vip, .locals, .mems, .interp, .eip };
+            const saved_scratch_registers = [5]Gpr{ .vsp, .locals, .mems, .interp, .eip };
             for (&saved_scratch_registers) |reg| {
                 as.printInstrs(&.{"push {f}"}, .{reg});
             }
@@ -1747,28 +1755,14 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
             as.writeInstrs(&.{"# stack is 16-byte aligned at this point"});
             if (mode != .nearest) {
                 as.printInstrs(&.{"call {[mode]t}{[func_suffix]c}"}, .{
-                    .mode = mode,
+                    .mode = (mode),
                     .func_suffix = float_type.cSuffix(),
                 });
             } else {
-                comptime {
-                    std.debug.assert(callee_saved_registers[0].tag == Gpr.vsp.tag);
-                    std.debug.assert(Gpr.system_v_callee_saved[0].tag == Gpr.r15.tag);
-                }
-
-                // roundevenf/roundeevenl (introduced in C23) is unavailable.
-                as.printInstrs(
-                    &.{
-                        // vsp in r15
-                        "ud2 # TODO: round",
-                        // "call round{[suffix]c}",
-                        // // TODO: move
-                        // "call round{[suffix]c}",
-                    },
-                    // .{ .mode = mode, .suffix = float_type.cSuffix() },
-                    .{},
-                );
-                // TODO: do two `round` trick
+                as.printInstrs(&.{"call {[symbol_prefix]s}roundeven.{[float]t} # call into Zig"}, .{
+                    .symbol_prefix = as.options.symbol_prefix,
+                    .float = float_type,
+                });
             }
 
             for (0..saved_scratch_registers.len) |i| {
@@ -1782,12 +1776,10 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
                 as.printInstrs(&.{"mov {[dst]f}, {[src]f}"}, .{ .dst = dst, .src = src });
             }
 
-            if (mode != .nearest) {
-                as.printInstrs(
-                    &.{"movs{[suffix]c} {[size]t} ptr [{[vsp]f} - 0x10], xmm0 # store result"},
-                    .{ .suffix = float_suffix, .size = size, .vsp = Gpr.vsp },
-                );
-            }
+            as.printInstrs(
+                &.{"movs{[suffix]c} {[size]t} ptr [{[vsp]f} - 0x10], xmm0 # store result"},
+                .{ .suffix = float_suffix, .size = size, .vsp = Gpr.vsp },
+            );
         }
         op.jmpToNextHandler(as);
         op.end(as);

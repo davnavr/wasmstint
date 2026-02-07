@@ -614,6 +614,27 @@ fn tailCallWithinWasmIndirect(
     );
 }
 
+fn @"roundeven.f32"(
+    z: f32, // xmm0
+) callconv(sysvcc) f32 {
+    return round.operations(f32).nearest(z);
+}
+
+fn @"roundeven.f64"(
+    z: f64, // xmm0
+) callconv(sysvcc) f64 {
+    return round.operations(f64).nearest(z);
+}
+
+comptime {
+    if (!std.Target.x86.featureSetHas(builtin.cpu.features, .sse4_1)) {
+        for (&[_][]const u8{ "f32", "f64" }) |ty| {
+            const name = "roundeven." ++ ty;
+            @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
+        }
+    }
+}
+
 const ConstructedFuncRef = extern struct {
     func: runtime.FuncRef.Nullable, // rax
     current_module: runtime.ModuleInst, // stays in rdx
@@ -1010,15 +1031,19 @@ comptime {
 
     for (&[_][]const u8{
         "interruptOutOfFuel",
+
         "returnFromWasm",
         "invokeWithinWasm",
         "invokeWithinWasmIndirect",
         "tailCallWithinWasm",
         "tailCallWithinWasmIndirect",
+
         "constructFuncRef",
+
         "memoryGrowReallocate",
         "tableGrowReallocate",
         "tableInit",
+
         "trapUnreachable",
         "trapIntegerDivisionByZero",
         "trapIntegerOverflow",
@@ -1044,6 +1069,7 @@ const opcodes = @import("opcodes");
 const Module = @import("../../Module.zig");
 const Interpreter = @import("../../Interpreter.zig");
 const runtime = @import("../../runtime.zig");
+const round = @import("../../round.zig");
 
 const Instr = @import("../Instr.zig");
 const Stack = @import("../Stack.zig");
