@@ -25,10 +25,10 @@ pub fn operations(comptime F: type) type {
         const BitInt = std.meta.Int(.unsigned, bit_width);
         const ExponentInt = std.math.FloatRepr(Scalar).Exponent;
 
-        const canonical_nan_bit_pattern: BitInt = 1 << (std.math.floatMantissaBits(F) - 1);
-        const precise_int_limit_value = 1 << (std.math.floatMantissaBits(F) + 1);
+        const canonical_nan_bit_pattern: BitInt = 1 << (std.math.floatMantissaBits(Scalar) - 1);
+        const precise_int_limit_value = 1 << (std.math.floatMantissaBits(Scalar) + 1);
         /// Above (or below if negative) this limit, only integers are representable.
-        const precise_int_limit: F = precise_int_limit_value;
+        const precise_int_limit: Scalar = precise_int_limit_value;
 
         inline fn splat(comptime T: type, value: T) @Vector(vector_len, T) {
             return @splat(value);
@@ -69,7 +69,7 @@ pub fn operations(comptime F: type) type {
         /// is not relied on here.
         inline fn result(z: Vector) F {
             const f = select(
-                F,
+                Scalar,
                 z != z, // Is this a NaN?
                 setCanonicalNanBit(z),
                 z,
@@ -93,7 +93,7 @@ pub fn operations(comptime F: type) type {
             const f = input(z);
             return result(
                 select(
-                    F,
+                    Scalar,
                     f <= splat(Scalar, -0.0),
                     @ceil(f),
                     @floor(f),
