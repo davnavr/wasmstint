@@ -1738,22 +1738,6 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
                 .vsp = Gpr.vsp,
             });
 
-            if (mode != .nearest) {
-                as.printInstrs(&.{
-                    "movap{[suffix]c} xmm1, xmm0",
-                    "cmpunords{[suffix]c} xmm1, xmm0 # all 1's if output is NaN",
-                    "andp{[suffix]c} xmm1, xmmword ptr " ++
-                        "[rip + .L{[symbol_prefix]s}{[float]t}_canonical_nan_bit]",
-                    "orp{[suffix]c} xmm0, xmm1 # set canonical NaN bit",
-                }, .{
-                    .suffix = float_suffix,
-                    .float = float_type,
-                    .symbol_prefix = as.options.symbol_prefix,
-                });
-            } else {
-                as.writeInstrs(&.{"# NaN canonicalization handled in runtime helper function"});
-            }
-
             as.writeInstrs(&.{"# callee-saved registers"});
 
             const callee_saved_registers = [3]Gpr{ .vip, .fuel, .module };
@@ -1771,13 +1755,24 @@ fn defineFloatOpcodeHandlers(as: *AsmWriter, float_type: AsmWriter.FloatType) vo
 
             as.writeInstrs(&.{"# stack is 16-byte aligned at this point"});
             if (mode != .nearest) {
-                as.printInstrs(&.{"call {[mode]t}{[func_suffix]s} # result in xmm0"}, .{
+                as.printInstrs(&.{
+                    "call {[mode]t}{[func_suffix]s} # result in xmm0",
+                    "movap{[suffix]c} xmm1, xmm0",
+                    "cmpunords{[suffix]c} xmm1, xmm0 # all 1's if output is NaN",
+                    "andp{[suffix]c} xmm1, xmmword ptr " ++
+                        "[rip + .L{[symbol_prefix]s}{[float]t}_canonical_nan_bit]",
+                    "orp{[suffix]c} xmm0, xmm1 # set canonical NaN bit",
+                }, .{
                     .mode = (mode),
                     .func_suffix = float_type.cSuffix(),
+                    .suffix = float_suffix,
+                    .float = float_type,
+                    .symbol_prefix = as.options.symbol_prefix,
                 });
             } else {
                 as.printInstrs(&.{
                     "call {[symbol_prefix]s}roundeven.{[float]t} # call into Zig, result in xmm0",
+                    "# NaN canonicalization handled in runtime helper function",
                 }, .{
                     .symbol_prefix = as.options.symbol_prefix,
                     .float = float_type,
