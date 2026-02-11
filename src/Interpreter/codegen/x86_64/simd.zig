@@ -2408,33 +2408,42 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         min.end(as);
     }
 
-    // pminsb (for i8x16) & pminsd (for i32x4) requires SSE4_1
-    for (&[_]FDPrefixOpcode{
-        .@"i8x16.min_s",
-        .@"i8x16.max_s",
-        .@"i32x4.min_s",
-    }) |opcode| {
-        var min = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
+    for (&[_]struct { FDPrefixOpcode, []const u8 }{
+        .{ .@"i8x16.min_s", "pminsb" },
+        .{ .@"i8x16.max_s", "pmaxsb" },
+        .{ .@"i32x4.min_s", "pminsd" },
+    }) |info| {
+        const opcode, const instr = info;
+        var min = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
         const interp = IntInterp.fromOpcodeName(opcode);
         const opcode_name = @tagName(opcode);
         const is_max = std.mem.eql(u8, "max", opcode_name[opcode_name.len - 5 ..][0..3]);
-        as.printInstrs(&[_][]const u8{
-            "# Taken from what LLVM emits for Zig's @min/@max builtin",
-            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
-            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
-            "movdqa xmm2, {[cmp_mov_src]s}",
-            "pcmpgt{[suffix]c} xmm2, {[cmp_reg]s} # lane set to 1's if operand 1 > operand 0",
-            "pand xmm0, xmm2 # only keep lane in operand 0 if it is less than value in operand 1",
-            "pandn xmm2, xmm1",
-            "por xmm0, xmm2",
+        if (as.hasFeature(.sse4_1)) {
+            as.printInstrs(&.{
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "{[instr]s} xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+            }, .{ .vsp = Gpr.vsp, .instr = instr });
+        } else {
+            as.printInstrs(&.{
+                "# Taken from what LLVM emits for Zig's @min/@max builtin",
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+                "movdqa xmm2, {[cmp_mov_src]s}",
+                "pcmpgt{[suffix]c} xmm2, {[cmp_reg]s} # lane set to 1's if operand 1 > operand 0",
+                "pand xmm0, xmm2 # only keep lane in operand 0 if it is less than value in operand 1",
+                "pandn xmm2, xmm1",
+                "por xmm0, xmm2",
+            }, .{
+                .vsp = Gpr.vsp,
+                .cmp_mov_src = if (is_max) "xmm0" else "xmm1",
+                .cmp_reg = if (is_max) "xmm1" else "xmm0",
+                .suffix = interp.suffix(),
+            });
+        }
+        as.printInstrs(&.{
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
-        }, .{
-            .vsp = Gpr.vsp,
-            .cmp_mov_src = if (is_max) "xmm0" else "xmm1",
-            .cmp_reg = if (is_max) "xmm1" else "xmm0",
-            .suffix = interp.suffix(),
-        });
+        }, .{ .vsp = Gpr.vsp });
         min.jmpToNextHandler(as);
         min.end(as);
     }
