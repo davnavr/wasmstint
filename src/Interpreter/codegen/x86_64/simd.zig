@@ -2646,8 +2646,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         abs.end(as);
     }
     {
-        // PABSQ requires SSSE3
-        var abs = as.defineOpcodeHandler(.{ .fd = .@"i64x2.abs" }, .@"32");
+        var abs = as.defineOpcodeHandler(.{ .fd = .@"i64x2.abs" }, .@"64");
         as.printInstrs(&[_][]const u8{
             "# Taken from what LLVM emits for Zig's @abs builtin",
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
@@ -2662,51 +2661,86 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     }
 
     {
-        // pshufb requires SSSE3
         var popcnt = as.defineOpcodeHandler(.{ .fd = .@"i8x16.popcnt" }, .@"64");
-        // Maybe this is faster: https://github.com/llvm/llvm-project/issues/79823
         as.write(
             \\.section .rodata.cst16, "aM", @progbits, 16
             \\.p2align 4, 0x00
             \\
         );
-        var const_0 = as.label(&.{"const"});
-        const_0.place(as);
-        as.writeInstrs(&.{".skip 16, 0x55"});
-
-        var const_1 = as.label(&.{"const"});
-        const_1.place(as);
-        as.writeInstrs(&.{".skip 16, 0x33"});
-
-        var const_2 = as.label(&.{"const"});
-        const_2.place(as);
+        var low_nibbles_mask = as.label(&.{"low_nibbles_mask"});
+        low_nibbles_mask.place(as);
         as.writeInstrs(&.{".skip 16, 0x0F"});
 
-        as.write("\n.text\n");
-        as.printInstrs(&[_][]const u8{
-            "# Taken from what LLVM emits for Zig's @popcnt builtin",
-            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand",
-            "movdqa xmm0, xmm1",
-            "psrlw xmm0, 1",
-            "pand xmm0, xmmword ptr [rip + {[const_0]f}]",
-            "psubb xmm1, xmm0",
-            "movdqa xmm0, xmmword ptr [rip + {[const_1]f}]",
-            "movdqa xmm2, xmm1",
-            "pand xmm2, xmm0",
-            "psrlw xmm1, 2",
-            "pand xmm1, xmm0",
-            "paddb xmm1, xmm2",
-            "movdqa xmm0, xmm1",
-            "psrlw xmm0, 4",
-            "paddb xmm0, xmm1",
-            "pand xmm0, xmmword ptr [rip + {[const_2]f}]",
-            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{
-            .vsp = Gpr.vsp,
-            .const_0 = const_0,
-            .const_1 = const_1,
-            .const_2 = const_2,
-        });
+        if (as.hasFeature(.ssse3)) {
+            var popcnt_mask = as.label(&.{"nibble_popcnt_mask"});
+            popcnt_mask.place(as);
+            as.write(".byte");
+            for (0..16) |b| {
+                if (b > 0) {
+                    as.write(",");
+                }
+                as.print(" {d}", .{@popCount(b)});
+            }
+
+            as.write("\n\n.text\n");
+            as.printInstrs(&.{
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
+                "movdqa xmm1, xmmword ptr [rip + {[popcnt_mask]f}]",
+
+                "movdqa xmm2, xmm0",
+                "pand xmm2, xmmword ptr [rip + {[low_nibbles_mask]f}] # low nibbles",
+                "movdqa xmm3, xmm1",
+                "pshufb xmm3, xmm2 # popcnt for low nibble",
+
+                "movdqa xmm4, xmm0",
+                "psrlw xmm4, 4",
+                "pand xmm4, xmmword ptr [rip + {[low_nibbles_mask]f}] # high nibbles",
+                "movdqa xmm5, xmm1",
+                "pshufb xmm5, xmm4 # popcnt for high nibble",
+
+                "paddb xmm3, xmm5",
+                "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm3 # store result",
+            }, .{
+                .vsp = Gpr.vsp,
+                .low_nibbles_mask = low_nibbles_mask,
+                .popcnt_mask = popcnt_mask,
+            });
+        } else {
+            // Maybe this is faster: https://github.com/llvm/llvm-project/issues/79823
+            var const_0 = as.label(&.{"const"});
+            const_0.place(as);
+            as.writeInstrs(&.{".skip 16, 0x55"});
+
+            var const_1 = as.label(&.{"const"});
+            const_1.place(as);
+            as.writeInstrs(&.{".skip 16, 0x33"});
+
+            as.write("\n.text\n");
+            as.printInstrs(&[_][]const u8{
+                "# Taken from what LLVM emits for Zig's @popcnt builtin",
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand",
+                "movdqa xmm0, xmm1",
+                "psrlw xmm0, 1",
+                "pand xmm0, xmmword ptr [rip + {[const_0]f}]",
+                "psubb xmm1, xmm0",
+                "movdqa xmm0, xmmword ptr [rip + {[const_1]f}]",
+                "movdqa xmm2, xmm1",
+                "pand xmm2, xmm0",
+                "psrlw xmm1, 2",
+                "pand xmm1, xmm0",
+                "paddb xmm1, xmm2",
+                "movdqa xmm0, xmm1",
+                "psrlw xmm0, 4",
+                "paddb xmm0, xmm1",
+                "pand xmm0, xmmword ptr [rip + {[low_nibbles_mask]f}]",
+                "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+            }, .{
+                .vsp = Gpr.vsp,
+                .const_0 = const_0,
+                .const_1 = const_1,
+                .low_nibbles_mask = low_nibbles_mask,
+            });
+        }
         popcnt.jmpToNextHandler(as);
         popcnt.end(as);
     }
