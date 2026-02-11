@@ -2343,19 +2343,27 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         mul.end(as);
     }
     {
-        // PMULLD requires SSE4_1
         var mul = as.defineOpcodeHandler(.{ .fd = .@"i32x4.mul" }, .@"64");
+        if (as.hasFeature(.sse4_1)) {
+            as.printInstrs(&.{
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+                "pmulld xmm1, xmmword ptr [{[vsp]f} - 0x20]",
+            }, .{ .vsp = Gpr.vsp });
+        } else {
+            as.printInstrs(&.{
+                "# Taken from LLVM output for Zig's *% operator on @Vector(4, i32)",
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+                "pshufd xmm2, xmm1, 0xF5 # only odd lanes from operand 0?",
+                "pmuludq xmm1, xmm0 # product of odd lanes?",
+                "pshufd xmm1, xmm1, 0xE8",
+                "pshufd xmm0, xmm0, 0xF5 # only odd lanes from operand 1?",
+                "pmuludq xmm0, xmm2",
+                "pshufd xmm0, xmm0, 0xE8",
+                "punpckldq xmm1, xmm0",
+            }, .{ .vsp = Gpr.vsp });
+        }
         as.printInstrs(&.{
-            "# Taken from LLVM output for Zig's *% operator on @Vector(4, i32)",
-            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
-            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
-            "pshufd xmm2, xmm1, 0xF5 # only odd lanes from operand 0?",
-            "pmuludq xmm1, xmm0 # product of odd lanes?",
-            "pshufd xmm1, xmm1, 0xE8",
-            "pshufd xmm0, xmm0, 0xF5 # only odd lanes from operand 1?",
-            "pmuludq xmm0, xmm2",
-            "pshufd xmm0, xmm0, 0xE8",
-            "punpckldq xmm1, xmm0",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm1 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
         }, .{ .vsp = Gpr.vsp });
