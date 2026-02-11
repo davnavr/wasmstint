@@ -2164,12 +2164,38 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     }) |opcode| {
         var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
         const interp = IntInterp.fromOpcodeName(opcode);
+        const shift_mask = interp.bitSize() - 1;
+        if (opcode == .@"i64x2.shr_s" and !as.hasFeature(.sse4_1)) {
+            // Scalar instructions used, since psraq is unavailable
+            as.printInstrs(&.{
+                "mov r15, rcx # preserve fuel",
+
+                "mov ecx, dword ptr [{[vsp]f} - 0x10] # amt to shift",
+                "and ecx, 0x{[shift_mask]X} # mod 2 of shift amt",
+
+                "mov r11, qword ptr [{[vsp]f} - 0x20] # low i64 to shift",
+                "mov r13, qword ptr [{[vsp]f} - 0x20 + 8] # high i64 to shift",
+
+                "sar r11, cl",
+                "sar r13, cl",
+
+                "mov rcx, r15 # restore fuel",
+
+                "mov qword ptr [{[vsp]f} - 0x20], r11 # store low result",
+                "mov qword ptr [{[vsp]f} - 0x20 + 8], r13 # store high result",
+                "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+            }, .{ .vsp = Gpr.vsp, .shift_mask = shift_mask });
+            op.jmpToNextHandler(as);
+            op.end(as);
+            continue;
+        }
+
         as.printInstrs(&.{
-            "mov r14d, dword ptr [{[vsp]f} - 0x10] # amt to shift",
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # vector to shift",
+            "mov r14d, dword ptr [{[vsp]f} - 0x10] # amt to shift",
             "and r14d, 0x{[shift_mask]X} # mod 2 of shift amt",
             "movd xmm1, r14d # shift amount in bottom 64 bits",
-        }, .{ .vsp = Gpr.vsp, .shift_mask = interp.bitSize() - 1 });
+        }, .{ .vsp = Gpr.vsp, .shift_mask = shift_mask });
         switch (opcode) {
             // x86-64 has no packed shift instruction for bytes
             .@"i8x16.shl" => as.printInstrs(&.{
@@ -2178,7 +2204,8 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
                 "pand xmm2, xmmword ptr [rip + .L{[symbol_prefix]s}i8x16_even_lanes]" ++
                     " # result even lanes",
                 "movdqa xmm3, xmmword ptr [rip + .L{[symbol_prefix]s}i8x16_odd_lanes]",
-                "psllw xmm3, xmm1 # mask for odd lanes", // vpsllw xmm1, xmmword ptr [rip + i8x16_odd_lanes], xmm2
+                // vpsllw xmm1, xmmword ptr [rip + i8x16_odd_lanes], xmm2
+                "psllw xmm3, xmm1 # mask for odd lanes",
                 "pand xmm0, xmm3 # result odd lanes",
                 "por xmm0, xmm2",
             }, .{ .symbol_prefix = symbol_prefix }),
@@ -2214,21 +2241,23 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
             .@"i32x4.shr_u" => as.writeInstrs(&.{"psrld xmm0, xmm1"}),
 
             .@"i64x2.shl" => as.writeInstrs(&.{"psllq xmm0, xmm1"}),
-            // .@"i64x2.shr_s" => as.writeInstrs(&.{"vpsraq xmm0, xmm1"}), // AVX512F?
-            .@"i64x2.shr_s" => as.printInstrs(&.{
-                "movdqa xmm2, xmmword ptr [rip + .L{[symbol_prefix]s}i64x2_sign_bits]",
-                "movdqa xmm3, xmm2",
-                "pand xmm2, xmm0 # sign bits",
-                "psrlq xmm0, xmm1 # logical shift",
-                // Requires SSE4.1
-                "pcmpeqq xmm2, xmm3 # all ones if sign bit is set, all zeroes otherwise",
-                "movdqa xmm5, xmm2",
-                "psrlq xmm2, xmm1 # logical shift of sign bits",
-                "pcmpeqq xmm4, xmm4 # all ones",
-                "pxor xmm2, xmm4 # bitwise NOT of sign bits to get shifted-in ones",
-                "pand xmm2, xmm5 # shifted ones bits if sign bit is set, all zeroes otherwise",
-                "por xmm0, xmm2",
-            }, .{ .symbol_prefix = symbol_prefix }),
+            .@"i64x2.shr_s" => {
+                // vpsravq requires AVX2
+                std.debug.assert(as.hasFeature(.sse4_1));
+                as.printInstrs(&.{
+                    "movdqa xmm2, xmmword ptr [rip + .L{[symbol_prefix]s}i64x2_sign_bits]",
+                    "movdqa xmm3, xmm2",
+                    "pand xmm2, xmm0 # sign bits",
+                    "psrlq xmm0, xmm1 # logical shift",
+                    "pcmpeqq xmm2, xmm3 # all ones if sign bit is set, all zeroes otherwise",
+                    "movdqa xmm5, xmm2",
+                    "psrlq xmm2, xmm1 # logical shift of sign bits",
+                    "pcmpeqq xmm4, xmm4 # all ones",
+                    "pxor xmm2, xmm4 # bitwise NOT of sign bits to get shifted-in ones",
+                    "pand xmm2, xmm5 # shifted ones bits if sign bit is set, all zeroes otherwise",
+                    "por xmm0, xmm2",
+                }, .{ .symbol_prefix = symbol_prefix });
+            },
             .@"i64x2.shr_u" => as.writeInstrs(&.{"psrlq xmm0, xmm1"}),
 
             else => unreachable,
