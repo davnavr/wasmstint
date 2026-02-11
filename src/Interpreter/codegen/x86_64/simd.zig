@@ -2371,7 +2371,6 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         mul.end(as);
     }
     {
-        // vpmullq requires AVX512?
         var mul = as.defineOpcodeHandler(.{ .fd = .@"i64x2.mul" }, .@"64");
         as.printInstrs(&.{
             "# smaller code size if regular instructions are used",
@@ -2616,24 +2615,33 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
                     " # if value was negative, pick the positive version, otherwise keep it",
             }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix(), .cmp_instr = sse2_instr });
         }
-        as.printInstrs(&[_][]const u8{
-            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp });
+        as.printInstrs(
+            &.{"movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result"},
+            .{ .vsp = Gpr.vsp },
+        );
         abs.jmpToNextHandler(as);
         abs.end(as);
     }
     {
-        // PABSD requires SSSE3
         var abs = as.defineOpcodeHandler(.{ .fd = .@"i32x4.abs" }, .@"32");
-        as.printInstrs(&[_][]const u8{
-            "# Taken from what LLVM emits for Zig's @abs builtin",
-            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
-            "movdqa xmm1, xmm0",
-            "psrad xmm1, 31 # obtain sign bits, lane is all 1's if value was negative",
-            "pxor xmm0, xmm1",
-            "psubd xmm0, xmm1",
-            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp });
+        if (as.hasFeature(.ssse3)) {
+            as.printInstrs(&.{
+                "pabsd xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            }, .{ .vsp = Gpr.vsp });
+        } else {
+            as.printInstrs(&[_][]const u8{
+                "# Taken from what LLVM emits for Zig's @abs builtin",
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+                "movdqa xmm1, xmm0",
+                "psrad xmm1, 31 # obtain sign bits, lane is all 1's if value was negative",
+                "pxor xmm0, xmm1",
+                "psubd xmm0, xmm1",
+            }, .{ .vsp = Gpr.vsp });
+        }
+        as.printInstrs(
+            &.{"movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result"},
+            .{ .vsp = Gpr.vsp },
+        );
         abs.jmpToNextHandler(as);
         abs.end(as);
     }
