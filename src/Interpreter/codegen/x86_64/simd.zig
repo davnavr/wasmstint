@@ -1732,7 +1732,7 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         as.printInstrs(&.{"movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20]"}, .{ .vsp = Gpr.vsp });
         if (as.hasFeature(.sse4_1)) {
             as.printInstrs(&.{
-                "pcmpeqq xmm0, xmmword ptr [{[vsp]f} - 0x10] # requires SSE4.1",
+                "pcmpeqq xmm0, xmmword ptr [{[vsp]f} - 0x10]",
             }, .{ .vsp = Gpr.vsp });
         } else {
             as.printInstrs(&.{
@@ -1766,14 +1766,22 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     }
 
     {
-        // pcmpeqq requires SSE4_1
         var ne = as.defineOpcodeHandler(.{ .fd = .@"i64x2.ne" }, .@"32");
+        if (as.hasFeature(.sse4_1)) {
+            as.printInstrs(&.{
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20]",
+                "pcmpeqq xmm1, xmmword ptr [{[vsp]f} - 0x10]",
+            }, .{ .vsp = Gpr.vsp });
+        } else {
+            as.printInstrs(&.{
+                "# Taken from LLVM output for Zig == operator",
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20]",
+                "pcmpeqd xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+                "pshufd xmm1, xmm0, 0xB1",
+                "pand xmm1, xmm0",
+            }, .{ .vsp = Gpr.vsp });
+        }
         as.printInstrs(&.{
-            "# Taken from LLVM output for Zig == operator",
-            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20]",
-            "pcmpeqd xmm0, xmmword ptr [{[vsp]f} - 0x10]",
-            "pshufd xmm1, xmm0, 0xB1",
-            "pand xmm1, xmm0",
             "pcmpeqd xmm0, xmm0 # all 1's",
             "pxor xmm0, xmm1 # bitwise NOT",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
