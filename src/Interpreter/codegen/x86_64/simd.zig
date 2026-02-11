@@ -1297,19 +1297,122 @@ fn defineFloatOpcodes(as: *AsmWriter) void {
     }) |opcode| {
         var op = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
         const interp = FloatInterp.fromOpcodeName(opcode);
-        const rounding_mode = std.meta.stringToEnum(
-            AsmWriter.RoundingControl,
-            @tagName(opcode)[6..],
-        ).?;
-        as.printInstrs(&.{
-            "roundp{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10], 0x{[rounding_mode]X}" ++
-                " # TODO: Requires SSE4.1",
-            "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{
-            .suffix = interp.suffix(),
-            .vsp = Gpr.vsp,
-            .rounding_mode = 0b1000 | @as(u8, @intFromEnum(rounding_mode)),
-        });
+        const opcode_name = @tagName(opcode);
+        const rounding_mode = std.meta.stringToEnum(AsmWriter.RoundingControl, opcode_name[6..]).?;
+        const float_suffix = interp.suffix();
+        if (as.hasFeature(.sse4_1)) {
+            as.printInstrs(&.{
+                "roundp{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10], 0x{[rounding_mode]X}",
+                "movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+            }, .{
+                .suffix = float_suffix,
+                .vsp = Gpr.vsp,
+                .rounding_mode = 0b1000 | @as(u8, @intFromEnum(rounding_mode)),
+            });
+        } else {
+            // calls into libc/compiler_rt
+            as.printInstrs(&.{"movap{[suffix]c} xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand"}, .{
+                .suffix = float_suffix,
+                .vsp = Gpr.vsp,
+            });
+
+            // register saving code copied from scalar version
+            as.writeInstrs(&.{"# callee-saved registers"});
+
+            const callee_saved_registers = [3]Gpr{ .vip, .fuel, .module };
+            for (Gpr.system_v_callee_saved[0..3], &callee_saved_registers) |dst, src| {
+                as.printInstrs(&.{"mov {[dst]f}, {[src]f}"}, .{ .dst = dst, .src = src });
+            }
+
+            as.writeInstrs(&.{
+                "# save scratch registers, stack is not 16-byte aligned on opcode handler entry",
+            });
+            const saved_scratch_registers = [5]Gpr{ .vsp, .locals, .mems, .interp, .eip };
+            for (&saved_scratch_registers) |reg| {
+                as.printInstrs(&.{"push {f}"}, .{reg});
+            }
+
+            as.writeInstrs(&.{"# stack is 16-byte aligned at this point"});
+            const float = opcode_name[0..5];
+            if (rounding_mode != .nearest) {
+                const float_type = std.meta.stringToEnum(AsmWriter.FloatType, opcode_name[0..3]).?;
+                const func_suffix = float_type.cSuffix();
+                switch (float_type) {
+                    .f32 => as.printInstrs(&.{
+                        "sub rsp, 0x20 # preserves the intermediate rounded results",
+                        "movaps [rsp + 0x10], xmm0 # save the operand",
+
+                        "call {[mode]t}{[func_suffix]s} # round lane 0, result in xmm0",
+                        "movaps [rsp], xmm0 # save rounded lane 0",
+
+                        "movd xmm0, dword ptr [rsp + 0x10 + 4] # lane 1",
+                        "call {[mode]t}{[func_suffix]s} # round lane 1, result in xmm0",
+                        "movd dword ptr [rsp + 4], xmm0 # save rounded lane 1",
+
+                        "movd xmm0, dword ptr [rsp + 0x10 + 8] # lane 2",
+                        "call {[mode]t}{[func_suffix]s} # round lane 2, result in xmm0",
+                        "movd dword ptr [rsp + 8], xmm0 # save rounded lane 2",
+
+                        "movd xmm0, dword ptr [rsp + 0x10 + 12] # lane 3",
+                        "call {[mode]t}{[func_suffix]s} # round lane 3, result in xmm0",
+                        "movd dword ptr [rsp + 12], xmm0 # save rounded lane 3",
+                        "movaps xmm0, xmmword ptr [rsp] # rounded results",
+
+                        "add rsp, 0x20",
+                    }, .{ .mode = rounding_mode, .func_suffix = func_suffix }),
+                    .f64 => as.printInstrs(&.{
+                        "sub rsp, 0x20 # preserves the intermediate rounded results",
+                        "movaps [rsp + 0x10], xmm0 # save the operand",
+
+                        "call {[mode]t}{[func_suffix]s} # round lane 0, result in xmm0",
+                        "movaps [rsp], xmm0 # save rounded lane 0",
+
+                        "movq xmm0, qword ptr [rsp + 0x10 + 8] # lane 1",
+                        "call {[mode]t}{[func_suffix]s} # round lane 1, result in xmm0",
+                        "movaps xmm1, xmmword ptr [rsp] # saved rounded results",
+                        "shufpd xmm0, xmm1, 0x0",
+
+                        "add rsp, 0x20",
+                    }, .{ .mode = rounding_mode, .func_suffix = func_suffix }),
+                }
+
+                as.printInstrs(&.{
+                    "movap{[suffix]c} xmm1, xmm0",
+                    "cmpunordp{[suffix]c} xmm1, xmm0 # all 1's if output is NaN",
+                    "andp{[suffix]c} xmm1, xmmword ptr " ++
+                        "[rip + .L{[symbol_prefix]s}{[float]s}_canonical_nan_bit]",
+                    "orp{[suffix]c} xmm0, xmm1 # set canonical NaN bit",
+                }, .{
+                    .suffix = float_suffix,
+                    .float = float,
+                    .symbol_prefix = as.options.symbol_prefix,
+                });
+            } else {
+                as.printInstrs(&.{
+                    "call {[symbol_prefix]s}roundeven.{[float]s} # call into Zig, result in xmm0",
+                    "# NaN canonicalization handled in runtime helper function",
+                }, .{
+                    .symbol_prefix = as.options.symbol_prefix,
+                    .float = float,
+                });
+            }
+
+            for (0..saved_scratch_registers.len) |i| {
+                as.printInstrs(
+                    &.{"pop {f}"},
+                    .{saved_scratch_registers[saved_scratch_registers.len - 1 - i]},
+                );
+            }
+
+            for (&callee_saved_registers, Gpr.system_v_callee_saved[0..3]) |dst, src| {
+                as.printInstrs(&.{"mov {[dst]f}, {[src]f}"}, .{ .dst = dst, .src = src });
+            }
+
+            as.printInstrs(
+                &.{"movap{[suffix]c} xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result"},
+                .{ .suffix = float_suffix, .vsp = Gpr.vsp },
+            );
+        }
         op.jmpToNextHandler(as);
         op.end(as);
     }

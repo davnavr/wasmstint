@@ -626,9 +626,21 @@ fn @"roundeven.f64"(
     return round.operations(f64).nearest(z);
 }
 
+fn @"roundeven.f32x4"(
+    z: @Vector(4, f32), // xmm0
+) callconv(sysvcc) @Vector(4, f32) {
+    return round.operations(@Vector(4, f32)).nearest(z);
+}
+
+fn @"roundeven.f64x2"(
+    z: @Vector(2, f64), // xmm0
+) callconv(sysvcc) @Vector(2, f64) {
+    return round.operations(@Vector(2, f64)).nearest(z);
+}
+
 comptime {
     if (!std.Target.x86.featureSetHas(builtin.cpu.features, .sse4_1)) {
-        for (&[_][]const u8{ "f32", "f64" }) |ty| {
+        for (&[_][]const u8{ "f32", "f64", "f32x4", "f64x2" }) |ty| {
             const name = "roundeven." ++ ty;
             @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
         }
