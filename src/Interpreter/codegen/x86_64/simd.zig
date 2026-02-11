@@ -461,7 +461,6 @@ fn defineBooleanOpcodes(as: *AsmWriter) void {
         }
     }
 
-    // PCMPEQQ and PCMPGTQ require SSE4.1
     {
         var all_true = as.defineOpcodeHandler(.{ .fd = .@"i64x2.all_true" }, .@"32");
         as.printInstrs(&.{
@@ -1176,32 +1175,60 @@ fn defineLaneAccessOpcodes(as: *AsmWriter) void {
 
         as.write("\n.text\n");
     }
+    const has_pshufb = as.hasFeature(.ssse3);
     {
-        // pshufb requires SSSE3
-        // - might require 2 pshufb for both inputs
-        var shuffle = as.defineOpcodeHandler(.{ .fd = .@"i8x16.shuffle" }, .fromByteUnits(128));
-        as.writeInstrs(&.{
-            "xor r11d, r11d # low 64-bits of result",
-            "xor r15d, r15d # high 64-bits of result",
-        });
+        var shuffle = as.defineOpcodeHandler(
+            .{ .fd = .@"i8x16.shuffle" },
+            if (has_pshufb) .@"64" else .fromByteUnits(128),
+        );
 
-        for (0..16) |index| {
+        if (has_pshufb) {
             as.printInstrs(&.{
-                "movzx r13d, byte ptr [{[vip]f} + {[index]d}] # index {[index]d}",
-                "movzx r14d, byte ptr [{[vsp]f} - 0x20 + r13] # read byte from source",
-                "or {[dst]f}, r14",
-                "ror {[dst]f}, 8",
-            }, .{
-                .vip = Gpr.vip,
-                .vsp = Gpr.vsp,
-                .index = index,
-                .dst = if (index < 8) Gpr.r11 else Gpr.r15,
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand A",
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand B",
+                "movdqu xmm2, xmmword ptr [{[vip]f}] # lanes",
+
+                "pshufb xmm0, xmm2 # select from A",
+                "pshufb xmm1, xmm2 # select from B",
+
+                "movdqa xmm3, xmmword ptr [rip + .L{[symbol_prefix]s}i8x16_lane_index_bounds]",
+                "pcmpgtb xmm3, xmm2 # indices < 16 mean A is the source",
+                "pcmpeqb xmm4, xmm4 # all ones",
+                "pxor xmm4, xmm3 # bitwise NOT to indicate which lanes to select from B",
+
+                "pand xmm0, xmm3 # keep selected lanes from A",
+                "pand xmm1, xmm4 # keep selected lanes from B",
+                "por xmm0, xmm1",
+
+                "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+            }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp, .symbol_prefix = as.options.symbol_prefix });
+        } else {
+            as.writeInstrs(&.{
+                "xor r11d, r11d # low 64-bits of result",
+                "xor r15d, r15d # high 64-bits of result",
             });
+
+            for (0..16) |index| {
+                as.printInstrs(&.{
+                    "movzx r13d, byte ptr [{[vip]f} + {[index]d}] # index {[index]d}",
+                    "movzx r14d, byte ptr [{[vsp]f} - 0x20 + r13] # read byte from source",
+                    "or {[dst]f}, r14",
+                    "ror {[dst]f}, 8",
+                }, .{
+                    .vip = Gpr.vip,
+                    .vsp = Gpr.vsp,
+                    .index = index,
+                    .dst = if (index < 8) Gpr.r11 else Gpr.r15,
+                });
+            }
+
+            as.printInstrs(&.{
+                "mov qword ptr [{[vsp]f} - 0x20], r11 # store low 64-bits of result",
+                "mov qword ptr [{[vsp]f} - 0x20 + 8], r15 # store high 64-bits of result",
+            }, .{ .vsp = Gpr.vsp });
         }
 
         as.printInstrs(&.{
-            "mov qword ptr [{[vsp]f} - 0x20], r11 # store low 64-bits of result",
-            "mov qword ptr [{[vsp]f} - 0x20 + 8], r15 # store high 64-bits of result",
             "lea {[vip]f}, [{[vip]f} + 0x10] # update VIP",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # update VSP",
         }, .{ .vip = Gpr.vip, .vsp = Gpr.vsp });
