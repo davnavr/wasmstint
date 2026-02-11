@@ -106,78 +106,100 @@ fn defineMemoryLoadOpcodes(as: *AsmWriter) void {
         access.end(&load_lane, as);
     }
 
-    {
-        // pmovsx requires SSE4_1
-        var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load8x8_s" }, .@"64");
-        var access = LinearMemoryAccess.start(as, 0x10, .@"8");
-        as.printInstrs(&.{
-            "movq xmm0, qword ptr [r13 + r15] # load from memory",
-            "punpcklbw xmm0, xmm0 # move original 8-bit lanes to high 8-bits of 16-bit lanes",
-            "psraw xmm0, 8 # sign-extend original 8-bit values to 16-bits",
-            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp });
-        access.end(&load, as);
-    }
-    {
-        // pmovzx requires SSE4_1
-        var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load8x8_u" }, .@"64");
-        var access = LinearMemoryAccess.start(as, 0x10, .@"8");
-        as.printInstrs(&.{
-            "movq xmm0, qword ptr [r13 + r15] # load from memory",
-            "pxor xmm1, xmm1",
-            "punpcklbw xmm0, xmm1 # fill high 8 bits with zero",
-            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp });
-        access.end(&load, as);
-    }
-    {
-        // pmovsx requires SSE4_1
-        var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load16x4_s" }, .@"64");
-        var access = LinearMemoryAccess.start(as, 0x10, .@"8");
-        as.printInstrs(&.{
-            "movq xmm0, qword ptr [r13 + r15] # load from memory",
-            "punpcklwd xmm0, xmm0 # move original 16-bit lanes to high 16-bits of 32-bit lanes",
-            "psrad xmm0, 16 # sign-extend original 16-bit values to 32-bits",
-            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp });
-        access.end(&load, as);
-    }
-    {
-        // pmovzx requires SSE4_1
-        var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load16x4_u" }, .@"64");
-        var access = LinearMemoryAccess.start(as, 0x10, .@"8");
-        as.printInstrs(&.{
-            "movq xmm0, qword ptr [r13 + r15] # load from memory",
-            "pxor xmm1, xmm1",
-            "punpcklwd xmm0, xmm1 # fill high 16 bits with zero",
-            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp });
-        access.end(&load, as);
-    }
-    {
-        // pmovsx requires SSE4_1
-        var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load32x2_s" }, .@"64");
-        var access = LinearMemoryAccess.start(as, 0x10, .@"8");
-        as.printInstrs(&.{
-            "# no psraq",
-            "movsxd r11, dword ptr [r13 + r15] # load low 32-bits from memory",
-            "movsxd r14, dword ptr [r13 + r15 + 4] # load high 32-bits from memory",
-            "mov qword ptr [{[vsp]f} - 0x10], r11 # store low 64-bit result",
-            "mov qword ptr [{[vsp]f} - 0x10 + 8], r14 # store high 64-bit result",
-        }, .{ .vsp = Gpr.vsp });
-        access.end(&load, as);
-    }
-    {
-        // pmovzx requires SSE4_1
-        var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load32x2_u" }, .@"64");
-        var access = LinearMemoryAccess.start(as, 0x10, .@"8");
-        as.printInstrs(&.{
-            "movq xmm0, qword ptr [r13 + r15] # load from memory",
-            "pxor xmm1, xmm1",
-            "punpckldq xmm0, xmm1 # fill high 16 bits with zero",
-            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp });
-        access.end(&load, as);
+    if (as.hasFeature(.sse4_1)) {
+        for (&[_]struct { FDPrefixOpcode, []const u8 }{
+            .{ .@"v128.load8x8_s", "bw" },
+            .{ .@"v128.load8x8_u", "bw" },
+            .{ .@"v128.load16x4_s", "wd" },
+            .{ .@"v128.load16x4_u", "wd" },
+            .{ .@"v128.load32x2_s", "dq" },
+            .{ .@"v128.load32x2_u", "dq" },
+        }) |info| {
+            const opcode, const suffix = info;
+            const opcode_name = @tagName(opcode);
+            const ext: u7 = switch (opcode_name[opcode_name.len - 1]) {
+                's' => 's',
+                'u' => 'z',
+                else => unreachable,
+            };
+
+            var load = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+            var access = LinearMemoryAccess.start(as, 0x10, .@"8");
+            as.printInstrs(&.{
+                "pmov{[ext]c}x{[suffix]s} xmm0, qword ptr [r13 + r15] # load from memory",
+                "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+            }, .{ .vsp = Gpr.vsp, .ext = ext, .suffix = suffix });
+            access.end(&load, as);
+        }
+    } else {
+        {
+            var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load8x8_s" }, .@"64");
+            var access = LinearMemoryAccess.start(as, 0x10, .@"8");
+            as.printInstrs(&.{
+                "movq xmm0, qword ptr [r13 + r15] # load from memory",
+                "punpcklbw xmm0, xmm0 # move original 8-bit lanes to high 8-bits of 16-bit lanes",
+                "psraw xmm0, 8 # sign-extend original 8-bit values to 16-bits",
+                "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+            }, .{ .vsp = Gpr.vsp });
+            access.end(&load, as);
+        }
+        {
+            var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load8x8_u" }, .@"64");
+            var access = LinearMemoryAccess.start(as, 0x10, .@"8");
+            as.printInstrs(&.{
+                "movq xmm0, qword ptr [r13 + r15] # load from memory",
+                "pxor xmm1, xmm1",
+                "punpcklbw xmm0, xmm1 # fill high 8 bits with zero",
+                "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+            }, .{ .vsp = Gpr.vsp });
+            access.end(&load, as);
+        }
+        {
+            var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load16x4_s" }, .@"64");
+            var access = LinearMemoryAccess.start(as, 0x10, .@"8");
+            as.printInstrs(&.{
+                "movq xmm0, qword ptr [r13 + r15] # load from memory",
+                "punpcklwd xmm0, xmm0" ++
+                    " # move original 16-bit lanes to high 16-bits of 32-bit lanes",
+                "psrad xmm0, 16 # sign-extend original 16-bit values to 32-bits",
+                "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+            }, .{ .vsp = Gpr.vsp });
+            access.end(&load, as);
+        }
+        {
+            var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load16x4_u" }, .@"64");
+            var access = LinearMemoryAccess.start(as, 0x10, .@"8");
+            as.printInstrs(&.{
+                "movq xmm0, qword ptr [r13 + r15] # load from memory",
+                "pxor xmm1, xmm1",
+                "punpcklwd xmm0, xmm1 # fill high 16 bits with zero",
+                "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+            }, .{ .vsp = Gpr.vsp });
+            access.end(&load, as);
+        }
+        {
+            var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load32x2_s" }, .@"64");
+            var access = LinearMemoryAccess.start(as, 0x10, .@"8");
+            as.printInstrs(&.{
+                "# no psraq",
+                "movsxd r11, dword ptr [r13 + r15] # load low 32-bits from memory",
+                "movsxd r14, dword ptr [r13 + r15 + 4] # load high 32-bits from memory",
+                "mov qword ptr [{[vsp]f} - 0x10], r11 # store low 64-bit result",
+                "mov qword ptr [{[vsp]f} - 0x10 + 8], r14 # store high 64-bit result",
+            }, .{ .vsp = Gpr.vsp });
+            access.end(&load, as);
+        }
+        {
+            var load = as.defineOpcodeHandler(.{ .fd = .@"v128.load32x2_u" }, .@"64");
+            var access = LinearMemoryAccess.start(as, 0x10, .@"8");
+            as.printInstrs(&.{
+                "movq xmm0, qword ptr [r13 + r15] # load from memory",
+                "pxor xmm1, xmm1",
+                "punpckldq xmm0, xmm1 # fill high 16 bits with zero",
+                "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+            }, .{ .vsp = Gpr.vsp });
+            access.end(&load, as);
+        }
     }
 
     {
