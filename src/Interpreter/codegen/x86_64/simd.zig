@@ -2495,17 +2495,25 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         max.end(as);
     }
     {
-        // pmaxsd requires SSE4_1
         var max = as.defineOpcodeHandler(.{ .fd = .@"i32x4.max_s" }, .@"32");
+        if (as.hasFeature(.sse4_1)) {
+            as.printInstrs(&.{
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "pmaxsd xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            }, .{ .vsp = Gpr.vsp });
+        } else {
+            as.printInstrs(&.{
+                "# Taken from what LLVM emits for Zig's @max builtin",
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "movdqa xmm2, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+                "movdqa xmm0, xmm1",
+                "pcmpgtd xmm0, xmm2",
+                "pand xmm1, xmm0",
+                "pandn xmm0, xmm2",
+                "por xmm0, xmm1",
+            }, .{ .vsp = Gpr.vsp });
+        }
         as.printInstrs(&.{
-            "# Taken from what LLVM emits for Zig's @max builtin",
-            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
-            "movdqa xmm2, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
-            "movdqa xmm0, xmm1",
-            "pcmpgtd xmm0, xmm2",
-            "pand xmm1, xmm0",
-            "pandn xmm0, xmm2",
-            "por xmm0, xmm1",
             "",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
