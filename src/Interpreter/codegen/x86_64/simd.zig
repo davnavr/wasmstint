@@ -2593,24 +2593,32 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         dot.end(as);
     }
 
-    for (&[_]struct { FDPrefixOpcode, []const u8 }{
-        .{ .@"i8x16.abs", "pminub" },
-        .{ .@"i16x8.abs", "pmaxsw" },
+    for (&[_]struct { FDPrefixOpcode, []const u8, []const u8 }{
+        .{ .@"i8x16.abs", "pminub", "pabsb" },
+        .{ .@"i16x8.abs", "pmaxsw", "pabsw" },
     }) |info| {
-        const opcode, const cmp_instr = info;
-        // PABSB/PABSW requires SSSE3
+        const opcode, const sse2_instr, const ssse3_instr = info;
         var abs = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
-        const interp = IntInterp.fromOpcodeName(opcode);
+        if (as.hasFeature(.ssse3)) {
+            as.printInstrs(
+                &.{"{[abs_instr]s} xmm0, xmmword ptr [{[vsp]f} - 0x10]"},
+                .{ .vsp = Gpr.vsp, .abs_instr = ssse3_instr },
+            );
+        } else {
+            const interp = IntInterp.fromOpcodeName(opcode);
+            as.printInstrs(&.{
+                "# Taken from what LLVM emits for Zig's @abs builtin",
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10]",
+                "pxor xmm0, xmm0",
+                "psub{[suffix]c} xmm0, xmm1" ++
+                    " # if lane value is negative, make it positive by subtracting from zero",
+                "{[cmp_instr]s} xmm0, xmm1" ++
+                    " # if value was negative, pick the positive version, otherwise keep it",
+            }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix(), .cmp_instr = sse2_instr });
+        }
         as.printInstrs(&[_][]const u8{
-            "# Taken from what LLVM emits for Zig's @abs builtin",
-            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10]",
-            "pxor xmm0, xmm0",
-            "psub{[suffix]c} xmm0, xmm1" ++
-                " # if lane value is negative, make it positive by subtracting from zero",
-            "{[cmp_instr]s} xmm0, xmm1" ++
-                " # if value was negative, pick the positive version, otherwise keep it",
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp, .suffix = interp.suffix(), .cmp_instr = cmp_instr });
+        }, .{ .vsp = Gpr.vsp });
         abs.jmpToNextHandler(as);
         abs.end(as);
     }
