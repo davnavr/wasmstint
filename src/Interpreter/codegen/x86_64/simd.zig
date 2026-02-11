@@ -2472,13 +2472,21 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         min.end(as);
     }
     {
-        // pmaxuw requires SSE4_1
         var max = as.defineOpcodeHandler(.{ .fd = .@"i16x8.max_u" }, .@"32");
+        if (as.hasFeature(.sse4_1)) {
+            as.printInstrs(&.{
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "pmaxuw xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            }, .{ .vsp = Gpr.vsp });
+        } else {
+            as.printInstrs(&.{
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+                "psubusw xmm0, xmm1",
+                "paddw xmm0, xmm1",
+            }, .{ .vsp = Gpr.vsp });
+        }
         as.printInstrs(&.{
-            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
-            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
-            "psubusw xmm0, xmm1",
-            "paddw xmm0, xmm1",
             "",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
