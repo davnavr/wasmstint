@@ -2449,14 +2449,22 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     }
 
     {
-        // pminuw requires SSE4_1
         var min = as.defineOpcodeHandler(.{ .fd = .@"i16x8.min_u" }, .@"32");
+        if (as.hasFeature(.sse4_1)) {
+            as.printInstrs(&.{
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "pminuw xmm0, xmmword ptr [{[vsp]f} - 0x10]",
+            }, .{ .vsp = Gpr.vsp });
+        } else {
+            as.printInstrs(&.{
+                "# Taken from what LLVM emits for Zig's @min builtin",
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "movdqa xmm1, xmm0",
+                "psubusw xmm1, xmmword ptr [{[vsp]f} - 0x10]",
+                "psubw xmm0, xmm1 # selects minimum value in lane based on difference",
+            }, .{ .vsp = Gpr.vsp });
+        }
         as.printInstrs(&.{
-            "# Taken from what LLVM emits for Zig's @min builtin",
-            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
-            "movdqa xmm1, xmm0",
-            "psubusw xmm1, xmmword ptr [{[vsp]f} - 0x10]",
-            "psubw xmm0, xmm1 # selects minimum value in lane based on difference",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
         }, .{ .vsp = Gpr.vsp });
