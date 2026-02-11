@@ -1950,38 +1950,96 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         ge_u.end(as);
     }
 
-    // TODO: other integer comparisons (not i64x2, those are done)
+    if (as.hasFeature(.sse4_2)) {
+        {
+            var lt_s = as.defineOpcodeHandler(.{ .fd = .@"i64x2.lt_s" }, .@"32");
+            as.printInstrs(&.{
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+                "pcmpgtq xmm0, xmm1",
 
-    for (&[_]struct { FDPrefixOpcode, []const u8 }{
-        .{ .@"i64x2.lt_s", "l" },
-        .{ .@"i64x2.le_s", "le" },
-        .{ .@"i64x2.gt_s", "g" },
-        .{ .@"i64x2.ge_s", "ge" },
-    }) |info| {
-        // pcmpgtq requires SSE4_2
-        const opcode, const condition = info;
-        var cmp = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
-        as.printInstrs(&.{
-            "# slightly smaller code size compared to using SSE instructions",
-            "xor r11d, r11d",
-            "mov r13, -1",
-            "mov r14, qword ptr [{[vsp]f} - 0x20] # operand 0, low qword",
-            "mov r15, qword ptr [{[vsp]f} - 0x10] # operand 1, low qword",
-            "cmp r14, r15",
-            "cmov{[condition]s} r11, r13",
-            "mov qword ptr [{[vsp]f} - 0x20], r11 # low qword result",
+                "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+                "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+            }, .{ .vsp = Gpr.vsp });
+            lt_s.jmpToNextHandler(as);
+            lt_s.end(as);
+        }
+        {
+            var le_s = as.defineOpcodeHandler(.{ .fd = .@"i64x2.le_s" }, .@"32");
+            as.printInstrs(&.{
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+                "movdqa xmm2, xmm0",
+                "pcmpeqq xmm2, xmm1",
+                "pcmpgtq xmm0, xmm1",
+                "por xmm0, xmm2",
 
-            "xor r11d, r11d",
-            "mov r14, qword ptr [{[vsp]f} - 0x18] # operand 0, high qword",
-            "mov r15, qword ptr [{[vsp]f} - 0x08] # operand 1, high qword",
-            "cmp r14, r15",
-            "cmov{[condition]s} r11, r13",
-            "mov qword ptr [{[vsp]f} - 0x18], r11 # high qword result",
+                "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+                "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+            }, .{ .vsp = Gpr.vsp });
+            le_s.jmpToNextHandler(as);
+            le_s.end(as);
+        }
+        {
+            var gt_s = as.defineOpcodeHandler(.{ .fd = .@"i64x2.gt_s" }, .@"32");
+            as.printInstrs(&.{
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+                "pcmpgtq xmm0, xmm1",
 
-            "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
-        }, .{ .vsp = Gpr.vsp, .condition = condition });
-        cmp.jmpToNextHandler(as);
-        cmp.end(as);
+                "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+                "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+            }, .{ .vsp = Gpr.vsp });
+            gt_s.jmpToNextHandler(as);
+            gt_s.end(as);
+        }
+        {
+            var ge_s = as.defineOpcodeHandler(.{ .fd = .@"i64x2.ge_s" }, .@"32");
+            as.printInstrs(&.{
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+                "movdqa xmm2, xmm0",
+                "pcmpeqq xmm2, xmm1",
+                "pcmpgtq xmm0, xmm1",
+                "por xmm0, xmm2",
+
+                "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
+                "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+            }, .{ .vsp = Gpr.vsp });
+            ge_s.jmpToNextHandler(as);
+            ge_s.end(as);
+        }
+    } else {
+        for (&[_]struct { FDPrefixOpcode, []const u8 }{
+            .{ .@"i64x2.lt_s", "l" },
+            .{ .@"i64x2.le_s", "le" },
+            .{ .@"i64x2.gt_s", "g" },
+            .{ .@"i64x2.ge_s", "ge" },
+        }) |info| {
+            const opcode, const condition = info;
+            var cmp = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+            as.printInstrs(&.{
+                "# slightly smaller code size compared to using SSE instructions",
+                "xor r11d, r11d",
+                "mov r13, -1",
+                "mov r14, qword ptr [{[vsp]f} - 0x20] # operand 0, low qword",
+                "mov r15, qword ptr [{[vsp]f} - 0x10] # operand 1, low qword",
+                "cmp r14, r15",
+                "cmov{[condition]s} r11, r13",
+                "mov qword ptr [{[vsp]f} - 0x20], r11 # low qword result",
+
+                "xor r11d, r11d",
+                "mov r14, qword ptr [{[vsp]f} - 0x18] # operand 0, high qword",
+                "mov r15, qword ptr [{[vsp]f} - 0x08] # operand 1, high qword",
+                "cmp r14, r15",
+                "cmov{[condition]s} r11, r13",
+                "mov qword ptr [{[vsp]f} - 0x18], r11 # high qword result",
+
+                "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
+            }, .{ .vsp = Gpr.vsp, .condition = condition });
+            cmp.jmpToNextHandler(as);
+            cmp.end(as);
+        }
     }
 
     // SSSE3 introduces PSIGNB/PSIGNW/PSIGND
