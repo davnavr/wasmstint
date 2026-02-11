@@ -1237,32 +1237,60 @@ fn defineLaneAccessOpcodes(as: *AsmWriter) void {
         shuffle.end(as);
     }
     {
-        // seems to follow pshufb semantics, but requires SSSE3
-        var swizzle = as.defineOpcodeHandler(.{ .fd = .@"i8x16.swizzle" }, .fromByteUnits(128));
-        as.printInstrs(&.{
-            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # indices",
-            "pminub xmm0, xmmword ptr [rip + .L{[symbol_prefix]s}i8x16_lane_index_bounds]",
-            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20]",
-            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm1 # prevent clobbering src bytes",
-            "mov byte ptr [{[vsp]f}], 0x00 # src byte used when index is out of bound",
-            "movq r11, xmm0 # indices 0-7",
-        }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.options.symbol_prefix });
+        var swizzle = as.defineOpcodeHandler(
+            .{ .fd = .@"i8x16.swizzle" },
+            if (has_pshufb) .@"64" else .fromByteUnits(128),
+        );
 
-        for (0..16) |index| {
+        if (has_pshufb) {
+            as.write(
+                \\.section .rodata.cst16, "aM", @progbits, 16
+                \\.p2align 4, 0x00
+                \\
+            );
+            var to_bit_7 = as.label(&.{"to_bit_7"});
+            to_bit_7.place(as);
+            as.writeInstrs(&.{".skip 16, 0x70"});
+
+            as.write("\n.text\n");
             as.printInstrs(&.{
-                "mov r13d, r11d # index {[index]d}",
-                "and r13d, 0x1F # ensure only index {[index]d} is used",
-                "movzx r14d, byte ptr [{[vsp]f} - 0x10 + r13] # read byte from source",
-                "mov byte ptr [{[vsp]f} - 0x20 + {[index]d}], r14b",
-            }, .{ .vsp = Gpr.vsp, .index = index });
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # source",
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # indices",
+                "movdqa xmm2, xmmword ptr [rip + .L{[symbol_prefix]s}i8x16_lane_index_bounds]",
+                "paddusb xmm1, xmmword ptr [rip + {[to_bit_7]f}] # set OOB lanes to 0x80",
+                "pshufb xmm0, xmm1 # shift according to indices",
+                "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # write result",
+            }, .{
+                .vsp = Gpr.vsp,
+                .symbol_prefix = as.options.symbol_prefix,
+                .to_bit_7 = to_bit_7,
+            });
+        } else {
+            as.printInstrs(&.{
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # indices",
+                "pminub xmm0, xmmword ptr [rip + .L{[symbol_prefix]s}i8x16_lane_index_bounds]",
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # source",
+                "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm1 # prevent clobbering src bytes",
+                "mov byte ptr [{[vsp]f}], 0x00 # src byte used when index is out of bound",
+                "movq r11, xmm0 # indices 0-7",
+            }, .{ .vsp = Gpr.vsp, .symbol_prefix = as.options.symbol_prefix });
 
-            if (index == 7) {
-                as.writeInstrs(&.{
-                    "pshufd xmm2, xmm0, 0x0E",
-                    "movq r11, xmm2 # indices 8-15",
-                });
-            } else if (index < 15) {
-                as.writeInstrs(&.{"shr r11, 8"});
+            for (0..16) |index| {
+                as.printInstrs(&.{
+                    "mov r13d, r11d # index {[index]d}",
+                    "and r13d, 0x1F # ensure only index {[index]d} is used",
+                    "movzx r14d, byte ptr [{[vsp]f} - 0x10 + r13] # read byte from source",
+                    "mov byte ptr [{[vsp]f} - 0x20 + {[index]d}], r14b",
+                }, .{ .vsp = Gpr.vsp, .index = index });
+
+                if (index == 7) {
+                    as.writeInstrs(&.{
+                        "pshufd xmm2, xmm0, 0x0E",
+                        "movq r11, xmm2 # indices 8-15",
+                    });
+                } else if (index < 15) {
+                    as.writeInstrs(&.{"shr r11, 8"});
+                }
             }
         }
 
