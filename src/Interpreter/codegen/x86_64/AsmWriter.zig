@@ -354,7 +354,7 @@ pub fn label(as: *AsmWriter, name: []const []const u8) Label {
     const prefix = ".L";
     const num = as.nextNumberedLabel();
     const buf = as.function_arena.allocator().alloc(u8, size: {
-        var size = prefix.len + as.options.symbol_prefix.len + function_name.len + 1 +
+        var size = prefix.len + as.options.symbol_prefix.len + function_name.len + 2 +
             (if (num == 0) 1 else std.math.log10_int(num) + 1);
 
         for (name) |s| {
@@ -372,6 +372,7 @@ pub fn label(as: *AsmWriter, name: []const []const u8) Label {
     for (name) |s| {
         writer.writeAll(s) catch unreachable;
     }
+    writer.writeByte('_') catch unreachable;
     writer.printInt(num, 10, .lower, .{}) catch unreachable;
 
     const name_concat = writer.buffered();

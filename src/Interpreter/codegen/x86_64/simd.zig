@@ -3067,7 +3067,6 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
 
     {
         // https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#saturating-integer-q-format-rounding-multiplication
-        // pmulhrsw requires SSSE3, but requires additional overflow checks anyway
         var q15mulr_sat_s = as.defineOpcodeHandler(
             .{ .fd = .@"i16x8.q15mulr_sat_s" },
             .fromByteUnits(128),
