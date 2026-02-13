@@ -23,12 +23,17 @@ pub const GlobalAddr = extern struct {
                     .{@as(*const Pointee(num), @ptrCast(@alignCast(global.value))).*},
                 );
             },
-            inline .funcref, .externref => |ref| {
+            // TODO: What formatter for externref here? ptr?
+            inline .funcref => |ref| {
                 try writer.print(
                     "{f}",
                     .{@as(*const Pointee(ref), @ptrCast(@alignCast(global.value)))},
                 );
             },
+            .externref => try ExternAddr.formatPtr(
+                @as(*const ExternAddr, @ptrCast(@alignCast(global.value))).*,
+                writer,
+            ),
             .v128 => {
                 try V128.format(@as(*const V128, @ptrCast(@alignCast(global.value))).*, writer);
             },
@@ -136,7 +141,7 @@ pub const FuncInst = extern struct {
         /// Asserts that `idx` does **not** refer to a function import.
         pub fn init(module: ModuleInst, idx: Module.FuncIdx) Wasm {
             std.debug.assert( // function import not allowed
-                module.header().module.inner.raw.func_import_count <= @intFromEnum(idx),
+                module.header().module.inner.func_import_count <= @intFromEnum(idx),
             );
 
             return Wasm{ .module = module, .idx = idx };
@@ -227,8 +232,8 @@ pub const FuncRef = packed struct(usize) {
         pub fn funcIdx(wasm: Wasm) Module.FuncIdx {
             const wasm_module = wasm.module().header().module.inner;
             const lookup_idx = wasm.lookupIdx();
-            const import_count = wasm_module.raw.func_import_count;
-            const idx: Module.FuncIdx = wasm_module.func_refs.keys()[lookup_idx];
+            const import_count = wasm_module.func_import_count;
+            const idx: Module.FuncIdx = wasm_module.parent().func_refs.keys()[lookup_idx];
 
             if (builtin.mode == .Debug) {
                 std.debug.assert(import_count <= lookup_idx);
@@ -362,20 +367,21 @@ pub const ExternAddr = packed union {
 
     pub const @"null" = ExternAddr{ .ptr = null };
 
+    const null_format = "(ref.null extern)";
+
     pub const Nat = enum(usize) {
         null = 0,
         _,
 
-        pub const Size = std.meta.Int(.unsigned, @bitSizeOf(usize) - 1);
-
-        pub fn fromInt(n: Size) Nat {
+        /// Asserts that `n != std.math.maxInt(usize)`.
+        pub fn fromInt(n: usize) Nat {
             const int = @as(usize, n) + 1;
             std.debug.assert(int > 0);
             return @enumFromInt(int);
         }
 
-        pub fn toInt(nat: Nat) ?Size {
-            return if (nat == .null) null else @intCast(@as(usize, @intFromEnum(nat)) - 1);
+        pub fn toInt(nat: Nat) ?usize {
+            return if (nat == .null) null else @intFromEnum(nat) - 1;
         }
 
         pub fn eql(a: Nat, b: Nat) bool {
@@ -383,7 +389,11 @@ pub const ExternAddr = packed union {
         }
 
         pub fn format(ref: Nat, writer: *Writer) Writer.Error!void {
-            return (ExternAddr{ .nat = ref }).format(writer);
+            if (ref.toInt()) |n| {
+                try writer.print("(ref.extern 0x{X})", .{n});
+            } else {
+                try writer.writeAll(null_format);
+            }
         }
     };
 
@@ -402,12 +412,16 @@ pub const ExternAddr = packed union {
         );
     }
 
-    pub fn format(ref: ExternAddr, writer: *Writer) Writer.Error!void {
-        if (ref.ptr == null) {
-            try writer.writeAll("(ref.null extern)");
+    pub fn formatPtr(ref: ExternAddr, writer: *Writer) Writer.Error!void {
+        if (ref.nat != .null) {
+            try writer.print("(ref.extern (;@{X};))", .{@intFromEnum(ref.nat)});
         } else {
-            try writer.print("(ref.extern 0x{X})", .{@intFromPtr(ref.ptr)});
+            try writer.writeAll(null_format);
         }
+    }
+
+    pub fn formatNat(ref: ExternAddr, writer: *Writer) Writer.Error!void {
+        try ref.nat.format(writer);
     }
 };
 

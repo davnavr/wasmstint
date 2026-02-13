@@ -164,7 +164,7 @@ const Execution = struct {
         }
     };
 
-    const ExternRef = wasmstint.runtime.ExternAddr.Nat;
+    const ExternRef = wasmstint.runtime.ExternAddr;
 
     const V128 = extern struct {
         bytes: [16]u8 align(8),
@@ -321,7 +321,8 @@ const Execution = struct {
                         "(f64.const {d} (;0x{X:0>16};))",
                         .{ f, @as(u64, @bitCast(f)) },
                     ),
-                    inline .funcref, .externref => |r| try r.format(w),
+                    .externref => |r| try r.formatPtr(w),
+                    inline .funcref => |r| try r.format(w),
                     .v128 => |v| try v.convert().format(w),
                 }
             }
@@ -382,7 +383,7 @@ const Execution = struct {
                     @tagName(tag),
                     n,
                 ),
-                .externref => |r| .{ .externref = .{ .nat = r } },
+                .externref => |r| .{ .externref = r },
                 .funcref => |f| .{ .funcref = if (f.id()) |idx|
                     @bitCast(wasmstint.runtime.FuncRef.init(.{ .host = &func_imports[idx.n] }))
                 else
@@ -444,8 +445,7 @@ const Execution = struct {
                     const result_bits: Bits = @bitCast(@field(value, @tagName(tag)));
                     break :eq result_bits == @as(Bits, @bitCast(z));
                 },
-                .externref => |extern_ref| value.externref
-                    .eql(wasmstint.runtime.ExternAddr{ .nat = extern_ref }),
+                .externref => |extern_ref| value.externref.eql(extern_ref),
                 .funcref => |pattern| eq: {
                     const actual = value.funcref.get();
                     if (pattern.arities()) |arities| {

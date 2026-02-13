@@ -41,7 +41,7 @@ pub const SideTable = packed struct(usize) {
         const current_frame: *const Stack.Frame = stack.currentFrame().?;
         const code = current_frame.function.expanded().wasm.code();
         const wasm_base_ptr = @intFromPtr(current_frame.function.expanded().wasm
-            .module.header().module.inner.wasm.ptr);
+            .module.header().module.wasmBytes().ptr);
 
         // std.debug.print("SIDE TABLE PTR = {*} + {}\n", .{ table.next, branch });
         const target: *const Module.Code.SideTableEntry = &table.next[branch];
@@ -91,7 +91,7 @@ pub const SideTable = packed struct(usize) {
         //     },
         // );
 
-        instr.next = addPtrWithOffset(base_ip, target.delta_ip.done);
+        instr.next = addPtrWithOffset(base_ip, target.inner.delta_ip.done);
         std.debug.assert(@intFromPtr(code.inner.instructions_end) == @intFromPtr(instr.end));
         std.debug.assert(@intFromPtr(code.inner.instructions_start) <= @intFromPtr(instr.next));
 
@@ -100,23 +100,30 @@ pub const SideTable = packed struct(usize) {
         //     .{
         //         @intFromPtr(instr.next) - wasm_base_ptr,
         //         instr.next[0],
-        //         @tagName(@as(@import("../opcodes.zig").ByteOpcode, @enumFromInt(instr.next[0]))),
+        //         @tagName(@as(@import("opcodes.zig").ByteOpcode, @enumFromInt(instr.next[0]))),
         //     },
         // );
 
-        table.next = addPtrWithOffset(table.next + branch, target.delta_stp);
+        table.next = addPtrWithOffset(table.next + branch, target.inner.delta_stp);
         table.checkBounds(stack);
 
         // std.debug.print(" ? STP=#{}\n", .{table.next - code.inner.side_table_ptr});
 
         // std.debug.print(" ? value stack height was {}\n", .{vals.items.len});
 
-        const src = Stack.Values.init(stack_top, stack, target.copy_count, target.copy_count)
-            .topSlice(target.copy_count);
-        const dst = (stack_top.ptr - target.pop_count)[0..target.copy_count];
+        const src = Stack.Values.init(
+            stack_top,
+            stack,
+            target.inner.copy_count,
+            target.inner.copy_count,
+        ).topSlice(target.inner.copy_count);
+        const dst = (stack_top.ptr - target.inner.pop_count)[0..target.inner.copy_count];
         @memmove(dst, src);
 
-        const new_top = addPtrWithOffset(stack_top.ptr, @as(i16, target.copy_count) - target.pop_count);
+        const new_top = addPtrWithOffset(
+            stack_top.ptr,
+            @as(i16, target.inner.copy_count) - target.inner.pop_count,
+        );
 
         // std.debug.print(" ? value stack height is {}\n", .{});
 

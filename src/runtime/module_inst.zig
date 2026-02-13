@@ -27,7 +27,7 @@ pub const ModuleInst = packed struct(usize) {
             // /// Allocated in the `module`'s arena.
             // global_value_offsets: []u16,
         ) std.mem.Allocator.Error!void {
-            const info = &module.inner.raw;
+            const info = module.inner;
 
             var size = allocators.ReservationAllocator(.@"16"){ .bytes = @sizeOf(Header) };
             try size.reserveAligned(
@@ -87,8 +87,8 @@ pub const ModuleInst = packed struct(usize) {
         pub inline fn funcBlockCount(module: Module) u32 {
             return std.math.divCeil(
                 u32,
-                @as(u32, @intCast(module.inner.func_refs.count())) -
-                    module.inner.raw.func_import_count,
+                @as(u32, @intCast(module.inner.parent().func_refs.count())) -
+                    module.inner.func_import_count,
                 FuncRef.Wasm.Block.funcs_per_block,
             ) catch unreachable;
         }
@@ -105,7 +105,7 @@ pub const ModuleInst = packed struct(usize) {
             idx: Module.FuncIdx,
         ) FuncInst {
             const i: u32 = @intFromEnum(idx);
-            const import_count = inst.module.inner.raw.func_import_count;
+            const import_count = inst.module.inner.func_import_count;
             std.debug.assert(i < inst.module.funcCount());
             return if (i < import_count)
                 inst.func_imports[i].funcInst()
@@ -118,12 +118,13 @@ pub const ModuleInst = packed struct(usize) {
         pub fn funcRef(inst: *const Header, idx: Module.FuncIdx) FuncRef {
             const idx_as_int: u32 = @intFromEnum(idx);
             const wasm_module = inst.module.inner;
-            const import_count = wasm_module.raw.func_import_count;
+            const import_count = wasm_module.func_import_count;
             std.debug.assert(idx_as_int < inst.module.funcCount());
             if (idx_as_int < import_count) {
                 return inst.func_imports[idx_as_int];
             } else {
-                const entry_idx: u32 = @intCast(wasm_module.func_refs.getIndexContext(idx, .{}).?);
+                const entry_idx: u32 =
+                    @intCast(wasm_module.parent().func_refs.getIndexContext(idx, .{}).?);
                 const rounded_idx: u32 =
                     // entries in [0..import_count] are imports
                     @divFloor(entry_idx - import_count, FuncRef.Wasm.Block.funcs_per_block);
@@ -155,18 +156,18 @@ pub const ModuleInst = packed struct(usize) {
         }
 
         pub fn startFuncInst(inst: *align(std.atomic.cache_line) const Header) ?FuncInst {
-            return if (inst.module.inner.raw.start.get()) |start_idx|
+            return if (inst.module.inner.start.get()) |start_idx|
                 inst.funcInst(start_idx)
             else
                 null;
         }
 
         pub inline fn tableInsts(inst: *const Header) []const *TableInst {
-            return inst.tables[0..inst.module.inner.raw.table_count];
+            return inst.tables[0..inst.module.inner.table_count];
         }
 
         pub inline fn definedTableInsts(inst: *const Header) []const *TableInst {
-            return inst.tableInsts()[inst.module.inner.raw.table_import_count..];
+            return inst.tableInsts()[inst.module.inner.table_import_count..];
         }
 
         /// Internal API.
@@ -175,11 +176,11 @@ pub const ModuleInst = packed struct(usize) {
         }
 
         pub inline fn memInsts(inst: *const Header) []const *MemInst {
-            return inst.mems[0..inst.module.inner.raw.mem_count];
+            return inst.mems[0..inst.module.inner.mem_count];
         }
 
         pub inline fn definedMemInsts(inst: *const Header) []const *MemInst {
-            return inst.memInsts()[inst.module.inner.raw.mem_import_count..];
+            return inst.memInsts()[inst.module.inner.mem_import_count..];
         }
 
         /// Internal API.
@@ -188,11 +189,11 @@ pub const ModuleInst = packed struct(usize) {
         }
 
         pub inline fn globalValues(inst: *const Header) []const *anyopaque {
-            return inst.globals[0..inst.module.inner.raw.global_count];
+            return inst.globals[0..inst.module.inner.global_count];
         }
 
         pub inline fn definedGlobalValues(inst: *const Header) []const *anyopaque {
-            return inst.globalValues()[inst.module.inner.raw.global_import_count..];
+            return inst.globalValues()[inst.module.inner.global_import_count..];
         }
 
         pub fn globalAddr(inst: *const Header, idx: Module.GlobalIdx) GlobalAddr {
@@ -233,11 +234,8 @@ pub const ModuleInst = packed struct(usize) {
         };
 
         pub fn dataSegmentDropFlag(inst: *const Header, idx: Module.DataIdx) DropFlag {
-            const drop_mask_len = std.math.divCeil(
-                u32,
-                inst.module.inner.raw.datas_count,
-                32,
-            ) catch unreachable;
+            const drop_mask_len = std.math.divCeil(u32, inst.module.inner.datas_count, 32) catch
+                unreachable;
 
             return DropFlag.init(inst.datas_drop_mask[0..drop_mask_len], @intFromEnum(idx));
         }
@@ -249,11 +247,8 @@ pub const ModuleInst = packed struct(usize) {
         }
 
         pub fn elemSegmentDropFlag(inst: *const Header, idx: Module.ElemIdx) DropFlag {
-            const drop_mask_len = std.math.divCeil(
-                u32,
-                inst.module.inner.raw.elems_count,
-                32,
-            ) catch unreachable;
+            const drop_mask_len = std.math.divCeil(u32, inst.module.inner.elems_count, 32) catch
+                unreachable;
 
             return DropFlag.init(inst.elems_drop_mask[0..drop_mask_len], @intFromEnum(idx));
         }

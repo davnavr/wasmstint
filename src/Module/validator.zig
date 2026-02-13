@@ -32,9 +32,12 @@ pub const Code = extern struct {
     pub const End = enum(u8) { end = @intFromEnum(opcodes.ByteOpcode.end) };
     pub const Ip = [*:@intFromEnum(End.end)]const u8;
 
-    /// Describes the changes to interpreter state should occur if its corresponding branch is taken.
-    pub const SideTableEntry = packed struct(if (builtin.mode == .Debug) u128 else u64) {
+    const side_table_safety_checks = builtin.mode == .Debug and
+        !@import("options").use_assembly_interpreter;
+
+    const SideTableEntryInner = packed struct(u64) {
         delta_ip: packed union {
+            /// Amount to adjust the IP by when the branch is taken.
             done: i32,
             /// Offset from the first byte of the first instruction to the first byte of the
             /// branch instruction.
@@ -43,13 +46,44 @@ pub const Code = extern struct {
         delta_stp: i16,
         copy_count: u8,
         pop_count: u8,
+
+        comptime {
+            std.debug.assert(@offsetOf(SideTableEntryInner, "delta_ip") == 0);
+            std.debug.assert(@offsetOf(SideTableEntryInner, "delta_stp") == 4);
+            std.debug.assert(@offsetOf(SideTableEntryInner, "copy_count") == 6);
+            std.debug.assert(@offsetOf(SideTableEntryInner, "pop_count") == 7);
+        }
+    };
+
+    // Zig x86-64 backend currently hates zero-sized types (e.g. `u0`)
+    const DebugSideTableEntry = packed struct(u128) {
+        inner: SideTableEntryInner,
         /// Set to the same value as `fixup_origin` to catch bugs during side table construction.
-        origin: if (builtin.mode == .Debug) u32 else void,
-        safety_flags: if (builtin.mode == .Debug) packed struct(u32) {
+        origin: u32,
+        safety_flags: packed struct(u32) {
             finished: bool = false,
             padding: enum(u31) { padding } = .padding,
-        } else u0 = if (builtin.mode == .Debug) .{} else 0,
+        } = .{},
+
+        fn init(inner: SideTableEntryInner, origin: u32) DebugSideTableEntry {
+            return .{ .inner = inner, .origin = origin };
+        }
     };
+
+    const ReleaseSideTableEntry = packed struct(u64) {
+        inner: SideTableEntryInner,
+
+        fn init(inner: SideTableEntryInner, origin: u32) ReleaseSideTableEntry {
+            _ = origin;
+            return .{ .inner = inner };
+        }
+    };
+
+    /// Describes the changes to interpreter state should occur if its corresponding branch is taken.
+    pub const SideTableEntry = if (side_table_safety_checks)
+        DebugSideTableEntry
+    else
+        ReleaseSideTableEntry;
 
     pub const Inner = extern struct {
         instructions_start: Ip,
@@ -136,14 +170,14 @@ pub const Code = extern struct {
         defer coz_transaction.end();
 
         const code_addr = @intFromPtr(code);
-        const code_sec_ptr = module.inner.raw.code;
+        const code_sec_ptr = module.inner.code;
         std.debug.assert(@intFromPtr(code_sec_ptr) <= code_addr);
-        std.debug.assert(code_addr < @intFromPtr(code_sec_ptr + module.inner.raw.code_count));
+        std.debug.assert(code_addr < @intFromPtr(code_sec_ptr + module.inner.code_count));
 
         const func_idx: Module.FuncIdx = @enumFromInt(@as(
             @typeInfo(Module.FuncIdx).@"enum".tag_type,
             @intCast(
-                module.inner.raw.func_import_count + @divExact(
+                module.inner.func_import_count + @divExact(
                     code_addr - @intFromPtr(code_sec_ptr),
                     @sizeOf(Code),
                 ),
@@ -157,8 +191,8 @@ pub const Code = extern struct {
             allocator,
             module,
             module.funcTypeIdx(func_idx),
-            module.codeEntries()[@intFromEnum(func_idx) - module.inner.raw.func_import_count]
-                .contents.slice(module.inner.raw.code_section, module.inner.wasm),
+            module.codeEntries()[@intFromEnum(func_idx) - module.inner.func_import_count]
+                .contents.slice(module.inner.code_section, module.wasmBytes()),
             scratch,
             diag,
         );
@@ -268,7 +302,7 @@ const BlockType = union(enum) {
             return BlockType.void;
         } else if (tag_int >= 0) {
             reader.bytes.* = int_bytes;
-            return if (tag_int < module.inner.raw.types_count)
+            return if (tag_int < module.inner.types_count)
                 BlockType{
                     .type = .{
                         .idx = @enumFromInt(
@@ -506,7 +540,7 @@ fn readMemIdx(reader: *Reader, module: Module, diag: Diagnostics) !void {
         return diag.writeAll(.parse, msg);
     }
 
-    if (module.inner.raw.mem_count == 0) {
+    if (module.inner.mem_count == 0) {
         return diag.print(.validation, "unknown memory {}", .{idx});
     }
 }
@@ -534,7 +568,7 @@ fn readMemArg(
             diag.writeAll(.parse, "malformed memop flags, alignment overflow");
     }
 
-    if (module.inner.raw.mem_count == 0) {
+    if (module.inner.mem_count == 0) {
         return diag.writeAll(.validation, "unknown memory in memarg");
     }
 
@@ -568,11 +602,11 @@ const ReadDataIdx = struct {
 
     fn boundsCheck(self: ReadDataIdx, module: Module, diag: Diagnostics) !void {
         // spec first checks OOB index
-        if (self.idx >= module.inner.raw.datas_count) {
+        if (self.idx >= module.inner.datas_count) {
             return diag.print(.validation, "unknown data segment {}, in code", .{self.idx});
         }
 
-        if (!module.inner.raw.has_data_count_section) {
+        if (!module.inner.has_data_count_section) {
             return diag.writeAll(.parse, "data count section required");
         }
     }
@@ -581,7 +615,7 @@ const ReadDataIdx = struct {
 fn readElemIdx(reader: *Reader, module: Module, diag: Diagnostics) !ValType {
     const idx = try reader.readIdx(
         Module.ElemIdx,
-        module.inner.raw.elems_count,
+        module.inner.elems_count,
         diag,
         &.{ "elem segment", "in code" },
     );
@@ -877,13 +911,12 @@ const SideTableBuilder = struct {
         errdefer comptime unreachable;
 
         fixup.* = .{ .entry_idx = idx };
-        entry.* = Entry{
+        entry.* = Entry.init(.{
             .delta_ip = .{ .fixup_origin = origin },
             .delta_stp = undefined,
             .copy_count = copy_count,
             .pop_count = pop_count,
-            .origin = if (builtin.mode == .Debug) origin else {},
-        };
+        }, origin);
 
         // std.debug.print(" PLACED ALT FIXUP #{} originating from 0x{X}\n", .{ idx, origin });
     }
@@ -908,23 +941,25 @@ const SideTableBuilder = struct {
         const idx = try table.nextEntryIdx();
         const entry = try table.entries.addOne(arena.allocator());
         errdefer _ = table.entries.pop().?;
-        entry.copy_count = copy_count;
-        entry.pop_count = pop_count;
-        entry.origin = if (builtin.mode == .Debug) origin else {};
+        entry.inner.copy_count = copy_count;
+        entry.inner.pop_count = pop_count;
+        if (Code.side_table_safety_checks) {
+            entry.origin = origin;
+        }
 
         if (known_target) |target| {
             const delta_ip = std.math.negateCast(origin - target.instr_offset) catch
                 return Error.WasmImplementationLimit;
 
-            entry.delta_ip = .{ .done = delta_ip };
-            if (builtin.mode == .Debug) {
+            entry.inner.delta_ip = .{ .done = delta_ip };
+            if (Code.side_table_safety_checks) {
                 entry.safety_flags.finished = true;
             }
 
             const delta_stp = std.math.negateCast(idx - target.side_table_idx) catch
                 return Error.WasmImplementationLimit;
 
-            entry.delta_stp = std.math.cast(i16, delta_stp) orelse
+            entry.inner.delta_stp = std.math.cast(i16, delta_stp) orelse
                 return Error.WasmImplementationLimit;
         } else {
             // std.debug.print(
@@ -932,8 +967,8 @@ const SideTableBuilder = struct {
             //     .{ idx, origin, block_offset, copy_count, pop_count },
             // );
 
-            entry.delta_ip = .{ .fixup_origin = origin };
-            entry.delta_stp = undefined;
+            entry.inner.delta_ip = .{ .fixup_origin = origin };
+            entry.inner.delta_stp = undefined;
 
             const current_list: *ActiveList =
                 &table.active.items[table.active.items.len - 1 - target_depth];
@@ -954,19 +989,21 @@ const SideTableBuilder = struct {
         defer coz_begin.end();
 
         const entry: *Entry = &table.entries.items[fixup_entry.entry_idx];
-        const origin = entry.delta_ip.fixup_origin;
+        const origin = entry.inner.delta_ip.fixup_origin;
 
-        entry.delta_ip = .{
+        entry.inner.delta_ip = .{
             .done = std.math.cast(i32, end_offset - origin) orelse
                 return error.WasmImplementationLimit,
         };
 
-        if (builtin.mode == .Debug) {
+        if (Code.side_table_safety_checks) {
             entry.safety_flags.finished = true;
         }
 
-        entry.delta_stp = std.math.cast(i16, target_side_table_idx - fixup_entry.entry_idx) orelse
-            return error.WasmImplementationLimit;
+        entry.inner.delta_stp = std.math.cast(
+            i16,
+            target_side_table_idx - fixup_entry.entry_idx,
+        ) orelse return error.WasmImplementationLimit;
 
         // std.debug.print(
         //     "FIXUP #{} targeting 0x{X} originating from 0x{X} (dip = {}, dstp = {}, target STP={})\n",
@@ -2696,7 +2733,7 @@ pub fn rawValidate(
     errdefer comptime unreachable;
 
     for (final_side_table, 0..) |*entry, i| {
-        if (builtin.mode == .Debug and !entry.safety_flags.finished) {
+        if (Code.side_table_safety_checks and !entry.safety_flags.finished) {
             std.debug.panic("entry #{} was not fixed up", .{i});
         }
 
@@ -2732,5 +2769,5 @@ const Reader = @import("Reader.zig");
 const Diagnostics = Reader.Diagnostics;
 const ValType = Module.ValType;
 const V128 = @import("../v128.zig").V128;
-const opcodes = @import("../opcodes.zig");
+const opcodes = @import("opcodes");
 const coz = @import("coz");

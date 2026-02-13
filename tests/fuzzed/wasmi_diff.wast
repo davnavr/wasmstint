@@ -16,6 +16,7 @@
   (invoke "" (i32.const 0xFB30_3030) (i32.const 0) (i64.const 0))
   (i32.const 0))
 
+
 ;; allocation of memory for globals
 (module
   (type (;0;) (func))
@@ -27,3 +28,27 @@
   (global (;3;) v128 (v128.const i32x4 0x30303030 0x30303030 0x30303030 0x30303030))
   (global (;4;) i32 (i32.const 0))
   (global (;5;) v128 (v128.const i32x4 0x00000000 0x00000000 0x00000000 0x00000000)))
+
+
+;; assembly backend
+(module
+  (func (export "i32.div_s") (param $numerator i32) (param $denominator i32) (result i32)
+    local.get $numerator
+    local.get $denominator
+    i32.div_s
+  )
+  
+  (func (export "i64.div_s") (param $numerator i64) (param $denominator i64) (result i64)
+    local.get $numerator
+    local.get $denominator
+    i64.div_s
+  )
+)
+
+;; incorrect overflow check
+(assert_return
+  (invoke "i32.div_s" (i32.const 0) (i32.const 0x7FFF_FFFF))
+  (i32.const 0))
+(assert_return
+  (invoke "i64.div_s" (i64.const 0) (i64.const 0x7FFF_FFFF_FFFF_FFFF))
+  (i64.const 0))

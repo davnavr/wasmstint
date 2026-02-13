@@ -10,6 +10,46 @@ Inspired by the following projects:
 
 Note that `wasmstint` is still in development and it's API is **very** unstable!
 
+## Design
+
+`wasmstint` departs from the usual design of WASM runtimes to ensure stack overflows never occur, at
+the cost of additional complexity. If total control of memory usage is not required, consider using
+a different WASM runtime instead.
+
+```zig
+var fuel = Fuel{ .remaining = 12345 };
+var state = interpreter.awaiting_host.beginCall(
+    call_stack_allocator,
+    my_function,
+    arguments,
+    &fuel,
+);
+
+while (true) {
+    state = next: switch (state) {
+        .awaiting_host => {
+            // handle call to host function
+        },
+        .call_stack_exhaustion => {
+            // handle call stack out-of-memory
+        },
+        .interrupted => |*intr| {
+            switch (intr.cause().*) {
+                .out_of_fuel => {},
+                .memory_grow => {},
+                .table_grow => {},
+            }
+
+            break :next intr.resumeExecution(&fuel);
+        },
+        .trap => {
+            // handle trap
+        },
+        // Other cases
+    };
+}
+```
+
 # Supported Features
 
 - Fuel-metering (like all the other WASM runtimes)
@@ -64,3 +104,17 @@ Additionally, big-endian targets are not supported at all.
 
 [WebAssembly]: https://webassembly.org/
 [Zig]: https://ziglang.org/
+
+# Backends
+
+`wasmstint` currently provides 2 different implementations of its interpreter, selected with the
+`-Dinterpreter-backend=` build option:
+
+- `portable`: Written in straightforward and relatively easy to understand Zig.
+  - Currently actually suffers from worse build times, due to the large number of SIMD instruction
+    handlers.
+- `assembly`: Hand-written interpreter written in x86-64 assembly. Currently only supported on
+  `x86_64-linux`, though may eventually support any OS using the System V ABI.
+  - Fastest performance and surprisingly fast build times at the cost of less runtime checks in
+    `Debug` mode.
+

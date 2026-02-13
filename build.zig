@@ -15,6 +15,7 @@ const ProjectOptions = struct {
     link_libc: ?bool,
     /// Implies `link_libc`.
     enable_coz: bool,
+    pic: ?bool,
 
     fn init(b: *Build) ProjectOptions {
         const optimize = b.standardOptimizeOption(.{});
@@ -53,6 +54,11 @@ const ProjectOptions = struct {
                 .other = llvm == .always,
             },
             .enable_coz = enable_coz,
+            .pic = b.option(
+                bool,
+                "pic",
+                "Require generating Position Independent Code",
+            ),
         };
     }
 };
@@ -300,24 +306,117 @@ const Modules = struct {
 
         const name = "wasmstint";
 
+        const InterpreterBackend = enum {
+            portable,
+            assembly,
+        };
+
         fn build(
             b: *Build,
             steps: *const TopLevelSteps,
             options: *const ProjectOptions,
             imports: struct { coz: Coz, allocators: Allocators },
         ) Wasmstint {
-            const module = b.addModule(name, .{
+            const root_module = b.addModule(name, .{
                 .root_source_file = b.path("src/root.zig"),
                 .target = options.target,
                 .optimize = options.optimize_interpreter,
                 .link_libc = options.link_libc,
             });
-            addAsImportTo(Coz, imports.coz, module);
-            addAsImportTo(Allocators, imports.allocators, module);
+            addAsImportTo(Coz, imports.coz, root_module);
+            addAsImportTo(Allocators, imports.allocators, root_module);
+
+            const opcodes_module = b.createModule(.{
+                .root_source_file = b.path("src/opcodes.zig"),
+            });
+            root_module.addImport("opcodes", opcodes_module);
+
+            const use_assembly_interpreter = b.option(
+                InterpreterBackend,
+                "interpreter-backend",
+                "Set the interpreter implementation to use",
+            ) orelse InterpreterBackend.portable;
+            const wasmstint_options = b.addOptions();
+            wasmstint_options.addOption(
+                bool,
+                "use_assembly_interpreter",
+                use_assembly_interpreter == .assembly,
+            );
+            root_module.addOptions("options", wasmstint_options);
+
+            const codegen_x64_sysv_exe = b.addExecutable(.{
+                .name = "wasmstint-codegen-x86_64_sysv",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/Interpreter/codegen/x86_64/main.zig"),
+                    .target = b.graph.host,
+                    .optimize = .Debug,
+                    .single_threaded = true,
+                    .pic = false,
+                    // .code_model = .small, // Forces usage of LLVM backend
+                }),
+                .max_rss = ByteSize.mib(163).bytes,
+            });
+            codegen_x64_sysv_exe.root_module.addImport("opcodes", opcodes_module);
+
+            const x64_asm_interp_symbol_prefix = "wasmstint.x86_64_sysv.";
+            const err_no_pic_flag = "pass -Dpic or -Dpic=false to use ASM backend";
+
+            if (use_assembly_interpreter == .assembly and
+                options.target.result.cpu.arch == .x86_64)
+            {
+                const Options = struct {
+                    optimize: std.builtin.OptimizeMode,
+                    symbol_prefix: []const u8,
+                    pic: bool,
+                    features: []const std.Target.x86.Feature,
+                };
+
+                const cpu_feature_set = options.target.result.cpu.features;
+                var cpu_features = std.ArrayList(std.Target.x86.Feature).initCapacity(
+                    b.allocator,
+                    cpu_feature_set.count(),
+                ) catch @panic("oom");
+
+                for (std.enums.values(std.Target.x86.Feature)) |feat| {
+                    if (std.Target.x86.featureSetHas(cpu_feature_set, feat)) {
+                        cpu_features.appendAssumeCapacity(feat);
+                    } else if (cpu_features.items.len == cpu_features.capacity) {
+                        break;
+                    }
+                }
+
+                var options_writer = std.Io.Writer.Allocating.init(b.allocator);
+                std.zon.stringify.serialize(
+                    Options{
+                        .optimize = options.optimize_interpreter,
+                        .symbol_prefix = x64_asm_interp_symbol_prefix,
+                        .pic = options.pic orelse true,
+                        // .target_triple = options.target.query.zigTriple(b.allocator) catch @panic("oom"),
+                        .features = cpu_features.items,
+                    },
+                    .{ .whitespace = false },
+                    &options_writer.writer,
+                ) catch @panic("oom");
+
+                const run_codegen = b.addRunArtifact(codegen_x64_sysv_exe);
+                run_codegen.step.max_rss = ByteSize.mib(3).bytes;
+                run_codegen.addArg(options_writer.written());
+                root_module.addAssemblyFile(run_codegen.addOutputFileArg("x86_64_sysv.s"));
+                // root_module.addAnonymousImport("asm_generated", .{
+                //     .root_source_file = run_codegen.addOutputFileArg("x86_64_sys_decls.zig"),
+                //     .target = options.target,
+                //     .optimize = options.optimize_interpreter,
+                // });
+                wasmstint_options.addOption([]const u8, "symbol_prefix", x64_asm_interp_symbol_prefix);
+
+                if (options.pic == null) {
+                    run_codegen.step.dependOn(&b.addFail(err_no_pic_flag).step);
+                }
+            }
 
             const tests = b.addTest(.{
                 .name = name,
-                .root_module = module,
+                .root_module = root_module,
                 // TODO(zig): https://github.com/ziglang/zig/issues/23423
                 .use_llvm = true,
                 .max_rss = ByteSize.mib(398).bytes,
@@ -326,11 +425,11 @@ const Modules = struct {
             const tests_run = &b.addRunArtifact(tests).step;
             tests_run.max_rss = ByteSize.mib(43).bytes;
             steps.@"test-unit".dependOn(tests_run);
-            addCheck(b, steps, .@"test", module, name, .{
+            addCheck(b, steps, .@"test", root_module, name, .{
                 .max_rss = .mib(126),
                 .use_llvm = options.use_llvm.interpreter,
             });
-            return .{ .module = module };
+            return .{ .module = root_module };
         }
     };
 
@@ -467,6 +566,7 @@ const SpectestInterp = struct {
             .root_source_file = b.path("src/spectest/main.zig"),
             .target = proj_opts.target,
             .optimize = proj_opts.optimize,
+            .pic = proj_opts.pic,
         });
         Modules.addAsImportTo(Modules.FileContent, imports.file_content, module);
         Modules.addAsImportTo(Modules.Wasmstint, imports.wasmstint, module);
@@ -478,7 +578,7 @@ const SpectestInterp = struct {
             .name = "wasmstint-spectest",
             .root_module = module,
             .use_llvm = proj_opts.use_llvm.interpreter,
-            .max_rss = ByteSize.mib(452).bytes,
+            .max_rss = ByteSize.mib(465).bytes,
         });
 
         b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{}).step);
@@ -647,16 +747,32 @@ fn buildSpecificationTests(
 
     top_steps.@"test".dependOn(test_spec_all_step);
 
-    const test_fuzzed_step = b.step("test-fuzzed", "Run test cases discovered by fuzzing");
-    const fuzzed_test_names = [_][]const u8{ "validation.wast", "wasmi_diff.wast" };
-    const fuzzed_test_dir = b.path("tests/fuzzed");
-    for (fuzzed_test_names) |name| {
-        test_fuzzed_step.dependOn(
-            buildWastTest(b, interpreter, fuzzed_test_dir.path(b, name), wabt, name),
-        );
-    }
+    {
+        const test_fuzzed_step = b.step("test-fuzzed", "Run WAST test cases discovered by fuzzing");
+        const fuzzed_test_dir = b.path("tests/fuzzed");
+        for (&[_][]const u8{ "validation.wast", "wasmi_diff.wast", "execution.wast" }) |name| {
+            test_fuzzed_step.dependOn(
+                buildWastTest(b, interpreter, fuzzed_test_dir.path(b, name), wabt, name),
+            );
+        }
 
-    top_steps.@"test".dependOn(test_fuzzed_step);
+        top_steps.@"test".dependOn(test_fuzzed_step);
+    }
+    {
+        const test_regression_step = b.step(
+            "test-spec-regression",
+            "Run WAST test cases to check bug fixes",
+        );
+        const regression_test_names = [_][]const u8{"x86_64_sysv.wast"};
+        const regression_test_dir = b.path("tests/regression");
+        for (regression_test_names) |name| {
+            test_regression_step.dependOn(
+                buildWastTest(b, interpreter, regression_test_dir.path(b, name), wabt, name),
+            );
+        }
+
+        top_steps.@"test".dependOn(test_regression_step);
+    }
 }
 
 const Wasip1Interp = struct {
@@ -680,6 +796,7 @@ const Wasip1Interp = struct {
             .root_source_file = b.path("src/WasiPreview1/main.zig"),
             .target = proj_opts.target,
             .optimize = proj_opts.optimize,
+            .pic = proj_opts.pic,
         });
         Modules.addAsImportTo(Modules.FileContent, imports.file_content, module);
         Modules.addAsImportTo(Modules.Wasmstint, imports.wasmstint, module);
@@ -829,6 +946,7 @@ fn buildFuzzers(
                 .root_source_file = b.path("fuzz/harness/libfuzzer.zig"),
                 .target = options.project.target,
                 .optimize = options.project.optimize,
+                .pic = true, // afl-clang-lto seems to require PIC
             }),
             .max_rss = ByteSize.mib(319).bytes,
             .use_llvm = true,
@@ -845,9 +963,15 @@ fn buildFuzzers(
             &.{ "afl-clang-lto", "-g", "-Wall", "-fsanitize=fuzzer", "-lwasmstint_fuzz_ffi", "-v" },
         );
         afl_clang_lto.disable_zig_progress = true;
+
         if (fail_no_rust_include) |fail| {
             afl_clang_lto.step.dependOn(fail);
         }
+
+        if (options.project.pic != true) {
+            afl_clang_lto.step.dependOn(&b.addFail("AFL fuzz harness requires -Dpic=true").step);
+        }
+
         { // Unfortunately, filtering by file seems to be broken
             afl_clang_lto.addFileInput(b.path("fuzz/denylist.txt"));
             afl_clang_lto.setEnvironmentVariable(
@@ -877,6 +1001,7 @@ fn buildFuzzers(
                 .root_source_file = b.path("fuzz/harness/main.zig"),
                 .target = options.project.target,
                 .optimize = options.project.optimize,
+                .pic = options.project.pic,
             }),
             .max_rss = ByteSize.mib(373).bytes,
             .use_llvm = options.project.use_llvm.interpreter,

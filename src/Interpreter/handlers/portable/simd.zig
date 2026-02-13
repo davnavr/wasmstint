@@ -52,12 +52,12 @@ const load_store = struct {
     }
 };
 
-pub const @"v128.load" = handlers.linearMemoryAccessor(
+pub const @"v128.load" = portable.linearMemoryAccessor(
     .@"16",
     .{ .fd = .@"v128.load" },
     .load,
     void,
-    handlers.nopBeforeMemoryAccess,
+    portable.nopBeforeMemoryAccess,
     load_store.performLoad,
 );
 
@@ -101,12 +101,12 @@ fn loadAndExtendHandler(
             return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
         }
 
-        const extendingLoad = handlers.linearMemoryAccessor(
+        const extendingLoad = portable.linearMemoryAccessor(
             .fromByteUnits(access_size),
             .{ .fd = opcode },
             .load,
             void,
-            handlers.nopBeforeMemoryAccess,
+            portable.nopBeforeMemoryAccess,
             performExtendingLoad,
         );
     }.extendingLoad;
@@ -142,12 +142,12 @@ fn loadAndSplatHandler(comptime opcode: FDPrefixOpcode, comptime To: type) Opcod
             return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
         }
 
-        const loadAndSplat = handlers.linearMemoryAccessor(
+        const loadAndSplat = portable.linearMemoryAccessor(
             .fromByteUnits(@sizeOf(To)),
             .{ .fd = opcode },
             .load,
             void,
-            handlers.nopBeforeMemoryAccess,
+            portable.nopBeforeMemoryAccess,
             performLoadAndSplat,
         );
     }.loadAndSplat;
@@ -158,7 +158,7 @@ pub const @"v128.load16_splat" = loadAndSplatHandler(.@"v128.load16_splat", u16)
 pub const @"v128.load32_splat" = loadAndSplatHandler(.@"v128.load32_splat", u32);
 pub const @"v128.load64_splat" = loadAndSplatHandler(.@"v128.load64_splat", u64);
 
-pub const @"v128.store" = handlers.linearMemoryAccessor(
+pub const @"v128.store" = portable.linearMemoryAccessor(
     .@"16",
     .{ .fd = .@"v128.store" },
     .store,
@@ -591,7 +591,7 @@ fn loadLaneHandler(
             return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
         }
 
-        const loadLane = handlers.linearMemoryAccessor(
+        const loadLane = portable.linearMemoryAccessor(
             .fromByteUnits(@sizeOf(T)),
             .{ .fd = opcode },
             .store, // actually a load, this ensures an assertion checks for 2 values on the stack
@@ -639,7 +639,7 @@ fn storeLaneHandler(
             return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
         }
 
-        const storeLane = handlers.linearMemoryAccessor(
+        const storeLane = portable.linearMemoryAccessor(
             .fromByteUnits(@sizeOf(T)),
             .{ .fd = opcode },
             .store,
@@ -682,12 +682,12 @@ fn loadAndZeroPadHandler(
             return dispatchNextOpcode(instr.*, vals.top, fuel, stp, locals, module, interp);
         }
 
-        const loadAndZeroPad = handlers.linearMemoryAccessor(
+        const loadAndZeroPad = portable.linearMemoryAccessor(
             .fromByteUnits(@sizeOf(T)),
             .{ .fd = opcode },
             .load,
             void,
-            handlers.nopBeforeMemoryAccess,
+            portable.nopBeforeMemoryAccess,
             performLoadAndZeroPad,
         );
     }.loadAndZeroPad;
@@ -1311,125 +1311,12 @@ fn floatOpcodeHandlers(comptime F: type) type {
         const Ints = @Vector(interpretation.laneCount(), I);
 
         const operators = struct {
-            fn ceil(z: Floats) Floats {
-                return @ceil(z);
-            }
+            const rounding = @import("../../../round.zig").operations(Floats);
 
-            fn floor(z: Floats) Floats {
-                // See comment on `f32.floor` implementation on why this may be inaccurate/incorrect
-                return @floor(z);
-            }
-
-            fn trunc(z: Floats) Floats {
-                return @select(F, z <= @as(Floats, @splat(-0.0)), @ceil(z), @floor(z));
-            }
-
-            // Copied from `../handlers.zig`
-            const canonical_nan_bit_vec: Ints = @splat(1 << (std.math.floatMantissaBits(F) - 1));
-            const precise_int_limit = 1 << (std.math.floatMantissaBits(F) + 1);
-            const pos_int_limit_vec: Floats = @splat(@as(F, precise_int_limit));
-            const neg_int_limit_vec: Floats = @splat(@as(F, -precise_int_limit));
-            const pos_inf_vec: Ints = @splat(@as(I, @bitCast(std.math.inf(F))));
-            const neg_inf_vec: Ints = @splat(@as(I, @bitCast(-std.math.inf(F))));
-
-            fn nearest(z: Floats) Floats {
-                // See the implementation of `f32.nearest` in `../handlers.zig` for more information
-
-                // '@round' compiles to 'llvm.round.*', but what is needed is 'llvm.roundeven.*'
-                // See also:
-                // - https://github.com/ziglang/zig/issues/767
-                // - https://github.com/ziglang/zig/issues/2535
-
-                const bits: Ints = @bitCast(z);
-                const detect_nans = z != z;
-                const reuse_value =
-                    (bits == pos_zeroes) | (bits == neg_zeroes) |
-                    (bits == pos_inf_vec) | (bits == neg_inf_vec);
-
-                const ret_pos_zero = (@as(Floats, @splat(0)) < z) & (z <= @as(Floats, @splat(0.5)));
-                const ret_neg_zero = (@as(Floats, @splat(-0.5)) <= z) & (z < @as(Floats, @splat(0)));
-
-                const left_int: Floats = @round(z);
-                const SignedInts = @Vector(lane_count, @Int(.signed, @typeInfo(F).float.bits));
-                const right_int: Floats = @round(
-                    @select(
-                        F,
-                        @as(SignedInts, @bitCast(z)) < @as(SignedInts, @splat(0)),
-                        z + @as(Floats, @splat(1.0)),
-                        z - @as(Floats, @splat(1.0)),
-                    ),
-                );
-
-                // My eyes hurt
-                const left_dist: Floats = @abs(left_int - z);
-                const right_dist: Floats = @abs(right_int - z);
-
-                const RoundedI = std.math.IntFittingRange(-precise_int_limit, precise_int_limit);
-                const RoundedInts = @Vector(lane_count, RoundedI);
-                // When both candidates are the same distance from `z`, pick the even one
-                const left_int_converted: RoundedInts = casted: {
-                    @setRuntimeSafety(false);
-                    break :casted @intFromFloat(left_int);
-                };
-                const even_rounded = @select(
-                    F,
-                    @rem(left_int_converted, @as(RoundedInts, @splat(2))) ==
-                        @as(RoundedInts, @splat(0)),
-                    left_int,
-                    right_int,
-                );
-
-                const actually_pick_rounded_values = @select(
-                    F,
-                    left_dist < right_dist,
-                    left_int,
-                    @select(
-                        F,
-                        right_dist < left_dist,
-                        right_dist,
-                        @select(
-                            F,
-                            (neg_int_limit_vec < z) & (z < pos_int_limit_vec),
-                            even_rounded,
-                            left_int,
-                        ),
-                    ),
-                );
-
-                // std.log.debug(
-                //     "nearest\n" ++
-                //         "reuse_value: {}\n" ++
-                //         "z: {}\n" ++
-                //         "left_dist: {}\n" ++
-                //         "right_dist: {}\n" ++
-                //         "even_rounded: {}\n" ++
-                //         "left_int: {}\n" ++
-                //         "right_int: {}",
-                //     .{ reuse_value, z, left_dist, right_dist, even_rounded, left_int, right_int },
-                // );
-
-                return @select(
-                    F,
-                    detect_nans,
-                    @as(Floats, @bitCast(bits | canonical_nan_bit_vec)),
-                    @select(
-                        F,
-                        reuse_value,
-                        z,
-                        @select(
-                            F,
-                            ret_pos_zero,
-                            @as(Floats, @splat(0.0)),
-                            @select(
-                                F,
-                                ret_neg_zero,
-                                @as(Floats, @splat(-0.0)),
-                                actually_pick_rounded_values,
-                            ),
-                        ),
-                    ),
-                );
-            }
+            const ceil = rounding.ceil;
+            const floor = rounding.floor;
+            const trunc = rounding.trunc;
+            const nearest = rounding.nearest;
 
             fn abs(z: Floats) Floats {
                 return @abs(z);
@@ -1573,22 +1460,26 @@ pub const @"f64x2.pmin" = f64x2_arith_ops.pmin;
 pub const @"f64x2.pmax" = f64x2_arith_ops.pmax;
 
 const std = @import("std");
-const Interpreter = @import("../../Interpreter.zig");
-const handlers = @import("../handlers.zig");
-const ohcc = handlers.ohcc;
-const OpcodeHandler = handlers.OpcodeHandler;
-const dispatchNextOpcode = handlers.dispatchNextOpcode;
+
+const runtime = @import("../../../runtime.zig");
+const Interpreter = @import("../../../Interpreter.zig");
+const Fuel = Interpreter.Fuel;
+const FDPrefixOpcode = @import("opcodes").FDPrefixOpcode;
+const V128 = @import("../../../v128.zig").V128;
+
+const portable = @import("../portable.zig");
+const ohcc = portable.ohcc;
+const dispatchNextOpcode = portable.dispatchNextOpcode;
+const MemArg = portable.MemArg;
+const OpcodeHandler = portable.OpcodeHandler;
+
+const handlers = @import("../../handlers.zig");
+const Locals = handlers.Locals;
 const Ip = handlers.Ip;
 const Eip = handlers.Eip;
 const Sp = handlers.Sp;
 const Stp = handlers.Stp;
-const Instr = @import("../Instr.zig");
-const Stack = @import("../Stack.zig");
-const Locals = handlers.Locals;
-const Fuel = Interpreter.Fuel;
 const Transition = handlers.Transition;
-const MemArg = handlers.MemArg;
-const Value = @import("../value.zig").Value;
-const V128 = @import("../../v128.zig").V128;
-const FDPrefixOpcode = @import("../../opcodes.zig").FDPrefixOpcode;
-const runtime = @import("../../runtime.zig");
+const Instr = @import("../../Instr.zig");
+const Stack = @import("../../Stack.zig");
+const Value = @import("../../value.zig").Value;

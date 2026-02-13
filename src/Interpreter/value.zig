@@ -112,7 +112,7 @@ pub const TaggedValue = union(enum) {
         value: *const TaggedValue,
         options: Options,
 
-        pub const Options = packed struct(u3) {
+        pub const Options = packed struct(u4) {
             int: packed struct(u2) {
                 signed: bool = true,
                 unsigned: bool = false,
@@ -121,6 +121,7 @@ pub const TaggedValue = union(enum) {
                 /// Append a WASM style comment indicating the float's bits, in hexadecimal.
                 hex: bool = true,
             } = .{},
+            extern_ref: std.meta.FieldEnum(runtime.ExternAddr) = .ptr,
         };
 
         pub fn format(self: Formatter, writer: *Writer) Writer.Error!void {
@@ -128,9 +129,10 @@ pub const TaggedValue = union(enum) {
             switch (value.*) {
                 inline .i32, .i64 => |i, tag| {
                     const Unsigned = std.meta.Int(.unsigned, @typeInfo(@TypeOf(i)).int.bits);
+                    const u: Unsigned = @bitCast(i);
 
                     try writer.writeAll("(" ++ @tagName(tag));
-                    try writer.print(".const 0x{X}", .{i});
+                    try writer.print(".const 0x{X}", .{u});
                     if (self.options.int.signed or self.options.int.unsigned) {
                         try writer.writeAll(" (; ");
 
@@ -143,7 +145,7 @@ pub const TaggedValue = union(enum) {
                         }
 
                         if (self.options.int.unsigned) {
-                            try writer.print("unsigned={d}", .{@as(Unsigned, @bitCast(i))});
+                            try writer.print("unsigned={d}", .{u});
                         }
 
                         try writer.writeAll(" ;))");
@@ -165,7 +167,11 @@ pub const TaggedValue = union(enum) {
                     }
                     try writer.writeByte(')');
                 },
-                inline .funcref, .externref, .v128 => |*v| try v.format(writer),
+                .externref => |*r| switch (self.options.extern_ref) {
+                    .ptr => try r.formatPtr(writer),
+                    .nat => try r.formatNat(writer),
+                },
+                inline .funcref, .v128 => |*v| try v.format(writer),
             }
         }
     };

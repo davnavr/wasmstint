@@ -2,6 +2,8 @@
 //!
 //! Based on <https://doi.org/10.48550/arXiv.2205.01183>.
 
+// TODO: Rename this to `Computation` or `Execution` or `Thread`
+
 const Value = @import("Interpreter/value.zig").Value;
 const Stack = @import("Interpreter/Stack.zig");
 const SideTable = @import("Interpreter/side_table.zig").SideTable;
@@ -232,24 +234,24 @@ pub const State = union(Tag) {
 
             // std.debug.print("ENTERING MAIN LOOP (ver = {})\n", .{interp.version.number});
 
-            var i = Instr.init(frame.wasm.ip, frame.wasm.eip);
+            var instr = Instr.init(frame.wasm.ip, frame.wasm.eip);
             const locals = handlers.Locals{ .ptr = frame.localValues(&interp.stack).ptr };
             const handler: *const handlers.OpcodeHandler =
-                i.readNextOpcodeHandler(fuel, locals, wasm_callee.module, interp);
+                instr.readNextOpcodeHandler(fuel, locals, wasm_callee.module, interp);
 
-            const transitioned = handler(
-                i.next,
-                interp.stack_top,
+            const transitioned = handlers.callOpcodeHandler(
+                handler,
+                instr,
                 fuel,
                 frame.wasm.stp,
                 locals,
                 wasm_callee.module,
                 interp,
-                i.end,
             );
 
-            if (builtin.mode == .Debug) {
-                interp.version.check(transitioned.version);
+            switch (builtin.mode) {
+                .Debug, .ReleaseSafe => interp.version.check(transitioned.version),
+                .ReleaseFast, .ReleaseSmall => {},
             }
 
             return State.init(interp);
@@ -568,7 +570,7 @@ pub const State = union(Tag) {
                 try interp.stack.allocateScratchSpace(
                     &interp.stack_top,
                     alloca,
-                    module.requiring_instantiation.inner.module.inner.raw.init_max_stack,
+                    module.requiring_instantiation.inner.module.inner.init_max_stack,
                 ),
             ) catch {
                 const trap = switch (instantiation_error) {

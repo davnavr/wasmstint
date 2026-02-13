@@ -196,6 +196,7 @@ fn generate_module(
         exceptions_enabled: config.exceptions_enabled.try_to_bool(u)?,
         export_everything: config.export_everything.try_to_bool(u)?,
         gc_enabled: config.gc_enabled.try_to_bool(u)?,
+        custom_descriptors_enabled: false,
         custom_page_sizes_enabled: config.custom_page_sizes_enabled.try_to_bool(u)?,
         generate_custom_sections: config.generate_custom_sections.try_to_bool(u)?,
         max_aliases: u.int_in_range(0..=MAX_MAXIMUM)?,
