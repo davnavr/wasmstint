@@ -610,16 +610,30 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         .@"i16x8.extend_low_i8x16_s",
         .@"i16x8.extend_high_i8x16_s",
     }) |opcode| {
-        // pmovsx requires SSE4_1
         var extend = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
-        as.printInstrs(&.{
-            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
-            "punpck{[pos]c}bw xmm0, xmm0" ++
-                " # move 8 x 8-bit lane to high 8-bits of target 8 x 16-bit lane",
-            "# lower 8-bits of 8 x 16-bit lanes are ignored",
-            "psraw xmm0, 8 # fill high 8-bits with sign bit of lane",
-            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
+        const pos = @tagName(opcode)[13];
+        if (as.hasFeature(.sse4_1)) {
+            const offset: u8 = switch (pos) {
+                'l' => 0,
+                'h' => 8,
+                else => unreachable,
+            };
+
+            as.printInstrs(&.{
+                "pmovsxbw xmm0, qword ptr [{[vsp]f} - 0x10 + {[offset]d}] # operand",
+            }, .{ .vsp = Gpr.vsp, .offset = offset });
+        } else {
+            as.printInstrs(&.{
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
+                "punpck{[pos]c}bw xmm0, xmm0" ++
+                    " # move 8 x 8-bit lane to high 8-bits of target 8 x 16-bit lane",
+                "# lower 8-bits of 8 x 16-bit lanes are ignored",
+                "psraw xmm0, 8 # fill high 8-bits with sign bit of lane",
+            }, .{ .vsp = Gpr.vsp, .pos = pos });
+        }
+        as.printInstrs(&.{"movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result"}, .{
+            .vsp = Gpr.vsp,
+        });
         extend.jmpToNextHandler(as);
         extend.end(as);
     }
@@ -627,15 +641,29 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         .@"i16x8.extend_low_i8x16_u",
         .@"i16x8.extend_high_i8x16_u",
     }) |opcode| {
-        // pmovzx requires SSE4_1
         var extend = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
-        as.printInstrs(&.{
-            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
-            "pxor xmm1, xmm1 # zeroes to be put in high 8-bits of 8 x 16-bit lanes",
-            "punpck{[pos]c}bw xmm0, xmm1" ++
-                " # move high 8 x 8-bit lanes into low 8-bits of target 8 x 16-bit lanes",
-            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
+        const pos = @tagName(opcode)[13];
+        if (as.hasFeature(.sse4_1)) {
+            const offset: u8 = switch (pos) {
+                'l' => 0,
+                'h' => 8,
+                else => unreachable,
+            };
+
+            as.printInstrs(&.{
+                "pmovzxbw xmm0, qword ptr [{[vsp]f} - 0x10 + {[offset]d}] # operand",
+            }, .{ .vsp = Gpr.vsp, .offset = offset });
+        } else {
+            as.printInstrs(&.{
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
+                "pxor xmm1, xmm1 # zeroes to be put in high 8-bits of 8 x 16-bit lanes",
+                "punpck{[pos]c}bw xmm0, xmm1" ++
+                    " # move high 8 x 8-bit lanes into low 8-bits of target 8 x 16-bit lanes",
+            }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
+        }
+        as.printInstrs(&.{"movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result"}, .{
+            .vsp = Gpr.vsp,
+        });
         extend.jmpToNextHandler(as);
         extend.end(as);
     }
