@@ -3068,40 +3068,73 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     {
         // https://github.com/WebAssembly/simd/blob/master/proposals/simd/SIMD.md#saturating-integer-q-format-rounding-multiplication
         // pmulhrsw requires SSSE3, but requires additional overflow checks anyway
-        var q15mulr_sat_s = as.defineOpcodeHandler(.{ .fd = .@"i16x8.q15mulr_sat_s" }, .@"64");
+        var q15mulr_sat_s = as.defineOpcodeHandler(
+            .{ .fd = .@"i16x8.q15mulr_sat_s" },
+            .fromByteUnits(128),
+        );
 
         as.write(
             \\.section .rodata.cst16, "aM", @progbits, 16
             \\.p2align 4, 0x00
             \\
         );
-        var const_0 = as.label(&.{"const"});
-        const_0.place(as);
-        as.writeInstrs(&@as([4][]const u8, @splat(".long 0x0000" ++ "4000")));
-        as.write("\n.text\n");
 
+        if (as.hasFeature(.ssse3)) {
+            var max_i16x8 = as.label(&.{"i16x8_max"});
+            max_i16x8.place(as);
+            as.writeInstrs(&@as([8][]const u8, @splat(".word 0x7FFF")));
+            as.write("\n.text\n");
+
+            // https://github.com/WebAssembly/relaxed-simd/issues/40
+            as.printInstrs(&.{
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+
+                "movdqa xmm2, xmmword ptr [rip + .L{[symbol_prefix]s}i16x8_sign_bits]",
+                "movdqa xmm3, xmm0",
+                "pcmpeqw xmm3, xmm2 # overflow detection",
+                "pcmpeqw xmm2, xmm1",
+                "pand xmm2, xmm3 # all 1's if overflow would occur",
+                "movdqa xmm3, xmm2",
+                "pcmpeqw xmm4, xmm4",
+                "pxor xmm4, xmm2 # all 1's if no overflow occurred",
+
+                "pmulhrsw xmm0, xmm1",
+                "pand xmm0, xmm4",
+                "pand xmm3, xmmword ptr [rip + {[max_i16x8]f}]",
+                "por xmm0, xmm3",
+            }, .{ .vsp = Gpr.vsp, .symbol_prefix = symbol_prefix, .max_i16x8 = max_i16x8 });
+        } else {
+            var const_0 = as.label(&.{"const"});
+            const_0.place(as);
+            as.writeInstrs(&@as([4][]const u8, @splat(".long 0x0000" ++ "4000")));
+            as.write("\n.text\n");
+
+            as.printInstrs(&.{
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+                "movdqa xmm4, xmmword ptr [rip + {[const_0]f}]",
+                "movdqa xmm2, xmm0",
+                "pmullw xmm0, xmm1 # product, low bits",
+                "pmulhw xmm2, xmm1 # product, high bits",
+                "movdqa xmm3, xmm0",
+                "# i32x4 of the products from original low 4 lanes",
+                "punpcklwd xmm0, xmm2",
+                "# i32x4 of the products from original high 4 lanes",
+                "punpckhwd xmm3, xmm2",
+                "# saturating must occur as last step",
+                "paddd xmm0, xmm4",
+                "paddd xmm3, xmm4",
+                "psrad xmm0, 15",
+                "psrad xmm3, 15",
+                "packssdw xmm0, xmm3",
+            }, .{ .vsp = Gpr.vsp, .const_0 = const_0 });
+        }
         as.printInstrs(&.{
-            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
-            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
-            "movdqa xmm4, xmmword ptr [rip + {[const_0]f}]",
-            "movdqa xmm2, xmm0",
-            "pmullw xmm0, xmm1 # product, low bits",
-            "pmulhw xmm2, xmm1 # product, high bits",
-            "movdqa xmm3, xmm0",
-            "# i32x4 of the products from original low 4 lanes",
-            "punpcklwd xmm0, xmm2",
-            "# i32x4 of the products from original high 4 lanes",
-            "punpckhwd xmm3, xmm2",
-            "# saturating must occur as last step",
-            "paddd xmm0, xmm4",
-            "paddd xmm3, xmm4",
-            "psrad xmm0, 15",
-            "psrad xmm3, 15",
-            "packssdw xmm0, xmm3",
-
+            "",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
-        }, .{ .vsp = Gpr.vsp, .const_0 = const_0 });
+        }, .{ .vsp = Gpr.vsp });
         q15mulr_sat_s.jmpToNextHandler(as);
         q15mulr_sat_s.end(as);
     }
