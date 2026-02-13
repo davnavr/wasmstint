@@ -671,16 +671,30 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         .@"i32x4.extend_low_i16x8_s",
         .@"i32x4.extend_high_i16x8_s",
     }) |opcode| {
-        // pmovsx requires SSE4_1
         var extend = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
-        as.printInstrs(&.{
-            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
-            "punpck{[pos]c}wd xmm0, xmm0" ++
-                " # move 4 x 16-bit lane to high 16-bits of target 4 x 32-bit lanes",
-            "# remaining 16-bits of 4 x 32-bit lanes are ignored",
-            "psrad xmm0, 16 # fill high 16-bits with sign bit of lane",
-            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
+        const pos = @tagName(opcode)[13];
+        if (as.hasFeature(.sse4_1)) {
+            const offset: u8 = switch (pos) {
+                'l' => 0,
+                'h' => 8,
+                else => unreachable,
+            };
+
+            as.printInstrs(&.{
+                "pmovsxwd xmm0, qword ptr [{[vsp]f} - 0x10 + {[offset]d}] # operand",
+            }, .{ .vsp = Gpr.vsp, .offset = offset });
+        } else {
+            as.printInstrs(&.{
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
+                "punpck{[pos]c}wd xmm0, xmm0" ++
+                    " # move 4 x 16-bit lane to high 16-bits of target 4 x 32-bit lanes",
+                "# remaining 16-bits of 4 x 32-bit lanes are ignored",
+                "psrad xmm0, 16 # fill high 16-bits with sign bit of lane",
+            }, .{ .vsp = Gpr.vsp, .pos = pos });
+        }
+        as.printInstrs(&.{"movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result"}, .{
+            .vsp = Gpr.vsp,
+        });
         extend.jmpToNextHandler(as);
         extend.end(as);
     }
@@ -688,15 +702,29 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         .@"i32x4.extend_low_i16x8_u",
         .@"i32x4.extend_high_i16x8_u",
     }) |opcode| {
-        // pmovzx requires SSE4_1
         var extend = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
-        as.printInstrs(&.{
-            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
-            "pxor xmm1, xmm1 # zeroes to be put in high 16-bits of 4 x 32-bit lanes",
-            "punpck{[pos]c}wd xmm0, xmm1" ++
-                " # move high 4 x 16-bit lanes into low 16-bits of target 4 x 32-bit lanes",
-            "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
-        }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
+        const pos = @tagName(opcode)[13];
+        if (as.hasFeature(.sse4_1)) {
+            const offset: u8 = switch (pos) {
+                'l' => 0,
+                'h' => 8,
+                else => unreachable,
+            };
+
+            as.printInstrs(&.{
+                "pmovzxwd xmm0, qword ptr [{[vsp]f} - 0x10 + {[offset]d}] # operand",
+            }, .{ .vsp = Gpr.vsp, .offset = offset });
+        } else {
+            as.printInstrs(&.{
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
+                "pxor xmm1, xmm1 # zeroes to be put in high 16-bits of 4 x 32-bit lanes",
+                "punpck{[pos]c}wd xmm0, xmm1" ++
+                    " # move high 4 x 16-bit lanes into low 16-bits of target 4 x 32-bit lanes",
+            }, .{ .vsp = Gpr.vsp, .pos = pos });
+        }
+        as.printInstrs(&.{"movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result"}, .{
+            .vsp = Gpr.vsp,
+        });
         extend.jmpToNextHandler(as);
         extend.end(as);
     }
