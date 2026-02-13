@@ -2890,17 +2890,26 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
     }
 
     {
-        // pmulld requires SSE4_1
         var extmul_low = as.defineOpcodeHandler(.{ .fd = .@"i32x4.extmul_low_i16x8_u" }, .@"64");
+        if (as.hasFeature(.sse4_1)) {
+            as.printInstrs(&.{
+                "pmovzxwd xmm0, qword ptr [{[vsp]f} - 0x20] # operand 0",
+                "pmovzxwd xmm1, qword ptr [{[vsp]f} - 0x10] # operand 1",
+                "pmulld xmm0, xmm1",
+            }, .{ .vsp = Gpr.vsp });
+        } else {
+            as.printInstrs(&.{
+                "# Taken from LLVM output for Zig's *% operator",
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+                "movdqa xmm2, xmm0",
+                "pmulhuw xmm2, xmm1 # calculate high 16-bits of product?",
+                "pmullw xmm0, xmm1 # calculate low 16-bits of product?",
+                "punpcklwd xmm0, xmm2",
+            }, .{ .vsp = Gpr.vsp });
+        }
         as.printInstrs(&.{
-            "# Taken from LLVM output for Zig's *% operator",
-            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
-            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
-            "movdqa xmm2, xmm0",
-            "pmulhuw xmm2, xmm1 # calculate high 16-bits of product?",
-            "pmullw xmm0, xmm1 # calculate low 16-bits of product?",
-            "punpcklwd xmm0, xmm2",
-
+            "",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
         }, .{ .vsp = Gpr.vsp });
@@ -2908,17 +2917,26 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         extmul_low.end(as);
     }
     {
-        // pmulld requires SSE4_1
         var extmul_high = as.defineOpcodeHandler(.{ .fd = .@"i32x4.extmul_high_i16x8_u" }, .@"64");
+        if (as.hasFeature(.sse4_1)) {
+            as.printInstrs(&.{
+                "pmovzxwd xmm0, qword ptr [{[vsp]f} - 0x20 + 8] # operand 0",
+                "pmovzxwd xmm1, qword ptr [{[vsp]f} - 0x10 + 8] # operand 1",
+                "pmulld xmm0, xmm1",
+            }, .{ .vsp = Gpr.vsp });
+        } else {
+            as.printInstrs(&.{
+                "# Taken from LLVM output for Zig's *% operator",
+                "pshufd xmm1, xmmword ptr [{[vsp]f} - 0x20], 0xEE # operand 0, high lanes",
+                "pshufd xmm0, xmmword ptr [{[vsp]f} - 0x10], 0xEE # operand 1, high lanes",
+                "movdqa xmm2, xmm0",
+                "pmulhuw xmm2, xmm1 # calculate high 16-bits of product?",
+                "pmullw xmm0, xmm1 # calculate low 16-bits of product?",
+                "punpcklwd xmm0, xmm2",
+            }, .{ .vsp = Gpr.vsp });
+        }
         as.printInstrs(&.{
-            "# Taken from LLVM output for Zig's *% operator",
-            "pshufd xmm1, xmmword ptr [{[vsp]f} - 0x20], 0xEE # operand 0, high lanes",
-            "pshufd xmm0, xmmword ptr [{[vsp]f} - 0x10], 0xEE # operand 1, high lanes",
-            "movdqa xmm2, xmm0",
-            "pmulhuw xmm2, xmm1 # calculate high 16-bits of product?",
-            "pmullw xmm0, xmm1 # calculate low 16-bits of product?",
-            "punpcklwd xmm0, xmm2",
-
+            "",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
         }, .{ .vsp = Gpr.vsp });
