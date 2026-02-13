@@ -610,6 +610,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         .@"i16x8.extend_low_i8x16_s",
         .@"i16x8.extend_high_i8x16_s",
     }) |opcode| {
+        // pmovsx requires SSE4_1
         var extend = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
@@ -626,6 +627,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         .@"i16x8.extend_low_i8x16_u",
         .@"i16x8.extend_high_i8x16_u",
     }) |opcode| {
+        // pmovzx requires SSE4_1
         var extend = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
@@ -641,12 +643,13 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         .@"i32x4.extend_low_i16x8_s",
         .@"i32x4.extend_high_i16x8_s",
     }) |opcode| {
+        // pmovsx requires SSE4_1
         var extend = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
             "punpck{[pos]c}wd xmm0, xmm0" ++
                 " # move 4 x 16-bit lane to high 16-bits of target 4 x 32-bit lanes",
-            "# lower 16-bits of 4 x 32-bit lanes are ignored",
+            "# remaining 16-bits of 4 x 32-bit lanes are ignored",
             "psrad xmm0, 16 # fill high 16-bits with sign bit of lane",
             "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
         }, .{ .vsp = Gpr.vsp, .pos = @tagName(opcode)[13] });
@@ -657,6 +660,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         .@"i32x4.extend_low_i16x8_u",
         .@"i32x4.extend_high_i16x8_u",
     }) |opcode| {
+        // pmovzx requires SSE4_1
         var extend = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         as.printInstrs(&.{
             "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand",
@@ -674,6 +678,7 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         .@"i64x2.extend_low_i32x4_u",
         .@"i64x2.extend_high_i32x4_u",
     }) |opcode| {
+        // pmovzx/pmovsx requires SSE4_1
         var extend = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         const opcode_name = @tagName(opcode);
         const low_lane_offset: u4 = switch (opcode_name[13]) {
@@ -2242,7 +2247,6 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
 
             .@"i64x2.shl" => as.writeInstrs(&.{"psllq xmm0, xmm1"}),
             .@"i64x2.shr_s" => {
-                // vpsravq requires AVX2
                 std.debug.assert(as.hasFeature(.sse4_1));
                 as.printInstrs(&.{
                     "movdqa xmm2, xmmword ptr [rip + .L{[symbol_prefix]s}i64x2_sign_bits]",
@@ -2850,30 +2854,41 @@ fn defineIntegerOpcodes(as: *AsmWriter) void {
         .@"i32x4.extmul_high_i16x8_s",
     }) |opcode| {
         var extmul = as.defineOpcodeHandler(.{ .fd = opcode }, .@"64");
+        const target = @tagName(opcode)[13];
+        if (as.hasFeature(.sse4_1)) {
+            const offset: u8 = switch (target) {
+                'l' => 0,
+                'h' => 8,
+                else => unreachable,
+            };
+
+            as.printInstrs(&.{
+                "pmovsxwd xmm0, qword ptr [{[vsp]f} - 0x20 + {[offset]d}] # operand 0",
+                "pmovsxwd xmm1, qword ptr [{[vsp]f} - 0x10 + {[offset]d}] # operand 1",
+                "pmulld xmm0, xmm1",
+            }, .{ .vsp = Gpr.vsp, .offset = offset });
+        } else {
+            as.printInstrs(&.{
+                "# Taken from LLVM output for Zig's *% operator",
+                "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
+                "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
+                "pxor xmm2, xmm2",
+                "punpck{[target]c}wd xmm1, xmm2 # move target 4 x 16-bit lanes of operand 0 to " ++
+                    "4 x 32-bit lanes, zero extended",
+                "punpck{[target]c}wd xmm0, xmm0" ++
+                    " # low and high 16-bits containing the 16-bit lane from operand 1",
+                "pmaddwd xmm0, xmm1",
+            }, .{ .vsp = Gpr.vsp, .target = target });
+        }
         as.printInstrs(&.{
-            // pmulld requires SSE4_1
-            // "pxor xmm0, xmm0",
-            // "pxor xmm1, xmm1",
-            // "punpcklwd xmm0, xmmword ptr [{[vsp]f} - 0x20]" ++
-            //     " # move low 4 x 16-bit lanes of operand 0 into high 16-bits of 4 x 32-bit lanes",
-            // "punpcklwd xmm1, xmmword ptr [{[vsp]f} - 0x10] # same but for operand 1",
-
-            "# Taken from LLVM output for Zig's *% operator",
-            "movdqa xmm1, xmmword ptr [{[vsp]f} - 0x20] # operand 0",
-            "movdqa xmm0, xmmword ptr [{[vsp]f} - 0x10] # operand 1",
-            "pxor xmm2, xmm2",
-            "punpck{[target]c}wd xmm1, xmm2" ++
-                "# move target 4 x 16-bit lanes of operand 0 to 4 x 32-bit lanes, zero extended",
-            "punpck{[target]c}wd xmm0, xmm0" ++
-                " # low and high 16-bits containing the 16-bit lane from operand 1",
-            "pmaddwd xmm0, xmm1",
-
+            "",
             "movdqa xmmword ptr [{[vsp]f} - 0x20], xmm0 # store result",
             "lea {[vsp]f}, [{[vsp]f} - 0x10] # adjust VSP",
-        }, .{ .vsp = Gpr.vsp, .target = @tagName(opcode)[13] });
+        }, .{ .vsp = Gpr.vsp });
         extmul.jmpToNextHandler(as);
         extmul.end(as);
     }
+
     {
         // pmulld requires SSE4_1
         var extmul_low = as.defineOpcodeHandler(.{ .fd = .@"i32x4.extmul_low_i16x8_u" }, .@"64");
