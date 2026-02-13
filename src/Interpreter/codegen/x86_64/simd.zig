@@ -734,7 +734,6 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
         .@"i64x2.extend_low_i32x4_u",
         .@"i64x2.extend_high_i32x4_u",
     }) |opcode| {
-        // pmovzx/pmovsx requires SSE4_1
         var extend = as.defineOpcodeHandler(.{ .fd = opcode }, .@"32");
         const opcode_name = @tagName(opcode);
         const low_lane_offset: u4 = switch (opcode_name[13]) {
@@ -743,27 +742,40 @@ fn defineConversionOpcodes(as: *AsmWriter) void {
             else => unreachable,
         };
         const sign = opcode_name[opcode_name.len - 1];
-        const reg_size: Gpr.Size = switch (sign) {
-            's' => .qword,
-            'u' => .dword,
-            else => unreachable,
-        };
-        as.printInstrs(&.{
-            "{[mov]s} {[r11]f}, dword ptr [{[vsp]f} - 0x10 + {[low_lane_offset]X}] # low lane",
-            "{[mov]s} {[r13]f}, dword ptr [{[vsp]f} - 0x10 + {[low_lane_offset]X} + 4] # high lane",
-            "mov qword ptr [{[vsp]f} - 0x10], r11 # store result low lane",
-            "mov qword ptr [{[vsp]f} - 0x08], r13 # store result high lane",
-        }, .{
-            .mov = switch (sign) {
-                's' => "movsxd",
-                'u' => "mov",
+        if (as.hasFeature(.sse4_1)) {
+            const sign_ext: u7 = switch (sign) {
+                's' => 's',
+                'u' => 'z',
                 else => unreachable,
-            },
-            .r11 = Gpr.r11.withSize(reg_size),
-            .r13 = Gpr.r13.withSize(reg_size),
-            .vsp = Gpr.vsp,
-            .low_lane_offset = low_lane_offset,
-        });
+            };
+
+            as.printInstrs(&.{
+                "pmov{[sign_ext]c}xdq xmm0, qword ptr [{[vsp]f} - 0x10 + {[offset]d}] # operand",
+                "movdqa xmmword ptr [{[vsp]f} - 0x10], xmm0 # store result",
+            }, .{ .vsp = Gpr.vsp, .offset = low_lane_offset, .sign_ext = sign_ext });
+        } else {
+            const reg_size: Gpr.Size = switch (sign) {
+                's' => .qword,
+                'u' => .dword,
+                else => unreachable,
+            };
+            as.printInstrs(&.{
+                "{[mov]s} {[r11]f}, dword ptr [{[vsp]f} - 0x10 + {[low_lane_offset]X}] # low lane",
+                "{[mov]s} {[r13]f}, dword ptr [{[vsp]f} - 0x10 + {[low_lane_offset]X} + 4] # high lane",
+                "mov qword ptr [{[vsp]f} - 0x10], r11 # store result low lane",
+                "mov qword ptr [{[vsp]f} - 0x08], r13 # store result high lane",
+            }, .{
+                .mov = switch (sign) {
+                    's' => "movsxd",
+                    'u' => "mov",
+                    else => unreachable,
+                },
+                .r11 = Gpr.r11.withSize(reg_size),
+                .r13 = Gpr.r13.withSize(reg_size),
+                .vsp = Gpr.vsp,
+                .low_lane_offset = low_lane_offset,
+            });
+        }
         extend.jmpToNextHandler(as);
         extend.end(as);
     }
