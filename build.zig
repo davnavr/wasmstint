@@ -354,7 +354,7 @@ const Modules = struct {
                     .pic = false,
                     // .code_model = .small, // Forces usage of LLVM backend
                 }),
-                .max_rss = ByteSize.mib(163).bytes,
+                .max_rss = ByteSize.mib(165).bytes,
             });
             codegen_x64_sysv_exe.root_module.addImport("opcodes", opcodes_module);
 

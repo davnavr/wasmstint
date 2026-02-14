@@ -1,15 +1,14 @@
 //! Generates an assembly `.s` file and a `.zig` file containing `extern fn` definitions
 //! to individual opcode handlers.
 
-pub fn main() noreturn {
+pub fn main(init: std.process.Init.Minimal) noreturn {
     var io_impl = std.Io.Threaded.init_single_threaded;
     const io = io_impl.ioBasic();
 
     var arena = ArenaAllocator.init(std.heap.page_allocator); // never reset
     var scratch = ArenaAllocator.init(std.heap.page_allocator);
 
-    var cli_args = std.process.ArgIterator.initWithAllocator(scratch.allocator()) catch
-        @panic("oom");
+    var cli_args = init.args.iterateAllocator(scratch.allocator()) catch @panic("oom");
     _ = cli_args.next().?;
 
     const options = std.zon.parse.fromSliceAlloc(
@@ -40,7 +39,8 @@ pub fn main() noreturn {
 
     const writer_buf_size = std.heap.pageSize() * 2;
     var asm_writer = AsmWriter.init(
-        std.fs.File.adaptFromNewApi(asm_file).writerStreaming(
+        asm_file.writerStreaming(
+            io,
             std.heap.page_allocator.alloc(u8, writer_buf_size) catch @panic("oom"),
         ),
         options,
@@ -3723,7 +3723,7 @@ const DispatchTable = enum {
         opcode: usize,
     ) void {
         as.print("\t.quad {s}", .{as.options.symbol_prefix});
-        if (std.meta.intToEnum(table.OpcodeType(), opcode) catch null) |defined| {
+        if (std.enums.fromInt(table.OpcodeType(), opcode)) |defined| {
             const name = AsmWriter.Opcode.init(table.OpcodeType(), defined).name();
             if (@field(as, @tagName(table.lookupField())).contains(defined)) {
                 as.print("{s}\n", .{name});

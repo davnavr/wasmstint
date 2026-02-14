@@ -133,9 +133,7 @@ fn panicInvalidByteOpcode(ip: Ip, eip: Eip) callconv(sysvcc) noreturn {
     const bad_ip = ip - 1;
     const bad_opcode: u8 = bad_ip[0];
     const opcode_name = name: {
-        const tag = std.meta.intToEnum(opcodes.ByteOpcode, bad_opcode) catch
-            break :name "unknown";
-
+        const tag = std.enums.fromInt(opcodes.ByteOpcode, bad_opcode) orelse break :name "unknown";
         break :name @tagName(tag);
     };
 
@@ -185,11 +183,11 @@ fn panicInvalidPrefixedOpcode(ip: Ip, eip: Eip, prefix_ip: Ip) callconv(sysvcc) 
 
             const name: ?[]const u8 = name: switch (prefix_byte) {
                 0xFC => @tagName(
-                    std.meta.intToEnum(opcodes.FCPrefixOpcode, numeric_opcode) catch
+                    std.enums.fromInt(opcodes.FCPrefixOpcode, numeric_opcode) orelse
                         break :name null,
                 ),
                 0xFD => @tagName(
-                    std.meta.intToEnum(opcodes.FDPrefixOpcode, numeric_opcode) catch
+                    std.enums.fromInt(opcodes.FDPrefixOpcode, numeric_opcode) orelse
                         break :name null,
                 ),
                 else => null,

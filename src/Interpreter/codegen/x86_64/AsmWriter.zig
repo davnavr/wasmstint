@@ -5,7 +5,7 @@ pub const Options = struct {
     features: []const std.Target.x86.Feature,
 };
 
-out: std.fs.File.Writer,
+out: std.Io.File.Writer,
 options: Options,
 features: std.Target.Cpu.Feature.Set,
 
@@ -72,7 +72,7 @@ pub fn print(as: *AsmWriter, comptime fmt: []const u8, args: anytype) void {
 }
 
 pub fn init(
-    writer: std.fs.File.Writer,
+    writer: std.Io.File.Writer,
     options: Options,
     arena: *std.heap.ArenaAllocator,
 ) AsmWriter {
