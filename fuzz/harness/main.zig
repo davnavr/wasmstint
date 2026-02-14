@@ -79,7 +79,7 @@ const InputSource = union(enum) {
     }
 };
 
-pub fn main() !u8 {
+pub fn main(init: std.process.Init.Minimal) !u8 {
     var allocator = std.heap.DebugAllocator(.{ .safety = true }).init;
     defer {
         const leak_count = allocator.detectLeaks();
@@ -99,7 +99,8 @@ pub fn main() !u8 {
     const arguments = args: {
         var parser: Arguments = undefined;
         parser.init();
-        break :args parser.programArguments(&scratch, &arguments_arena) catch @panic("args oom");
+        break :args parser.programArguments(init.args, &scratch, &arguments_arena) catch
+            @panic("args oom");
     };
     _ = scratch.reset(.retain_capacity);
 
@@ -164,7 +165,7 @@ pub fn main() !u8 {
             };
         defer if (!save_stdout) file.close(io);
 
-        var writer = std.fs.File.adaptFromNewApi(file).writerStreaming(&.{});
+        var writer = file.writerStreaming(io, &.{});
         writer.interface.writeAll(wasm_buffer.bytes()) catch {
             std.debug.print("error saving module to {f}: {t}", .{ fmt_path, writer.err.? });
             return 1;
