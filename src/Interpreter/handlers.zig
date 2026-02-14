@@ -73,10 +73,7 @@ pub fn dispatchTable(
     var table: [dispatchTableLength(Opcode, manual_length)]*const OpcodeHandler = @splat(invalid);
     for (std.enums.values(Opcode)) |op| {
         const name = @tagName(op);
-        // TODO: Remove this when x64 asm impl is done
-        if (!use_assembly or @hasDecl(handler_namespace, name)) {
-            table[@intFromEnum(op)] = @as(*const OpcodeHandler, @field(handler_namespace, name));
-        }
+        table[@intFromEnum(op)] = @as(*const OpcodeHandler, @field(handler_namespace, name));
     }
     return table;
 }
