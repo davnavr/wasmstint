@@ -169,59 +169,12 @@ pub const nt = struct {
 pub const mman = struct {
     pub const has_mmap_anonymous = posix.MAP != void and @hasField(posix.MAP, "ANONYMOUS");
 
-    pub const Prot = prot: {
-        const attributes = std.builtin.Type.StructField.Attributes{
-            .default_value_ptr = @ptrCast(&false),
-        };
-        break :prot @Struct(
-            .@"packed",
-            u32,
-            names: {
-                @setEvalBranchQuota(5000);
-                var names: [32][]const u8 = undefined;
-                for (0.., &names) |i, *n| {
-                    n.* = std.fmt.comptimePrint("_{d}", .{i});
-                }
-
-                for (@typeInfo(posix.PROT).@"struct".decls) |d| {
-                    const value: u32 = @field(posix.PROT, d.name);
-                    if (@popCount(value) != 1) {
-                        continue;
-                    }
-
-                    names[@ctz(value)] = d.name;
-                }
-
-                break :names &names;
-            },
-            &(.{bool} ** 32),
-            &(.{attributes} ** 32),
-        );
-    };
-
-    comptime {
-        if (posix.PROT != void) {
-            std.debug.assert(
-                @as(u32, @bitCast(Prot{ .READ = true, .WRITE = true })) ==
-                    posix.PROT.READ | posix.PROT.WRITE,
-            );
-        }
-    }
-
-    pub const Flags = struct {
-        // left blank for now...
-    };
-
     pub const MapError = Oom || posix.UnexpectedError;
 
     /// - [POSIX](https://pubs.opengroup.org/onlinepubs/009604499/functions/mmap.html)
     /// - [Linux (man7)](https://man7.org/linux/man-pages/man2/mmap.2.html)
     /// - [FreeBSD](https://man.freebsd.org/cgi/man.cgi?mmap(2))
-    pub fn map_anonymous(
-        length: usize,
-        prot: Prot,
-        flags: Flags,
-    ) MapError![]align(page_size_min) u8 {
+    pub fn map_anonymous(length: usize, prot: std.posix.PROT) MapError![]align(page_size_min) u8 {
         if (comptime !has_mmap_anonymous) {
             @compileError("target platform " ++ @tagName(builtin.cpu.arch) ++ "-" ++
                 @tagName(builtin.os.tag) ++ " does not support mmap with MAP_ANONYMOUS");
@@ -229,12 +182,10 @@ pub const mman = struct {
 
         std.debug.assert(length > 0);
 
-        _ = flags;
-
         const pages = posix.mmap(
             null,
             length,
-            @as(u32, @bitCast(prot)),
+            prot,
             posix.MAP{ .TYPE = .PRIVATE, .ANONYMOUS = true },
             -1,
             0,
@@ -255,13 +206,16 @@ pub const mman = struct {
     pub fn protect(
         /// Must refer to anonymously mapped memory.
         pages: []align(page_size_min) u8,
-        prot: Prot,
+        prot: std.posix.PROT,
     ) ProtectError!void {
         std.debug.assert(pages.len > 0);
-        return posix.mprotect(pages, @as(u32, @bitCast(prot))) catch |e| switch (e) {
-            error.OutOfMemory, error.Unexpected => |err| err,
-            error.AccessDenied => unreachable, // `mprotect` on mapped file
-        };
+        switch (posix.errno(posix.system.mprotect(pages.ptr, pages.len, prot))) {
+            .SUCCESS => {},
+            .ACCES => unreachable, // `mprotect` on mapped file
+            .INVAL => unreachable,
+            .NOMEM => return error.OutOfMemory,
+            else => |bad| return posix.unexpectedErrno(bad),
+        }
     }
 
     pub const UnmapError = posix.UnexpectedError || Oom;

@@ -87,7 +87,6 @@ pub const Mapped = extern struct {
             const pages = virtual_memory.mman.map_anonymous(
                 reserve,
                 .{ .WRITE = single_syscall, .READ = single_syscall },
-                .{},
             ) catch return Oom.OutOfMemory;
             errdefer virtual_memory.mman.unmap(pages) catch {};
 
@@ -175,11 +174,11 @@ inline fn unexpectedError(e: anyerror) void {
     @branchHint(.cold);
     if (std.posix.unexpected_error_tracing) {
         var stderr_buf: [512]u8 align(16) = undefined;
-        const stderr, const color = std.debug.lockStderrWriter(&stderr_buf);
-        defer std.debug.unlockStderrWriter();
-        stderr.print("unexpected error: {t}\n", .{e}) catch {};
+        const stderr = std.debug.lockStderr(&stderr_buf).terminal();
+        defer std.debug.unlockStderr();
+        stderr.writer.print("unexpected error: {t}\n", .{e}) catch {};
         if (@errorReturnTrace()) |trace| {
-            std.debug.writeStackTrace(trace, stderr, color) catch {};
+            std.debug.writeStackTrace(trace, stderr) catch {};
         }
     }
 }

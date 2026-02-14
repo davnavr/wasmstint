@@ -49,19 +49,18 @@ pub fn init(
 }
 
 pub const Output = struct {
-    tty_config: std.Io.tty.Config,
-    writer: *std.Io.Writer,
+    terminal: std.Io.Terminal,
 
-    pub inline fn setColor(output: *const Output, color: std.Io.tty.Color) void {
-        output.tty_config.setColor(output.writer, color) catch {};
+    pub inline fn setColor(output: *const Output, color: std.Io.Terminal.Color) void {
+        output.terminal.setColor(color) catch {};
     }
 
     pub inline fn print(output: *const Output, comptime fmt: []const u8, args: anytype) void {
-        output.writer.print(fmt, args) catch {};
+        output.terminal.writer.print(fmt, args) catch {};
     }
 
     pub inline fn writeAll(output: *const Output, bytes: []const u8) void {
-        output.writer.writeAll(bytes) catch {};
+        output.terminal.writer.writeAll(bytes) catch {};
     }
 
     pub fn writeErrorPreamble(output: *const Output) void {
@@ -74,7 +73,7 @@ pub const Output = struct {
 fn fail(output: Output, message: []const u8) Error {
     output.writeErrorPreamble();
     output.writeAll(message);
-    output.writer.writeByte('\n') catch {};
+    output.terminal.writer.writeByte('\n') catch {};
     return error.ScriptError;
 }
 

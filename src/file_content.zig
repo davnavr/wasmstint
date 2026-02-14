@@ -166,7 +166,7 @@ pub fn readFile(io: Io, dir: Io.Dir, sub_path: BytePath) ReadFileError!VirtualMe
         };
 
         break :win base[0..allocated_size];
-    } else try virtual_memory.mman.map_anonymous(allocated_size, .{ .WRITE = true }, .{});
+    } else try virtual_memory.mman.map_anonymous(allocated_size, .{ .WRITE = true });
 
     errdefer if (builtin.os.tag == .windows) {
         var region_size: windows.SIZE_T = allocated.len;

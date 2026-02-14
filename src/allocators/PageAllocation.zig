@@ -114,7 +114,6 @@ pub fn init(
     } else virtual_memory.mman.map_anonymous(
         allocate_size,
         .{ .READ = allocate_all_rw, .WRITE = allocate_all_rw },
-        .{},
     ) catch return Oom.OutOfMemory;
 
     errdefer if (builtin.os.tag == .windows) {

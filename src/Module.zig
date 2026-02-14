@@ -534,11 +534,8 @@ pub const Limits = extern struct {
 
         // If 64-bit memory and/or shared memory is used, limits is a LEB128 u32?
         // const flag = try reader.readUleb128Enum(u32, LimitsFlag, diag, "limits flag");
-        const flag = std.meta.intToEnum(LimitsFlag, flag_byte) catch return diag.print(
-            .parse,
-            "limits flag integer too large: 0x{X:0>2}",
-            .{flag_byte},
-        );
+        const flag = std.enums.fromInt(LimitsFlag, flag_byte) orelse
+            return diag.print(.parse, "limits flag integer too large: 0x{X:0>2}", .{flag_byte});
 
         // When 64-bit memories are supported, parsed type needs to conditionally change to u64.
         const min = try reader.readUleb128(u32, diag, "limits minimum");

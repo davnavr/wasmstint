@@ -1338,7 +1338,7 @@ const opcode_handlers = struct {
             .Debug, .ReleaseSafe => {
                 const bad_opcode: u8 = (ip - 1)[0];
                 const opcode_name = name: {
-                    const tag = std.meta.intToEnum(opcodes.ByteOpcode, bad_opcode) catch
+                    const tag = std.enums.fromInt(opcodes.ByteOpcode, bad_opcode) orelse
                         break :name "unknown";
 
                     break :name @tagName(tag);

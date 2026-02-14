@@ -47,7 +47,7 @@ const Arguments = cli_args.CliArgs(.{
     },
 });
 
-pub fn main() u8 {
+pub fn main(init: std.process.Init.Minimal) u8 {
     var scratch = ArenaAllocator.init(std.heap.page_allocator);
     defer if (builtin.mode == .Debug) scratch.deinit();
 
@@ -57,28 +57,25 @@ pub fn main() u8 {
     const arguments = args: {
         var parser: Arguments = undefined;
         parser.init();
-        break :args parser.programArguments(&scratch, &arena) catch @panic("oom");
+        break :args parser.programArguments(init.args, &scratch, &arena) catch @panic("oom");
     };
     _ = scratch.reset(.retain_capacity);
 
-    if (arguments.@"wait-for-debugger") {
-        wasmstint.waitForDebugger();
-    }
-
     var io_threaded = Io.Threaded.init_single_threaded;
     const io = io_threaded.ioBasic();
+
+    if (arguments.@"wait-for-debugger") {
+        wasmstint.waitForDebugger(io);
+    }
 
     const stderr_buffer = std.heap.page_allocator.alignedAlloc(
         u8,
         .fromByteUnits(std.heap.page_size_min),
         8192,
     ) catch @panic("oom");
-    const stderr = stderr: {
-        const locked = std.debug.lockStderrWriter(stderr_buffer);
-        break :stderr State.Output{ .tty_config = locked[1], .writer = locked[0] };
-    };
+    const stderr = State.Output{ .terminal = std.debug.lockStderr(stderr_buffer).terminal() };
     // Flush happens even if error occurs
-    defer std.debug.unlockStderrWriter();
+    defer std.debug.unlockStderr();
 
     const fmt_json_path = std.unicode.fmtUtf8(arguments.run);
 
@@ -111,18 +108,14 @@ pub fn main() u8 {
     errdefer json_dir.close(io);
 
     var rng = rng: {
-        var init = std.Random.Xoshiro256{ .s = undefined };
+        var rng_init = std.Random.Xoshiro256{ .s = undefined };
         if (arguments.@"rng-seed") |seed| {
-            init.s = @bitCast(seed);
-        } else if (builtin.os.tag == .windows) {
-            // Undefined symbol: SystemFunction032
-            // Don't want to linkadvapi32 right now
-            init.seed(42);
+            rng_init.s = @bitCast(seed);
         } else {
-            std.posix.getrandom(std.mem.asBytes(&init.s)) catch @panic("cannot obtain RNG");
+            io.randomSecure(std.mem.asBytes(&rng_init.s)) catch @panic("cannot obtain RNG");
         }
 
-        break :rng init;
+        break :rng rng_init;
     };
 
     var json_script: Parser = undefined;
@@ -175,7 +168,7 @@ pub fn main() u8 {
             error.ScriptError => {
                 if (builtin.mode == .Debug) {
                     if (@errorReturnTrace()) |trace| {
-                        std.debug.writeStackTrace(trace, stderr.writer, stderr.tty_config) catch {};
+                        std.debug.writeStackTrace(trace, stderr.terminal) catch {};
                     }
                 }
                 break 1;
@@ -213,13 +206,13 @@ fn handleJsonError(
 
             if (builtin.mode == .Debug) {
                 if (@errorReturnTrace()) |trace| {
-                    std.debug.writeStackTrace(trace, stderr.writer, stderr.tty_config) catch {};
+                    std.debug.writeStackTrace(trace, stderr.terminal) catch {};
                 }
             }
         },
     }
 
-    std.debug.unlockStderrWriter();
+    std.debug.unlockStderr();
     std.process.exit(1);
 }
 
