@@ -30,41 +30,11 @@ pub const ArgIterator = struct {
         return .{ .remaining = args };
     }
 
-    pub fn initProcessArgs(arena: *ArenaAllocator) Oom!ArgIterator {
-        return .{
-            .remaining = args: switch (builtin.os.tag) {
-                .wasi => (try std.process.ArgIteratorWasi.init(arena.allocator())).args,
-                .windows => {
-                    // Copied from `std.process.ArgIterator.initWithAllocator`.
-                    const command_line = std.os.windows.peb().ProcessParameters.CommandLine;
-                    var args = try std.process.ArgIteratorWindows.init(
-                        arena.allocator(),
-                        command_line.Buffer.?[0..(command_line.Length / 2)],
-                    );
-
-                    var arg_list = std.ArrayList([:0]const u8).empty;
-                    // Arguments are allocated in separate parts of `args.buffer` in the `arena`.
-                    while (args.next()) |a| {
-                        try arg_list.append(arena.allocator(), a);
-                    }
-
-                    break :args arg_list.items;
-                },
-                else => {
-                    var args = try arena.allocator().alloc(
-                        [:0]const u8,
-                        std.os.argv.len,
-                    );
-                    errdefer comptime unreachable;
-
-                    for (0.., std.os.argv) |i, a| {
-                        args[i] = std.mem.sliceTo(a, 0);
-                    }
-
-                    break :args args;
-                },
-            },
-        };
+    pub fn initProcessArgs(
+        arena: *ArenaAllocator,
+        args: std.process.Args,
+    ) std.process.Args.ToSliceError!ArgIterator {
+        return .{ .remaining = try args.toSlice(arena.allocator()) };
     }
 
     pub fn next(args: *ArgIterator) ?[:0]const u8 {
@@ -160,14 +130,13 @@ pub const Flag = struct {
 
         pub fn print(
             diag: *const Diagnostics,
-            writer: *Writer,
-            color: std.Io.tty.Config,
-        ) std.Io.tty.Config.SetColorError!void {
-            try color.setColor(writer, .bright_red);
-            try writer.writeAll("error: ");
-            try color.setColor(writer, .reset);
-            try writer.writeAll(diag.message);
-            try writer.writeByte('\n');
+            out: std.Io.Terminal,
+        ) std.Io.Terminal.SetColorError!void {
+            try out.setColor(.bright_red);
+            try out.writer.writeAll("error: ");
+            try out.setColor(.reset);
+            try out.writer.writeAll(diag.message);
+            try out.writer.writeByte('\n');
         }
     };
 
@@ -798,13 +767,16 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             );
         }
 
+        const ParseProcessArgsError = ParseError || std.Io.UnexpectedError;
+
         pub fn parseProcessArgs(
             self: *const Self,
+            process_args: std.process.Args,
             scratch: *ArenaAllocator,
             arena: *ArenaAllocator,
             diagnostics: ?*Flag.Diagnostics,
-        ) ParseError!Parsed {
-            var args = try ArgIterator.initProcessArgs(scratch);
+        ) ParseProcessArgsError!Parsed {
+            var args = try ArgIterator.initProcessArgs(scratch, process_args);
             _ = args.next().?;
             return self.parseRemaining(&args, arena, diagnostics);
         }
@@ -819,46 +791,43 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             return self.parseRemaining(&args_iter, arena, diagnostics);
         }
 
-        pub fn printUsage(
-            writer: *Writer,
-            color: std.Io.tty.Config,
-        ) std.Io.tty.Config.SetColorError!void {
+        pub fn printUsage(out: std.Io.Terminal) std.Io.Terminal.SetColorError!void {
             @branchHint(.cold);
 
             if (comptime app_info.description.len > 0) {
-                try writer.writeAll(app_info.description ++ "\n\n");
+                try out.writer.writeAll(app_info.description ++ "\n\n");
             }
 
-            try writer.writeAll("OPTIONS:\n");
+            try out.writer.writeAll("OPTIONS:\n");
 
             inline for (flags) |f| {
                 if (f.namespace == Flag.remainder.namespace) {
                     continue;
                 }
 
-                try writer.writeByte('\n');
+                try out.writer.writeByte('\n');
 
                 if (f.info.short) |short| {
-                    try color.setColor(writer, .bright_cyan);
-                    try writer.writeAll(&[2]u8{ '-', short });
-                    try color.setColor(writer, .reset);
-                    try writer.writeAll(", ");
+                    try out.setColor(.bright_cyan);
+                    try out.writer.writeAll(&[2]u8{ '-', short });
+                    try out.setColor(.reset);
+                    try out.writer.writeAll(", ");
                 }
 
-                try color.setColor(writer, .bright_cyan);
+                try out.setColor(.bright_cyan);
                 const has_args_help = f.arg_help != null;
-                try writer.writeAll("--" ++ f.info.long ++ (if (has_args_help) " " else ""));
+                try out.writer.writeAll("--" ++ f.info.long ++ (if (has_args_help) " " else ""));
 
                 if (has_args_help) {
-                    try color.setColor(writer, .bright_blue);
-                    try writer.writeAll(f.arg_help.?.string());
+                    try out.setColor(.bright_blue);
+                    try out.writer.writeAll(f.arg_help.?.string());
                 }
 
-                try color.setColor(writer, .reset);
+                try out.setColor(.reset);
                 if (f.info.description.len > 0) {
-                    try writer.writeAll("\n    " ++ f.info.description ++ "\n");
+                    try out.writer.writeAll("\n    " ++ f.info.description ++ "\n");
                 } else {
-                    try writer.writeByte('\n');
+                    try out.writer.writeByte('\n');
                 }
             }
         }
@@ -867,13 +836,14 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
             @branchHint(.cold);
             {
                 var stderr_buffer: [1024]u8 align(16) = undefined;
-                const stderr, const color = std.debug.lockStderrWriter(&stderr_buffer);
-                defer std.debug.unlockStderrWriter();
+                const stderr = std.debug.lockStderr(&stderr_buffer);
+                defer std.debug.unlockStderr();
 
+                const out = stderr.terminal();
                 if (diagnostics) |diag| {
-                    diag.print(stderr, color) catch {};
+                    diag.print(out) catch {};
                 } else {
-                    printUsage(stderr, color) catch {};
+                    printUsage(out) catch {};
                 }
             }
 
@@ -928,12 +898,16 @@ pub fn CliArgs(comptime app_info: AppInfo) type {
 
         pub fn programArguments(
             self: *const Self,
+            process_args: std.process.Args,
             scratch: *ArenaAllocator,
             arena: *ArenaAllocator,
-        ) Oom!Parsed {
+        ) std.process.Args.ToSliceError!Parsed {
             var diagnostics: Flag.Diagnostics = undefined;
             return parsedArgumentsOrExit(
-                self.parseProcessArgs(scratch, arena, &diagnostics),
+                self.parseProcessArgs(process_args, scratch, arena, &diagnostics) catch |e| switch (e) {
+                    error.Unexpected => |err| return err,
+                    else => |err| err,
+                },
                 &diagnostics,
             );
         }
