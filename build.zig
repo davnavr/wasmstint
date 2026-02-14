@@ -647,14 +647,14 @@ fn buildWabtTools(b: *Build, wabt_dep: *Build.Dependency) WabtTools {
         .use_llvm = true,
         .max_rss = ByteSize.mib(500).bytes, // arbitrary value
     });
-    wabt_lib.addConfigHeader(config_header);
-    wabt_lib.addIncludePath(wabt_dep.path("include"));
-    wabt_lib.addCSourceFiles(.{
+    wabt_lib.root_module.addConfigHeader(config_header);
+    wabt_lib.root_module.addIncludePath(wabt_dep.path("include"));
+    wabt_lib.root_module.addCSourceFiles(.{
         .root = wabt_dep.path("."),
         .files = &@import("tools/wabt.zon").src,
         .flags = flags,
     });
-    wabt_lib.linkLibCpp();
+    wabt_lib.root_module.link_libcpp = true;
 
     const wast2json_exe = b.addExecutable(.{
         .name = "wast2json",
@@ -665,14 +665,14 @@ fn buildWabtTools(b: *Build, wabt_dep: *Build.Dependency) WabtTools {
         .use_llvm = true,
         .max_rss = ByteSize.mib(500).bytes, // arbitrary value
     });
-    wast2json_exe.addConfigHeader(config_header);
-    wast2json_exe.addIncludePath(wabt_dep.path("include"));
-    wast2json_exe.addCSourceFile(.{
+    wast2json_exe.root_module.addConfigHeader(config_header);
+    wast2json_exe.root_module.addIncludePath(wabt_dep.path("include"));
+    wast2json_exe.root_module.addCSourceFile(.{
         .file = wabt_dep.path("src/tools/wast2json.cc"),
         .flags = flags,
     });
-    wast2json_exe.linkLibrary(wabt_lib);
-    wast2json_exe.linkLibCpp();
+    wast2json_exe.root_module.linkLibrary(wabt_lib);
+    wast2json_exe.root_module.link_libcpp = true;
 
     {
         const run = b.addRunArtifact(wast2json_exe);
@@ -705,7 +705,7 @@ fn buildWastTest(
     const output_json = wast2json.addOutputFileArg(b.fmt("{s}.json", .{name[0 .. name.len - 5]}));
 
     const run_test = b.addRunArtifact(interpreter.exe);
-    run_test.max_stdio_size = 15 * 1024 * 1024;
+    run_test.stdio_limit = .limited(15 * 1024 * 1024);
     run_test.step.max_rss = ByteSize.mib(45).bytes;
     run_test.setName(name);
     run_test.addArg("--run");
@@ -1054,6 +1054,7 @@ fn buildWasiSamplePrograms(
 
     const tests_dir = b.path("tests/wasip1/zig");
     const tests_dir_handle = b.build_root.handle.openDir(
+        b.graph.io,
         tests_dir.src_path.sub_path,
         .{ .iterate = true },
     ) catch @panic("could not open tests directory");
@@ -1063,7 +1064,7 @@ fn buildWasiSamplePrograms(
     steps.@"test".dependOn(test_step);
 
     var tests_iter = tests_dir_handle.iterateAssumeFirstIteration();
-    while (tests_iter.next() catch @panic("bad entry in tests directory")) |tests_entry| {
+    while (tests_iter.next(b.graph.io) catch @panic("bad entry in tests directory")) |tests_entry| {
         if (tests_entry.kind != .file or
             !std.mem.eql(u8, ".zig", std.fs.path.extension(tests_entry.name)))
         {
