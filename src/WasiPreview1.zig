@@ -50,18 +50,17 @@ const File = @import("WasiPreview1/File.zig");
 
 const Api = @import("WasiPreview1/api.zig").Api;
 
-pub const Csprng = @import("WasiPreview1/Csprng.zig");
 pub const Path = @import("WasiPreview1/Path.zig");
 pub const PreopenDir = @import("WasiPreview1/PreopenDir.zig");
 pub const host_os = @import("WasiPreview1/host_os.zig");
 
 allocator: Allocator,
+io: std.Io,
 scratch: struct {
     state: ArenaAllocator.State,
     lock: std.debug.SafetyLock = .{},
 },
 api_lookup: Api.Lookup,
-csprng: Csprng,
 fd_table: Fd.Table,
 args: Arguments,
 environ: Environ,
@@ -88,8 +87,8 @@ pub const InitOptions = struct {
     //stdout: ?union(enum) { null, real, some_memory_thing },
     //stderr: ?,
     //stdin: ?,
-    fd_rng_seed: u64,
-    csprng: Csprng = .os,
+    /// Used to seed the RNG for file descriptor numbers.
+    fd_rng_seed: u64 = 42,
 };
 
 /// After initialization, hosts should call the entry point of the application (e.g. `_start`) as
@@ -98,6 +97,10 @@ pub const InitOptions = struct {
 /// [the application ABI]: https://github.com/WebAssembly/WASI/blob/v0.2.7/legacy/application-abi.md
 pub fn init(
     allocator: Allocator,
+    /// Used to perform very basic I/O (e.g. reading random data or getting the current time.
+    ///
+    /// Interactions with the file system are handled separately.
+    io: std.Io,
     options: InitOptions,
     // Can't put in `InitOptions` since these are file handles that need to be closed.
     preopen_dirs: *[]PreopenDir,
@@ -122,8 +125,8 @@ pub fn init(
         .fd_table = fd_table,
         .api_lookup = api_lookup,
         .allocator = allocator,
+        .io = io,
         .scratch = .{ .state = ArenaAllocator.init(allocator).state },
-        .csprng = options.csprng,
         .args = options.args,
         .environ = options.environ,
         .inode_hash_seed = @enumFromInt(rng.next()),
@@ -356,29 +359,23 @@ fn clock_time_get(
 
     log.debug("clock_time_get({t}, {d}, {f})", .{ clock_id, precision.ns, ret_ptr });
 
-    _ = wasi;
-    const time: u64 = switch (clock_id) {
-        .real_time => return Errno.nosys, // TODO clock_time_get(realtime)
-        // Zig tries to use a monotonic clock
-        .monotonic => monotonic: {
-            const inst = std.time.Instant.now() catch return Errno.inval;
-            switch (@FieldType(std.time.Instant, "timestamp")) {
-                u64 => break :monotonic inst.timestamp,
-                std.posix.timespec => {
-                    const spec: std.posix.timespec = inst.timestamp;
-                    break :monotonic (@as(u64, @intCast(spec.sec)) * std.time.ns_per_s) +
-                        @as(u64, @intCast(spec.nsec));
-                },
-                else => |bad| @compileError("clock_time_get monotonic for " ++ @typeName(bad)),
-            }
-        },
+    const clock: std.Io.Clock = switch (clock_id) {
+        .real_time => .real,
+        .monotonic => .awake,
         .process_cputime_id,
         .thread_cputime_id,
         _,
         => return .inval,
     };
 
-    ret_ptr.write(mem, types.Timestamp{ .ns = time }) catch |e| return .mapError(e);
+    ret_ptr.write(
+        mem,
+        types.Timestamp{
+            .ns = @bitCast(
+                @as(i64, @truncate(std.Io.Timestamp.now(wasi.io, clock).toNanoseconds())),
+            ),
+        },
+    ) catch |e| return .mapError(e);
 
     return .success;
 }
@@ -1485,7 +1482,10 @@ fn random_get(
 
     const buf = pointer.Slice(u8).init(mem, buf_ptr, buf_len) catch |e| return .mapError(e);
 
-    wasi.csprng.get(buf.bytes()) catch |e| return .mapError(e);
+    wasi.io.randomSecure(buf.bytes()) catch |e| switch (e) {
+        error.EntropyUnavailable => return .again,
+        error.Canceled => unreachable,
+    };
 
     return .success;
 }

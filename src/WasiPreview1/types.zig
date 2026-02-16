@@ -22,12 +22,27 @@ pub const Timestamp = packed struct(u64) {
         return Timestamp{ .ns = @as(u64, @bitCast(time)) *| win_time_unit_per_ns };
     }
 
+    pub fn fromLinuxStatxTimestamp(timestamp: std.os.linux.statx_timestamp) Timestamp {
+        return Timestamp{
+            .ns = std.math.cast(
+                u64,
+                std.math.cast(
+                    u96,
+                    (@as(i96, timestamp.sec) *| std.time.ns_per_s) +| @as(i96, timestamp.nsec),
+                ) orelse 0,
+            ) orelse std.math.maxInt(u64),
+        };
+    }
+
     pub fn fromPosixTimespec(time: std.posix.timespec) Timestamp {
         return Timestamp{
-            .ns = @truncate(@as(
-                u128,
-                @bitCast((@as(i128, time.sec) *| std.time.ns_per_s) +| @as(i128, time.nsec)),
-            )),
+            .ns = std.math.cast(
+                u64,
+                std.math.cast(
+                    u96,
+                    (@as(i96, time.sec) *| std.time.ns_per_s) +| @as(i96, time.nsec),
+                ) orelse 0,
+            ) orelse std.math.maxInt(u64),
         };
     }
 
@@ -469,11 +484,13 @@ pub const FileType = enum(u8) {
     socket_stream,
     symbolic_link,
 
+    const Stat = if (builtin.os.tag == .linux) std.os.linux.Statx else std.posix.Stat;
+
     pub fn fromPosixMode(
-        mode: @FieldType(std.posix.Stat, "mode"),
+        mode: @FieldType(Stat, "mode"),
     ) error{UnknownSocketType}!FileType {
         const S = std.posix.S;
-        return switch (mode & std.posix.S.IFMT) {
+        return switch (mode & S.IFMT) {
             S.IFBLK => .block_device,
             S.IFCHR => .character_device,
             S.IFDIR => .directory,

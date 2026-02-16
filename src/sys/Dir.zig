@@ -340,12 +340,10 @@ pub const Iterator = struct {
     fn peekPosix(iter: *Iterator) Error!?*const Entry {
         if (iter.needs_reset) {
             @branchHint(.unlikely);
-            std.posix.lseek_SET(iter.dir.handle, 0) catch |e| switch (e) {
-                error.AccessDenied => unreachable, // directory should allow iteration
-                error.Unexpected => |err| return err,
-                error.Canceled => unreachable,
-                error.Unseekable => unreachable,
-            };
+            switch (std.posix.errno(sys.unix_like.lseek(iter.dir.handle, 0, std.posix.SEEK.SET))) {
+                .SUCCESS => {},
+                else => |err| return std.posix.unexpectedErrno(err),
+            }
             iter.needs_reset = false;
         }
 

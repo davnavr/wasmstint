@@ -169,15 +169,30 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
         };
     } else return .{
         .flags = types.FdFlags{
-            .valid = types.FdFlags.Valid.fromFlagsPosix(
-                sys.unix_like.fcntlGetFl(self.file) catch |e| return switch (e) {
-                    error.Locked => error.WouldBlock,
-                    else => |err| err,
-                },
-            ),
+            .valid = flags: {
+                const result = std.posix.system.fcntl(self.file, std.posix.F.GETFL, undefined);
+                switch (std.posix.errno(result)) {
+                    .SUCCESS => break :flags types.FdFlags.Valid.fromFlagsPosix(
+                        @as(
+                            std.posix.O,
+                            @bitCast(
+                                @as(
+                                    @typeInfo(std.posix.O).@"struct".backing_integer.?,
+                                    @intCast(result),
+                                ),
+                            ),
+                        ),
+                    ),
+                    .BADF => unreachable,
+                    .INVAL => unreachable,
+                    .PERM => unreachable,
+                    .ACCES, .AGAIN => return error.WouldBlock,
+                    else => |err| return std.posix.unexpectedErrno(err),
+                }
+            },
         },
         .type = type: {
-            if (builtin.os.tag == .linux) fallback: {
+            if (builtin.os.tag == .linux) {
                 var statx: std.os.linux.Statx = undefined;
                 sys.linux.statx(
                     self.file,
@@ -186,13 +201,12 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
                     .{ .TYPE = true },
                     &statx,
                 ) catch |e| switch (e) {
-                    error.StatxNotSupported => {
-                        log.debug("statx is not supported, falling back to stat", .{});
-                        break :fallback;
-                    },
                     error.MissingRequestedFields => {
                         @branchHint(.cold);
-                        log.debug("statx did not provide type: 0x{X}", .{statx.mask});
+                        log.debug(
+                            "statx did not provide type: 0x{X}",
+                            .{@as(u32, @bitCast(statx.mask))},
+                        );
                         break :type .unknown; // exotic file type
                     },
                     else => |err| return err,
@@ -210,21 +224,21 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
                     S.IFSOCK => .unknown, // TODO: Requires getsockopt
                     else => .unknown,
                 };
-            }
+            } else {
+                var stat = std.mem.zeroes(std.posix.Stat);
+                switch (std.posix.errno(sys.unix_like.fstat(self.file, &stat))) {
+                    .SUCCESS => {},
+                    .INVAL => unreachable,
+                    .BADF => unreachable, // Always a race condition.
+                    .NOMEM => return error.SystemResources,
+                    .ACCES => return error.AccessDenied,
+                    else => |err| return std.posix.unexpectedErrno(err),
+                }
 
-            var stat = std.mem.zeroes(std.posix.Stat);
-            switch (std.posix.errno(sys.unix_like.fstat(self.file, &stat))) {
-                .SUCCESS => {},
-                .INVAL => unreachable,
-                .BADF => unreachable, // Always a race condition.
-                .NOMEM => return error.SystemResources,
-                .ACCES => return error.AccessDenied,
-                else => |err| return std.posix.unexpectedErrno(err),
+                break :type types.FileType.fromPosixMode(stat.mode) catch |e| switch (e) {
+                    error.UnknownSocketType => .unknown, // TODO: Requires getsockopt
+                };
             }
-
-            break :type types.FileType.fromPosixMode(stat.mode) catch |e| switch (e) {
-                error.UnknownSocketType => .unknown, // TODO: Requires getsockopt
-            };
         },
     };
 }
@@ -483,18 +497,33 @@ fn fd_write(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!u32 {
 
     // OS needs a chance to return errors, even if length is 0
     _ = total_len;
-    //if (total_len == 0) return 0;
 
-    const written = std.posix.writev(
-        self.file,
-        File.Ciovec.castSlice(iovs),
-    ) catch |e| return switch (e) {
-        error.NotOpenForWriting => error.BadFd,
-        error.Canceled => unreachable,
-        else => |known| known,
-    };
-
-    return @intCast(written);
+    const posix_iovs = File.Ciovec.castSlice(iovs);
+    while (true) {
+        const written = std.posix.system.writev(
+            self.file,
+            posix_iovs.ptr,
+            @min(posix_iovs.len, std.posix.IOV_MAX),
+        );
+        return switch (std.posix.errno(written)) {
+            .SUCCESS => @intCast(written),
+            .INTR => continue,
+            .INVAL => error.InvalidArgument,
+            .FAULT => unreachable,
+            .SRCH => error.ProcessNotFound,
+            .AGAIN => error.WouldBlock,
+            .BADF => error.BadFd,
+            .DQUOT => error.DiskQuota,
+            .FBIG => error.FileTooBig,
+            .IO => error.InputOutput,
+            .NOSPC => error.NoSpaceLeft,
+            .PERM => error.PermissionDenied,
+            .PIPE => error.BrokenPipe,
+            .CONNRESET => error.ConnectionResetByPeer,
+            .BUSY => error.DeviceBusy,
+            else => |err| std.posix.unexpectedErrno(err),
+        };
+    }
 }
 
 fn sock_accept(ctx: Ctx, flags: types.FdFlags.Valid) Error!File.Impl {

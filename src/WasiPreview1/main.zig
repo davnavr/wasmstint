@@ -107,13 +107,12 @@ const fail = struct {
     fn printInitialMessage(
         comptime fmt: []const u8,
         args: anytype,
-        color: Io.tty.Config,
-        stderr: *Io.Writer,
+        stderr: Io.Terminal,
     ) Io.Writer.Error!void {
-        color.setColor(stderr, .bright_red) catch {};
-        stderr.writeAll("error: ") catch {};
-        color.setColor(stderr, .reset) catch {};
-        stderr.print(fmt ++ "\n", args) catch {};
+        stderr.setColor(.bright_red) catch {};
+        stderr.writer.writeAll("error: ") catch {};
+        stderr.setColor(.reset) catch {};
+        stderr.writer.print(fmt ++ "\n", args) catch {};
     }
 
     fn formatWithFollowup(
@@ -121,18 +120,14 @@ const fail = struct {
         comptime fmt: []const u8,
         args: anytype,
         context: anytype,
-        comptime printFollowupMessage: fn (
-            @TypeOf(context),
-            Io.tty.Config,
-            *Io.Writer,
-        ) Io.Writer.Error!void,
+        comptime printFollowupMessage: fn (@TypeOf(context), Io.Terminal) Io.Writer.Error!void,
     ) Error {
         @branchHint(.cold);
         var buf: [256]u8 align(16) = undefined;
-        const stderr, const color = std.debug.lockStderrWriter(&buf);
-        printInitialMessage(fmt, args, color, stderr) catch {};
-        printFollowupMessage(context, color, stderr) catch {};
-        stderr.flush() catch {};
+        const stderr = std.debug.lockStderr(&buf).terminal();
+        printInitialMessage(fmt, args, stderr) catch {};
+        printFollowupMessage(context, stderr) catch {};
+        stderr.writer.flush() catch {};
         return err;
     }
 
@@ -143,7 +138,7 @@ const fail = struct {
             args,
             {},
             struct {
-                fn nothing(_: void, _: Io.tty.Config, _: *Io.Writer) Io.Writer.Error!void {}
+                fn nothing(_: void, _: Io.Terminal) Io.Writer.Error!void {}
             }.nothing,
         );
     }
@@ -170,215 +165,146 @@ const PreopenDir = struct {
     permissions: WasiPreview1.PreopenDir.Permissions = .none,
 };
 
-fn parseArguments(scratch: *ArenaAllocator, arena: *ArenaAllocator) ParsedArguments {
+const CustomArgumentParser = struct {
+    const use_windows_peb = builtin.os.tag == .windows and !builtin.link_libc;
+
+    arena: *ArenaAllocator,
+    environ: WasiPreview1.Environ.List = .empty,
+    environ_map: std.process.Environ.Map,
+    preopen_dirs: std.ArrayList(PreopenDir) = .empty,
+
+    fn init(parser: *CustomArgumentParser, environ: std.process.Environ, arena: *ArenaAllocator) void {
+        parser.* = .{
+            .arena = arena,
+            .environ_map = environ.createMap(arena.allocator()) catch oom("env map"),
+        };
+    }
+
+    fn lookupEnviron(
+        parser: *CustomArgumentParser,
+        key: [:0]const u8,
+    ) std.mem.Allocator.Error!WasiPreview1.Environ.Pair {
+        if (parser.environ_map.get(key)) |v| {
+            return WasiPreview1.Environ.Pair.initTruncated(v) catch unreachable;
+        } else {
+            @branchHint(.unlikely);
+            const key_truncated = key[0..@min(key.len, WasiPreview1.Environ.Pair.max_len - 1)];
+            const buf = try parser.arena.allocator().alloc(u8, key_truncated.len + 1);
+            buf[key_truncated.len] = '=';
+            @memcpy(buf[0..key_truncated.len], key[0..key_truncated.len]);
+            const empty = WasiPreview1.Environ.Pair.initTruncated(buf) catch unreachable;
+            std.debug.assert(empty.value().len == 0);
+            return empty;
+        }
+    }
+
+    fn parse(
+        parser: *CustomArgumentParser,
+        comptime flag: Arguments.FlagEnum,
+        args: *cli_args.ArgIterator,
+        results_arena: *ArenaAllocator,
+        diag: ?*cli_args.Flag.Diagnostics,
+    ) cli_args.Flag.InvalidError!void {
+        switch (flag) {
+            .env => {
+                const key = args.next() orelse
+                    return env_flag.info.reportMissing(diag, env_flag.arg_help.?);
+
+                const pair = pair: {
+                    const set = WasiPreview1.Environ.Pair.initTruncated(key) catch |e| switch (e) {
+                        error.MissingEqualsSign => try parser.lookupEnviron(key),
+                    };
+
+                    break :pair try set.dupe(results_arena.allocator());
+                };
+
+                try parser.environ.append(parser.arena.allocator(), pair);
+            },
+            .dir => {
+                const host = try args.nextDupe(results_arena) orelse {
+                    return cli_args.Flag.Diagnostics.report(
+                        diag,
+                        "missing HOST directory path for --dir flag",
+                    );
+                };
+
+                const host_fmt = std.unicode.fmtUtf8(host);
+                const guest = try args.nextDupe(results_arena) orelse {
+                    return cli_args.Flag.Diagnostics.reportFmt(
+                        diag,
+                        results_arena,
+                        "missing GUEST directory name for --dir {f}",
+                        .{host_fmt},
+                    );
+                };
+                const guest_fmt = std.unicode.fmtUtf8(guest);
+                const guest_utf8 = WasiPreview1.Path.init(guest) catch |e| return switch (e) {
+                    error.InvalidUtf8 => cli_args.Flag.Diagnostics.reportFmt(
+                        diag,
+                        results_arena,
+                        "GUEST directory {[guest]f} must be valid UTF-8 in --dir {[host]f}",
+                        .{ .host = host_fmt, .guest = guest_fmt },
+                    ),
+                    error.PathTooLong => cli_args.Flag.Diagnostics.reportFmt(
+                        diag,
+                        results_arena,
+                        "length of GUEST directory is too long in --dir {[host]f} {[guest]f}",
+                        .{ .host = host_fmt, .guest = guest_fmt },
+                    ),
+                };
+
+                const entry = try parser.preopen_dirs.addOne(parser.arena.allocator());
+                entry.* = PreopenDir{ .host = host, .guest = guest_utf8 };
+
+                const bad_perm_note =
+                    "note: pass 'ro' for read-only access, or 'rw' for read-write access";
+
+                const perm = args.next() orelse {
+                    return cli_args.Flag.Diagnostics.reportFmt(
+                        diag,
+                        results_arena,
+                        "missing PERM string for --dir {f} {s}\n" ++ bad_perm_note,
+                        .{ host_fmt, guest },
+                    );
+                };
+
+                if (std.mem.eql(u8, perm, "rw")) {
+                    entry.permissions.write = true;
+                } else if (!std.mem.eql(u8, perm, "ro")) {
+                    return cli_args.Flag.Diagnostics.reportFmt(
+                        diag,
+                        results_arena,
+                        "unknown permission {f} in --dir {f} {s}",
+                        .{
+                            std.unicode.fmtUtf8(perm),
+                            host_fmt,
+                            guest,
+                        },
+                    );
+                }
+            },
+            else => unreachable,
+        }
+    }
+};
+
+fn parseArguments(
+    init: *const std.process.Init.Minimal,
+    scratch: *ArenaAllocator,
+    arena: *ArenaAllocator,
+) ParsedArguments {
     var parser: Arguments = undefined;
     parser.init();
 
-    const ParseCustomArguments = struct {
-        const use_windows_peb = builtin.os.tag == .windows and !builtin.link_libc;
-
-        scratch: *ArenaAllocator,
-        environ: WasiPreview1.Environ.List = .empty,
-        scanned_env_vars: ScannedEnvVars = .empty,
-        unscanned_env_vars: if (use_windows_peb) ?[*:0]u16 else [][*:0]u8,
-        preopen_dirs: std.ArrayList(PreopenDir) = .empty,
-
-        const ScannedEnvVars = std.ArrayHashMapUnmanaged(
-            WasiPreview1.Environ.Pair,
-            void,
-            ScannedEnvVarsContext,
-            true,
-        );
-
-        const ScannedEnvVarsContext = struct {
-            pub fn hash(_: @This(), key: WasiPreview1.Environ.Pair) u32 {
-                return std.hash.CityHash32.hash(key.name());
-            }
-
-            pub fn eql(
-                _: @This(),
-                a: WasiPreview1.Environ.Pair,
-                b: WasiPreview1.Environ.Pair,
-                _: usize,
-            ) bool {
-                return std.mem.eql(u8, a.name(), b.name());
-            }
-        };
-
-        fn init(args: *@This(), scratch_arena: *ArenaAllocator) void {
-            args.* = .{
-                .scratch = scratch_arena,
-                .unscanned_env_vars = if (use_windows_peb)
-                    std.os.windows.peb().ProcessParameters.Environment
-                else
-                    std.os.environ,
-            };
-
-            if (!use_windows_peb) {
-                args.scanned_env_vars.ensureTotalCapacity(
-                    scratch_arena.allocator(),
-                    args.unscanned_env_vars.len,
-                ) catch oom("scanned env vars");
-            }
-        }
-
-        fn emptyEnviron(
-            key: [:0]const u8,
-            results_arena: *ArenaAllocator,
-        ) WasiPreview1.Environ.Pair {
-            const key_truncated = key[0..@min(key.len, WasiPreview1.Environ.Pair.max_len)];
-            const s = results_arena.allocator().alloc(u8, key_truncated.len + 1) catch
-                oom("empty env var");
-            s[key_truncated.len] = '=';
-            const pair = WasiPreview1.Environ.Pair.initTruncated(s) catch unreachable;
-            std.debug.assert(pair.value().len == 0);
-            return pair;
-        }
-
-        const ScannedEnvironGetContext = struct {
-            pub fn hash(_: @This(), key: [:0]const u8) u32 {
-                return std.hash.CityHash32.hash(key);
-            }
-
-            pub fn eql(
-                _: @This(),
-                a: [:0]const u8,
-                b: WasiPreview1.Environ.Pair,
-                _: usize,
-            ) bool {
-                return std.mem.eql(u8, a, b.name());
-            }
-        };
-
-        fn scanNextInheritedEnviron(
-            self: *@This(),
-            key: [:0]const u8,
-            results_arena: *ArenaAllocator,
-        ) WasiPreview1.Environ.Pair {
-            if (self.scanned_env_vars.getKeyAdapted(key, ScannedEnvironGetContext{})) |found| {
-                return found;
-            } else if (use_windows_peb) {
-                @panic("TODO: std.unicode.calcWtf8Len");
-            } else {
-                while (self.unscanned_env_vars.len > 0) {
-                    defer self.unscanned_env_vars = self.unscanned_env_vars[1..];
-
-                    const entry = WasiPreview1.Environ.Pair.initTruncated(
-                        std.mem.sliceTo(self.unscanned_env_vars[0], 0),
-                    ) catch unreachable;
-
-                    self.scanned_env_vars.putAssumeCapacity(entry, {});
-
-                    if (std.mem.eql(u8, key, entry.name())) {
-                        return entry.dupe(results_arena.allocator()) catch
-                            oom("inherited env var");
-                    }
-                }
-
-                return emptyEnviron(key, results_arena);
-            }
-        }
-
-        fn parse(
-            self: *@This(),
-            comptime flag: Arguments.FlagEnum,
-            args: *cli_args.ArgIterator,
-            results_arena: *ArenaAllocator,
-            diag: ?*cli_args.Flag.Diagnostics,
-        ) cli_args.Flag.InvalidError!void {
-            switch (flag) {
-                .env => {
-                    const str = args.next() orelse return env_flag.info.reportMissing(
-                        diag,
-                        env_flag.arg_help.?,
-                    );
-
-                    const pair = pair: {
-                        const set = WasiPreview1.Environ.Pair.initTruncated(str) catch
-                            break :pair self.scanNextInheritedEnviron(str, results_arena);
-
-                        break :pair try set.dupe(results_arena.allocator());
-                    };
-
-                    try self.environ.append(self.scratch.allocator(), pair);
-                },
-                .dir => {
-                    const host = try args.nextDupe(results_arena) orelse {
-                        return cli_args.Flag.Diagnostics.report(
-                            diag,
-                            "missing HOST directory path for --dir flag",
-                        );
-                    };
-
-                    const host_fmt = std.unicode.fmtUtf8(host);
-                    const guest = try args.nextDupe(results_arena) orelse {
-                        return cli_args.Flag.Diagnostics.reportFmt(
-                            diag,
-                            results_arena,
-                            "missing GUEST directory name for --dir {f}",
-                            .{host_fmt},
-                        );
-                    };
-                    const guest_fmt = std.unicode.fmtUtf8(guest);
-                    const guest_utf8 = WasiPreview1.Path.init(guest) catch |e| return switch (e) {
-                        error.InvalidUtf8 => cli_args.Flag.Diagnostics.reportFmt(
-                            diag,
-                            results_arena,
-                            "GUEST directory {[guest]f} must be valid UTF-8 in --dir {[host]f}",
-                            .{ .host = host_fmt, .guest = guest_fmt },
-                        ),
-                        error.PathTooLong => cli_args.Flag.Diagnostics.reportFmt(
-                            diag,
-                            results_arena,
-                            "length of GUEST directory is too long in --dir {[host]f} {[guest]f}",
-                            .{ .host = host_fmt, .guest = guest_fmt },
-                        ),
-                    };
-
-                    const entry = try self.preopen_dirs.addOne(self.scratch.allocator());
-                    entry.* = PreopenDir{ .host = host, .guest = guest_utf8 };
-
-                    const bad_perm_note =
-                        "note: pass 'ro' for read-only access, or 'rw' for read-write access";
-
-                    const perm = args.next() orelse {
-                        return cli_args.Flag.Diagnostics.reportFmt(
-                            diag,
-                            results_arena,
-                            "missing PERM string for --dir {f} {s}\n" ++ bad_perm_note,
-                            .{ host_fmt, guest },
-                        );
-                    };
-
-                    if (std.mem.eql(u8, perm, "rw")) {
-                        entry.permissions.write = true;
-                    } else if (!std.mem.eql(u8, perm, "ro")) {
-                        return cli_args.Flag.Diagnostics.reportFmt(
-                            diag,
-                            results_arena,
-                            "unknown permission {f} in --dir {f} {s}",
-                            .{
-                                std.unicode.fmtUtf8(perm),
-                                host_fmt,
-                                guest,
-                            },
-                        );
-                    }
-                },
-                else => unreachable,
-            }
-        }
-    };
-
-    var custom_args: ParseCustomArguments = undefined;
-    custom_args.init(scratch);
-    var args = cli_args.ArgIterator.initProcessArgs(scratch) catch oom("argv");
+    var custom_args: CustomArgumentParser = undefined;
+    custom_args.init(init.environ, scratch);
+    var args = cli_args.ArgIterator.initProcessArgs(scratch, init.args) catch oom("argv");
     _ = args.next().?;
     const parsed = parser.remainingArgumentsWithCustom(
         &args,
         arena,
         &custom_args,
-        ParseCustomArguments.parse,
+        CustomArgumentParser.parse,
     ) catch oom("CLI arguments");
 
     var forwarded = WasiPreview1.Arguments.List.initCapacity(
@@ -416,13 +342,14 @@ fn logger(
         return;
     }
 
+    var io = std.Io.Threaded.init_single_threaded;
     var buffer: [1024]u8 align(16) = undefined;
-    var log_file_writer: std.fs.File.Writer = undefined;
+    var log_file_writer: std.Io.File.Writer = undefined;
     var writer: *Io.Writer = if (log_file) |f| writer: {
         // TODO(zig): https://github.com/ziglang/zig/issues/25738
-        log_file_writer = std.fs.File.adaptFromNewApi(f).writerStreaming(&buffer);
+        log_file_writer = f.writerStreaming(io.ioBasic(), &buffer);
         break :writer &log_file_writer.interface;
-    } else std.debug.lockStderrWriter(&buffer)[0];
+    } else &std.debug.lockStderr(&buffer).file_writer.interface;
 
     // Zig `std` does not yet providing printing of timestamps.
     defer log_counter +%= 1;
@@ -435,7 +362,7 @@ fn logger(
     if (log_file) |_| {
         writer.flush() catch {};
     } else {
-        std.debug.unlockStderrWriter();
+        std.debug.unlockStderr();
     }
 }
 
@@ -444,9 +371,9 @@ pub const std_options = std.Options{
     .log_level = .debug,
 };
 
-pub fn main() void {
+pub fn main(init: std.process.Init.Minimal) void {
     const exit_code: u32 = @bitCast(
-        realMain() catch |e| switch (e) {
+        realMain(init) catch |e| switch (e) {
             error.BadCliFlag => if (builtin.os.tag == .windows) @as(i32, -1) else 2,
             error.GenericError => 1,
         },
@@ -470,7 +397,7 @@ fn printExitCode(arguments: *const Arguments.Parsed, code: i32) void {
     }
 }
 
-fn realMain() Error!i32 {
+fn realMain(init: std.process.Init.Minimal) Error!i32 {
     var memory_limit: usize = std.math.maxInt(usize);
     var limited_page_allocator = allocators.LimitedAllocator.init(
         &memory_limit,
@@ -482,7 +409,7 @@ fn realMain() Error!i32 {
     var scratch = ArenaAllocator.init(limited_page_allocator.allocator());
     defer scratch.deinit();
 
-    const all_arguments = parseArguments(&scratch, &arena);
+    const all_arguments = parseArguments(&init, &scratch, &arena);
     const arguments = all_arguments.flags;
 
     memory_limit = @min(memory_limit, arguments.@"rt-memory-limit");
@@ -547,11 +474,13 @@ fn realMain() Error!i32 {
     };
     defer if (builtin.mode == .Debug) wasm_binary.deinit();
 
-    const csprng = WasiPreview1.Csprng.os;
     const rt_rng_num: u128 = arguments.@"rt-rng-seed" orelse seed: {
         var seed: u128 = undefined;
-        csprng.get(std.mem.asBytes(&seed)) catch |e|
-            return fail.format(error.GenericError, "could not access OS CSPRNG: {t}", .{e});
+        io.randomSecure(std.mem.asBytes(&seed)) catch |e| switch (e) {
+            error.EntropyUnavailable => return fail
+                .print(error.GenericError, "could not access OS CSPRNG"),
+            error.Canceled => unreachable,
+        };
         break :seed seed;
     };
 
@@ -648,11 +577,11 @@ fn realMain() Error!i32 {
 
     var wasi = WasiPreview1.init(
         limited_page_allocator.allocator(), // std.heap.smp_allocator,
+        io,
         .{
             .args = forwarded_arguments,
             .environ = all_arguments.environ,
             .fd_rng_seed = rt_rng_seeds[1],
-            .csprng = csprng,
         },
         &preopens,
     ) catch |e| switch (e) {
@@ -802,16 +731,15 @@ fn realMain() Error!i32 {
                 struct {
                     fn printFollowupMessage(
                         available_exports: wasmstint.runtime.ModuleInst.ExportVals,
-                        color: Io.tty.Config,
-                        out: *Io.Writer,
+                        stderr: std.Io.Terminal,
                     ) Io.Writer.Error!void {
-                        color.setColor(out, .bright_cyan) catch {};
-                        try out.writeAll("note: ");
-                        color.setColor(out, .reset) catch {};
+                        stderr.setColor(.bright_cyan) catch {};
+                        try stderr.writer.writeAll("note: ");
+                        stderr.setColor(.reset) catch {};
                         if (available_exports.len == 0) {
-                            try out.writeAll("module does not provide any exports\n");
+                            try stderr.writer.writeAll("module does not provide any exports\n");
                         } else {
-                            try out.writeAll("module's available entry points are:\n");
+                            try stderr.writer.writeAll("module's available entry points are:\n");
                             for (0..available_exports.len) |i| {
                                 const exp = available_exports.at(i);
                                 if (exp.val != .func) {
@@ -823,7 +751,7 @@ fn realMain() Error!i32 {
                                     continue;
                                 }
 
-                                try out.print(
+                                try stderr.writer.print(
                                     "{f}\n",
                                     .{std.unicode.fmtUtf8(exp.name.bytes())},
                                 );

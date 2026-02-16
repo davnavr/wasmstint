@@ -80,13 +80,48 @@ pub fn fileStat(
                 all_info.BasicInformation.ChangeTime,
             ),
         };
-    } else if (@hasDecl(std.posix.system, "Stat") and std.posix.Stat != void) {
-        const stat = std.posix.fstat(fd) catch |e| switch (e) {
-            error.Canceled, error.Streaming => unreachable,
-            else => |err| return err,
+    } else if (builtin.os.tag == .linux) {
+        var statx: std.os.linux.Statx = undefined;
+        sys.linux.statx(
+            fd,
+            "",
+            .{ .EMPTY_PATH = true, .SYMLINK_NOFOLLOW = true },
+            .{
+                .INO = true,
+                .MODE = true,
+                .SIZE = true,
+                .NLINK = true,
+                .ATIME = true,
+                .MTIME = true,
+                .CTIME = true,
+            },
+            &statx,
+        ) catch |e| return switch (e) {
+            error.MissingRequestedFields => error.Unimplemented,
+            else => |err| err,
         };
 
-        return wasi_types.FileStat.fromPosixStat(&stat, device_hash_seed, inode_hash_seed);
+        return wasi_types.FileStat{
+            .dev = .init(device_hash_seed, (@as(u64, statx.dev_major) << 32) | statx.dev_minor),
+            .ino = .init(inode_hash_seed, statx.ino),
+            .type = wasi_types.FileType.fromPosixMode(statx.mode) catch |e| switch (e) {
+                // TODO: need `getsockopt()` to determine exact type of socket
+                error.UnknownSocketType => .unknown,
+            },
+            .nlink = statx.nlink,
+            .size = .{ .bytes = @bitCast(statx.size) },
+            .atim = .fromLinuxStatxTimestamp(statx.atime),
+            .mtim = .fromLinuxStatxTimestamp(statx.mtime),
+            .ctim = .fromLinuxStatxTimestamp(statx.ctime),
+        };
+    } else if (@hasDecl(std.posix.system, "Stat") and std.posix.Stat != void) {
+        // const stat = std.posix.fstat(fd) catch |e| switch (e) {
+        //     error.Canceled, error.Streaming => unreachable,
+        //     else => |err| return err,
+        // };
+        @compileError("POSIX fstat");
+
+        // return wasi_types.FileStat.fromPosixStat(&stat, device_hash_seed, inode_hash_seed);
     } else {
         @compileError("no fileStat implementation for " ++ @tagName(builtin.os.tag));
     }

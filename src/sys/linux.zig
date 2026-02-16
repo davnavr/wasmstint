@@ -27,18 +27,11 @@ pub const DT = dt: {
     );
 };
 
-const statx_available = builtin.os.isAtLeast(.linux, .{ .major = 4, .minor = 11, .patch = 0 });
-
-/// Used when marking branches where `statx` is unavailable.
-const hint_statx_unavailable: std.builtin.BranchHint = if (statx_available == true)
-    .unlikely
-else if (statx_available == false)
-    .likely
-else
-    .none;
-
-/// https://github.com/ziglang/zig/issues/23514
-var has_statx = std.atomic.Value(bool).init(true);
+comptime {
+    std.debug.assert( // Zig assumes Linux supports `statx`, check your version
+        builtin.os.isAtLeast(.linux, .{ .major = 4, .minor = 11, .patch = 0 }) == true,
+    );
+}
 
 pub const StatxFlags = packed struct(c_int) {
     _0: u8 = 0,
@@ -86,22 +79,7 @@ pub const StatxFlags = packed struct(c_int) {
     }
 };
 
-pub const StatxMask = packed struct(c_uint) {
-    TYPE: bool = false,
-    MODE: bool = false,
-    NLINK: bool = false,
-    UID: bool = false,
-    GID: bool = false,
-    ATIM: bool = false,
-    MTIM: bool = false,
-    CTIM: bool = false,
-    INO: bool = false,
-    SIZE: bool = false,
-    _10: u22 = 0,
-};
-
 pub const StatxError = std.posix.UnexpectedError || error{
-    StatxNotSupported,
     /// Some fields that were requested could not be provided.
     MissingRequestedFields,
     AccessDenied,
@@ -112,33 +90,22 @@ pub const StatxError = std.posix.UnexpectedError || error{
     NotDir,
 };
 
-/// Note that Zig currently does not expose the glibc wrapper for `statx`.
-///
-/// Since glibc 2.28.
+/// Zig assumes that `statx` is always supported.
 pub fn statx(
     dir: Fd,
     path: [:0]const u8,
     flags: StatxFlags,
-    mask: StatxMask,
+    mask: system.STATX,
     buf: *system.Statx,
 ) StatxError!void {
-    if (!has_statx.load(.unordered)) {
-        @branchHint(hint_statx_unavailable);
-        return error.StatxNotSupported;
-    }
-
     buf.* = undefined;
-    const result = system.statx(dir, path, @bitCast(flags), @bitCast(mask), buf);
+    const result = system.statx(dir, path, @bitCast(flags), mask, buf);
     const requested_mask = @as(u32, @bitCast(mask));
     switch (std.os.linux.errno(result)) {
-        .SUCCESS => if (buf.mask & requested_mask != requested_mask) {
+        .SUCCESS => if (@as(u32, @bitCast(buf.mask)) & requested_mask != requested_mask) {
             return error.MissingRequestedFields;
         },
-        .NOSYS => {
-            @branchHint(hint_statx_unavailable);
-            has_statx.store(false, .monotonic);
-            return error.StatxNotSupported;
-        },
+        .NOSYS => @panic("statx not supported"), // https://github.com/ziglang/zig/issues/23514
         .ACCES => return error.AccessDenied,
         .BADF => unreachable, // kernel expected absolute path
         .FAULT => unreachable,

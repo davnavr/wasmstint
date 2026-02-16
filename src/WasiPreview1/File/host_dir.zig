@@ -911,11 +911,8 @@ fn accessSubPathPortable(
             o_flags_no_follow,
             0,
         ) catch |e| return switch (e) {
-            error.SharingViolation,
-            error.NetworkNotFound,
-            error.PipeBusy,
-            => unreachable, // Windows-only
-            error.FileLocksNotSupported => unreachable,
+            error.NetworkNotFound, error.PipeBusy => unreachable, // Windows-only
+            error.FileLocksUnsupported => unreachable,
             error.SymLinkLoop => {
                 log.err("TODO: final path component of {f} was a symlink", .{path});
                 return error.Unimplemented;
@@ -1097,11 +1094,6 @@ fn pathOpenFlags(
 ) SetOpenFlagsError!OsOpenFlags {
     try open_flags.check();
     if (builtin.os.tag == .windows) {
-        // No effect for regular files on linux.
-        // POSIX says behavior on regular files is unspecified.
-        // Windows doesn't really have an equivalent to `O_NONBLOCK` anyways.
-        _ = fd_flags.nonblock;
-
         if (fd_flags.dsync or fd_flags.rsync or fd_flags.sync) {
             log.err("unsupported fdflags {f} on windows", .{fd_flags});
             return Error.NotSupported; // `Errno.notsup` for unsupported flags
@@ -1117,7 +1109,7 @@ fn pathOpenFlags(
             .access_mask = sys.windows.AccessMask.init(init_flags)
                 .setConditional(rights.canWrite(), write_flags)
                 .setFlagConditional(rights.fd_read, .FILE_READ_DATA)
-                .setFlagConditional(rights.fd_sync, .SYNCHRONIZE)
+                .setFlagConditional(rights.fd_sync or !fd_flags.non_block, .SYNCHRONIZE)
                 .setFlagConditional(rights.fd_filestat_get, .FILE_READ_ATTRIBUTES)
                 .setFlagConditional(rights.fd_filestat_set_size or rights.fd_filestat_set_times, .FILE_WRITE_ATTRIBUTES)
                 .setFlagConditional(rights.fd_readdir, .FILE_LIST_DIRECTORY),
@@ -1132,10 +1124,9 @@ fn pathOpenFlags(
                 .FILE_OVERWRITE
             else
                 .FILE_OPEN,
-            .create_options = sys.windows.CreateOptions.init(&.{
-                .FILE_SYNCHRONOUS_IO_NONALERT,
-                .FILE_OPEN_FOR_BACKUP_INTENT,
-            }).setFlagConditional(open_flags.directory, .FILE_DIRECTORY_FILE),
+            .create_options = sys.windows.CreateOptions.init(&.{.FILE_OPEN_FOR_BACKUP_INTENT})
+                .setFlagConditional(!fd_flags.non_block, .FILE_SYNCHRONOUS_IO_NONALERT)
+                .setFlagConditional(open_flags.directory, .FILE_DIRECTORY_FILE),
         };
     } else {
         var o_flags = fd_flags.toFlagsPosix() catch return error.NotSupported;
@@ -1162,6 +1153,7 @@ fn pathOpen(
     allocator: Allocator,
     open_flags: types.OpenFlags.Valid,
     rights: types.Rights.Valid,
+    fd_flags: types.FdFlags.Valid,
 ) Error!File.OpenedPath {
     errdefer std.posix.close(new_fd);
     _ = scratch;
@@ -1194,16 +1186,32 @@ fn pathOpen(
         }
     } else if (@hasDecl(std.posix.system, "O") and std.posix.O != void) {
         if (!open_flags.directory) {
-            // TODO: On linux, use statx to determine if directory
-            const stat = std.posix.fstat(new_fd) catch |e| switch (e) {
-                error.Canceled, error.Streaming => unreachable,
-                else => |err| return err,
+            const mode = if (builtin.os.tag == .linux) linux: {
+                var statx: std.os.linux.Statx = undefined;
+                sys.linux.statx(
+                    new_fd,
+                    "",
+                    .{ .EMPTY_PATH = true, .SYMLINK_NOFOLLOW = true },
+                    .{ .MODE = true },
+                    &statx,
+                ) catch |e| return switch (e) {
+                    error.MissingRequestedFields => error.Unimplemented,
+                    else => |err| err,
+                };
+
+                break :linux statx.mode;
+            } else posix: {
+                const stat = std.posix.system.fstat(new_fd);
+                break :posix stat.mode;
             };
 
-            if (types.FileType.fromPosixMode(stat.mode) catch .unknown != .directory) {
+            if (types.FileType.fromPosixMode(mode) catch .unknown != .directory) {
                 log.debug(opened_msg, .{path});
                 return File.OpenedPath{
-                    .file = host_file.wrapFile(std.Io.File{ .handle = new_fd }, .close),
+                    .file = host_file.wrapFile(std.Io.File{
+                        .handle = new_fd,
+                        .flags = .{ .nonblocking = fd_flags.nonblock },
+                    }, .close),
                     .rights = rights.intersection(host_file.possible_rights),
                 };
             }
@@ -1238,7 +1246,7 @@ fn path_open(
         path,
         .{ open_flags, rights, fd_flags },
         pathOpenFlags,
-        .{ allocator, open_flags, rights },
+        .{ allocator, open_flags, rights, fd_flags },
         pathOpen,
     );
 }
