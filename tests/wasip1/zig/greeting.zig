@@ -1,5 +1,5 @@
-pub fn main() !void {
-    var args = try std.process.ArgIteratorWasi.init(std.heap.wasm_allocator);
+pub fn main(init: std.process.Init.Minimal) !void {
+    var args = try init.args.iterateAllocator(std.heap.wasm_allocator);
     defer args.deinit();
 
     _ = args.next() orelse @panic("no process name!");
@@ -15,6 +15,8 @@ const std = @import("std");
 
 test "no arguments" {
     try subprocess.invokeWasiInterpreter(
+        std.testing.io,
+        std.testing.allocator,
         test_paths.interpreter,
         test_paths.wasm,
         .{},
@@ -26,6 +28,8 @@ test "no arguments" {
 
 test "one argument" {
     try subprocess.invokeWasiInterpreter(
+        std.testing.io,
+        std.testing.allocator,
         test_paths.interpreter,
         test_paths.wasm,
         .{

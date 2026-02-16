@@ -1,13 +1,16 @@
 pub fn main() !void {
+    var threaded_io = std.Io.Threaded.init_single_threaded;
+    const io = threaded_io.ioBasic();
+
     var stdout_buf: [4096]u8 align(16) = undefined;
-    var stdout_writer = std.fs.File.stdout().writerStreaming(&stdout_buf);
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
     defer stdout.flush() catch {};
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     {
         var prestat: wasi.prestat_t = undefined;
-        switch (wasi.fd_prestat_get(cwd.fd, &prestat)) {
+        switch (wasi.fd_prestat_get(cwd.handle, &prestat)) {
             .SUCCESS => {},
             else => |err| return std.posix.unexpectedErrno(err),
         }
@@ -19,7 +22,7 @@ pub fn main() !void {
         );
         // defer std.heap.wasm_allocator.free(name_buf);
 
-        switch (wasi.fd_prestat_dir_name(cwd.fd, name_buf.ptr, name_buf.len)) {
+        switch (wasi.fd_prestat_dir_name(cwd.handle, name_buf.ptr, name_buf.len)) {
             .SUCCESS => {},
             else => |err| return std.posix.unexpectedErrno(err),
         }
@@ -30,7 +33,7 @@ pub fn main() !void {
     const kind_width = std.fmt.comptimePrint("{[width]}", .{
         .width = comptime width: {
             var max = 0;
-            for (std.meta.fieldNames(std.fs.File.Kind)) |kind| {
+            for (std.meta.fieldNames(std.Io.File.Kind)) |kind| {
                 max = @max(max, kind.len);
             }
             break :width max;
@@ -39,7 +42,7 @@ pub fn main() !void {
 
     var iterator = cwd.iterateAssumeFirstIteration();
     var total: u64 = 0;
-    while (try iterator.next()) |entry| {
+    while (try iterator.next(io)) |entry| {
         try stdout.print(
             "{[kind]t: >" ++ kind_width ++ "} {[name]s}\n",
             .{ .kind = entry.kind, .name = entry.name },

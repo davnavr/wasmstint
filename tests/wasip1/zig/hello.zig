@@ -7,6 +7,8 @@ const std = @import("std");
 
 test {
     try subprocess.invokeWasiInterpreter(
+        std.testing.io,
+        std.testing.allocator,
         test_paths.interpreter,
         test_paths.wasm,
         .{},
