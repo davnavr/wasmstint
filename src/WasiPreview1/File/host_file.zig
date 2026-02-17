@@ -110,15 +110,14 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
     const self = ctx.get(HostFile);
     if (builtin.os.tag == .windows) {
         var status_block: std.os.windows.IO_STATUS_BLOCK = undefined;
-        var info: std.os.windows.FILE_ALL_INFORMATION = undefined;
+        var info: std.os.windows.FILE.ALL_INFORMATION = undefined;
 
         // Equivalent in `kernel32` is `GetFileInformationByHandle`
         // Simplified version of implementation of `std.fs.File.stat`
         const status = sys.windows.ntQueryInformationFile(
             self.file,
             &status_block,
-            // Need both `FILE_ACCESS_INFORMATION` and `FILE_STANDARD_INFORMATION`
-            .FileAllInformation,
+            .All, // Need both `.Access` and `.Standard`
             &info,
         );
         switch (status) {
@@ -367,11 +366,8 @@ fn fd_read(ctx: Ctx, iovs: []const File.Iovec, total_len: u32) Error!u32 {
     const self = ctx.get(HostFile);
     log.debug("attempting to read up to {} bytes", .{total_len});
     if (builtin.os.tag == .windows) {
-        if (total_len == 0) {
-            @branchHint(.unlikely);
-            return 0;
-        } else if (iovs.len > 1) {
-            @branchHint(.unlikely); // More common to write a single iovec
+        if (iovs.len > 1) {
+            @branchHint(.unlikely); // More common to read a single iovec
             // Could use `scratch` allocator to create a buffer
             log.debug(
                 "consider buffering fd_read on windows: iovs.len={d}, total_len={d}",
@@ -379,11 +375,35 @@ fn fd_read(ctx: Ctx, iovs: []const File.Iovec, total_len: u32) Error!u32 {
             );
         }
 
-        const buffer = iovs[0].bytes();
-        std.debug.assert(buffer.len > 0);
-        std.debug.assert(buffer.len <= total_len);
-        // Copied from `std.os.windows.ReadFile`
+        const buffer = windowsIovsToByteSlice(File.Iovec, iovs, total_len);
         while (true) {
+            if (true) {
+                // TODO: Determine if NtReadFile can be used here
+                var io_status_block: std.os.windows.IO_STATUS_BLOCK = undefined;
+                while (true) {
+                    return switch (std.os.windows.ntdll.NtReadFile(
+                        self.file,
+                        null,
+                        null,
+                        null,
+                        &io_status_block,
+                        @ptrCast(buffer.ptr),
+                        @intCast(buffer.len),
+                        null,
+                        null,
+                    )) {
+                        .SUCCESS, .END_OF_FILE => @intCast(io_status_block.Information),
+                        .ACCESS_DENIED => error.AccessDenied,
+                        .PENDING => unreachable,
+                        .CANCELLED => unreachable,
+                        .PIPE_BROKEN => error.BrokenPipe,
+                        .INVALID_HANDLE => error.BadFd,
+                        .FILE_LOCK_CONFLICT => error.LockViolation,
+                        else => |bad| std.os.windows.unexpectedStatus(bad),
+                    };
+                }
+            }
+
             // `ReadFile` sets this to `0` anyway.
             var number_of_bytes_read: std.os.windows.DWORD = undefined;
             // `kernel32.ReadFile` handles reading from consoles, not just normal files
@@ -458,13 +478,8 @@ fn fd_tell(ctx: Ctx) Error!types.FileSize {
 
         // var offset: std.os.windows.LARGE_INTEGER = undefined;
         var io: std.os.windows.IO_STATUS_BLOCK = undefined;
-        var info: std.os.windows.FILE_POSITION_INFORMATION = undefined;
-        const status = sys.windows.ntQueryInformationFile(
-            self.file,
-            &io,
-            .FilePositionInformation,
-            &info,
-        );
+        var info: std.os.windows.FILE.POSITION_INFORMATION = undefined;
+        const status = sys.windows.ntQueryInformationFile(self.file, &io, .Position, &info);
         return switch (status) {
             .SUCCESS, .BUFFER_OVERFLOW => types.FileSize{
                 .bytes = @as(u64, @bitCast(info.CurrentByteOffset)),
@@ -492,37 +507,67 @@ fn fd_tell(ctx: Ctx) Error!types.FileSize {
     }
 }
 
+fn windowsIovsToByteSlice(comptime Vec: type, iovs: []const Vec, total_len: u32) (switch (Vec) {
+    File.Ciovec => []const u8,
+    File.Iovec => []u8,
+    else => unreachable,
+}) {
+    if (total_len > 0) {
+        for (iovs) |v| {
+            const b = v.bytes();
+            if (b.len > 0) {
+                @branchHint(.likely);
+                std.debug.assert(b.len <= total_len);
+                return b;
+            }
+        }
+    }
+    return &.{};
+}
+
 fn fd_write(ctx: Ctx, iovs: []const File.Ciovec, total_len: u32) Error!u32 {
     const self = ctx.get(HostFile);
-
-    // OS needs a chance to return errors, even if length is 0
-    _ = total_len;
-
     const posix_iovs = File.Ciovec.castSlice(iovs);
-    while (true) {
-        const written = std.posix.system.writev(
-            self.file,
-            posix_iovs.ptr,
-            @min(posix_iovs.len, std.posix.IOV_MAX),
+    // No check for total_len != 0 here, which lets the OS handle things
+    if (sys.is_windows and iovs.len > 1) {
+        @branchHint(.unlikely); // More common to write a single iovec
+        log.debug(
+            "consider buffering fd_write on windows: iovs.len={d}, total_len={d}",
+            .{ iovs.len, total_len },
         );
-        return switch (std.posix.errno(written)) {
-            .SUCCESS => @intCast(written),
-            .INTR => continue,
-            .INVAL => error.InvalidArgument,
-            .FAULT => unreachable,
-            .SRCH => error.ProcessNotFound,
-            .AGAIN => error.WouldBlock,
-            .BADF => error.BadFd,
-            .DQUOT => error.DiskQuota,
-            .FBIG => error.FileTooBig,
-            .IO => error.InputOutput,
-            .NOSPC => error.NoSpaceLeft,
-            .PERM => error.PermissionDenied,
-            .PIPE => error.BrokenPipe,
-            .CONNRESET => error.ConnectionResetByPeer,
-            .BUSY => error.DeviceBusy,
-            else => |err| std.posix.unexpectedErrno(err),
-        };
+    }
+
+    while (true) {
+        if (sys.is_windows) {
+            return sys.windows.writeFile(
+                self.file,
+                windowsIovsToByteSlice(File.Ciovec, iovs, total_len),
+            );
+        } else {
+            const written = std.posix.system.writev(
+                self.file,
+                posix_iovs.ptr,
+                @min(posix_iovs.len, std.posix.IOV_MAX),
+            );
+            return switch (std.posix.errno(written)) {
+                .SUCCESS => @intCast(written),
+                .INTR => continue,
+                .INVAL => error.InvalidArgument,
+                .FAULT => unreachable,
+                .SRCH => error.ProcessNotFound,
+                .AGAIN => error.WouldBlock,
+                .BADF => error.BadFd,
+                .DQUOT => error.DiskQuota,
+                .FBIG => error.FileTooBig,
+                .IO => error.InputOutput,
+                .NOSPC => error.NoSpaceLeft,
+                .PERM => error.PermissionDenied,
+                .PIPE => error.BrokenPipe,
+                .CONNRESET => error.ConnectionResetByPeer,
+                .BUSY => error.DeviceBusy,
+                else => |err| std.posix.unexpectedErrno(err),
+            };
+        }
     }
 }
 

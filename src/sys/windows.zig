@@ -1,141 +1,50 @@
 //! Wrappers over the Windows (Win32/`kernel32.dll`) and Windows Native (`ntdll.dll`) APIs.
 
-fn Mask(comptime ValidFlags: type) type {
-    return packed struct(u32) {
-        bits: std.os.windows.ULONG,
-
-        const Valid = ValidFlags;
-        const Self = @This();
-
-        pub const zero = Self{ .bits = 0 };
-
-        pub fn init(flags: []const Valid) Self {
-            var mask = Self.zero;
-            for (flags) |f| {
-                switch (f) {
-                    inline else => |tag| mask.bits |= @field(std.os.windows, @tagName(tag)),
-                }
-            }
-            return mask;
-        }
-
-        pub fn set(mask: Self, others: Self) Self {
-            return Self{ .bits = mask.bits | others.bits };
-        }
-
-        pub fn setFlag(mask: Self, flag: Valid) Self {
-            return mask.set(Self.init(&.{flag}));
-        }
-
-        pub fn setConditional(a: Self, condition: bool, b: Self) Self {
-            return if (condition) a.set(b) else a;
-        }
-
-        pub fn setFlagConditional(mask: Self, condition: bool, flag: Valid) Self {
-            return mask.setConditional(condition, Self.init(&.{flag}));
-        }
-
-        pub fn without(mask: Self, removed: Self) Self {
-            return Self{ .bits = mask.bits & (~removed.bits) };
-        }
-
-        pub fn contains(a: Self, b: Self) bool {
-            return a.bits | b.bits == a.bits;
-        }
-
-        pub fn containsFlag(mask: Self, flag: Valid) bool {
-            return mask.contains(Self.init(&.{flag}));
-        }
-    };
+/// Returns the number of bytes actually written.
+///
+/// https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntwritefile
+pub fn writeFile(
+    file: Handle,
+    /// Caller ensures `bytes.len <= std.math.maxInt(u32)`,
+    bytes: []const u8,
+) !u32 {
+    var io_status_block: std.os.windows.IO_STATUS_BLOCK = undefined;
+    while (true) {
+        return switch (std.os.windows.ntdll.NtWriteFile(
+            file,
+            null,
+            null,
+            null,
+            &io_status_block,
+            bytes.ptr,
+            @intCast(bytes.len),
+            null,
+            null,
+        )) {
+            .SUCCESS => @intCast(io_status_block.Information),
+            .ACCESS_DENIED => error.AccessDenied,
+            .PENDING => unreachable,
+            .CANCELLED => unreachable,
+            .INVALID_USER_BUFFER => error.SystemResources,
+            .NO_MEMORY => error.OutOfMemory,
+            .QUOTA_EXCEEDED => error.SystemResources,
+            .PIPE_BROKEN => error.BrokenPipe,
+            .INVALID_HANDLE => error.BadFd,
+            .FILE_LOCK_CONFLICT => error.LockViolation,
+            .WORKING_SET_QUOTA => error.OutOfMemory,
+            .DISK_FULL => error.NoSpaceLeft,
+            else => |bad| std.os.windows.unexpectedStatus(bad),
+        };
+    }
 }
 
-/// https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/access-mask
-pub const AccessMask = Mask(enum {
-    DELETE,
-    FILE_READ_DATA,
-    FILE_READ_ATTRIBUTES,
-    FILE_READ_EA,
-    FILE_WRITE_DATA,
-    FILE_WRITE_ATTRIBUTES,
-    FILE_APPEND_DATA,
-    FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE,
-    FILE_LIST_DIRECTORY,
-    FILE_TRAVERSE,
-    STANDARD_RIGHTS_READ,
-    STANDARD_RIGHTS_WRITE,
-    SYNCHRONIZE,
-});
-
-/// `ShareAccess` parameter in `NtCreateFile()`.
-pub const ShareAccess = Mask(enum {
-    FILE_SHARE_READ,
-    FILE_SHARE_WRITE,
-    FILE_SHARE_DELETE,
-});
-
-pub const share_access_default = ShareAccess.init(
-    &.{ .FILE_SHARE_READ, .FILE_SHARE_WRITE, .FILE_SHARE_DELETE },
-);
-
-/// `CreateDisposition` parameter in `NtCreateFile()`.
-pub const CreateDisposition = disp: {
-    const options = [_][]const u8{
-        "FILE_SUPERSEDE",
-        "FILE_CREATE",
-        "FILE_OPEN",
-        "FILE_OPEN_IF",
-        "FILE_OVERWRITE",
-        "FILE_OVERWRITE_IF",
-    };
-
-    break :disp @Enum(
-        std.os.windows.ULONG,
-        .exhaustive,
-        &options,
-        values: {
-            var values: [options.len]std.os.windows.ULONG = undefined;
-            for (&options, &values) |name, *v| {
-                v.* = @field(std.os.windows, name);
-            }
-            break :values &values;
-        },
-    );
+pub const share_access_default = std.os.windows.FILE.SHARE{
+    .READ = true,
+    .WRITE = true,
+    .DELETE = true,
 };
 
-/// `CreateOptions` parameter in `NtCreateFile()`.
-pub const CreateOptions = Mask(enum {
-    FILE_DIRECTORY_FILE,
-    FILE_NON_DIRECTORY_FILE,
-    FILE_WRITE_THROUGH,
-    FILE_SEQUENTIAL_ONLY,
-    FILE_RANDOM_ACCESS,
-    FILE_NO_INTERMEDIATE_BUFFERING,
-    FILE_SYNCHRONOUS_IO_NONALERT,
-    FILE_OPEN_REPARSE_POINT,
-    /// Required for opening directories.
-    FILE_OPEN_FOR_BACKUP_INTENT,
-});
-
-pub const FileAttributes = Mask(enum {
-    FILE_ATTRIBUTE_READONLY,
-    FILE_ATTRIBUTE_HIDDEN,
-    FILE_ATTRIBUTE_SYSTEM,
-    FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_ARCHIVE,
-    FILE_ATTRIBUTE_NORMAL,
-    FILE_ATTRIBUTE_TEMPORARY,
-    FILE_ATTRIBUTE_COMPRESSED,
-});
-
 pub const DUPLICATE_SAME_ATTRIBUTES = 0x0000_0004;
-
-/// `OBJ_DONT_REPARSE` fails on paths like `C:\Users\You\file.txt`, so it should only be used when
-/// processing relative paths.
-///
-// For more information see:
-/// https://www.tiraniddo.dev/2020/05/objdontreparse-is-mostly-useless.html
-pub const OBJ_DONT_REPARSE = 0x0000_1000;
 
 /// Documentation for `NtCreateFile` only lists `OBJ_CASE_INSENSITIVE` for `Attributes`
 pub const obj_dont_reparse_min_version = std.Target.Os.WindowsVersion.win10_rs1;
@@ -150,24 +59,9 @@ pub extern "ntdll" fn NtDuplicateObject(
     source_handle: Handle,
     target_process_handle: ?Handle,
     target_handle: ?*Handle,
-    desired_access: AccessMask,
+    desired_access: std.os.windows.ACCESS_MASK,
     handle_attributes: std.os.windows.ULONG,
     options: std.os.windows.ULONG,
-) callconv(.winapi) Status;
-
-/// https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile
-pub extern "ntdll" fn NtCreateFile(
-    file_handle: *Handle,
-    desired_access: AccessMask,
-    object_attributes: *std.os.windows.OBJECT_ATTRIBUTES,
-    io_status_block: *std.os.windows.IO_STATUS_BLOCK,
-    allocation_size: ?*std.os.windows.LARGE_INTEGER,
-    file_attributes: FileAttributes,
-    share_access: ShareAccess,
-    create_disposition: CreateDisposition,
-    create_options: CreateOptions,
-    ea_buffer: ?*anyopaque,
-    ea_length: std.os.windows.ULONG,
 ) callconv(.winapi) Status;
 
 /// Returned when `OBJ_DONT_REPARSE` is used and a reparse point was encountered.
@@ -251,7 +145,7 @@ pub const FILE_ID_FULL_DIR_INFORMATION = extern struct {
     ChangeTime: std.os.windows.LARGE_INTEGER,
     EndOfFile: std.os.windows.LARGE_INTEGER,
     AllocationSize: std.os.windows.LARGE_INTEGER,
-    FileAttributes: FileAttributes,
+    FileAttributes: std.os.windows.FILE.ATTRIBUTE,
     /// In bytes.
     FileNameLength: std.os.windows.ULONG,
     EaSize: std.os.windows.ULONG,
@@ -263,7 +157,7 @@ pub fn queryDirectoryFile(
     handle: Handle,
     io_status_block: *std.os.windows.IO_STATUS_BLOCK,
     file_information: []u8,
-    file_information_class: std.os.windows.FILE_INFORMATION_CLASS,
+    file_information_class: std.os.windows.FILE.INFORMATION_CLASS,
     scan: enum(u1) { restart = std.os.windows.TRUE, @"resume" = 0 },
 ) Status {
     return std.os.windows.ntdll.NtQueryDirectoryFile(
@@ -473,7 +367,7 @@ pub fn isMsysOrCygwinPty(handle: Handle) NamedPipePty {
             &io_status_block,
             @ptrCast(&name_info),
             @sizeOf(FileNameInfo),
-            .FileNameInformation,
+            .Name,
         );
 
         switch (query_status) {

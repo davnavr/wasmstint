@@ -15,8 +15,8 @@ pub fn fileStat(
 
         const all_info = info: {
             var io: std.os.windows.IO_STATUS_BLOCK = undefined;
-            var info: std.os.windows.FILE_ALL_INFORMATION = undefined;
-            const status = sys.windows.ntQueryInformationFile(fd, &io, .FileAllInformation, &info);
+            var info: std.os.windows.FILE.ALL_INFORMATION = undefined;
+            const status = sys.windows.ntQueryInformationFile(fd, &io, .All, &info);
             switch (status) {
                 .SUCCESS, .BUFFER_OVERFLOW => break :info info,
                 .INFO_LENGTH_MISMATCH => unreachable,
@@ -34,13 +34,13 @@ pub fn fileStat(
         // Can't use `FILE_FS_OBJECTID_INFORMATION`, since 16-byte GUID can't fit in 64-bit dev #
         const fs_volume_info = info: {
             var io: std.os.windows.IO_STATUS_BLOCK = undefined;
-            var info: std.os.windows.FILE_FS_VOLUME_INFORMATION = undefined;
+            var info: std.os.windows.FILE.FS_VOLUME_INFORMATION = undefined;
             const status = std.os.windows.ntdll.NtQueryVolumeInformationFile(
                 fd,
                 &io,
                 &info,
                 @sizeOf(@TypeOf(info)),
-                .FileFsVolumeInformation,
+                .Volume,
             );
             switch (status) {
                 .SUCCESS, .BUFFER_OVERFLOW => break :info info,

@@ -579,7 +579,7 @@ pub const FdFlags = packed struct(u16) {
 
         pub fn fromFlagsWindows(flags: std.os.windows.ACCESS_MASK) Valid {
             return Valid{
-                .append = flags & std.os.windows.FILE_APPEND_DATA != 0,
+                .append = flags.SPECIFIC.FILE.APPEND_DATA,
                 // Refer to comment on `sync` for possible equivalents of other flags on Windows
             };
         }
