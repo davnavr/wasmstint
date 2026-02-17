@@ -124,15 +124,10 @@ pub fn readByteTag(
     }
 
     const byte = try reader.readByte(diag, desc);
-    return std.meta.intToEnum(Tag, byte) catch |e| if (byte & 0x80 != 0)
+    return std.enums.fromInt(Tag, byte) orelse (if (byte & 0x80 != 0)
         diag.print(.parse, "invalid {s}: integer representation too long", .{desc})
-    else switch (e) {
-        std.meta.IntToEnumError.InvalidEnumTag => diag.print(
-            .parse,
-            "invalid {s}: 0x{X:0>2}",
-            .{ desc, byte },
-        ),
-    };
+    else
+        diag.print(.parse, "invalid {s}: 0x{X:0>2}", .{ desc, byte }));
 }
 
 pub fn readUleb128(reader: Reader, comptime T: type, diag: Diagnostics, desc: []const u8) Error!T {
@@ -219,13 +214,8 @@ pub fn readUleb128Enum(
     desc: []const u8,
 ) Error!E {
     const value = try reader.readUleb128(T, diag, desc);
-    return std.meta.intToEnum(E, value) catch |e| switch (e) {
-        std.meta.IntToEnumError.InvalidEnumTag => diag.print(
-            .parse,
-            "invalid {s}: {}",
-            .{ desc, value },
-        ),
-    };
+    return std.enums.fromInt(E, value) orelse
+        diag.print(.parse, "invalid {s}: {}", .{ desc, value });
 }
 
 pub fn readIleb128(reader: Reader, comptime T: type, diag: Diagnostics, desc: []const u8) Error!T {
@@ -269,9 +259,9 @@ fn testReadIleb128(comptime T: type, input_bytes: []const u8, expected: T) !void
     var reader = Reader.init(&input);
     const actual = value: {
         var diag_buffer: [128]u8 = undefined;
-        const stderr, _ = std.debug.lockStderrWriter(&diag_buffer);
-        const diag = Diagnostics.init(stderr);
-        defer std.debug.unlockStdErr();
+        const stderr = std.debug.lockStderr(&diag_buffer).terminal();
+        const diag = Diagnostics.init(stderr.writer);
+        defer std.debug.unlockStderr();
         break :value try reader.readIleb128(T, diag, @typeName(T));
     };
     try std.testing.expectEqual(expected, actual);

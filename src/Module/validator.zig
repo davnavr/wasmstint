@@ -318,10 +318,7 @@ const BlockType = union(enum) {
         } else {
             reader.bytes.* = byte_bytes;
             return BlockType{
-                .single_result = std.meta.intToEnum(
-                    ValType,
-                    byte_tag,
-                ) catch return diag.print(
+                .single_result = std.enums.fromInt(ValType, byte_tag) orelse return diag.print(
                     .parse,
                     "malformed valtype in block type 0x{X:0>2}",
                     .{byte_tag},
@@ -1310,7 +1307,7 @@ pub fn rawValidate(
         }
 
         const opcode_byte = reader.readAssumeLength(1)[0];
-        const opcode_tag = std.meta.intToEnum(opcodes.ByteOpcode, opcode_byte) catch
+        const opcode_tag = std.enums.fromInt(opcodes.ByteOpcode, opcode_byte) orelse
             return diag.print(.parse, "illegal opcode 0x{X:0>2}", .{opcode_byte});
 
         // std.log.debug("validate: {t} 0x{X:0>2}", .{ opcode_tag, opcode_byte });

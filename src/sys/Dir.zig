@@ -56,25 +56,27 @@ pub fn openDirZ(dir: Dir, path: sys.PathZ, options: OpenOptions) OpenError!Dir {
             ));
         }
 
-        const base_access_flags = sys.windows.AccessMask.init(&.{
-            .STANDARD_RIGHTS_READ,
-            .FILE_READ_ATTRIBUTES,
-            .FILE_READ_EA,
-            .SYNCHRONIZE,
-        });
-        const access_flags = base_access_flags
-            .setFlagConditional(options.access_sub_paths, .FILE_TRAVERSE)
-            .setFlagConditional(options.iterate, .FILE_LIST_DIRECTORY);
+        const access_flags = std.os.windows.ACCESS_MASK{
+            .STANDARD = .{ .RIGHTS = .READ, .SYNCHRONIZE = true },
+            .SPECIFIC = .{
+                .FILE_DIRECTORY = .{
+                    .READ_ATTRIBUTES = true,
+                    .READ_EA = true,
+                    .TRAVERSE = options.access_sub_paths,
+                    .LIST = options.iterate,
+                },
+            },
+        };
 
         var opened: sys.Handle = undefined;
         var io: std.os.windows.IO_STATUS_BLOCK = undefined;
 
         var root_directory: ?sys.Handle = dir.handle;
         var allocated_name = std.mem.zeroes(std.os.windows.UNICODE_STRING);
-        var object_name = if (options.relative_name_only)
-            sys.windows.initUnicodeString(@constCast(path))
+        const object_name: std.os.windows.UNICODE_STRING = if (options.relative_name_only)
+            .init(path)
         else if (try sys.windows.relativeDosPathToNt(dir.handle, path, &allocated_name)) |relative|
-            sys.windows.initUnicodeString(relative)
+            .init(relative)
         else not_relative: {
             root_directory = null;
             break :not_relative allocated_name;
@@ -86,30 +88,36 @@ pub fn openDirZ(dir: Dir, path: sys.PathZ, options: OpenOptions) OpenError!Dir {
 
         std.debug.assert(object_name.Buffer != null);
 
-        var attrs = std.os.windows.OBJECT_ATTRIBUTES{
-            .Length = @sizeOf(std.os.windows.OBJECT_ATTRIBUTES),
+        var attrs = std.os.windows.OBJECT.ATTRIBUTES{
             .RootDirectory = root_directory,
-            .ObjectName = &object_name,
-            .Attributes = if (options.follow_symlinks) 0 else sys.windows.OBJ_DONT_REPARSE,
+            .ObjectName = @constCast(&object_name),
+            // `OBJ_DONT_REPARSE` fails on paths like `C:\Users\You\file.txt`, so it should only be
+            // used when processing relative paths.
+            //
+            // For more information see:
+            // https://www.tiraniddo.dev/2020/05/objdontreparse-is-mostly-useless.html
+            .Attributes = .{
+                .DONT_REPARSE = !options.follow_symlinks,
+            },
             .SecurityDescriptor = null,
             .SecurityQualityOfService = null,
         };
 
         for (0..attempt_count) |_| {
-            const status = sys.windows.NtCreateFile(
+            const status = std.os.windows.ntdll.NtCreateFile(
                 &opened,
                 access_flags,
                 &attrs,
                 &io,
                 null,
-                sys.windows.FileAttributes.init(&.{.FILE_ATTRIBUTE_NORMAL}),
+                .{ .NORMAL = true },
                 sys.windows.share_access_default,
-                sys.windows.CreateDisposition.FILE_OPEN,
-                sys.windows.CreateOptions.init(&.{
-                    .FILE_DIRECTORY_FILE,
-                    .FILE_SYNCHRONOUS_IO_NONALERT,
-                    .FILE_OPEN_FOR_BACKUP_INTENT,
-                }),
+                .OPEN,
+                .{
+                    .DIRECTORY_FILE = true,
+                    .IO = .SYNCHRONOUS_NONALERT,
+                    .OPEN_FOR_BACKUP_INTENT = true,
+                },
                 null,
                 0,
             );
@@ -126,10 +134,6 @@ pub fn openDirZ(dir: Dir, path: sys.PathZ, options: OpenOptions) OpenError!Dir {
                 .BAD_NETWORK_PATH, .BAD_NETWORK_NAME => error.NetworkNotFound,
                 .DELETE_PENDING => {
                     @branchHint(.cold);
-                    _ = std.os.windows.kernel32.SleepEx(
-                        42, // arbitrary amount
-                        std.os.windows.TRUE,
-                    );
                     continue;
                 },
                 .VIRUS_INFECTED, .VIRUS_DELETED => error.AntivirusInterference,
@@ -318,7 +322,7 @@ pub const Iterator = struct {
             iter.dir.handle,
             &io,
             iter.buffer,
-            .FileIdFullDirectoryInformation,
+            .IdFullDirectory,
             if (iter.needs_reset) .restart else .@"resume",
         );
         return switch (status) {
@@ -340,12 +344,10 @@ pub const Iterator = struct {
     fn peekPosix(iter: *Iterator) Error!?*const Entry {
         if (iter.needs_reset) {
             @branchHint(.unlikely);
-            std.posix.lseek_SET(iter.dir.handle, 0) catch |e| switch (e) {
-                error.AccessDenied => unreachable, // directory should allow iteration
-                error.Unexpected => |err| return err,
-                error.Canceled => unreachable,
-                error.Unseekable => unreachable,
-            };
+            switch (std.posix.errno(sys.unix_like.lseek(iter.dir.handle, 0, std.posix.SEEK.SET))) {
+                .SUCCESS => {},
+                else => |err| return std.posix.unexpectedErrno(err),
+            }
             iter.needs_reset = false;
         }
 

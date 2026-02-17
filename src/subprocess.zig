@@ -36,17 +36,14 @@ pub fn fmtArgv(argv: []const []const u8) std.fmt.Alt([]const []const u8, formatA
     return .{ .data = argv };
 }
 
-fn formatSignalNumber(num: u32, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    if (std.enums.fromInt(std.posix.SIG, num)) |known| {
-        try writer.print("SIG{t}", .{known});
-    } else {
-        try writer.writeAll("unknown signal");
+fn formatSignalNumber(num: std.posix.SIG, writer: *Io.Writer) Io.Writer.Error!void {
+    switch (num) {
+        else => |known| try writer.print("SIG{t}", .{known}),
+        _ => try writer.writeAll("unknown signal"),
     }
-
-    try writer.print(" {d}", .{num});
 }
 
-pub fn fmtSignalNumber(num: u32) std.fmt.Alt(u32, formatSignalNumber) {
+pub fn fmtSignalNumber(num: std.posix.SIG) std.fmt.Alt(std.posix.SIG, formatSignalNumber) {
     return .{ .data = num };
 }
 
@@ -127,53 +124,74 @@ const ExpectedOutput = struct {
     stdout: []const u8 = "",
     stderr: []const u8 = "",
 
-    stdio_max_bytes: usize = 64 * 1024 * 1024, // 64 MiB
-    // /// How much time, in nanoseconds, the interpreter process can execute for.
-    // timeout: u64 = 10 * std.time.ns_per_s,
+    stdio_max_bytes: u64 = 1 * 1024 * 1024, // 1 MiB
+
+    /// How much time, in nanoseconds, the interpreter process can execute for.
+    timeout: Io.Timeout = .{
+        .duration = .{
+            .raw = .fromNanoseconds(10 * std.time.ns_per_s),
+            .clock = .awake,
+        },
+    },
 };
 
 pub fn invokeWasiInterpreter(
+    io: Io,
+    allocator: std.mem.Allocator,
     interpreter: []const u8,
     wasm: []const u8,
     arguments: WasiArguments,
     expected: ExpectedOutput,
 ) !void {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    var stdout = std.ArrayList(u8).empty;
-    defer stdout.deinit(std.testing.allocator);
-    var stderr = std.ArrayList(u8).empty;
-    defer stderr.deinit(std.testing.allocator);
-
+    var stdout: []const u8 = undefined;
+    var stderr: []const u8 = undefined;
     const exit_code = exit: {
         const argv = try arguments.initInterpreterProcess(interpreter, wasm, &arena);
-        var interp = std.process.Child.init(argv, arena.allocator());
-        interp.stdin_behavior = if (expected.stdin.len == 0) .Ignore else .Pipe;
-        interp.stdout_behavior = .Pipe;
-        interp.stderr_behavior = .Pipe;
-
         errdefer std.debug.print("error in interpreter subprocess {f}\n", .{fmtArgv(argv)});
+        // `std.process.run()` doesn't allow passing stdin
+        var interp = try std.process.spawn(io, .{
+            .argv = argv,
+            .stdin = if (expected.stdin.len == 0) .ignore else .pipe,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        });
+        defer interp.kill(io);
 
-        try interp.spawn();
-        try interp.waitForSpawn();
-        interp.collectOutput(
-            std.testing.allocator,
-            &stdout,
-            &stderr,
-            expected.stdio_max_bytes,
-        ) catch |err| {
-            _ = interp.kill() catch |kill_err| {
-                std.debug.print("attempt to kill interpreter process due to {t} failed\n", .{err});
-                return kill_err;
-            };
+        if (expected.stdin.len > 0) {
+            try interp.stdin.?.writeStreamingAll(io, expected.stdin);
+        }
 
-            return err;
-        };
+        // Taken from `std.process.run()`, because I'm lazy and `collectOutput()` was removed.
+        var readers_buf: Io.File.MultiReader.Buffer(2) = undefined;
+        var readers: Io.File.MultiReader = undefined;
+        readers.init(
+            arena.allocator(),
+            io,
+            readers_buf.toStreams(),
+            &.{ interp.stdout.?, interp.stderr.? },
+        );
 
-        switch (try interp.wait()) {
-            .Exited => |code| break :exit code,
-            .Unknown => |n| {
+        const stdout_reader = readers.reader(0);
+        const stderr_reader = readers.reader(1);
+
+        const capacity = expected.stdout.len + expected.stderr.len;
+        while (readers.fill(capacity, expected.timeout)) |_| {
+            if (stdout_reader.buffered().len > expected.stdio_max_bytes) return error.StreamTooLong;
+            if (stderr_reader.buffered().len > expected.stdio_max_bytes) return error.StreamTooLong;
+        } else |e| switch (e) {
+            error.EndOfStream => {},
+            else => |err| return err,
+        }
+
+        try readers.checkAnyError();
+        stdout = stdout_reader.buffered();
+        stderr = stderr_reader.buffered();
+        switch (try interp.wait(io)) {
+            .exited => |code| break :exit code,
+            .unknown => |n| {
                 if (builtin.os.tag == .windows) {
                     std.debug.print("interpreter process exited for unknown reason\n", .{});
                 } else {
@@ -182,27 +200,25 @@ pub fn invokeWasiInterpreter(
 
                 return error.ExitedUnknownStatus;
             },
-            .Signal => |num| {
+            .signal => |num| {
                 if (builtin.os.tag == .windows) {
                     unreachable;
                 }
 
                 std.debug.print(
                     "interpreter process exited with signal {d} ({f})\n",
-                    .{ num, fmtSignalNumber(num) },
+                    .{ @intFromEnum(num), fmtSignalNumber(num) },
                 );
 
                 return error.ExitedWithSignal;
             },
-            .Stopped => |num| {
+            .stopped => |num| {
                 if (builtin.os.tag == .windows) {
                     unreachable;
                 }
 
-                std.debug.print(
-                    "interpreter process stopped {d} ({f})\n",
-                    .{ num, fmtSignalNumber(num) },
-                );
+                std.debug.print("interpreter process stopped ({d})\n", .{num});
+
                 return error.StoppedWithSignal;
             },
         }
@@ -214,16 +230,16 @@ pub fn invokeWasiInterpreter(
         fail = true;
     }
 
-    if (std.mem.indexOfDiff(u8, stdout.items, expected.stdout)) |diff_index| {
+    if (std.mem.indexOfDiff(u8, stdout, expected.stdout)) |diff_index| {
         fail = true;
         std.debug.print("stdout stream differs at byte index {d}:\n", .{diff_index});
-        try printDiff(expected.stdout, stdout.items, diff_index);
+        try printDiff(expected.stdout, stdout, diff_index);
     }
 
-    if (std.mem.indexOfDiff(u8, stderr.items, expected.stderr)) |diff_index| {
+    if (std.mem.indexOfDiff(u8, stderr, expected.stderr)) |diff_index| {
         fail = true;
         std.debug.print("stderr stream differs at byte index {d}:\n", .{diff_index});
-        try printDiff(expected.stderr, stderr.items, diff_index);
+        try printDiff(expected.stderr, stderr, diff_index);
     }
 
     if (fail) {
@@ -244,8 +260,8 @@ fn isAsciiString(s: []const u8) bool {
 fn printDiff(expected: []const u8, actual: []const u8, diff_index: usize) !void {
     @branchHint(.unlikely);
     var stderr_buf: [256]u8 align(16) = undefined;
-    const stderr, const color = std.debug.lockStderrWriter(&stderr_buf);
-    defer stderr.flush() catch {};
+    const stderr = std.debug.lockStderr(&stderr_buf).terminal();
+    defer stderr.writer.flush() catch {};
 
     std.debug.assert(@max(expected.len, actual.len) > 0);
 
@@ -260,24 +276,23 @@ fn printDiff(expected: []const u8, actual: []const u8, diff_index: usize) !void 
         var remaining_actual = actual[first_line_start..];
         while (remaining_expected.len > 0 or remaining_actual.len > 0) {
             if (remaining_expected.len > 0) {
-                printDiffLine(stderr, color, .bright_green, '+', &remaining_expected);
+                printDiffLine(stderr, .bright_green, '+', &remaining_expected);
             }
 
             if (remaining_actual.len > 0) {
-                printDiffLine(stderr, color, .bright_red, '-', &remaining_actual);
+                printDiffLine(stderr, .bright_red, '-', &remaining_actual);
             }
         }
 
-        try color.setColor(stderr, .reset);
+        try stderr.setColor(.reset);
     } else {
-        @branchHint(.unlikely);
-        try printDiffHexDump(stderr, color, expected, actual);
+        // @branchHint(.unlikely);
+        try printDiffHexDump(stderr, expected, actual);
     }
 }
 
-fn printDiffLine( // TODO
-    stderr: *std.Io.Writer,
-    config: HasColor,
+fn printDiffLine( // TODO: currently unused
+    stderr: Terminal,
     color: Color,
     prefix_char: u8,
     remaining: *[]const u8,
@@ -285,8 +300,8 @@ fn printDiffLine( // TODO
     const newline_index = std.mem.indexOfScalar(u8, remaining.*, '\n');
     const line = remaining.*[0..(newline_index orelse remaining.len)];
     defer remaining.* = remaining.*[(if (newline_index) |i| i + 1 else remaining.len)..];
-    config.setColor(stderr, color) catch {};
-    stderr.writeAll(&.{ prefix_char, ' ' }) catch {};
+    stderr.setColor(color) catch {};
+    stderr.writer.writeAll(&.{ prefix_char, ' ' }) catch {};
 
     for (line) |b| {
         switch (@as(u7, @intCast(b))) {
@@ -295,24 +310,19 @@ fn printDiffLine( // TODO
             std.ascii.control_code.vt...std.ascii.control_code.us,
             => |ctrl| {
                 const codepoint = @as(u24, 0x2400) + ctrl;
-                stderr.writeAll(&std.unicode.utf8EncodeComptime(codepoint)) catch {};
+                stderr.writer.writeAll(&std.unicode.utf8EncodeComptime(codepoint)) catch {};
             },
-            '\x7F' => stderr.writeAll("\u{2421}") catch {},
-            else => stderr.writeByte(b) catch {},
+            '\x7F' => stderr.writer.writeAll("\u{2421}") catch {},
+            else => stderr.writer.writeByte(b) catch {},
         }
     }
 
-    stderr.writeByte('\n') catch {};
+    stderr.writer.writeByte('\n') catch {};
 }
 
 const hex_dump_line_width = 16;
 
-fn printDiffHexDump(
-    stderr: *std.Io.Writer,
-    config: HasColor,
-    expected: []const u8,
-    actual: []const u8,
-) !void {
+fn printDiffHexDump(stderr: Terminal, expected: []const u8, actual: []const u8) !void {
     const expected_diff_color = Color.bright_green;
     const actual_diff_color = Color.bright_red;
 
@@ -325,27 +335,27 @@ fn printDiffHexDump(
     var addr: usize = 0;
     while (remaining_expected.len > 0 or remaining_actual.len > 0) {
         defer addr += hex_dump_line_width;
-        defer stderr.flush() catch {};
+        defer stderr.writer.flush() catch {};
         const expected_line = remaining_expected[0..@min(hex_dump_line_width, remaining_expected.len)];
         remaining_expected = remaining_expected[expected_line.len..];
 
         const actual_line = remaining_actual[0..@min(hex_dump_line_width, remaining_actual.len)];
         remaining_actual = remaining_actual[actual_line.len..];
 
-        try config.setColor(stderr, .bright_black);
-        try stderr.print("{[addr]X:0>[width]}", .{ .addr = addr, .width = addr_width });
-        try config.setColor(stderr, .reset);
-        try stderr.writeAll(" |");
-        try printDiffHexDumpLine(stderr, config, expected_line, actual_line, expected_diff_color);
-        try printDiffHexDumpLine(stderr, config, actual_line, expected_line, actual_diff_color);
-        try stderr.writeByte('\n');
+        try stderr.setColor(.bright_black);
+        try stderr.writer.print("{[addr]X:0>[width]}", .{ .addr = addr, .width = addr_width });
+        try stderr.setColor(.reset);
+        try stderr.writer.writeAll(" |");
+        try printDiffHexDumpLine(stderr, expected_line, actual_line, expected_diff_color);
+        try printDiffHexDumpLine(stderr, actual_line, expected_line, actual_diff_color);
+        try stderr.writer.writeByte('\n');
     }
 }
 
-fn setColorInfallible(writer: *Writer, config: HasColor, color: Color) error{Unexpected}!void {
-    return config.setColor(writer, color) catch |e| switch (e) {
+fn setColorInfallible(terminal: Terminal, color: Color) error{ Unexpected, Canceled }!void {
+    return terminal.setColor(color) catch |e| switch (e) {
         error.WriteFailed => unreachable,
-        error.Unexpected => |err| err,
+        error.Unexpected, error.Canceled => |err| err,
     };
 }
 
@@ -361,8 +371,7 @@ const cp_437_non_ascii: [128]u14 = .{
 };
 
 fn printDiffHexDumpLine(
-    stderr: *Writer,
-    config: HasColor,
+    stderr: Terminal,
     line: []const u8,
     other: []const u8,
     diff_color: Color,
@@ -374,8 +383,8 @@ fn printDiffHexDumpLine(
     for (line, 0..) |line_byte, i| {
         const other_byte = if (i < other.len) other[i] else null;
         if (line_byte != other_byte) {
-            try setColorInfallible(&hex, config, diff_color);
-            try setColorInfallible(&text, config, diff_color);
+            try setColorInfallible(.{ .writer = &hex, .mode = stderr.mode }, diff_color);
+            try setColorInfallible(.{ .writer = &text, .mode = stderr.mode }, diff_color);
         }
 
         hex.print(" {X:0>2}", .{line_byte}) catch unreachable;
@@ -398,22 +407,23 @@ fn printDiffHexDumpLine(
         }) catch unreachable;
 
         if (line_byte != other_byte) {
-            try setColorInfallible(&hex, config, .reset);
-            try setColorInfallible(&text, config, .reset);
+            try setColorInfallible(.{ .writer = &hex, .mode = stderr.mode }, .reset);
+            try setColorInfallible(.{ .writer = &text, .mode = stderr.mode }, .reset);
         }
     }
 
     const remainder_count = hex_dump_line_width - line.len;
-    try stderr.writeAll(hex.buffered());
-    try stderr.splatByteAll(' ', 3 * remainder_count);
-    try stderr.writeAll(" |");
-    try stderr.writeAll(text.buffered());
-    try stderr.splatBytesAll("\u{25E6}", remainder_count);
-    try stderr.writeAll("|");
+    try stderr.writer.writeAll(hex.buffered());
+    try stderr.writer.splatByteAll(' ', 3 * remainder_count);
+    try stderr.writer.writeAll(" |");
+    try stderr.writer.writeAll(text.buffered());
+    try stderr.writer.splatBytesAll("\u{25E6}", remainder_count);
+    try stderr.writer.writeAll("|");
 }
 
 const std = @import("std");
 const builtin = @import("builtin");
-const Writer = std.Io.Writer;
-const HasColor = std.Io.tty.Config;
-const Color = std.Io.tty.Color;
+const Io = std.Io;
+const Writer = Io.Writer;
+const Terminal = Io.Terminal;
+const Color = Terminal.Color;

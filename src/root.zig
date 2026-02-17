@@ -9,7 +9,7 @@ pub const Interpreter = @import("Interpreter.zig");
 pub const pointer = @import("pointer.zig");
 pub const V128 = @import("v128.zig").V128;
 
-pub fn waitForDebugger() void {
+pub fn waitForDebugger(io: std.Io) void {
     const os = @import("builtin").target.os;
     if (os.tag == .windows) {
         std.debug.print("Attach debugger to process {}\n", .{std.os.windows.GetCurrentProcessId()});
@@ -19,7 +19,7 @@ pub fn waitForDebugger() void {
         };
 
         while (debugapi.IsDebuggerPresent() == 0) {
-            _ = std.os.windows.kernel32.SleepEx(100, 0);
+            io.sleep(.fromMilliseconds(100), .awake) catch continue;
         }
     } else {
         if (os.tag == .linux) {
@@ -29,7 +29,7 @@ pub fn waitForDebugger() void {
         var dbg: usize = 0;
         const dbg_ptr: *volatile usize = &dbg;
         while (dbg_ptr.* == 0) {
-            std.posix.nanosleep(0, 100_000_000);
+            io.sleep(.fromMilliseconds(100), .awake) catch continue;
         }
     }
 }

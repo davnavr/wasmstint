@@ -15,8 +15,8 @@ pub fn fileStat(
 
         const all_info = info: {
             var io: std.os.windows.IO_STATUS_BLOCK = undefined;
-            var info: std.os.windows.FILE_ALL_INFORMATION = undefined;
-            const status = sys.windows.ntQueryInformationFile(fd, &io, .FileAllInformation, &info);
+            var info: std.os.windows.FILE.ALL_INFORMATION = undefined;
+            const status = sys.windows.ntQueryInformationFile(fd, &io, .All, &info);
             switch (status) {
                 .SUCCESS, .BUFFER_OVERFLOW => break :info info,
                 .INFO_LENGTH_MISMATCH => unreachable,
@@ -34,13 +34,13 @@ pub fn fileStat(
         // Can't use `FILE_FS_OBJECTID_INFORMATION`, since 16-byte GUID can't fit in 64-bit dev #
         const fs_volume_info = info: {
             var io: std.os.windows.IO_STATUS_BLOCK = undefined;
-            var info: std.os.windows.FILE_FS_VOLUME_INFORMATION = undefined;
+            var info: std.os.windows.FILE.FS_VOLUME_INFORMATION = undefined;
             const status = std.os.windows.ntdll.NtQueryVolumeInformationFile(
                 fd,
                 &io,
                 &info,
                 @sizeOf(@TypeOf(info)),
-                .FileFsVolumeInformation,
+                .Volume,
             );
             switch (status) {
                 .SUCCESS, .BUFFER_OVERFLOW => break :info info,
@@ -80,13 +80,48 @@ pub fn fileStat(
                 all_info.BasicInformation.ChangeTime,
             ),
         };
-    } else if (@hasDecl(std.posix.system, "Stat") and std.posix.Stat != void) {
-        const stat = std.posix.fstat(fd) catch |e| switch (e) {
-            error.Canceled, error.Streaming => unreachable,
-            else => |err| return err,
+    } else if (builtin.os.tag == .linux) {
+        var statx: std.os.linux.Statx = undefined;
+        sys.linux.statx(
+            fd,
+            "",
+            .{ .EMPTY_PATH = true, .SYMLINK_NOFOLLOW = true },
+            .{
+                .INO = true,
+                .MODE = true,
+                .SIZE = true,
+                .NLINK = true,
+                .ATIME = true,
+                .MTIME = true,
+                .CTIME = true,
+            },
+            &statx,
+        ) catch |e| return switch (e) {
+            error.MissingRequestedFields => error.Unimplemented,
+            else => |err| err,
         };
 
-        return wasi_types.FileStat.fromPosixStat(&stat, device_hash_seed, inode_hash_seed);
+        return wasi_types.FileStat{
+            .dev = .init(device_hash_seed, (@as(u64, statx.dev_major) << 32) | statx.dev_minor),
+            .ino = .init(inode_hash_seed, statx.ino),
+            .type = wasi_types.FileType.fromPosixMode(statx.mode) catch |e| switch (e) {
+                // TODO: need `getsockopt()` to determine exact type of socket
+                error.UnknownSocketType => .unknown,
+            },
+            .nlink = statx.nlink,
+            .size = .{ .bytes = @bitCast(statx.size) },
+            .atim = .fromLinuxStatxTimestamp(statx.atime),
+            .mtim = .fromLinuxStatxTimestamp(statx.mtime),
+            .ctim = .fromLinuxStatxTimestamp(statx.ctime),
+        };
+    } else if (@hasDecl(std.posix.system, "Stat") and std.posix.Stat != void) {
+        // const stat = std.posix.fstat(fd) catch |e| switch (e) {
+        //     error.Canceled, error.Streaming => unreachable,
+        //     else => |err| return err,
+        // };
+        @compileError("POSIX fstat");
+
+        // return wasi_types.FileStat.fromPosixStat(&stat, device_hash_seed, inode_hash_seed);
     } else {
         @compileError("no fileStat implementation for " ++ @tagName(builtin.os.tag));
     }

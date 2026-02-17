@@ -60,13 +60,13 @@ pub const Mapped = extern struct {
                 null,
                 &alloc_size,
                 .{ .RESERVE = true, .COMMIT = single_syscall },
-                .READWRITE,
+                .{ .READWRITE = true },
             ) catch return Oom.OutOfMemory;
             std.debug.assert(alloc_size == reserve);
 
             errdefer {
                 var freed_size: windows.SIZE_T = reserve;
-                virtual_memory.nt.free(base_addr, &freed_size, .RELEASE) catch {};
+                virtual_memory.nt.free(base_addr, &freed_size, .{ .RELEASE = true }) catch {};
                 std.debug.assert(reserve == freed_size);
             }
 
@@ -76,7 +76,7 @@ pub const Mapped = extern struct {
                     base_addr,
                     &commit_size,
                     .{ .COMMIT = true },
-                    .READWRITE,
+                    .{ .READWRITE = true },
                 ) catch return Oom.OutOfMemory;
                 std.debug.assert(commit_size == capacity);
                 std.debug.assert(@intFromPtr(base_addr) == @intFromPtr(commit_ret));
@@ -87,7 +87,6 @@ pub const Mapped = extern struct {
             const pages = virtual_memory.mman.map_anonymous(
                 reserve,
                 .{ .WRITE = single_syscall, .READ = single_syscall },
-                .{},
             ) catch return Oom.OutOfMemory;
             errdefer virtual_memory.mman.unmap(pages) catch {};
 
@@ -160,7 +159,7 @@ fn free(mem: *MemInst) void {
     inst.checkInvariants();
     if (builtin.os.tag == .windows) {
         var freed_size: windows.SIZE_T = 0;
-        virtual_memory.nt.free(@alignCast(mem.base), &freed_size, .RELEASE) catch |e|
+        virtual_memory.nt.free(@alignCast(mem.base), &freed_size, .{ .RELEASE = true }) catch |e|
             unexpectedError(e);
         std.debug.assert(freed_size == mem.limit);
     } else {
@@ -175,11 +174,11 @@ inline fn unexpectedError(e: anyerror) void {
     @branchHint(.cold);
     if (std.posix.unexpected_error_tracing) {
         var stderr_buf: [512]u8 align(16) = undefined;
-        const stderr, const color = std.debug.lockStderrWriter(&stderr_buf);
-        defer std.debug.unlockStderrWriter();
-        stderr.print("unexpected error: {t}\n", .{e}) catch {};
+        const stderr = std.debug.lockStderr(&stderr_buf).terminal();
+        defer std.debug.unlockStderr();
+        stderr.writer.print("unexpected error: {t}\n", .{e}) catch {};
         if (@errorReturnTrace()) |trace| {
-            std.debug.writeStackTrace(trace, stderr, color) catch {};
+            std.debug.writeStackTrace(trace, stderr) catch {};
         }
     }
 }
@@ -210,7 +209,7 @@ fn grow(mem: *MemInst, new_size: usize) Oom!void {
             new_pages.ptr,
             &region_size,
             .{ .COMMIT = true },
-            .READWRITE,
+            .{ .READWRITE = true },
         ) catch return Oom.OutOfMemory;
         std.debug.assert(@intFromPtr(base) == @intFromPtr(new_pages.ptr));
     } else {
