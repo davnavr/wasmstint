@@ -1,5 +1,6 @@
 const portable = @import("handlers/portable.zig");
 const x86_64_sysv = @import("handlers/x86_64_sysv.zig");
+const llvm_ir = @import("handlers/llvm_ir.zig");
 
 const implementation = switch (@import("options").interpreter_backend) {
     .assembly => switch (builtin.cpu.arch) {
@@ -13,7 +14,7 @@ const implementation = switch (@import("options").interpreter_backend) {
         else => |bad| @compileError("no assembly interpreter implementation for " ++
             @tagName(bad)),
     },
-    .@"llvm-ir" => @compileError("TODO: define LLVM IR helpers"),
+    .@"llvm-ir" => llvm_ir,
     .zig => portable,
 };
 

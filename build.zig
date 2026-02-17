@@ -451,7 +451,7 @@ const Modules = struct {
                         .pic = false,
                         // .code_model = .small, // Forces usage of LLVM backend
                     }),
-                    .max_rss = ByteSize.mib(163).bytes,
+                    .max_rss = ByteSize.mib(167).bytes,
                 });
                 codegen_exe.root_module.addImport("opcodes", opcodes_module);
 
@@ -461,6 +461,7 @@ const Modules = struct {
                     optimize: std.builtin.OptimizeMode,
                     symbol_prefix: []const u8,
                     strip: bool,
+                    use_llvm: bool,
                     target: struct {
                         triple: []const u8,
                         cpu_features: []const u8,
@@ -473,6 +474,7 @@ const Modules = struct {
                         .optimize = options.optimize_interpreter,
                         .symbol_prefix = symbol_prefix,
                         .strip = false,
+                        .use_llvm = options.use_llvm.interpreter,
                         .target = .{
                             .triple = options.target.query.zigTriple(b.allocator) catch
                                 @panic("oom"),

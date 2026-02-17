@@ -2,6 +2,7 @@ const Options = struct {
     optimize: std.builtin.OptimizeMode,
     symbol_prefix: []const u8,
     strip: bool,
+    use_llvm: bool,
     target: struct {
         triple: []const u8,
         cpu_features: []const u8,
@@ -76,7 +77,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .target = &target,
         .triple = target_info.triple,
     });
-    try buildLlvmModule(&builder, &target_info);
+    try buildLlvmModule(&builder, &target, &target_info, &options);
 
     const bitcode: []const u32 = try builder.toBitcode(std.heap.page_allocator, .{
         .name = "wasmstint.codegen.llvm",
@@ -86,13 +87,31 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try bc_file.writeStreamingAll(io, @ptrCast(bitcode));
 }
 
+fn enumFieldCount(comptime E: type) comptime_int {
+    return @typeInfo(E).@"enum".fields.len;
+}
+
 fn buildLlvmModule(
     builder: *Builder,
+    target: *const std.Target,
     target_info: *const TargetInfo,
+    options: *const Options,
 ) !void {
     builder.data_layout = try builder.string(target_info.data_layout);
+    try builder.functions.ensureUnusedCapacity(
+        builder.gpa,
+        enumFieldCount(opcodes.ByteOpcode) + enumFieldCount(opcodes.FCPrefixOpcode),
+    );
+
+    const cconv: Builder.CallConv = if (target.cpu.arch == .x86_64 and options.use_llvm)
+        .x86_regcallcc
+    else
+        .ccc;
+
+    _ = cconv;
 }
 
 const std = @import("std");
 const Builder = std.zig.llvm.Builder;
 const ArenaAllocator = std.heap.ArenaAllocator;
+const opcodes = @import("opcodes");
