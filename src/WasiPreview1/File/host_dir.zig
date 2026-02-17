@@ -1135,7 +1135,9 @@ fn pathOpenFlags(
                 .OPEN,
             .create_options = .{
                 .OPEN_FOR_BACKUP_INTENT = true,
-                .IO = if (fd_flags.nonblock) .ASYNCHRONOUS else .SYNCHRONOUS_NONALERT,
+                // .ASYNCHRONOUS causes STATUS_PENDING in fd_readdir()
+                // .IO = if (fd_flags.nonblock) .ASYNCHRONOUS else .SYNCHRONOUS_NONALERT,
+                .IO = .SYNCHRONOUS_NONALERT,
                 .DIRECTORY_FILE = open_flags.directory,
             },
         };
