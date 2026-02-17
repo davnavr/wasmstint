@@ -685,19 +685,16 @@ fn accessSubPathPortable(
             error.OutOfMemory => |oom| return oom,
         };
 
-        var final_name_unicode = sys.windows.initUnicodeString(final_name_w);
-
         const new_fd: sys.Handle = if (sys.windows.has_obj_dont_reparse == true) opened: {
             var attrs = std.os.windows.OBJECT_ATTRIBUTES{
                 .Length = @sizeOf(std.os.windows.OBJECT_ATTRIBUTES),
                 .RootDirectory = final_dir.handle,
-                .ObjectName = &final_name_unicode,
+                .ObjectName = @constCast(&std.os.windows.initUnicodeString(final_name_w)),
                 .Attributes = sys.windows.OBJ_DONT_REPARSE,
                 .SecurityDescriptor = null,
                 .SecurityQualityOfService = null,
             };
 
-            // Recreates some logic for `std.os.windows.OpenFile`
             while (true) {
                 var opened_handle: sys.Handle = undefined;
                 var io: std.os.windows.IO_STATUS_BLOCK = undefined;
@@ -834,7 +831,6 @@ fn accessSubPathPortable(
                     .USER_MAPPED_FILE => return error.AccessDenied,
                     .INVALID_HANDLE => unreachable,
                     .DELETE_PENDING => {
-                        // See comment in `std.os.windows.OpenFile`
                         std.Thread.sleep(std.time.ns_per_ms);
                         continue;
                     },

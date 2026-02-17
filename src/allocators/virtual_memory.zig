@@ -10,64 +10,14 @@ pub const nt = struct {
         ConflictingAddresses,
     };
 
-    pub const AllocationType = packed struct(windows.ULONG) {
-        _0: u12 = 0,
-        COMMIT: bool = false,
-        RESERVE: bool = false,
-        _14: u5 = 0,
-        RESET: bool = false,
-        TOP_DOWN: bool = false,
-        WRITE_WATCH: bool = false,
-        PHYSICAL: bool = false,
-        _23: u1 = 0,
-        RESET_UNDO: bool = false,
-        _25: u4 = 0,
-        LARGE_PAGES: bool = false,
-        _30: u2 = 0,
-
-        comptime {
-            for (@typeInfo(AllocationType).@"struct".fields) |field| {
-                if (field.type != bool) {
-                    continue;
-                }
-
-                const expected: windows.ULONG = @field(windows, "MEM_" ++ field.name);
-                var actual = AllocationType{};
-                @field(actual, field.name) = true;
-
-                const actual_bits: windows.ULONG = @bitCast(actual);
-                if (expected != actual_bits) {
-                    @compileError(
-                        std.fmt.comptimePrint(
-                            "expected 0x{X:0>8} (MEM_" ++ field.name ++ "), got 0x{X:0>8}",
-                            .{ expected, actual_bits },
-                        ),
-                    );
-                }
-            }
-
-            std.debug.assert(@as(u32, @bitCast(AllocationType{})) == 0);
-        }
-    };
-
-    /// Subset of the Windows [memory protection constants] (`PAGE_*`).
-    ///
-    /// [memory protection constants]: https://learn.microsoft.com/en-us/windows/win32/Memory/memory-protection-constants
-    pub const Protection = enum(windows.ULONG) {
-        NOACCESS = windows.PAGE_NOACCESS,
-        READONLY = windows.PAGE_READONLY,
-        READWRITE = windows.PAGE_READWRITE,
-        _,
-    };
-
     /// Returns the base of the base address of the allocated region of pages.
     ///
     /// https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntallocatevirtualmemory
     pub fn allocate(
         base_address: ?[*]align(page_size_min) u8,
         region_size: *windows.SIZE_T,
-        allocation_type: AllocationType,
-        protection: Protection,
+        allocation_type: windows.MEM.ALLOCATE,
+        protection: windows.PAGE,
     ) AllocateVirtualMemoryError![*]align(page_size_min) u8 {
         var ret_base_address: ?*anyopaque = @ptrCast(base_address);
         const status = windows.ntdll.NtAllocateVirtualMemory(
@@ -75,8 +25,8 @@ pub const nt = struct {
             @ptrCast(&ret_base_address),
             0,
             region_size,
-            @as(windows.ULONG, @bitCast(allocation_type)),
-            @intFromEnum(protection),
+            allocation_type,
+            protection,
         );
 
         return switch (status) {
@@ -98,23 +48,17 @@ pub const nt = struct {
         };
     }
 
-    pub const FreeType = enum(windows.ULONG) {
-        DECOMMIT = windows.MEM_DECOMMIT,
-        RELEASE = windows.MEM_RELEASE,
-        _,
-    };
-
     pub fn free(
         base_address: [*]align(page_size_min) u8,
         region_size: *windows.SIZE_T,
-        free_type: FreeType,
+        free_type: windows.MEM.FREE,
     ) posix.UnexpectedError!void {
         var freed_address: ?*anyopaque = @ptrCast(base_address);
         const status = windows.ntdll.NtFreeVirtualMemory(
             windows.GetCurrentProcess(),
             @ptrCast(&freed_address),
             region_size,
-            @intFromEnum(free_type),
+            free_type,
         );
 
         switch (status) {
@@ -134,21 +78,21 @@ pub const nt = struct {
 
     pub fn protect(
         pages: []align(page_size_min) u8,
-        new_protection: Protection,
-    ) ProtectError!Protection {
+        new_protection: windows.PAGE,
+    ) ProtectError!windows.PAGE {
         var base_address: ?*anyopaque = @ptrCast(pages.ptr);
         var region_size: windows.SIZE_T = pages.len;
-        var old_protect: windows.DWORD = undefined;
+        var old_protect: windows.PAGE = undefined;
         const status = windows.ntdll.NtProtectVirtualMemory(
             windows.GetCurrentProcess(),
             @ptrCast(&base_address),
             &region_size,
-            @intFromEnum(new_protection),
+            new_protection,
             &old_protect,
         );
 
         return switch (status) {
-            .SUCCESS => @enumFromInt(old_protect),
+            .SUCCESS => old_protect,
             .NO_MEMORY => return Oom.OutOfMemory,
             .INSUFFICIENT_RESOURCES => return error.SystemResources,
             .INVALID_HANDLE => unreachable,

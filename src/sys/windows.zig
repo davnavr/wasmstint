@@ -173,16 +173,6 @@ pub extern "ntdll" fn NtCreateFile(
 /// Returned when `OBJ_DONT_REPARSE` is used and a reparse point was encountered.
 pub const STATUS_REPARSE_POINT_ENCOUNTERED: Status = @enumFromInt(0xC000_050B);
 
-/// https://learn.microsoft.com/en-us/windows/win32/api/ntdef/ns-ntdef-_unicode_string
-pub fn initUnicodeString(str: []u16) std.os.windows.UNICODE_STRING {
-    return std.os.windows.UNICODE_STRING{
-        // Lengths are in bytes, excluding null-terminator
-        .Length = @intCast(str.len * 2),
-        .MaximumLength = @intCast(str.len * 2),
-        .Buffer = str.ptr,
-    };
-}
-
 pub const PathConversionError = std.posix.UnexpectedError || error{
     OutOfMemory,
     NameTooLong,
@@ -224,12 +214,12 @@ pub fn relativeDosPathToNt(
     };
 }
 
-pub fn FileInformationType(comptime class: std.os.windows.FILE_INFORMATION_CLASS) type {
+pub fn FileInformationType(comptime class: std.os.windows.FILE.INFORMATION_CLASS) type {
     return switch (class) {
-        .FileBasicInformation => std.os.windows.FILE_BASIC_INFORMATION,
-        .FilePositionInformation => std.os.windows.FILE_POSITION_INFORMATION,
-        .FileAllInformation => std.os.windows.FILE_ALL_INFORMATION,
-        .FileStandardInformation => std.os.windows.FILE_STANDARD_INFORMATION,
+        .Basic => std.os.windows.FILE.BASIC_INFORMATION,
+        .Position => std.os.windows.FILE.POSITION_INFORMATION,
+        .All => std.os.windows.FILE.ALL_INFORMATION,
+        .Standard => std.os.windows.FILE.STANDARD_INFORMATION,
         else => @compileError("specify file information struct for " ++ @tagName(class)),
     };
 }
@@ -237,7 +227,7 @@ pub fn FileInformationType(comptime class: std.os.windows.FILE_INFORMATION_CLASS
 pub fn ntQueryInformationFile(
     handle: Handle,
     io_status_block: *std.os.windows.IO_STATUS_BLOCK,
-    comptime file_information_class: std.os.windows.FILE_INFORMATION_CLASS,
+    comptime file_information_class: std.os.windows.FILE.INFORMATION_CLASS,
     file_information: *FileInformationType(file_information_class),
 ) Status {
     return std.os.windows.ntdll.NtQueryInformationFile(

@@ -28,28 +28,7 @@ pub fn readFilePortable(
     allocator: Allocator,
 ) !FileContent {
     if (builtin.os.tag == .windows) {
-        const sub_path_wide = std.unicode.wtf8ToWtf16LeAllocZ(
-            allocator,
-            sub_path,
-        ) catch |e| return switch (e) {
-            error.OutOfMemory => |oom| oom,
-            error.InvalidWtf8 => error.BadPathName,
-        };
-        defer allocator.free(sub_path_wide);
-
-        var allocated_name = std.mem.zeroes(std.os.windows.UNICODE_STRING);
-        const nt_path = if (try sys.windows.relativeDosPathToNt(
-            dir.handle,
-            sub_path_wide,
-            &allocated_name,
-        )) |relative|
-            relative
-        else
-            allocated_name.Buffer.?[0..@divExact(allocated_name.Length, 2)];
-
-        defer std.os.windows.ntdll.RtlFreeUnicodeString(&allocated_name);
-
-        return mapFileWindows(io, dir, nt_path);
+        return mapFileWindows(io, dir, sub_path);
     } else if (virtual_memory.mman.has_mmap_anonymous) {
         return readFile(io, dir, sub_path);
     } else {
@@ -111,7 +90,7 @@ pub const VirtualMemory = struct {
 
         if (builtin.os.tag == .windows) {
             var region_size: windows.SIZE_T = pages.len;
-            virtual_memory.nt.free(pages.ptr, &region_size, .RELEASE) catch unreachable;
+            virtual_memory.nt.free(pages.ptr, &region_size, .{ .RELEASE = true }) catch unreachable;
         } else {
             virtual_memory.mman.unmap(pages) catch unreachable;
         }
@@ -170,7 +149,7 @@ pub fn readFile(io: Io, dir: Io.Dir, sub_path: BytePath) ReadFileError!VirtualMe
 
     errdefer if (builtin.os.tag == .windows) {
         var region_size: windows.SIZE_T = allocated.len;
-        virtual_memory.nt.free(allocated.ptr, &region_size, .DECOMMIT) catch {};
+        virtual_memory.nt.free(allocated.ptr, &region_size, .{ .DECOMMIT = true }) catch {};
     } else posix.munmap(allocated);
 
     const actual_size = read: {
@@ -187,7 +166,7 @@ pub fn readFile(io: Io, dir: Io.Dir, sub_path: BytePath) ReadFileError!VirtualMe
     if (pages.unused.len > 0) {
         if (builtin.os.tag == .windows) {
             var region_size: windows.SIZE_T = pages.unused.len;
-            try virtual_memory.nt.free(pages.unused.ptr, &region_size, .DECOMMIT);
+            try virtual_memory.nt.free(pages.unused.ptr, &region_size, .{ .DECOMMIT = true });
         } else {
             try virtual_memory.mman.unmap(pages.unused);
         }
@@ -228,10 +207,11 @@ pub const WindowsMappedView = struct {
     }
 };
 
-pub const MapFileError = Oom || windows.OpenError || Io.Cancelable || error{
+pub const MapFileError = Oom || Io.File.OpenError || error{
     /// File was already locked
-    FileLockConflict,
+    LockViolation,
     FileMappingNotSupported,
+    WouldBlock,
 };
 
 /// Unlike the Unix-lock operating systems, Windows allows mapping files while preventing other
@@ -240,41 +220,19 @@ pub const MapFileError = Oom || windows.OpenError || Io.Cancelable || error{
 /// Note that this function has not been tested on files on network drives.
 ///
 /// To instead allocate a buffer via `VirtualAlloc()` and read the file into it, call `readFile`.
-pub fn mapFileWindows(
-    io: Io,
-    dir: Io.Dir,
-    /// WTF-16 encoded NT path to the file to open.
-    sub_path_w: []const u16,
-) MapFileError!WindowsMappedView {
-    const file = try windows.OpenFile(
-        sub_path_w,
-        windows.OpenFileOptions{
-            .dir = dir.handle,
-            .access_mask = windows.FILE_READ_DATA | windows.SYNCHRONIZE,
-            .creation = windows.FILE_OPEN,
-            // Prevent other processes from modifying the file
-            .share_access = windows.FILE_SHARE_READ,
-        },
-    );
+pub fn mapFileWindows(io: Io, dir: Io.Dir, sub_path: []const u8) MapFileError!WindowsMappedView {
+    const file = (try dir.openFile(io, sub_path, .{
+        // .lock = .shared, // causes Unexpected error
+    })).handle;
     // Safe to close file handle after mapping is created
     defer windows.CloseHandle(file);
-
-    if (io.cancelRequested()) {
-        return error.Canceled;
-    }
 
     // Unfortunately have to get actual size of file, since neither `NtCreateSection` nor
     // `NtMapViewOfSection` provide a way to get a size that isn't rounded to page size.
     const size = size: {
         var io_status_block: windows.IO_STATUS_BLOCK = undefined;
-        var info: windows.FILE_STANDARD_INFORMATION = undefined;
-        const status = sys.windows.ntQueryInformationFile(
-            file,
-            &io_status_block,
-            .FileStandardInformation,
-            &info,
-        );
-
+        var info: windows.FILE.STANDARD_INFORMATION = undefined;
+        const status = sys.windows.ntQueryInformationFile(file, &io_status_block, .Standard, &info);
         switch (status) {
             .SUCCESS, .BUFFER_OVERFLOW => break :size @as(
                 usize,
@@ -286,27 +244,23 @@ pub fn mapFileWindows(
         }
     };
 
-    if (io.cancelRequested()) {
-        return error.Canceled;
-    }
-
     const mapping: windows.HANDLE = mapping: {
         // ntdll equivalent of `CreateFileMappingW`
         var section: windows.HANDLE = undefined;
         var maximum_size: windows.LARGE_INTEGER = @bitCast(@as(u64, size));
         const status = windows.ntdll.NtCreateSection(
             &section,
-            windows.SECTION_QUERY | windows.SECTION_MAP_READ,
+            .{ .SPECIFIC = .{ .SECTION = .{ .QUERY = true, .MAP_READ = true } } },
             null,
             &maximum_size, // `null` means no restiction
-            windows.PAGE_READONLY,
-            windows.SEC_COMMIT,
+            .{ .READONLY = true },
+            .{ .COMMIT = true },
             file,
         );
 
         switch (status) {
             .SUCCESS => break :mapping section,
-            .FILE_LOCK_CONFLICT => return error.FileLockConflict,
+            .FILE_LOCK_CONFLICT => return error.LockViolation,
             .INVALID_FILE_FOR_SECTION => return error.FileMappingNotSupported,
             .INVALID_PAGE_PROTECTION => unreachable,
             .MAPPED_FILE_SIZE_ZERO => return WindowsMappedView{
@@ -321,18 +275,7 @@ pub fn mapFileWindows(
     };
     errdefer windows.CloseHandle(mapping);
 
-    if (io.cancelRequested()) {
-        return error.Canceled;
-    }
-
     const win = struct {
-        /// Zig got values in `windows.SECTION_INHERIT` wrong.
-        pub const InheritDisposition = enum(c_int) {
-            ViewShare = 1,
-            ViewUnmap = 2,
-            _,
-        };
-
         /// `ntdll` equivalent of [`MapViewOfFile()`].
         ///
         /// [`MapViewOfFile()`]: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-zwmapviewofsection
@@ -346,9 +289,9 @@ pub fn mapFileWindows(
             commit_size: windows.SIZE_T,
             section_offset: ?*windows.LARGE_INTEGER,
             view_size: *windows.SIZE_T,
-            inherit_disposition: InheritDisposition,
-            allocation_type: virtual_memory.nt.AllocationType,
-            protection: virtual_memory.nt.Protection,
+            inherit_disposition: windows.SECTION_INHERIT,
+            allocation_type: windows.MEM.MAP,
+            protection: windows.PAGE,
         ) callconv(.winapi) windows.NTSTATUS;
     };
 
@@ -362,9 +305,9 @@ pub fn mapFileWindows(
         0, // CommitSize should be ignored, since this is not backed by the page file.
         null,
         &view_size,
-        .ViewShare,
+        .Share,
         .{}, // COMMIT is already implied
-        .READONLY,
+        .{ .READONLY = true },
     );
 
     std.debug.assert(size <= view_size);

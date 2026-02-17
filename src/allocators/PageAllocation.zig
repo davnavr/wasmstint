@@ -107,7 +107,7 @@ pub fn init(
             null,
             &region_size,
             .{ .RESERVE = true, .COMMIT = allocate_all_rw },
-            if (options.guard_pages) .NOACCESS else .READWRITE,
+            if (options.guard_pages) .{ .NOACCESS = true } else .{ .READWRITE = true },
         ) catch return Oom.OutOfMemory;
 
         break :win allocated_base[0..allocate_size];
@@ -118,7 +118,7 @@ pub fn init(
 
     errdefer if (builtin.os.tag == .windows) {
         var region_size: windows.SIZE_T = 0;
-        virtual_memory.nt.free(allocated_pages.ptr, &region_size, .RELEASE) catch {};
+        virtual_memory.nt.free(allocated_pages.ptr, &region_size, .{ .RELEASE = true }) catch {};
     } else {
         virtual_memory.mman.unmap(allocated_pages) catch {};
     };
@@ -136,7 +136,7 @@ pub fn init(
                 preallocate_pages.ptr,
                 &region_size,
                 .{ .COMMIT = true },
-                .READWRITE,
+                .{ .READWRITE = true },
             ) catch return Oom.OutOfMemory;
         } else {
             _ = virtual_memory.mman.protect(
@@ -159,14 +159,14 @@ pub fn init(
                 low_guard.ptr,
                 &region_size,
                 .{ .COMMIT = true },
-                .NOACCESS,
+                .{ .NOACCESS = true },
             ) catch return Oom.OutOfMemory;
             std.debug.assert(region_size == page_size);
             _ = virtual_memory.nt.allocate(
                 high_guard.ptr,
                 &region_size,
                 .{ .COMMIT = true },
-                .NOACCESS,
+                .{ .NOACCESS = true },
             ) catch return Oom.OutOfMemory;
         } else {
             _ = virtual_memory.mman.protect(low_guard, .{}) catch return Oom.OutOfMemory;
@@ -217,7 +217,7 @@ pub fn grow(ctx: *PageAllocation, new_capacity: usize) Oom!void {
             new_pages.ptr,
             &region_size,
             .{ .COMMIT = true },
-            .READWRITE,
+            .{ .READWRITE = true },
         ) catch return Oom.OutOfMemory;
     } else {
         virtual_memory.mman.protect(new_pages, .{ .READ = true, .WRITE = true }) catch
@@ -340,7 +340,7 @@ pub fn deinit(ctx: *PageAllocation) void {
 
     if (builtin.os.tag == .windows) {
         var region_size: windows.SIZE_T = 0;
-        virtual_memory.nt.free(pages.ptr, &region_size, .RELEASE) catch {};
+        virtual_memory.nt.free(pages.ptr, &region_size, .{ .RELEASE = true }) catch {};
     } else {
         virtual_memory.mman.unmap(pages) catch {};
     }
