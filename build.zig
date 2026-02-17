@@ -307,8 +307,9 @@ const Modules = struct {
         const name = "wasmstint";
 
         const InterpreterBackend = enum {
-            portable,
+            zig,
             assembly,
+            @"llvm-ir",
         };
 
         fn build(
@@ -331,16 +332,16 @@ const Modules = struct {
             });
             root_module.addImport("opcodes", opcodes_module);
 
-            const use_assembly_interpreter = b.option(
+            const interpreter_backend = b.option(
                 InterpreterBackend,
                 "interpreter-backend",
                 "Set the interpreter implementation to use",
-            ) orelse InterpreterBackend.portable;
+            ) orelse InterpreterBackend.zig;
             const wasmstint_options = b.addOptions();
             wasmstint_options.addOption(
-                bool,
-                "use_assembly_interpreter",
-                use_assembly_interpreter == .assembly,
+                InterpreterBackend,
+                "interpreter_backend",
+                interpreter_backend,
             );
             root_module.addOptions("options", wasmstint_options);
 
@@ -361,7 +362,7 @@ const Modules = struct {
             const x64_asm_interp_symbol_prefix = "wasmstint.x86_64_sysv.";
             const err_no_pic_flag = "pass -Dpic or -Dpic=false to use ASM backend";
 
-            if (use_assembly_interpreter == .assembly and
+            if (interpreter_backend == .assembly and
                 options.target.result.cpu.arch == .x86_64)
             {
                 const Options = struct {

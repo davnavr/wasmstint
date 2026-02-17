@@ -1,10 +1,8 @@
 const portable = @import("handlers/portable.zig");
 const x86_64_sysv = @import("handlers/x86_64_sysv.zig");
 
-const use_assembly: bool = @import("options").use_assembly_interpreter;
-
-const implementation = if (use_assembly)
-    switch (builtin.cpu.arch) {
+const implementation = switch (@import("options").interpreter_backend) {
+    .assembly => switch (builtin.cpu.arch) {
         .x86_64 => if (!std.Target.x86.featureSetHas(builtin.cpu.features, .sse2))
             @compileError("SSE2 is required to use the x86-64 assembly interpreter")
         else if (builtin.os.tag == .linux)
@@ -14,9 +12,10 @@ const implementation = if (use_assembly)
                 @tagName(builtin.os.tag)),
         else => |bad| @compileError("no assembly interpreter implementation for " ++
             @tagName(bad)),
-    }
-else
-    portable;
+    },
+    .@"llvm-ir" => @compileError("TODO: define LLVM IR helpers"),
+    .zig => portable,
+};
 
 /// Use `callOpcodeHandler()`
 pub const OpcodeHandler = implementation.OpcodeHandler;

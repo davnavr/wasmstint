@@ -802,7 +802,7 @@ pub const FrameSize = packed struct(u64) {
 /// |==============  top  ==============|
 /// ```
 pub const Frame = extern struct {
-    const has_checksum = builtin.mode == .Debug and !@import("options").use_assembly_interpreter;
+    const has_checksum = builtin.mode == .Debug and @import("options").interpreter_backend == .zig;
 
     /// For every WASM stack frame, a checksum of the previous stack frame's data (its contents
     /// on the value stack and the `StackFrame` structure itself) is calculated. This is
@@ -968,7 +968,7 @@ pub fn frameAt(stack: Stack, offset: Frame.Offset) ?*Frame {
 /// values have not been modified.
 pub const Saved = struct {
     pub const has_checksum = builtin.mode == .Debug and
-        !@import("options").use_assembly_interpreter;
+        @import("options").interpreter_backend == .zig;
 
     saved_top: Top,
     /// Tracks how many values are being restored.

@@ -110,11 +110,16 @@ Additionally, big-endian targets are not supported at all.
 `wasmstint` currently provides 2 different implementations of its interpreter, selected with the
 `-Dinterpreter-backend=` build option:
 
-- `portable`: Written in straightforward and relatively easy to understand Zig.
+- `zig`: Written in straightforward and relatively easy to understand Zig.
   - Currently actually suffers from worse build times, due to the large number of SIMD instruction
     handlers.
 - `assembly`: Hand-written interpreter written in x86-64 assembly. Currently only supported on
   `x86_64-linux`, though may eventually support any OS using the System V ABI.
-  - Fastest performance and surprisingly fast build times at the cost of less runtime checks in
+  - Good performance and surprisingly fast build times at the cost of less runtime checks in
     `Debug` mode.
+  - Bad for fuzzing, as `afl-fuzz` can't do instrumentation
+- `llvm-ir`: Written in LLVM IR.
+  - Theoretically best performance while keeping the same fast build times as the `assembly` backend
+    while being more portable.
+  - Theoretically also allows instrumentation needed by `afl-fuzz`
 

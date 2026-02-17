@@ -33,7 +33,7 @@ pub const Code = extern struct {
     pub const Ip = [*:@intFromEnum(End.end)]const u8;
 
     const side_table_safety_checks = builtin.mode == .Debug and
-        !@import("options").use_assembly_interpreter;
+        @import("options").interpreter_backend == .zig;
 
     const SideTableEntryInner = packed struct(u64) {
         delta_ip: packed union {
