@@ -685,11 +685,12 @@ fn accessSubPathPortable(
             error.OutOfMemory => |oom| return oom,
         };
 
+        const final_name_unicode = std.os.windows.initUnicodeString(final_name_w);
         const new_fd: sys.Handle = if (sys.windows.has_obj_dont_reparse == true) opened: {
             var attrs = std.os.windows.OBJECT_ATTRIBUTES{
                 .Length = @sizeOf(std.os.windows.OBJECT_ATTRIBUTES),
                 .RootDirectory = final_dir.handle,
-                .ObjectName = @constCast(&std.os.windows.initUnicodeString(final_name_w)),
+                .ObjectName = @constCast(&final_name_unicode),
                 .Attributes = sys.windows.OBJ_DONT_REPARSE,
                 .SecurityDescriptor = null,
                 .SecurityQualityOfService = null,

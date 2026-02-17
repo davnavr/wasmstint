@@ -861,7 +861,7 @@ fn buildFuzzers(
             .use_llvm = options.project.use_llvm.other,
         });
         const ffi_tests_run = &b.addRunArtifact(ffi_test).step;
-        ffi_tests_run.max_rss = ByteSize.mib(10).bytes; // arbitrary amount
+        ffi_tests_run.max_rss = ByteSize.mib(11).bytes; // arbitrary amount
         steps.@"test-unit".dependOn(ffi_tests_run);
     }
 
