@@ -19,17 +19,16 @@ const calling_convention: CallingConvention = cc: {
 /// Sets up a stack frame for the assembly opcode handler, before invoking it.
 const opcodeHandlerTrampoline = @extern(
     *const fn (
-        locals: common.Locals, // rdi
-        sp: Sp, // rsi
-        module: runtime.ModuleInst, // rdx,
-        fuel: *const Interpreter.Fuel, // rcx
-        memories: [*]const *runtime.MemInst, // r8
-        interpreter: *Interpreter, // r9
-        // These parameters are passed on the stack
-        ip: Ip, // `rbp + 16` -> rax
-        stp: Stp, // `rbp + 24` -> rbx
-        eip: Eip, // `rbp + 32` -> r10
-        handler: *const OpcodeHandler, // `rbp + 40`
+        locals: common.Locals,
+        sp: Sp,
+        module: runtime.ModuleInst,
+        fuel: *const Interpreter.Fuel,
+        memories: [*]const *runtime.MemInst,
+        interpreter: *Interpreter,
+        ip: Ip,
+        stp: Stp,
+        eip: Eip,
+        handler: *const OpcodeHandler,
     ) callconv(calling_convention) Transition,
     .{ .name = symbol_prefix ++ "opcodeHandlerTrampoline" },
 );
