@@ -320,7 +320,9 @@ const Builder = struct {
         }
 
         // TODO: bool option for uwtable
-        // try b.fnAttributes(wip, &.{ .{.uwtable = undefined } });
+        if (b.target.cpu.arch == .x86_64 and b.target.os.tag == .linux) {
+            try b.fnAttributes(wip, &.{.{ .uwtable = .async }});
+        }
     }
 
     fn addFunction(
@@ -369,6 +371,7 @@ const Builder = struct {
     }
 
     fn setDispatchTableInitializer(b: *Builder, comptime E: type) Oom!void {
+        // const invalid
         const table_global_idx: Global.Index = switch (E) {
             opcodes.ByteOpcode => b.dispatch_tables.byte,
             else => @compileError(@typeName(E)),
