@@ -617,7 +617,6 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         defer wip.deinit();
 
         const cont_mask = try b.module.intValue(.i8, 0x80);
-        const ret_poison = try b.module.poisonValue(ret_ty);
 
         const entry_blk = try wip.block(0, "Entry");
         wip.cursor = .{ .block = entry_blk };
@@ -642,14 +641,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
 
         {
             wip.cursor = .{ .block = ret_single_byte };
-            _ = try wip.ret(
-                try wip.insertValue(
-                    try wip.insertValue(ret_poison, acc_0, &.{0}, ""),
-                    vip_1,
-                    &.{1},
-                    "",
-                ),
-            );
+            _ = try wip.ret(try wip.buildAggregate(ret_ty, &.{ acc_0, vip_1 }, ""));
         }
 
         const shift_7 = try b.module.intValue(.i32, 7);
@@ -660,9 +652,17 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         const shift_phi = try wip.phi(.i32, "");
         const vip_phi = try wip.phi(.ptr, "");
         _ = try wip.callIntrinsicAssumeCold();
-        const next_byte = try wip.load(.normal, .i8, vip_0, .default, "");
-        // TODO: assume shift_phi is divisible by 7
+        _ = try wip.callIntrinsic(
+            .normal,
+            .none,
+            .assume,
+            &.{},
+            &.{try wip.icmp(.ule, shift_phi.toValue(), try b.module.intValue(.i32, 28), "")},
+            "",
+        );
+
         // TODO: llvm.assume shift_phi to be <= 28 here
+        const next_byte = try wip.load(.normal, .i8, vip_0, .default, "");
         const next_acc = try wip.bin(
             .@"or",
             try wip.bin(
@@ -697,14 +697,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
 
         {
             wip.cursor = .{ .block = loop_ret };
-            _ = try wip.ret(
-                try wip.insertValue(
-                    try wip.insertValue(ret_poison, next_acc, &.{0}, ""),
-                    next_vip,
-                    &.{1},
-                    "",
-                ),
-            );
+            _ = try wip.ret(try wip.buildAggregate(ret_ty, &.{ next_acc, next_vip }, ""));
         }
         try wip.finish();
     }
