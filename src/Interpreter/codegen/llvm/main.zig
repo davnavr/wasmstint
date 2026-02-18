@@ -116,9 +116,12 @@ const Builder = struct {
     options: Options,
     target: *const std.Target,
     cache_line_size: u16,
+    size_type: Type = .none,
     target_info: TargetInfo,
+
     scratch: *ArenaAllocator,
     module: llvm.Builder,
+
     ffi_call_conv: CallConv,
     string_constants: struct {
         @"target-cpu": String = .none,
@@ -126,6 +129,7 @@ const Builder = struct {
     } = .{},
     target_cpu: String = .none,
     target_features: String = .none,
+
     opcode_handler: struct {
         call_conv: CallConv,
         type: Type,
@@ -135,7 +139,9 @@ const Builder = struct {
         byte: Global.Index = .none,
     } = .{},
     byte_opcode_lookup: std.EnumSet(opcodes.ByteOpcode) = .initEmpty(),
+
     out_of_fuel_handler: Function.Index = .none,
+    decode_uleb_idx: Function.Index = .none,
 
     fn init(
         b: *Builder,
@@ -203,6 +209,8 @@ const Builder = struct {
         }
 
         b.target_features = try b.module.string(target_features.items);
+        const ptr_size: u16 = @divExact(b.target.ptrBitWidth(), 8);
+        b.size_type = try b.module.intType(ptr_size);
         b.opcode_handler = .{
             .call_conv = switch (config.target.cpu.arch) {
                 .x86_64, .aarch64, .riscv64 => .ghccc,
@@ -223,7 +231,7 @@ const Builder = struct {
                         .locals, .vsp => 16,
                         .module => b.cache_line_size,
                         // TODO: read datalayout to determine alignment of u64 Fuel/STP
-                        .memories, .ctx => @divExact(b.target.ptrBitWidth(), 8),
+                        .memories, .ctx => ptr_size,
                         else => null,
                     };
 
@@ -486,10 +494,12 @@ fn buildLlvmModule(b: *Builder) Oom!void {
             },
             .i32,
         );
-        var attributes = FunctionAttributes.Wip{};
-        try b.commonFnAttributes(&attributes);
-        try b.fnAttributes(&attributes, &.{ .hot, .norecurse });
-        try b.setFnAttributes(trampoline, &attributes);
+        {
+            var attributes = FunctionAttributes.Wip{};
+            try b.commonFnAttributes(&attributes);
+            try attributes.addFnAttr(.norecurse, &b.module);
+            try b.setFnAttributes(trampoline, &attributes);
+        }
         var wip = try b.wipFunction(trampoline);
         defer wip.deinit();
 
@@ -572,6 +582,132 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         _ = try wip.ret(result);
         try wip.finish();
     }
+    {
+        const ret_ty = try b.module.structType(.normal, &.{ .i32, .ptr });
+        b.decode_uleb_idx = try b.addFunction(
+            try b.strtabStringSymbolPrefixed("decodeUlebIndex"),
+            try b.fnType(ret_ty, &.{.ptr}),
+            if (b.target.cpu.arch == .x86_64) .preserve_mostcc else .fastcc,
+            .{ .linkage = .internal, .preemption = .dso_local },
+        );
+        const param_attrs = [6]Attribute{
+            .readonly,
+            .nonnull,
+            .noundef,
+            .{ .dereferenceable = 1 },
+            .@"noalias",
+            .nofree,
+        };
+        {
+            var attrs = FunctionAttributes.Wip{};
+            try b.commonFnAttributes(&attrs);
+            try b.fnAttributes(
+                &attrs,
+                // TODO: see if LLVM partial inlining works here
+                // If this is split across two functions, add .alwaysinline here
+                &.{ .mustprogress, .willreturn, .norecurse },
+            );
+            for (&param_attrs) |a| {
+                try attrs.addParamAttr(0, a, &b.module);
+            }
+            try b.setFnAttributes(b.decode_uleb_idx, &attrs);
+        }
+
+        var wip = try b.wipFunction(b.decode_uleb_idx);
+        defer wip.deinit();
+
+        const cont_mask = try b.module.intValue(.i8, 0x80);
+        const ret_poison = try b.module.poisonValue(ret_ty);
+
+        const entry_blk = try wip.block(0, "Entry");
+        wip.cursor = .{ .block = entry_blk };
+        const vip_0 = wip.arg(0);
+        const byte_0 = try wip.load(.normal, .i8, vip_0, .default, "");
+        const vip_1 = try wip.gep(
+            .inbounds,
+            .i8,
+            vip_0,
+            &.{try b.module.intValue(b.size_type, 1)},
+            "",
+        );
+        const ret_single_byte = try wip.block(1, "ReturnSingleByte");
+        const loop_body = try wip.block(2, "LoopBody");
+        const acc_0 = try wip.cast(.zext, byte_0, .i32, "");
+        _ = try wip.brCond(
+            try wip.icmp(.ult, byte_0, cont_mask, ""),
+            ret_single_byte,
+            loop_body,
+            .then_likely,
+        );
+
+        {
+            wip.cursor = .{ .block = ret_single_byte };
+            _ = try wip.ret(
+                try wip.insertValue(
+                    try wip.insertValue(ret_poison, acc_0, &.{0}, ""),
+                    vip_1,
+                    &.{1},
+                    "",
+                ),
+            );
+        }
+
+        const shift_7 = try b.module.intValue(.i32, 7);
+
+        // Hopefully LLVM loop unrolling can work here
+        wip.cursor = .{ .block = loop_body };
+        const acc_phi = try wip.phi(.i32, "");
+        const shift_phi = try wip.phi(.i32, "");
+        const vip_phi = try wip.phi(.ptr, "");
+        _ = try wip.callIntrinsicAssumeCold();
+        const next_byte = try wip.load(.normal, .i8, vip_0, .default, "");
+        // TODO: assume shift_phi is divisible by 7
+        // TODO: llvm.assume shift_phi to be <= 28 here
+        const next_acc = try wip.bin(
+            .@"or",
+            try wip.bin(
+                .@"shl nuw",
+                try wip.cast(.zext, try wip.bin(.@"and", byte_0, cont_mask, ""), .i32, ""),
+                shift_phi.toValue(),
+                "",
+            ),
+            acc_phi.toValue(),
+            "",
+        );
+        // `add nuw nsw` not supported by Zig API?
+        const next_shift = try wip.bin(.@"add nsw", shift_phi.toValue(), shift_7, "");
+        const next_vip = try wip.gep(
+            .inbounds,
+            .i8,
+            vip_phi.toValue(),
+            &.{try b.module.intValue(b.size_type, 1)},
+            "",
+        );
+        const loop_ret = try wip.block(1, "ReturnMultiByte");
+        _ = try wip.brCond(
+            try wip.icmp(.ult, next_byte, cont_mask, ""),
+            loop_ret,
+            loop_body,
+            .then_likely,
+        );
+
+        acc_phi.finish(&.{ acc_0, next_acc }, &.{ entry_blk, loop_body }, &wip);
+        shift_phi.finish(&.{ shift_7, next_shift }, &.{ entry_blk, loop_body }, &wip);
+        vip_phi.finish(&.{ vip_1, next_vip }, &.{ entry_blk, loop_body }, &wip);
+
+        {
+            wip.cursor = .{ .block = loop_ret };
+            _ = try wip.ret(
+                try wip.insertValue(
+                    try wip.insertValue(ret_poison, next_acc, &.{0}, ""),
+                    next_vip,
+                    &.{1},
+                    "",
+                ),
+            );
+        }
+        try wip.finish();
+    }
 
     try b.setDispatchTableInitializer(opcodes.ByteOpcode);
 }
@@ -583,6 +719,7 @@ const opcodes = @import("opcodes");
 
 const llvm = std.zig.llvm;
 const Attribute = llvm.Builder.Attribute;
+const Block = llvm.Builder.Block;
 const CallConv = llvm.Builder.CallConv;
 const Constant = llvm.Builder.Constant;
 const Global = llvm.Builder.Global;
