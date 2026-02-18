@@ -115,7 +115,11 @@ const Builder = struct {
 
     options: Options,
     target: *const std.Target,
+    /// In bytes.
     cache_line_size: u16,
+    /// `@sizeOf(*anyopaque)`, in bytes.
+    ptr_size: u16,
+    /// `usize`.
     size_type: Type = .none,
     target_info: TargetInfo,
 
@@ -143,6 +147,11 @@ const Builder = struct {
     out_of_fuel_handler: Function.Index = .none,
     decode_uleb_idx: Function.Index = .none,
 
+    opcode_handler_writing_lock: std.debug.SafetyLock = .{},
+    value_structs: struct {
+        i64: Type = .none,
+    } = .{},
+
     fn init(
         b: *Builder,
         gpa: std.mem.Allocator,
@@ -157,6 +166,7 @@ const Builder = struct {
             .options = config.options,
             .target = config.target,
             .cache_line_size = std.atomic.cacheLineForCpu(config.target.cpu),
+            .ptr_size = @divExact(config.target.ptrBitWidth(), 8),
             .target_info = config.target_info,
             .scratch = scratch,
             .module = try llvm.Builder.init(.{
@@ -209,8 +219,7 @@ const Builder = struct {
         }
 
         b.target_features = try b.module.string(target_features.items);
-        const ptr_size: u16 = @divExact(b.target.ptrBitWidth(), 8);
-        b.size_type = try b.module.intType(ptr_size);
+        b.size_type = try b.module.intType(b.ptr_size);
         b.opcode_handler = .{
             .call_conv = switch (config.target.cpu.arch) {
                 .x86_64, .aarch64, .riscv64 => .ghccc,
@@ -231,7 +240,7 @@ const Builder = struct {
                         .locals, .vsp => 16,
                         .module => b.cache_line_size,
                         // TODO: read datalayout to determine alignment of u64 Fuel/STP
-                        .memories, .ctx => ptr_size,
+                        .memories, .ctx => b.ptr_size,
                         else => null,
                     };
 
@@ -253,7 +262,7 @@ const Builder = struct {
                     }
 
                     switch (param) {
-                        .memories, .ctx, .vip, .stp, .eip, .disp => {
+                        .ctx, .vip, .stp, .eip, .disp => {
                             try attrs.addParamAttr(idx, .readonly, &b.module);
                         },
                         else => {},
@@ -261,6 +270,10 @@ const Builder = struct {
                 }
                 break :attrs try attrs.finish(&b.module);
             },
+        };
+
+        b.value_structs = .{
+            .i64 = try b.module.structType(.normal, &.{ .i64, .i64 }),
         };
     }
 
@@ -443,6 +456,143 @@ const Builder = struct {
             try b.module.arrayConst(table_global.type, values),
             &b.module,
         );
+    }
+
+    fn defineOpcodeHandler(b: *Builder, opcode: Opcode) Oom!OpcodeHandler {
+        switch (opcode) {
+            inline else => |value, kind| {
+                const set: *std.EnumSet(@TypeOf(value)) = switch (kind) {
+                    .byte => &b.byte_opcode_lookup,
+                };
+
+                if (set.contains(value)) std.debug.panic("duplicate handler for {t}", .{value});
+
+                set.insert(value);
+            },
+        }
+
+        const func = try b.addFunction(
+            try b.strtabStringSymbolPrefixed(opcode.name()),
+            b.opcode_handler.type,
+            b.opcode_handler.call_conv,
+            .{ .linkage = .internal, .preemption = .dso_local },
+        );
+        func.setAttributes(b.opcode_handler.fn_attrs, &b.module);
+        b.opcode_handler_writing_lock.lock();
+        return .{
+            .wip = try WipFunction.init(
+                &b.module,
+                .{ .function = func, .strip = b.options.strip },
+            ),
+        };
+    }
+
+    fn callDecodeUlebIdx(b: *Builder, wip: *WipFunction, ip: Value) Oom!Value {
+        return wip.call(
+            .normal,
+            b.decode_uleb_idx.ptr(&b.module).call_conv,
+            .none,
+            b.decode_uleb_idx.typeOf(&b.module),
+            b.decode_uleb_idx.toValue(&b.module),
+            &.{ip},
+            "",
+        );
+    }
+};
+
+const Opcode = union(enum) {
+    byte: opcodes.ByteOpcode,
+    // fc: opcodes.FCPrefixOpcode,
+    // fd: opcodes.FDPrefixOpcode,
+
+    fn init(comptime E: type, opcode: E) Opcode {
+        return @unionInit(
+            Opcode,
+            switch (E) {
+                opcodes.ByteOpcode => "byte",
+                // opcodes.FCPrefixOpcode => "fc",
+                // opcodes.FDPrefixOpcode => "fd",
+                else => @compileError(@typeName(Type)),
+            },
+            opcode,
+        );
+    }
+
+    fn name(opcode: Opcode) []const u8 {
+        return switch (opcode) {
+            .byte => |byte| if (byte != .@"select t") @tagName(byte) else "select_t",
+            // inline else => |n| @tagName(n),
+        };
+    }
+};
+
+const OpcodeHandler = struct {
+    wip: WipFunction,
+
+    /// Finishes the basic block `wip` is positioned at.
+    fn jmpToNextHandler(
+        handler: *OpcodeHandler,
+        b: *Builder,
+        updates: struct {
+            vsp: Value,
+            vip: Value,
+            stp: Value,
+        },
+    ) Oom!void {
+        const wip = &handler.wip;
+        const next_handler_offset = try wip.cast(
+            .zext,
+            try wip.load(.normal, .i8, updates.vip, .default, ""),
+            b.size_type,
+            "",
+        );
+        const next_handler = try wip.load(
+            .normal,
+            .ptr,
+            try wip.gep(
+                .inbounds,
+                .ptr,
+                OpcodeHandlerParam.disp.arg(wip),
+                &.{next_handler_offset},
+                "",
+            ),
+            .fromByteUnits(b.ptr_size),
+            "",
+        );
+        const after_next_ip_byte = try wip.gep(
+            .inbounds,
+            .i8,
+            updates.vip,
+            &.{try b.module.intValue(b.size_type, 1)},
+            "",
+        );
+
+        var args: [10]Value = undefined;
+        for (&args, std.enums.values(OpcodeHandlerParam)) |*a, param| {
+            a.* = switch (param) {
+                .vsp => updates.vsp,
+                .vip => after_next_ip_byte,
+                .stp => updates.stp,
+                else => param.arg(wip),
+            };
+        }
+        _ = try wip.ret(
+            try wip.call(
+                .musttail,
+                b.opcode_handler.call_conv,
+                .none,
+                b.opcode_handler.type,
+                next_handler,
+                &args,
+                "",
+            ),
+        );
+    }
+
+    fn finish(handler: *OpcodeHandler, b: *Builder) Oom!void {
+        try handler.wip.finish();
+        handler.wip.deinit();
+        b.opcode_handler_writing_lock.unlock();
     }
 };
 
@@ -661,7 +811,6 @@ fn buildLlvmModule(b: *Builder) Oom!void {
             "",
         );
 
-        // TODO: llvm.assume shift_phi to be <= 28 here
         const next_byte = try wip.load(.normal, .i8, vip_0, .default, "");
         const next_acc = try wip.bin(
             .@"or",
@@ -702,7 +851,65 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         try wip.finish();
     }
 
+    try buildLocalOpcodeHandlers(b);
+
     try b.setDispatchTableInitializer(opcodes.ByteOpcode);
+}
+
+fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
+    {
+        var local_get = try b.defineOpcodeHandler(.{ .byte = .@"local.get" });
+        const wip = &local_get.wip;
+
+        const entry_blk = try wip.block(0, "Entry");
+        wip.cursor = .{ .block = entry_blk };
+        const decode_result = try b.callDecodeUlebIdx(wip, OpcodeHandlerParam.vip.arg(wip));
+        const new_vip = try wip.extractValue(decode_result, &.{1}, "");
+        const src_addr = try wip.gep(
+            .inbounds,
+            b.value_structs.i64,
+            OpcodeHandlerParam.locals.arg(wip),
+            &.{try wip.extractValue(decode_result, &.{0}, "")},
+            "",
+        );
+        _ = try wip.callIntrinsic(
+            .normal,
+            attrs: {
+                var attrs = FunctionAttributes.Wip{};
+                defer attrs.deinit(&b.module);
+                for (0..2) |i| {
+                    try attrs.addParamAttr(i, .{ .@"align" = .fromByteUnits(16) }, &b.module);
+                    try attrs.addParamAttr(i, .noundef, &b.module);
+                    try attrs.addParamAttr(i, .nonnull, &b.module);
+                    try attrs.addParamAttr(i, .{ .dereferenceable = 16 }, &b.module);
+                }
+                break :attrs try attrs.finish(&b.module);
+            },
+            .memmove,
+            &.{ .ptr, .ptr, b.size_type },
+            &.{
+                OpcodeHandlerParam.vsp.arg(wip),
+                src_addr,
+                try b.module.intValue(b.size_type, 16),
+                .false,
+            },
+            "",
+        );
+
+        const new_vsp = try wip.gep(
+            .inbounds,
+            b.value_structs.i64,
+            OpcodeHandlerParam.vsp.arg(wip),
+            &.{try b.module.intValue(b.size_type, 1)},
+            "",
+        );
+        try local_get.jmpToNextHandler(b, .{
+            .vip = new_vip,
+            .vsp = new_vsp,
+            .stp = OpcodeHandlerParam.stp.arg(wip),
+        });
+        try local_get.finish(b);
+    }
 }
 
 const std = @import("std");
