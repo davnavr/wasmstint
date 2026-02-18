@@ -24,8 +24,8 @@ const opcodeHandlerTrampoline = @extern(
         module: runtime.ModuleInst,
         fuel: *const Interpreter.Fuel,
         memories: [*]const *runtime.MemInst,
-        interpreter: *Interpreter,
-        ip: Ip,
+        ctx: *Interpreter,
+        vip: Ip,
         stp: Stp,
         eip: Eip,
         handler: *const OpcodeHandler,
@@ -40,15 +40,15 @@ pub inline fn callOpcodeHandler(
     stp: Stp,
     locals: common.Locals,
     module: runtime.ModuleInst,
-    interp: *Interpreter,
+    ctx: *Interpreter,
 ) Transition {
     var transition = opcodeHandlerTrampoline(
         locals,
-        interp.stack_top,
+        ctx.stack_top,
         module,
         fuel,
         module.header().mems,
-        interp,
+        ctx,
         instr.next,
         stp,
         instr.end,
@@ -58,23 +58,23 @@ pub inline fn callOpcodeHandler(
     // Zig x86-64 backend does not support tail calls, and tail calls cannot be emulated with
     // inline `asm` due to the need to preserve callee-saved registers.
     while (builtin.zig_backend != .stage2_llvm and
-        interp.current_state == .interrupted and
-        interp.current_state.interrupted.cause == .out_of_fuel and
+        ctx.current_state == .interrupted and
+        ctx.current_state.interrupted.cause == .out_of_fuel and
         fuel.remaining > 0)
     {
-        const current_frame = interp.stack.frameAt(interp.stack.current_frame).?;
+        const current_frame = ctx.stack.frameAt(ctx.stack.current_frame).?;
         const wasm_func = current_frame.function.expanded().wasm;
         const new_module = wasm_func.module;
         var new_instr = Instr.init(current_frame.wasm.ip, current_frame.wasm.eip);
-        const new_locals = common.Locals{ .ptr = current_frame.localValues(&interp.stack).ptr };
-        const new_handler = new_instr.readNextOpcodeHandler(fuel, new_locals, new_module, interp);
+        const new_locals = common.Locals{ .ptr = current_frame.localValues(&ctx.stack).ptr };
+        const new_handler = new_instr.readNextOpcodeHandler(fuel, new_locals, new_module, ctx);
         transition = opcodeHandlerTrampoline(
             new_locals,
-            interp.stack_top,
+            ctx.stack_top,
             new_module,
             fuel,
             new_module.header().mems,
-            interp,
+            ctx,
             new_instr.next,
             current_frame.wasm.stp,
             new_instr.end,
@@ -94,6 +94,24 @@ pub const byte_dispatch_table = @extern(
     *const [256]*const OpcodeHandler,
     .{ .name = symbol_prefix ++ "byte_dispatch_table" },
 );
+
+fn interruptOutOfFuel(
+    vip: Ip,
+    eip: Eip,
+    sp: Sp,
+    stp: Stp,
+    ctx: *Interpreter,
+) callconv(calling_convention) Transition {
+    return Transition.interrupted(.init(vip, eip), sp, stp, ctx, .out_of_fuel);
+}
+
+comptime {
+    for (&[_][]const u8{
+        "interruptOutOfFuel",
+    }) |name| {
+        @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
+    }
+}
 
 const std = @import("std");
 const CallingConvention = std.builtin.CallingConvention;

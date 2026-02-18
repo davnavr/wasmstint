@@ -115,6 +115,7 @@ const Builder = struct {
 
     options: Options,
     target: *const std.Target,
+    cache_line_size: u16,
     target_info: TargetInfo,
     scratch: *ArenaAllocator,
     module: llvm.Builder,
@@ -134,6 +135,7 @@ const Builder = struct {
         byte: Global.Index = .none,
     } = .{},
     byte_opcode_lookup: std.EnumSet(opcodes.ByteOpcode) = .initEmpty(),
+    out_of_fuel_handler: Function.Index = .none,
 
     fn init(
         b: *Builder,
@@ -148,6 +150,7 @@ const Builder = struct {
         b.* = Builder{
             .options = config.options,
             .target = config.target,
+            .cache_line_size = std.atomic.cacheLineForCpu(config.target.cpu),
             .target_info = config.target_info,
             .scratch = scratch,
             .module = try llvm.Builder.init(.{
@@ -210,9 +213,44 @@ const Builder = struct {
                 var attrs = FunctionAttributes.Wip{};
                 defer attrs.deinit(&b.module);
                 try b.commonFnAttributes(&attrs);
-                try b.fnAttributes(&attrs, .{
-                    .function = &.{},
-                });
+                for (std.enums.values(OpcodeHandlerParam)) |param| {
+                    const idx = @intFromEnum(param);
+                    for (&[3]Attribute{ .nonnull, .nofree, .noundef }) |attr| {
+                        try attrs.addParamAttr(idx, attr, &b.module);
+                    }
+
+                    const alignment: ?u16 = switch (param) {
+                        .locals, .vsp => 16,
+                        .module => b.cache_line_size,
+                        // TODO: read datalayout to determine alignment of u64 Fuel/STP
+                        .memories, .ctx => @divExact(b.target.ptrBitWidth(), 8),
+                        else => null,
+                    };
+
+                    if (alignment) |a| {
+                        try attrs.addParamAttr(idx, .{ .@"align" = .fromByteUnits(a) }, &b.module);
+                    }
+
+                    switch (param) {
+                        .locals, .vsp, .fuel, .stp, .disp => {
+                            try attrs.addParamAttr(idx, .@"noalias", &b.module);
+                        },
+                        else => {},
+                    }
+
+                    switch (param) {
+                        .fuel => try attrs.addParamAttr(idx, .{ .dereferenceable = 8 }, &b.module),
+                        // .module // don't know size of ModuleInst in advance
+                        else => {},
+                    }
+
+                    switch (param) {
+                        .memories, .ctx, .vip, .stp, .eip, .disp => {
+                            try attrs.addParamAttr(idx, .readonly, &b.module);
+                        },
+                        else => {},
+                    }
+                }
                 break :attrs try attrs.finish(&b.module);
             },
         };
@@ -240,11 +278,9 @@ const Builder = struct {
     fn fnAttributes(
         b: *Builder,
         wip: *FunctionAttributes.Wip,
-        attributes: struct {
-            function: []const Attribute = &.{},
-        },
+        attributes: []const Attribute,
     ) Oom!void {
-        for (attributes.function) |attr| {
+        for (attributes) |attr| {
             try wip.addFnAttr(attr, &b.module);
         }
     }
@@ -254,58 +290,47 @@ const Builder = struct {
     }
 
     fn commonFnAttributes(b: *Builder, wip: *FunctionAttributes.Wip) Oom!void {
-        try b.fnAttributes(wip, .{
-            .function = &[_]Attribute{ .nounwind, .willreturn },
-        });
+        try b.fnAttributes(wip, &.{ .nounwind, .willreturn });
 
         // This is what the Zig compiler does
         if (b.options.optimize == .ReleaseSmall) {
-            try b.fnAttributes(wip, .{ .function = &[2]Attribute{ .minsize, .optsize } });
+            try b.fnAttributes(wip, &.{ .minsize, .optsize });
         }
 
         if (b.target_cpu != .none) {
-            try b.fnAttributes(wip, .{
-                .function = &[1]Attribute{
-                    .{
-                        .string = .{
-                            .kind = b.string_constants.@"target-cpu",
-                            .value = b.target_cpu,
-                        },
+            try b.fnAttributes(wip, &.{
+                .{
+                    .string = .{
+                        .kind = b.string_constants.@"target-cpu",
+                        .value = b.target_cpu,
                     },
                 },
             });
         }
 
         if (b.target_features != .empty) {
-            try b.fnAttributes(wip, .{
-                .function = &[1]Attribute{
-                    .{
-                        .string = .{
-                            .kind = b.string_constants.@"target-features",
-                            .value = b.target_features,
-                        },
+            try b.fnAttributes(wip, &.{
+                .{
+                    .string = .{
+                        .kind = b.string_constants.@"target-features",
+                        .value = b.target_features,
                     },
                 },
             });
         }
 
         // TODO: bool option for uwtable
-        // try b.fnAttributes(wip, .{ .function = &[_]Attribute{.uwtable} });
+        // try b.fnAttributes(wip, &.{ .{.uwtable = undefined } });
     }
 
     fn addFunction(
         b: *Builder,
         name: StrtabString,
-        param_types: []const Type,
-        ret_type: Type,
+        ty: Type,
         call_conv: CallConv,
         options: FunctionOptions,
     ) Oom!Function.Index {
-        const func = try b.module.addFunction(
-            try b.fnType(ret_type, param_types),
-            name,
-            .default,
-        );
+        const func = try b.module.addFunction(ty, name, .default);
         func.setCallConv(call_conv, &b.module);
         func.setLinkage(options.linkage, &b.module);
         func.ptr(&b.module).global.ptr(&b.module).preemption = options.preemption;
@@ -320,8 +345,7 @@ const Builder = struct {
     ) Oom!Function.Index {
         return try b.addFunction(
             try b.strtabStringSymbolPrefixed(name),
-            param_types,
-            ret_type,
+            try b.fnType(ret_type, param_types),
             b.ffi_call_conv,
             .{ .preemption = .dso_local },
         );
@@ -335,6 +359,7 @@ const Builder = struct {
         const name_str = try b.strtabStringSymbolPrefixed(name);
         const ty = try b.module.arrayType(len, .ptr);
         const variable = try b.module.addVariable(name_str, ty, .default);
+        variable.setAlignment(.fromByteUnits(b.cache_line_size), &b.module);
         return try b.module.addGlobal(name_str, .{
             .preemption = .dso_local,
             .type = ty,
@@ -389,6 +414,23 @@ const Builder = struct {
     }
 };
 
+const OpcodeHandlerParam = enum(u4) {
+    locals,
+    vsp,
+    module,
+    fuel,
+    memories,
+    ctx,
+    vip,
+    stp,
+    eip,
+    disp,
+
+    fn arg(param: OpcodeHandlerParam, wip: *WipFunction) Value {
+        return wip.arg(@intFromEnum(param));
+    }
+};
+
 fn enumFieldCount(comptime E: type) comptime_int {
     return @typeInfo(E).@"enum".fields.len;
 }
@@ -422,7 +464,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         );
         var attributes = FunctionAttributes.Wip{};
         try b.commonFnAttributes(&attributes);
-        try b.fnAttributes(&attributes, .{ .function = &[2]Attribute{ .hot, .norecurse } });
+        try b.fnAttributes(&attributes, &.{ .hot, .norecurse });
         try b.setFnAttributes(trampoline, &attributes);
         var wip = try b.wipFunction(trampoline);
         defer wip.deinit();
@@ -457,6 +499,54 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         //     });
         //     break :attrs trap_attrs.finish();
         // }, .trap, &.{}, .{}, "");
+    }
+    {
+        b.out_of_fuel_handler = try b.addFunction(
+            try b.strtabStringSymbolPrefixed("outOfFuelHandler"),
+            b.opcode_handler.type,
+            b.opcode_handler.call_conv,
+            .{ .linkage = .external, .preemption = .dso_local },
+        );
+        {
+            var attrs = try b.opcode_handler.fn_attrs.toWip(&b.module);
+            try b.fnAttributes(&attrs, &.{ .mustprogress, .willreturn, .cold });
+            try b.setFnAttributes(b.out_of_fuel_handler, &attrs);
+        }
+        var wip = try b.wipFunction(b.out_of_fuel_handler);
+        defer wip.deinit();
+
+        const helper = try b.addFunction(
+            try b.strtabStringSymbolPrefixed("interruptOutOfFuel"),
+            try b.fnType(.i32, &@as([5]Type, @splat(.ptr))),
+            b.ffi_call_conv,
+            .{ .linkage = .external, .preemption = .dso_local },
+        );
+        {
+            var attrs = FunctionAttributes.Wip{};
+            try b.commonFnAttributes(&attrs);
+            try b.setFnAttributes(helper, &attrs);
+        }
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const call_params: [5]Value = params: {
+            var params: [5]Value = undefined;
+            for (&params, [5]OpcodeHandlerParam{ .vip, .eip, .vsp, .stp, .ctx }) |*p, arg| {
+                p.* = wip.arg(@intFromEnum(arg));
+            }
+
+            break :params params;
+        };
+        const result = try wip.call(
+            .tail,
+            b.ffi_call_conv,
+            .none,
+            helper.typeOf(&b.module),
+            helper.toValue(&b.module),
+            &call_params,
+            "",
+        );
+        _ = try wip.ret(result);
+        try wip.finish();
     }
 
     try b.setDispatchTableInitializer(opcodes.ByteOpcode);
