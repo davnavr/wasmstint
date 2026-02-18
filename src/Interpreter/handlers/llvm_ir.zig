@@ -113,10 +113,37 @@ comptime {
     }
 }
 
+fn panicInvalidByteOpcode(ip: Ip, eip: Eip) callconv(calling_convention) noreturn {
+    @branchHint(.cold);
+    const bad_ip = ip - 1;
+    const bad_opcode: u8 = bad_ip[0];
+    const opcode_name = name: {
+        const tag = std.enums.fromInt(opcodes.ByteOpcode, bad_opcode) orelse break :name "unknown";
+        break :name @tagName(tag);
+    };
+
+    std.debug.panic(
+        "invalid instruction 0x{X:0>2} ({s}) @ {X}, EIP={X}",
+        .{ bad_opcode, opcode_name, @intFromPtr(bad_ip), @intFromPtr(eip) },
+    );
+}
+
+comptime {
+    if (builtin.mode != .ReleaseSmall) {
+        for (&[_][]const u8{
+            "panicInvalidByteOpcode",
+            // "panicInvalidPrefixedOpcode",
+        }) |name| {
+            @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
+        }
+    }
+}
+
 const std = @import("std");
 const CallingConvention = std.builtin.CallingConvention;
 const builtin = @import("builtin");
 
+const opcodes = @import("opcodes");
 const Interpreter = @import("../../Interpreter.zig");
 const runtime = @import("../../runtime.zig");
 

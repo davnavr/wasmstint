@@ -371,7 +371,30 @@ const Builder = struct {
     }
 
     fn setDispatchTableInitializer(b: *Builder, comptime E: type) Oom!void {
-        // const invalid
+        const invalid_handler: Function.Index = if (b.options.optimize == .ReleaseSmall)
+            .none
+        else handler: switch (E) {
+            opcodes.ByteOpcode => {
+                const handler = try b.addFfiFunction(
+                    "panicInvalidByteOpcode",
+                    &@as([2]Type, @splat(.ptr)),
+                    .void,
+                );
+                var attrs = FunctionAttributes.Wip{};
+                try b.commonFnAttributes(&attrs);
+                try attrs.addFnAttr(.noreturn, &b.module);
+                try b.setFnAttributes(handler, &attrs);
+
+                break :handler handler;
+            },
+            else => @compileError(@typeName(E)),
+        };
+
+        const invalid: Constant = if (invalid_handler == .none)
+            try b.module.undefConst(.ptr)
+        else
+            invalid_handler.toConst(&b.module);
+
         const table_global_idx: Global.Index = switch (E) {
             opcodes.ByteOpcode => b.dispatch_tables.byte,
             else => @compileError(@typeName(E)),
@@ -387,7 +410,6 @@ const Builder = struct {
 
         _ = b.scratch.reset(.retain_capacity);
         const values = try b.scratch.allocator().alloc(Constant, len);
-        const undef = try b.module.undefConst(.ptr);
         var name_arena = ArenaAllocator.init(b.scratch.allocator());
         for (values, 0..len) |*v, i| {
             v.* = val: {
@@ -405,8 +427,7 @@ const Builder = struct {
                     break :val b.module.getGlobal(handler_name).?.toConst();
                 }
 
-                // TODO: use undef only on ReleaseSmall.
-                break :val undef;
+                break :val invalid;
             };
         }
 
