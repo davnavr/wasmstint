@@ -751,12 +751,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         {
             var attrs = FunctionAttributes.Wip{};
             try b.commonFnAttributes(&attrs);
-            try b.fnAttributes(
-                &attrs,
-                // TODO: see if LLVM partial inlining works here
-                // If this is split across two functions, add .alwaysinline here
-                &.{ .mustprogress, .willreturn, .norecurse },
-            );
+            try b.fnAttributes(&attrs, &.{ .mustprogress, .willreturn, .norecurse });
             for (&param_attrs) |a| {
                 try attrs.addParamAttr(0, a, &b.module);
             }
@@ -796,7 +791,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
 
         const shift_7 = try b.module.intValue(.i32, 7);
 
-        // Hopefully LLVM loop unrolling can work here
+        // LLVM partial inlining seems to be working properly here
         wip.cursor = .{ .block = loop_body };
         const acc_phi = try wip.phi(.i32, "");
         const shift_phi = try wip.phi(.i32, "");
@@ -811,19 +806,20 @@ fn buildLlvmModule(b: *Builder) Oom!void {
             "",
         );
 
-        const next_byte = try wip.load(.normal, .i8, vip_0, .default, "");
+        const next_byte = try wip.load(.normal, .i8, vip_phi.toValue(), .default, "");
+        const next_value_bits = try wip.bin(.@"and", next_byte, try b.module.intValue(.i8, 0x7F), "");
         const next_acc = try wip.bin(
             .@"or",
             try wip.bin(
                 .@"shl nuw",
-                try wip.cast(.zext, try wip.bin(.@"and", byte_0, cont_mask, ""), .i32, ""),
+                try wip.cast(.zext, next_value_bits, .i32, ""),
                 shift_phi.toValue(),
                 "",
             ),
             acc_phi.toValue(),
             "",
         );
-        // `add nuw nsw` not supported by Zig API?
+        // TODO(zig): `add nuw nsw` not supported
         const next_shift = try wip.bin(.@"add nsw", shift_phi.toValue(), shift_7, "");
         const next_vip = try wip.gep(
             .inbounds,
