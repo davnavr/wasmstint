@@ -290,7 +290,7 @@ const Builder = struct {
     }
 
     fn commonFnAttributes(b: *Builder, wip: *FunctionAttributes.Wip) Oom!void {
-        try b.fnAttributes(wip, &.{ .nounwind, .willreturn });
+        try wip.addFnAttr(.nounwind, &b.module);
 
         // This is what the Zig compiler does
         if (b.options.optimize == .ReleaseSmall) {
