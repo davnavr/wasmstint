@@ -683,6 +683,24 @@ const OpcodeHandler = struct {
         };
     }
 
+    const UnOpOperands = struct {
+        c_1: Value,
+        /// A `ptr` where the result of the operation is written.
+        result: Value,
+
+        fn writeResult(op: UnOpOperands, handler: *OpcodeHandler, result: Value) Oom!void {
+            _ = try handler.wip.store(.normal, result, op.result, value_stack_alignment);
+        }
+    };
+
+    fn unOp(handler: *OpcodeHandler, b: *Builder, ty: Type) Oom!UnOpOperands {
+        const addr = try handler.operandAt(b, ty, 0);
+        return .{
+            .c_1 = try handler.wip.load(.normal, ty, addr, value_stack_alignment, ""),
+            .result = addr,
+        };
+    }
+
     /// Finishes the basic block `wip` is positioned at.
     fn jmpTrapWithNumericCode(
         handler: *OpcodeHandler,
@@ -1400,6 +1418,32 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             try op.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&op.wip),
                 .vsp = new_vsp,
+                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
+            });
+            try op.finish(b);
+        }
+        for ([2]struct { llvm.Builder.Intrinsic, []const u8 }{
+            .{ .ctlz, "clz" },
+            .{ .cttz, "ctz" },
+        }) |info| {
+            const intrin, const name = info;
+            var op = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), name);
+            op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
+            const un_op = try op.unOp(b, int_ty);
+            try un_op.writeResult(
+                &op,
+                try op.wip.callIntrinsic(
+                    .normal,
+                    .none,
+                    intrin,
+                    &.{int_ty},
+                    &.{ un_op.c_1, .false },
+                    "",
+                ),
+            );
+            try op.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&op.wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(&op.wip),
                 .stp = OpcodeHandlerParam.stp.arg(&op.wip),
             });
             try op.finish(b);
