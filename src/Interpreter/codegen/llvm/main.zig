@@ -1448,6 +1448,25 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             });
             try op.finish(b);
         }
+        {
+            var popcnt = try b.opcodeHandlerFromPrefixedName(
+                ByteOpcode,
+                @tagName(int_ty),
+                "popcnt",
+            );
+            popcnt.wip.cursor = .{ .block = try popcnt.wip.block(0, "Entry") };
+            const un_op = try popcnt.unOp(b, int_ty);
+            try un_op.writeResult(
+                &popcnt,
+                try popcnt.wip.callIntrinsic(.normal, .none, .ctpop, &.{int_ty}, &.{un_op.c_1}, ""),
+            );
+            try popcnt.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&popcnt.wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(&popcnt.wip),
+                .stp = OpcodeHandlerParam.stp.arg(&popcnt.wip),
+            });
+            try popcnt.finish(b);
+        }
     }
 }
 
