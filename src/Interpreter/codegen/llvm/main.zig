@@ -1109,7 +1109,7 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             op.wip.cursor = .{ .block = entry_blk };
             const bin_op = try op.binOp(b, int_ty);
             try bin_op.writeResult(&op, try op.wip.bin(.add, bin_op.c_1, bin_op.c_2, ""));
-            const new_vsp = try op.adjustVspBy(b, 1);
+            const new_vsp = try op.adjustVspBy(b, -1);
             try op.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&op.wip),
                 .vsp = new_vsp,
