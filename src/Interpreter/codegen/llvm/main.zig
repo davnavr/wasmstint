@@ -553,7 +553,7 @@ const Opcode = union(enum) {
         s: []const u8,
     ) Oom!Opcode {
         _ = scratch.reset(.retain_capacity);
-        return .fromName(E, try std.mem.concat(scratch.allocator(), u8, &.{ prefix, s }));
+        return .fromName(E, try std.mem.concat(scratch.allocator(), u8, &.{ prefix, ".", s }));
     }
 };
 
@@ -1099,16 +1099,16 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
 
 fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
     for (&[2]Type{ .i32, .i64 }) |int_ty| {
-        {
+        for (&[3]llvm.Builder.WipFunction.Instruction.Tag{ .add, .sub, .mul }) |op_tag| {
             var op = try b.opcodeHandlerFromPrefixedName(
                 ByteOpcode,
                 @tagName(int_ty),
-                ".add",
+                @tagName(op_tag),
             );
             const entry_blk = try op.wip.block(0, "Entry");
             op.wip.cursor = .{ .block = entry_blk };
             const bin_op = try op.binOp(b, int_ty);
-            try bin_op.writeResult(&op, try op.wip.bin(.add, bin_op.c_1, bin_op.c_2, ""));
+            try bin_op.writeResult(&op, try op.wip.bin(op_tag, bin_op.c_1, bin_op.c_2, ""));
             const new_vsp = try op.adjustVspBy(b, -1);
             try op.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&op.wip),
