@@ -802,6 +802,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         {
             var attrs = FunctionAttributes.Wip{};
             try b.commonFnAttributes(&attrs);
+            try attrs.addFnAttr(.willreturn, &b.module);
             try b.setFnAttributes(helper, &attrs);
         }
 
@@ -941,10 +942,109 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         try wip.finish();
     }
 
+    try buildControlOpcodeHandlers(b);
     try buildLocalOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
 
     try b.setDispatchTableInitializer(ByteOpcode);
+}
+
+fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
+    const return_handler: Function.Index = ret: {
+        var ret = try b.opcodeHandler(.{ .byte = .@"return" });
+        const index = ret.wip.function;
+
+        const helper = try b.addFunction(
+            try b.strtabStringSymbolPrefixed("returnFromWasm"),
+            try b.fnType(.i32, &@as([10]Type, @splat(.ptr))),
+            b.ffi_call_conv,
+            .{ .linkage = .external, .preemption = .dso_local },
+        );
+        {
+            var attrs = FunctionAttributes.Wip{};
+            try b.commonFnAttributes(&attrs);
+            try attrs.addFnAttr(.willreturn, &b.module);
+            try b.setFnAttributes(helper, &attrs);
+        }
+
+        const entry_blk = try ret.wip.block(0, "Entry");
+        ret.wip.cursor = .{ .block = entry_blk };
+        const args = args: {
+            var args: [10]Value = undefined;
+            const dummy = try b.module.poisonValue(.ptr);
+            for (&args, std.enums.values(OpcodeHandlerParam)) |*a, param| {
+                a.* = switch (param) {
+                    .vsp, .module, .fuel, .ctx, .eip => param.arg(&ret.wip),
+                    else => dummy,
+                };
+            }
+            break :args args;
+        };
+        _ = try ret.wip.ret(
+            try ret.wip.call(
+                .tail,
+                b.ffi_call_conv,
+                .none,
+                helper.typeOf(&b.module),
+                helper.toValue(&b.module),
+                &args,
+                "",
+            ),
+        );
+
+        try ret.finish(b);
+        break :ret index;
+    };
+    {
+        var end = try b.opcodeHandler(.{ .byte = .end });
+        const entry_blk = try end.wip.block(0, "Entry");
+        end.wip.cursor = .{ .block = entry_blk };
+        const is_return = try end.wip.icmp(
+            .eq,
+            try end.wip.gep(
+                .inbounds,
+                .i8,
+                OpcodeHandlerParam.vip.arg(&end.wip),
+                &.{try b.sizeIntValue(-1)},
+                "",
+            ),
+            OpcodeHandlerParam.eip.arg(&end.wip),
+            "",
+        );
+        const ret = try end.wip.block(1, "Return");
+        const cont = try end.wip.block(1, "Continue");
+        _ = try end.wip.brCond(is_return, ret, cont, .none);
+
+        {
+            end.wip.cursor = .{ .block = ret };
+            const ret_args = args: {
+                var args: [10]Value = undefined;
+                for (&args, std.enums.values(OpcodeHandlerParam)) |*a, param| {
+                    a.* = param.arg(&end.wip);
+                }
+                break :args args;
+            };
+            _ = try end.wip.ret(
+                try end.wip.call(
+                    .musttail,
+                    b.opcode_handler.call_conv,
+                    .none,
+                    b.opcode_handler.type,
+                    return_handler.toValue(&b.module),
+                    &ret_args,
+                    "",
+                ),
+            );
+        }
+
+        end.wip.cursor = .{ .block = cont };
+        try end.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&end.wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(&end.wip),
+            .stp = OpcodeHandlerParam.stp.arg(&end.wip),
+        });
+        try end.finish(b);
+    }
 }
 
 fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {

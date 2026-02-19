@@ -109,9 +109,100 @@ fn interruptOutOfFuel(
     return Transition.interrupted(.init(vip, eip), sp, stp, ctx, .out_of_fuel);
 }
 
+fn returnFromWasm(
+    // Dummy parameters so LLVM can generate tail calls
+    _: common.Locals,
+    old_sp: Sp,
+    old_module: runtime.ModuleInst,
+    fuel: *Interpreter.Fuel,
+    _: [*]const *runtime.MemInst,
+    ctx: *Interpreter,
+    _: Ip,
+    _: Stp,
+    old_eip: Eip,
+    _: *const OpcodeHandler,
+) callconv(calling_convention) Transition {
+    const popped = ctx.stack.popFrame(old_sp, .from_stack_top);
+    if (builtin.mode == .Debug) {
+        std.debug.assert( // module mismatch
+            @intFromPtr(popped.info.callee.expanded().wasm.module.inner) ==
+                @intFromPtr(old_module.inner),
+        );
+        const expected_eip = @intFromPtr(popped.info.wasm.eip);
+        const actual_eip = @intFromPtr(old_eip);
+        if (expected_eip != actual_eip) {
+            std.debug.panic("expected EIP={X}, got {X}", .{ expected_eip, actual_eip });
+        }
+    }
+
+    return_to_host: {
+        if (ctx.stack.call_depth == 0) {
+            break :return_to_host;
+        }
+
+        const frame = ctx.stack.frameAt(ctx.stack.current_frame).?;
+        switch (frame.function.expanded()) {
+            .wasm => |wasm| {
+                var instr = Instr.init(frame.wasm.ip, frame.wasm.eip);
+                if (builtin.zig_backend == .stage2_x86_64) {
+                    // trampoline continues execution
+                    return Transition.interrupted(
+                        instr,
+                        popped.top,
+                        frame.wasm.stp,
+                        ctx,
+                        .out_of_fuel,
+                    );
+                } else {
+                    const new_locals = common.Locals{
+                        .ptr = frame.localValues(&ctx.stack).ptr,
+                    };
+                    const handler = instr.readNextOpcodeHandler(
+                        fuel,
+                        new_locals,
+                        wasm.module,
+                        ctx,
+                    );
+
+                    // ABI of the functions are the same, so this call is fine.
+                    // Optimizer seems to emit a direct `jmp` despite function pointers here.
+                    return @call(
+                        .always_tail,
+                        @as(@TypeOf(&returnFromWasm), @ptrCast(opcodeHandlerTrampoline)),
+                        .{
+                            new_locals.ptr,
+                            popped.top,
+                            wasm.module,
+                            fuel,
+                            wasm.module.header().mems,
+                            ctx,
+                            instr.next,
+                            frame.wasm.stp,
+                            instr.end,
+                            handler,
+                        },
+                    );
+                }
+            },
+            .host => break :return_to_host,
+        }
+
+        comptime unreachable;
+    }
+
+    return Transition.awaitingHost(
+        popped.top,
+        ctx,
+        popped.signature,
+        .returning_to_host,
+        .wrote_ip_and_stp_to_the_current_stack_frame, // no need to save, since this returns to host
+    );
+}
+
 comptime {
     for (&[_][]const u8{
         "interruptOutOfFuel",
+        "returnFromWasm",
     }) |name| {
         @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
     }
