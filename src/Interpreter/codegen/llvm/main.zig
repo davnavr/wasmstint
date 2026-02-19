@@ -1467,6 +1467,38 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             });
             try popcnt.finish(b);
         }
+
+        const extend_signed = [3]struct { Type, []const u8 }{
+            .{ .i8, "extend8_s" },
+            .{ .i16, "extend16_s" },
+            .{ .i32, "extend32_s" },
+        };
+        const extend_signed_len: usize = switch (int_ty) {
+            .i32 => 2,
+            .i64 => 3,
+            else => unreachable,
+        };
+        for (extend_signed[0..extend_signed_len]) |info| {
+            const src_ty, const name = info;
+            var extend = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), name);
+            extend.wip.cursor = .{ .block = try extend.wip.block(0, "Entry") };
+            const un_op = try extend.unOp(b, int_ty);
+            try un_op.writeResult(
+                &extend,
+                try extend.wip.cast(
+                    .sext,
+                    try extend.wip.cast(.trunc, un_op.c_1, src_ty, ""),
+                    int_ty,
+                    "",
+                ),
+            );
+            try extend.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&extend.wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(&extend.wip),
+                .stp = OpcodeHandlerParam.stp.arg(&extend.wip),
+            });
+            try extend.finish(b);
+        }
     }
 }
 
