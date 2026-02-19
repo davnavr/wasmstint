@@ -1160,11 +1160,7 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
         const zero = try b.module.intValue(int_ty, 0);
         const neg_one = try b.module.intValue(int_ty, -1);
         {
-            var div_s = try b.opcodeHandlerFromPrefixedName(
-                ByteOpcode,
-                @tagName(int_ty),
-                "div_s",
-            );
+            var div_s = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), "div_s");
             const entry = try div_s.wip.block(0, "Entry");
             div_s.wip.cursor = .{ .block = entry };
             const trap_ip = try div_s.wip.gep(
@@ -1239,6 +1235,60 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             );
 
             try div_s.finish(b);
+        }
+        {
+            var div_u = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), "div_u");
+            const entry = try div_u.wip.block(0, "Entry");
+            div_u.wip.cursor = .{ .block = entry };
+            const trap_ip = try div_u.wip.gep(
+                .inbounds,
+                .i8,
+                OpcodeHandlerParam.vip.arg(&div_u.wip),
+                &.{try b.sizeIntValue(-1)},
+                "",
+            );
+            const bin_op = try div_u.binOp(b, int_ty);
+            const trap = try div_u.wip.block(1, "TrapDivisonByZero");
+            const non_zero_divisor = try div_u.wip.block(1, "NonZeroDivisor");
+            _ = try div_u.wip.brCond(
+                try div_u.wip.icmp(.eq, bin_op.c_2, zero, ""),
+                trap,
+                non_zero_divisor,
+                .else_likely,
+            );
+
+            div_u.wip.cursor = .{ .block = non_zero_divisor };
+            try bin_op.writeResult(&div_u, try div_u.wip.bin(.udiv, bin_op.c_1, bin_op.c_2, ""));
+            const new_vsp = try div_u.adjustVspBy(b, -1);
+            try div_u.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&div_u.wip),
+                .vsp = new_vsp,
+                .stp = OpcodeHandlerParam.stp.arg(&div_u.wip),
+            });
+
+            div_u.wip.cursor = .{ .block = trap };
+            const trap_args = args: {
+                var args: [6]Value = undefined;
+                args[0] = trap_ip;
+                for (args[1..5], [4]OpcodeHandlerParam{ .vsp, .eip, .stp, .ctx }) |*a, param| {
+                    a.* = param.arg(&div_u.wip);
+                }
+                args[5] = try NumericTrapCode.integer_division_by_zero.toValue(b);
+                break :args args;
+            };
+            _ = try div_u.wip.ret(
+                try div_u.wip.call(
+                    .normal,
+                    b.ffi_call_conv,
+                    .none,
+                    b.trap_with_numeric_code.typeOf(&b.module),
+                    b.trap_with_numeric_code.toValue(&b.module),
+                    &trap_args,
+                    "",
+                ),
+            );
+
+            try div_u.finish(b);
         }
     }
 }
