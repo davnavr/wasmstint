@@ -199,10 +199,31 @@ fn returnFromWasm(
     );
 }
 
+fn trapWithNumericCode(
+    trap_ip: Ip,
+    sp: Sp,
+    eip: Eip,
+    stp: Stp,
+    ctx: *Interpreter,
+    code: usize,
+) callconv(calling_convention) Transition {
+    const trap = switch (@as(Interpreter.Trap.Code, @enumFromInt(code))) {
+        inline .unreachable_code_reached,
+        .integer_division_by_zero,
+        .integer_overflow,
+        .invalid_conversion_to_integer,
+        => |chosen| Interpreter.Trap.init(comptime chosen, {}),
+        else => unreachable,
+    };
+
+    return Transition.trapAt(trap_ip, eip, sp, stp, ctx, trap);
+}
+
 comptime {
     for (&[_][]const u8{
         "interruptOutOfFuel",
         "returnFromWasm",
+        "trapWithNumericCode",
     }) |name| {
         @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
     }

@@ -146,6 +146,7 @@ const Builder = struct {
 
     out_of_fuel_handler: Function.Index = .none,
     decode_uleb_idx: Function.Index = .none,
+    trap_with_numeric_code: Function.Index = .none,
 
     opcode_handler_writing_lock: std.debug.SafetyLock = .{},
     value_structs: struct {
@@ -668,6 +669,8 @@ const OpcodeHandler = struct {
         }
     };
 
+    /// Loads two operands of type `ty` from the operand stack, and calculates the `ptr`
+    /// where the result is written.
     fn binOp(handler: *OpcodeHandler, b: *Builder, ty: Type) Oom!BinOpOperands {
         const c_1_addr = try handler.operandAt(b, ty, 1);
         return .{
@@ -941,6 +944,28 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         }
         try wip.finish();
     }
+    {
+        b.trap_with_numeric_code = try b.addFunction(
+            try b.strtabStringSymbolPrefixed("trapWithNumericCode"),
+            try b.fnType(.i32, &.{ .ptr, .ptr, .ptr, .ptr, .ptr, b.size_type }),
+            b.ffi_call_conv,
+            .{ .linkage = .external, .preemption = .dso_local },
+        );
+        var attrs = FunctionAttributes.Wip{};
+        try b.commonFnAttributes(&attrs);
+        try b.fnAttributes(&attrs, &.{ .mustprogress, .willreturn, .norecurse });
+        // for (&[6]Attribute{
+        //     .readonly,
+        //     .nonnull,
+        //     .noundef,
+        //     .{ .dereferenceable = 1 },
+        //     .@"noalias",
+        //     .nofree,
+        // }) |a| {
+        //     try attrs.addParamAttr(0, a, &b.module);
+        // }
+        try b.setFnAttributes(b.decode_uleb_idx, &attrs);
+    }
 
     try buildControlOpcodeHandlers(b);
     try buildLocalOpcodeHandlers(b);
@@ -948,6 +973,17 @@ fn buildLlvmModule(b: *Builder) Oom!void {
 
     try b.setDispatchTableInitializer(ByteOpcode);
 }
+
+const NumericTrapCode = enum(u8) {
+    unreachable_code_reached = 0,
+    integer_division_by_zero = 2,
+    integer_overflow = 3,
+    invalid_conversion_to_integer = 4,
+
+    fn toValue(code: NumericTrapCode, b: *Builder) Oom!Value {
+        return b.sizeIntValue(@intFromEnum(code));
+    }
+};
 
 fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
     const return_handler: Function.Index = ret: {
@@ -967,8 +1003,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
             try b.setFnAttributes(helper, &attrs);
         }
 
-        const entry_blk = try ret.wip.block(0, "Entry");
-        ret.wip.cursor = .{ .block = entry_blk };
+        ret.wip.cursor = .{ .block = try ret.wip.block(0, "Entry") };
         const args = args: {
             var args: [10]Value = undefined;
             const dummy = try b.module.poisonValue(.ptr);
@@ -997,8 +1032,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
     };
     {
         var end = try b.opcodeHandler(.{ .byte = .end });
-        const entry_blk = try end.wip.block(0, "Entry");
-        end.wip.cursor = .{ .block = entry_blk };
+        end.wip.cursor = .{ .block = try end.wip.block(0, "Entry") };
         const is_return = try end.wip.icmp(
             .eq,
             try end.wip.gep(
@@ -1052,8 +1086,7 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
         var local_get = try b.opcodeHandler(.{ .byte = .@"local.get" });
         const wip = &local_get.wip;
 
-        const entry_blk = try wip.block(0, "Entry");
-        wip.cursor = .{ .block = entry_blk };
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
         const decode_result = try b.callDecodeUlebIdx(wip, OpcodeHandlerParam.vip.arg(wip));
         const new_vip = try wip.extractValue(decode_result, &.{1}, "");
         const src_addr = try wip.gep(
@@ -1105,8 +1138,7 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
                 @tagName(int_ty),
                 @tagName(op_tag),
             );
-            const entry_blk = try op.wip.block(0, "Entry");
-            op.wip.cursor = .{ .block = entry_blk };
+            op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
             const bin_op = try op.binOp(b, int_ty);
             try bin_op.writeResult(&op, try op.wip.bin(op_tag, bin_op.c_1, bin_op.c_2, ""));
             const new_vsp = try op.adjustVspBy(b, -1);
@@ -1116,6 +1148,97 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
                 .stp = OpcodeHandlerParam.stp.arg(&op.wip),
             });
             try op.finish(b);
+        }
+        const min_int = try b.module.intValue(
+            int_ty,
+            @as(i64, switch (int_ty) {
+                .i32 => std.math.minInt(i32),
+                .i64 => std.math.minInt(i64),
+                else => unreachable,
+            }),
+        );
+        const zero = try b.module.intValue(int_ty, 0);
+        const neg_one = try b.module.intValue(int_ty, -1);
+        {
+            var div_s = try b.opcodeHandlerFromPrefixedName(
+                ByteOpcode,
+                @tagName(int_ty),
+                "div_s",
+            );
+            const entry = try div_s.wip.block(0, "Entry");
+            div_s.wip.cursor = .{ .block = entry };
+            const trap_ip = try div_s.wip.gep(
+                .inbounds,
+                .i8,
+                OpcodeHandlerParam.vip.arg(&div_s.wip),
+                &.{try b.sizeIntValue(-1)},
+                "",
+            );
+            const bin_op = try div_s.binOp(b, int_ty);
+            const trap = try div_s.wip.block(2, "Trap");
+            const non_zero_divisor = try div_s.wip.block(1, "NonZeroDivisor");
+            _ = try div_s.wip.brCond(
+                try div_s.wip.icmp(.eq, bin_op.c_2, zero, ""),
+                trap,
+                non_zero_divisor,
+                .else_likely,
+            );
+
+            div_s.wip.cursor = .{ .block = non_zero_divisor };
+            const no_trap = try div_s.wip.block(1, "NoTrap");
+            _ = try div_s.wip.brCond(
+                try div_s.wip.bin(
+                    .@"and",
+                    try div_s.wip.icmp(.eq, bin_op.c_1, min_int, ""),
+                    try div_s.wip.icmp(.eq, bin_op.c_2, neg_one, ""),
+                    "",
+                ),
+                trap,
+                no_trap,
+                .else_likely,
+            );
+
+            div_s.wip.cursor = .{ .block = no_trap };
+            try bin_op.writeResult(&div_s, try div_s.wip.bin(.sdiv, bin_op.c_1, bin_op.c_2, ""));
+            const new_vsp = try div_s.adjustVspBy(b, -1);
+            try div_s.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&div_s.wip),
+                .vsp = new_vsp,
+                .stp = OpcodeHandlerParam.stp.arg(&div_s.wip),
+            });
+
+            div_s.wip.cursor = .{ .block = trap };
+            const trap_code = (try div_s.wip.phi(b.size_type, ""));
+            trap_code.finish(
+                &.{
+                    try NumericTrapCode.integer_division_by_zero.toValue(b),
+                    try NumericTrapCode.integer_overflow.toValue(b),
+                },
+                &.{ entry, non_zero_divisor },
+                &div_s.wip,
+            );
+            const trap_args = args: {
+                var args: [6]Value = undefined;
+                args[0] = trap_ip;
+                for (args[1..5], [4]OpcodeHandlerParam{ .vsp, .eip, .stp, .ctx }) |*a, param| {
+                    a.* = param.arg(&div_s.wip);
+                }
+                args[5] = trap_code.toValue();
+                break :args args;
+            };
+            _ = try div_s.wip.ret(
+                try div_s.wip.call(
+                    .normal,
+                    b.ffi_call_conv,
+                    .none,
+                    b.trap_with_numeric_code.typeOf(&b.module),
+                    b.trap_with_numeric_code.toValue(&b.module),
+                    &trap_args,
+                    "",
+                ),
+            );
+
+            try div_s.finish(b);
         }
     }
 }
