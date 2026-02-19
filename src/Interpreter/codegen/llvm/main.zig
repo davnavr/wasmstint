@@ -1243,44 +1243,48 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             try div_s.jmpTrapWithNumericCode(b, trap_ip, trap_code.toValue());
             try div_s.finish(b);
         }
-        {
-            var div_u = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), "div_u");
-            const entry = try div_u.wip.block(0, "Entry");
-            div_u.wip.cursor = .{ .block = entry };
-            const trap_ip = try div_u.wip.gep(
+        for (&[2]struct { WipFunction.Instruction.Tag, []const u8 }{
+            .{ .udiv, "div_u" },
+            .{ .urem, "rem_u" },
+        }) |info| {
+            const op_tag, const name = info;
+            var op = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), name);
+            const entry = try op.wip.block(0, "Entry");
+            op.wip.cursor = .{ .block = entry };
+            const trap_ip = try op.wip.gep(
                 .inbounds,
                 .i8,
-                OpcodeHandlerParam.vip.arg(&div_u.wip),
+                OpcodeHandlerParam.vip.arg(&op.wip),
                 &.{try b.sizeIntValue(-1)},
                 "",
             );
-            const bin_op = try div_u.binOp(b, int_ty);
-            const trap = try div_u.wip.block(1, "TrapDivisonByZero");
-            const non_zero_divisor = try div_u.wip.block(1, "NonZeroDivisor");
-            _ = try div_u.wip.brCond(
-                try div_u.wip.icmp(.eq, bin_op.c_2, zero, ""),
+            const bin_op = try op.binOp(b, int_ty);
+            const trap = try op.wip.block(1, "TrapDivisonByZero");
+            const non_zero_divisor = try op.wip.block(1, "NonZeroDivisor");
+            _ = try op.wip.brCond(
+                try op.wip.icmp(.eq, bin_op.c_2, zero, ""),
                 trap,
                 non_zero_divisor,
                 .else_likely,
             );
 
-            div_u.wip.cursor = .{ .block = non_zero_divisor };
-            try bin_op.writeResult(&div_u, try div_u.wip.bin(.udiv, bin_op.c_1, bin_op.c_2, ""));
-            const new_vsp = try div_u.adjustVspBy(b, -1);
-            try div_u.jmpToNextHandler(b, .{
-                .vip = OpcodeHandlerParam.vip.arg(&div_u.wip),
+            op.wip.cursor = .{ .block = non_zero_divisor };
+            try bin_op.writeResult(&op, try op.wip.bin(op_tag, bin_op.c_1, bin_op.c_2, ""));
+            const new_vsp = try op.adjustVspBy(b, -1);
+            try op.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&op.wip),
                 .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(&div_u.wip),
+                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
             });
 
-            div_u.wip.cursor = .{ .block = trap };
-            try div_u.jmpTrapWithNumericCode(
+            op.wip.cursor = .{ .block = trap };
+            try op.jmpTrapWithNumericCode(
                 b,
                 trap_ip,
                 try NumericTrapCode.integer_division_by_zero.toValue(b),
             );
 
-            try div_u.finish(b);
+            try op.finish(b);
         }
         {
             var rem_s = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), "rem_s");
