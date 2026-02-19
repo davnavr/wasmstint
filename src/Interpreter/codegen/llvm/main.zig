@@ -1377,6 +1377,33 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             });
             try op.finish(b);
         }
+        for ([2]struct { llvm.Builder.Intrinsic, []const u8 }{
+            .{ .fshl, "rotl" },
+            .{ .fshr, "rotr" },
+        }) |info| {
+            const intrin, const name = info;
+            var op = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), name);
+            op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
+            const bin_op = try op.binOp(b, int_ty);
+            try bin_op.writeResult(
+                &op,
+                try op.wip.callIntrinsic(
+                    .normal,
+                    .none,
+                    intrin,
+                    &.{int_ty},
+                    &.{ bin_op.c_1, bin_op.c_1, bin_op.c_2 },
+                    "",
+                ),
+            );
+            const new_vsp = try op.adjustVspBy(b, -1);
+            try op.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&op.wip),
+                .vsp = new_vsp,
+                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
+            });
+            try op.finish(b);
+        }
     }
 }
 
