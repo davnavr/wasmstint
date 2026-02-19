@@ -118,7 +118,7 @@ const Builder = struct {
     /// In bytes.
     cache_line_size: u16,
     /// `@sizeOf(*anyopaque)`, in bytes.
-    ptr_size: u16,
+    ptr_size_bytes: u16,
     /// `usize`.
     size_type: Type = .none,
     target_info: TargetInfo,
@@ -163,11 +163,12 @@ const Builder = struct {
             target_info: TargetInfo,
         },
     ) Oom!void {
+        const ptr_bit_size = config.target.ptrBitWidth();
         b.* = Builder{
             .options = config.options,
             .target = config.target,
             .cache_line_size = std.atomic.cacheLineForCpu(config.target.cpu),
-            .ptr_size = @divExact(config.target.ptrBitWidth(), 8),
+            .ptr_size_bytes = @divExact(ptr_bit_size, 8),
             .target_info = config.target_info,
             .scratch = scratch,
             .module = try llvm.Builder.init(.{
@@ -220,7 +221,7 @@ const Builder = struct {
         }
 
         b.target_features = try b.module.string(target_features.items);
-        b.size_type = try b.module.intType(b.ptr_size);
+        b.size_type = try b.module.intType(ptr_bit_size);
         b.opcode_handler = .{
             .call_conv = switch (config.target.cpu.arch) {
                 .x86_64, .aarch64, .riscv64 => .ghccc,
@@ -241,7 +242,7 @@ const Builder = struct {
                         .locals, .vsp => 16,
                         .module => b.cache_line_size,
                         // TODO: read datalayout to determine alignment of u64 Fuel/STP
-                        .memories, .ctx => b.ptr_size,
+                        .memories, .ctx => b.ptr_size_bytes,
                         else => null,
                     };
 
@@ -574,12 +575,14 @@ const OpcodeHandler = struct {
         },
     ) Oom!void {
         const wip = &handler.wip;
+        const next_opcode_byte = try wip.load(.normal, .i8, updates.vip, .default, "");
         const next_handler_offset = try wip.cast(
             .zext,
-            try wip.load(.normal, .i8, updates.vip, .default, ""),
+            next_opcode_byte,
             b.size_type,
             "",
         );
+
         const next_handler = try wip.load(
             .normal,
             .ptr,
@@ -590,7 +593,7 @@ const OpcodeHandler = struct {
                 &.{next_handler_offset},
                 "",
             ),
-            .fromByteUnits(b.ptr_size),
+            .fromByteUnits(b.ptr_size_bytes),
             "",
         );
         const after_next_ip_byte = try wip.gep(
