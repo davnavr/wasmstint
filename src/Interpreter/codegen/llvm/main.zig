@@ -576,13 +576,7 @@ const OpcodeHandler = struct {
     ) Oom!void {
         const wip = &handler.wip;
         const next_opcode_byte = try wip.load(.normal, .i8, updates.vip, .default, "");
-        const next_handler_offset = try wip.cast(
-            .zext,
-            next_opcode_byte,
-            b.size_type,
-            "",
-        );
-
+        const next_handler_offset = try wip.cast(.zext, next_opcode_byte, b.size_type, "");
         const next_handler = try wip.load(
             .normal,
             .ptr,
@@ -687,6 +681,36 @@ const OpcodeHandler = struct {
             .c_1 = try handler.wip.load(.normal, ty, c_1_addr, value_stack_alignment, ""),
             .result = c_1_addr,
         };
+    }
+
+    /// Finishes the basic block `wip` is positioned at.
+    fn jmpTrapWithNumericCode(
+        handler: *OpcodeHandler,
+        b: *Builder,
+        trap_ip: Value,
+        trap_code: Value,
+    ) Oom!void {
+        const params = args: {
+            var args: [6]Value = undefined;
+            args[0] = trap_ip;
+            for (args[1..5], [4]OpcodeHandlerParam{ .vsp, .eip, .stp, .ctx }) |*a, param| {
+                a.* = param.arg(&handler.wip);
+            }
+            args[5] = trap_code;
+            break :args args;
+        };
+
+        _ = try handler.wip.ret(
+            try handler.wip.call(
+                .normal,
+                b.ffi_call_conv,
+                .none,
+                b.trap_with_numeric_code.typeOf(&b.module),
+                b.trap_with_numeric_code.toValue(&b.module),
+                &params,
+                "",
+            ),
+        );
     }
 
     fn finish(handler: *OpcodeHandler, b: *Builder) Oom!void {
@@ -1216,27 +1240,7 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
                 &.{ entry, non_zero_divisor },
                 &div_s.wip,
             );
-            const trap_args = args: {
-                var args: [6]Value = undefined;
-                args[0] = trap_ip;
-                for (args[1..5], [4]OpcodeHandlerParam{ .vsp, .eip, .stp, .ctx }) |*a, param| {
-                    a.* = param.arg(&div_s.wip);
-                }
-                args[5] = trap_code.toValue();
-                break :args args;
-            };
-            _ = try div_s.wip.ret(
-                try div_s.wip.call(
-                    .normal,
-                    b.ffi_call_conv,
-                    .none,
-                    b.trap_with_numeric_code.typeOf(&b.module),
-                    b.trap_with_numeric_code.toValue(&b.module),
-                    &trap_args,
-                    "",
-                ),
-            );
-
+            try div_s.jmpTrapWithNumericCode(b, trap_ip, trap_code.toValue());
             try div_s.finish(b);
         }
         {
@@ -1270,28 +1274,77 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             });
 
             div_u.wip.cursor = .{ .block = trap };
-            const trap_args = args: {
-                var args: [6]Value = undefined;
-                args[0] = trap_ip;
-                for (args[1..5], [4]OpcodeHandlerParam{ .vsp, .eip, .stp, .ctx }) |*a, param| {
-                    a.* = param.arg(&div_u.wip);
-                }
-                args[5] = try NumericTrapCode.integer_division_by_zero.toValue(b);
-                break :args args;
-            };
-            _ = try div_u.wip.ret(
-                try div_u.wip.call(
-                    .normal,
-                    b.ffi_call_conv,
-                    .none,
-                    b.trap_with_numeric_code.typeOf(&b.module),
-                    b.trap_with_numeric_code.toValue(&b.module),
-                    &trap_args,
-                    "",
-                ),
+            try div_u.jmpTrapWithNumericCode(
+                b,
+                trap_ip,
+                try NumericTrapCode.integer_division_by_zero.toValue(b),
             );
 
             try div_u.finish(b);
+        }
+        {
+            var rem_s = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), "rem_s");
+            const entry = try rem_s.wip.block(0, "Entry");
+            rem_s.wip.cursor = .{ .block = entry };
+            const trap_ip = try rem_s.wip.gep(
+                .inbounds,
+                .i8,
+                OpcodeHandlerParam.vip.arg(&rem_s.wip),
+                &.{try b.sizeIntValue(-1)},
+                "",
+            );
+            const bin_op = try rem_s.binOp(b, int_ty);
+            const trap = try rem_s.wip.block(1, "TrapZeroDivisor");
+            const non_zero_divisor = try rem_s.wip.block(1, "NonZeroDivisor");
+            _ = try rem_s.wip.brCond(
+                try rem_s.wip.icmp(.eq, bin_op.c_2, zero, ""),
+                trap,
+                non_zero_divisor,
+                .else_likely,
+            );
+
+            rem_s.wip.cursor = .{ .block = non_zero_divisor };
+            const no_overflow = try rem_s.wip.block(1, "NoOverflow");
+            const store_result = try rem_s.wip.block(2, "StoreResult");
+            _ = try rem_s.wip.brCond(
+                try rem_s.wip.bin(
+                    .@"and",
+                    try rem_s.wip.icmp(.eq, bin_op.c_1, min_int, ""),
+                    try rem_s.wip.icmp(.eq, bin_op.c_2, neg_one, ""),
+                    "",
+                ),
+                store_result,
+                no_overflow,
+                .else_likely,
+            );
+
+            rem_s.wip.cursor = .{ .block = no_overflow };
+            const result_no_overflow = try rem_s.wip.bin(.srem, bin_op.c_1, bin_op.c_2, "");
+            _ = try rem_s.wip.br(store_result);
+
+            rem_s.wip.cursor = .{ .block = store_result };
+            const result_phi = try rem_s.wip.phi(int_ty, "");
+            result_phi.finish(
+                &.{ result_no_overflow, zero },
+                &.{ no_overflow, non_zero_divisor },
+                &rem_s.wip,
+            );
+            try bin_op.writeResult(&rem_s, result_phi.toValue());
+            const new_vsp = try rem_s.adjustVspBy(b, -1);
+            try rem_s.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&rem_s.wip),
+                .vsp = new_vsp,
+                .stp = OpcodeHandlerParam.stp.arg(&rem_s.wip),
+            });
+
+            rem_s.wip.cursor = .{ .block = trap };
+            try rem_s.jmpTrapWithNumericCode(
+                b,
+                trap_ip,
+                try NumericTrapCode.integer_division_by_zero.toValue(b),
+            );
+
+            try rem_s.finish(b);
         }
     }
 }
