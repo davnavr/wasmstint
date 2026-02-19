@@ -142,7 +142,7 @@ const Builder = struct {
     dispatch_tables: struct {
         byte: Global.Index = .none,
     } = .{},
-    byte_opcode_lookup: std.EnumSet(opcodes.ByteOpcode) = .initEmpty(),
+    byte_opcode_lookup: std.EnumSet(ByteOpcode) = .initEmpty(),
 
     out_of_fuel_handler: Function.Index = .none,
     decode_uleb_idx: Function.Index = .none,
@@ -395,7 +395,7 @@ const Builder = struct {
         const invalid_handler: Function.Index = if (b.options.optimize == .ReleaseSmall)
             .none
         else handler: switch (E) {
-            opcodes.ByteOpcode => {
+            ByteOpcode => {
                 const handler = try b.addFfiFunction(
                     "panicInvalidByteOpcode",
                     &@as([2]Type, @splat(.ptr)),
@@ -417,7 +417,7 @@ const Builder = struct {
             invalid_handler.toConst(&b.module);
 
         const table_global_idx: Global.Index = switch (E) {
-            opcodes.ByteOpcode => b.dispatch_tables.byte,
+            ByteOpcode => b.dispatch_tables.byte,
             else => @compileError(@typeName(E)),
         };
 
@@ -425,7 +425,7 @@ const Builder = struct {
         const table_var = table_global.kind.variable;
         const len = table_global.type.aggregateLen(&b.module);
         const set: *const std.EnumSet(E) = switch (E) {
-            opcodes.ByteOpcode => &b.byte_opcode_lookup,
+            ByteOpcode => &b.byte_opcode_lookup,
             else => @compileError(@typeName(E)),
         };
 
@@ -458,7 +458,7 @@ const Builder = struct {
         );
     }
 
-    fn defineOpcodeHandler(b: *Builder, opcode: Opcode) Oom!OpcodeHandler {
+    fn opcodeHandler(b: *Builder, opcode: Opcode) Oom!OpcodeHandler {
         switch (opcode) {
             inline else => |value, kind| {
                 const set: *std.EnumSet(@TypeOf(value)) = switch (kind) {
@@ -487,6 +487,15 @@ const Builder = struct {
         };
     }
 
+    fn opcodeHandlerFromPrefixedName(
+        b: *Builder,
+        comptime E: type,
+        prefix: []const u8,
+        name: []const u8,
+    ) Oom!OpcodeHandler {
+        return try b.opcodeHandler(try .fromPrefixedName(E, b.scratch, prefix, name));
+    }
+
     fn callDecodeUlebIdx(b: *Builder, wip: *WipFunction, ip: Value) Oom!Value {
         return wip.call(
             .normal,
@@ -498,10 +507,14 @@ const Builder = struct {
             "",
         );
     }
+
+    fn sizeIntValue(b: *Builder, value: i64) Oom!Value {
+        return try b.module.intValue(b.size_type, value);
+    }
 };
 
 const Opcode = union(enum) {
-    byte: opcodes.ByteOpcode,
+    byte: ByteOpcode,
     // fc: opcodes.FCPrefixOpcode,
     // fd: opcodes.FDPrefixOpcode,
 
@@ -509,7 +522,7 @@ const Opcode = union(enum) {
         return @unionInit(
             Opcode,
             switch (E) {
-                opcodes.ByteOpcode => "byte",
+                ByteOpcode => "byte",
                 // opcodes.FCPrefixOpcode => "fc",
                 // opcodes.FDPrefixOpcode => "fd",
                 else => @compileError(@typeName(Type)),
@@ -524,7 +537,27 @@ const Opcode = union(enum) {
             // inline else => |n| @tagName(n),
         };
     }
+
+    fn fromName(comptime E: type, s: []const u8) Opcode {
+        return .init(
+            E,
+            std.meta.stringToEnum(E, s) orelse
+                std.debug.panic("no opcode {s} in " ++ @typeName(E), .{s}),
+        );
+    }
+
+    fn fromPrefixedName(
+        comptime E: type,
+        scratch: *ArenaAllocator,
+        prefix: []const u8,
+        s: []const u8,
+    ) Oom!Opcode {
+        _ = scratch.reset(.retain_capacity);
+        return .fromName(E, try std.mem.concat(scratch.allocator(), u8, &.{ prefix, s }));
+    }
 };
+
+const value_stack_alignment = llvm.Builder.Alignment.fromByteUnits(16);
 
 const OpcodeHandler = struct {
     wip: WipFunction,
@@ -563,7 +596,7 @@ const OpcodeHandler = struct {
             .inbounds,
             .i8,
             updates.vip,
-            &.{try b.module.intValue(b.size_type, 1)},
+            &.{try b.sizeIntValue(1)},
             "",
         );
 
@@ -587,6 +620,67 @@ const OpcodeHandler = struct {
                 "",
             ),
         );
+    }
+
+    fn adjustVspBy(handler: *OpcodeHandler, b: *Builder, amt: i64) Oom!Value {
+        return try handler.wip.gep(
+            .inbounds,
+            b.value_structs.i64,
+            OpcodeHandlerParam.vsp.arg(&handler.wip),
+            &.{try b.sizeIntValue(amt)},
+            "",
+        );
+    }
+
+    /// Obtains a `ptr` value containing the address of the given stack operand.
+    ///
+    /// Note that this is based on the value of `vsp` on function entry.
+    fn operandAt(
+        handler: *OpcodeHandler,
+        b: *Builder,
+        ty: Type,
+        /// `0` means the value on top of the stack, `1` the value below that, and so on.
+        index: u8,
+    ) Oom!Value {
+        const offset = -@as(i64, index) - 1;
+        const offset_mul: i64 = switch (ty) {
+            .i32 => 4,
+            .i64 => 2,
+            else => unreachable,
+        };
+        return try handler.wip.gep(
+            .inbounds,
+            ty,
+            OpcodeHandlerParam.vsp.arg(&handler.wip),
+            &.{try b.sizeIntValue(offset * offset_mul)},
+            "",
+        );
+    }
+
+    const BinOpOperands = struct {
+        c_2: Value,
+        c_1: Value,
+        /// A `ptr` where the result of the operation is written.
+        result: Value,
+
+        fn writeResult(op: BinOpOperands, handler: *OpcodeHandler, result: Value) Oom!void {
+            _ = try handler.wip.store(.normal, result, op.result, value_stack_alignment);
+        }
+    };
+
+    fn binOp(handler: *OpcodeHandler, b: *Builder, ty: Type) Oom!BinOpOperands {
+        const c_1_addr = try handler.operandAt(b, ty, 1);
+        return .{
+            .c_2 = try handler.wip.load(
+                .normal,
+                ty,
+                try handler.operandAt(b, ty, 0),
+                value_stack_alignment,
+                "",
+            ),
+            .c_1 = try handler.wip.load(.normal, ty, c_1_addr, value_stack_alignment, ""),
+            .result = c_1_addr,
+        };
     }
 
     fn finish(handler: *OpcodeHandler, b: *Builder) Oom!void {
@@ -621,7 +715,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     b.module.data_layout = try b.module.string(b.target_info.data_layout);
     try b.module.functions.ensureUnusedCapacity(
         b.module.gpa,
-        enumFieldCount(opcodes.ByteOpcode) + enumFieldCount(opcodes.FCPrefixOpcode),
+        enumFieldCount(ByteOpcode) + enumFieldCount(opcodes.FCPrefixOpcode),
     );
     try b.module.globals.ensureUnusedCapacity(b.module.gpa, 3);
 
@@ -771,7 +865,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
             .inbounds,
             .i8,
             vip_0,
-            &.{try b.module.intValue(b.size_type, 1)},
+            &.{try b.sizeIntValue(1)},
             "",
         );
         const ret_single_byte = try wip.block(1, "ReturnSingleByte");
@@ -825,7 +919,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
             .inbounds,
             .i8,
             vip_phi.toValue(),
-            &.{try b.module.intValue(b.size_type, 1)},
+            &.{try b.sizeIntValue(1)},
             "",
         );
         const loop_ret = try wip.block(1, "ReturnMultiByte");
@@ -848,13 +942,14 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     }
 
     try buildLocalOpcodeHandlers(b);
+    try buildIntegerOpcodeHandlers(b);
 
-    try b.setDispatchTableInitializer(opcodes.ByteOpcode);
+    try b.setDispatchTableInitializer(ByteOpcode);
 }
 
 fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
     {
-        var local_get = try b.defineOpcodeHandler(.{ .byte = .@"local.get" });
+        var local_get = try b.opcodeHandler(.{ .byte = .@"local.get" });
         const wip = &local_get.wip;
 
         const entry_blk = try wip.block(0, "Entry");
@@ -874,7 +969,7 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
                 var attrs = FunctionAttributes.Wip{};
                 defer attrs.deinit(&b.module);
                 for (0..2) |i| {
-                    try attrs.addParamAttr(i, .{ .@"align" = .fromByteUnits(16) }, &b.module);
+                    try attrs.addParamAttr(i, .{ .@"align" = value_stack_alignment }, &b.module);
                     try attrs.addParamAttr(i, .noundef, &b.module);
                     try attrs.addParamAttr(i, .nonnull, &b.module);
                     try attrs.addParamAttr(i, .{ .dereferenceable = 16 }, &b.module);
@@ -886,19 +981,13 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
             &.{
                 OpcodeHandlerParam.vsp.arg(wip),
                 src_addr,
-                try b.module.intValue(b.size_type, 16),
+                try b.sizeIntValue(16),
                 .false,
             },
             "",
         );
 
-        const new_vsp = try wip.gep(
-            .inbounds,
-            b.value_structs.i64,
-            OpcodeHandlerParam.vsp.arg(wip),
-            &.{try b.module.intValue(b.size_type, 1)},
-            "",
-        );
+        const new_vsp = try local_get.adjustVspBy(b, 1);
         try local_get.jmpToNextHandler(b, .{
             .vip = new_vip,
             .vsp = new_vsp,
@@ -908,10 +997,34 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
     }
 }
 
+fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
+    for (&[2]Type{ .i32, .i64 }) |int_ty| {
+        {
+            var op = try b.opcodeHandlerFromPrefixedName(
+                ByteOpcode,
+                @tagName(int_ty),
+                ".add",
+            );
+            const entry_blk = try op.wip.block(0, "Entry");
+            op.wip.cursor = .{ .block = entry_blk };
+            const bin_op = try op.binOp(b, int_ty);
+            try bin_op.writeResult(&op, try op.wip.bin(.add, bin_op.c_1, bin_op.c_2, ""));
+            const new_vsp = try op.adjustVspBy(b, 1);
+            try op.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&op.wip),
+                .vsp = new_vsp,
+                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
+            });
+            try op.finish(b);
+        }
+    }
+}
+
 const std = @import("std");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Oom = std.mem.Allocator.Error;
 const opcodes = @import("opcodes");
+const ByteOpcode = opcodes.ByteOpcode;
 
 const llvm = std.zig.llvm;
 const Attribute = llvm.Builder.Attribute;
