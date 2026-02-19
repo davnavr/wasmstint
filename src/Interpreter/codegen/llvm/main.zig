@@ -1159,7 +1159,7 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
 
 fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
     for (&[2]Type{ .i32, .i64 }) |int_ty| {
-        for (&[6]llvm.Builder.WipFunction.Instruction.Tag{
+        for (&[6]WipFunction.Instruction.Tag{
             .add,
             .sub,
             .mul,
@@ -1356,6 +1356,26 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             );
 
             try rem_s.finish(b);
+        }
+        const shift_mask = try b.module.intValue(int_ty, int_ty.scalarBits(&b.module) - 1);
+        for (&[3]struct { WipFunction.Instruction.Tag, []const u8 }{
+            .{ .shl, "shl" },
+            .{ .ashr, "shr_s" },
+            .{ .lshr, "shr_u" },
+        }) |info| {
+            const op_tag, const name = info;
+            var op = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), name);
+            op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
+            const bin_op = try op.binOp(b, int_ty);
+            const shift_amt = try op.wip.bin(.@"and", bin_op.c_2, shift_mask, "");
+            try bin_op.writeResult(&op, try op.wip.bin(op_tag, bin_op.c_1, shift_amt, ""));
+            const new_vsp = try op.adjustVspBy(b, -1);
+            try op.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&op.wip),
+                .vsp = new_vsp,
+                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
+            });
+            try op.finish(b);
         }
     }
 }
