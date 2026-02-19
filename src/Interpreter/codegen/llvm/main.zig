@@ -1159,7 +1159,14 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
 
 fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
     for (&[2]Type{ .i32, .i64 }) |int_ty| {
-        for (&[3]llvm.Builder.WipFunction.Instruction.Tag{ .add, .sub, .mul }) |op_tag| {
+        for (&[6]llvm.Builder.WipFunction.Instruction.Tag{
+            .add,
+            .sub,
+            .mul,
+            .@"and",
+            .@"or",
+            .xor,
+        }) |op_tag| {
             var op = try b.opcodeHandlerFromPrefixedName(
                 ByteOpcode,
                 @tagName(int_ty),
