@@ -1281,6 +1281,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     }
 
     try buildControlOpcodeHandlers(b);
+    try buildParametricOpcodeHandlers(b);
     try buildLocalOpcodeHandlers(b);
     try buildMemoryLoadOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
@@ -1474,6 +1475,42 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         );
 
         try call.finish(b);
+    }
+}
+
+fn buildParametricOpcodeHandlers(b: *Builder) Oom!void {
+    {
+        var drop = try b.opcodeHandler(.{ .byte = .drop });
+        drop.wip.cursor = .{ .block = try drop.wip.block(0, "Entry") };
+
+        if (b.options.optimize == .Debug) {
+            _ = try drop.wip.callIntrinsic(
+                .normal,
+                attrs: {
+                    var attrs = FunctionAttributes.Wip{};
+                    defer attrs.deinit(&b.module);
+                    try attrs.addParamAttr(0, .{ .@"align" = value_stack_alignment }, &b.module);
+                    break :attrs try attrs.finish(&b.module);
+                },
+                .@"memset.inline",
+                &.{ .ptr, b.size_type },
+                &.{
+                    try drop.operandAt(b, 0),
+                    try b.module.intValue(.i8, 0xCC),
+                    try b.sizeIntValue(16),
+                    .false,
+                },
+                "",
+            );
+        }
+
+        const new_vsp = try drop.adjustVspBy(b, -1);
+        try drop.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&drop.wip),
+            .vsp = new_vsp,
+            .stp = OpcodeHandlerParam.stp.arg(&drop.wip),
+        });
+        try drop.finish(b);
     }
 }
 
