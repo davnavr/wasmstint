@@ -156,6 +156,10 @@ const Builder = struct {
     value_structs: struct {
         i64: Type = .none,
     } = .{},
+    value_copy: struct {
+        attributes: FunctionAttributes,
+        overload: [3]Type,
+    } = undefined,
 
     fn init(
         b: *Builder,
@@ -290,6 +294,20 @@ const Builder = struct {
         });
         b.value_structs = .{
             .i64 = try b.module.structType(.normal, &.{ .i64, .i64 }),
+        };
+        b.value_copy = .{
+            .attributes = attrs: {
+                var attrs = FunctionAttributes.Wip{};
+                defer attrs.deinit(&b.module);
+                for (0..2) |i| {
+                    try attrs.addParamAttr(i, .{ .@"align" = value_stack_alignment }, &b.module);
+                    try attrs.addParamAttr(i, .noundef, &b.module);
+                    try attrs.addParamAttr(i, .nonnull, &b.module);
+                    try attrs.addParamAttr(i, .{ .dereferenceable = 16 }, &b.module);
+                }
+                break :attrs try attrs.finish(&b.module);
+            },
+            .overload = [3]Type{ .ptr, .ptr, b.size_type },
         };
     }
 
@@ -1479,6 +1497,37 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
     }
 }
 
+fn writeSelectHandler(b: *Builder, select: *OpcodeHandler) Oom!Value {
+    const condition_value = try select.wip.load(
+        .normal,
+        .i32,
+        try select.operandAt(b, 0),
+        value_stack_alignment,
+        "",
+    );
+    const condition = try select.wip.icmp(.ne, condition_value, try b.module.intValue(.i32, 0), "");
+    // If true, value already in result location is kept the same.
+    const dst_ptr = try select.operandAt(b, 2);
+    const src_ptr = try select.wip.gep(
+        .inbounds,
+        b.value_structs.i64,
+        dst_ptr,
+        &.{try select.wip.bin(.@"sub nuw", .true, condition, "")},
+        "",
+    );
+
+    _ = try select.wip.callIntrinsic(
+        .normal,
+        b.value_copy.attributes,
+        .memmove,
+        &b.value_copy.overload,
+        &.{ dst_ptr, src_ptr, try b.sizeIntValue(16), .false },
+        "",
+    );
+
+    return try select.adjustVspBy(b, -2);
+}
+
 fn buildParametricOpcodeHandlers(b: *Builder) Oom!void {
     {
         var drop = try b.opcodeHandler(.{ .byte = .drop });
@@ -1512,6 +1561,17 @@ fn buildParametricOpcodeHandlers(b: *Builder) Oom!void {
             .stp = OpcodeHandlerParam.stp.arg(&drop.wip),
         });
         try drop.finish(b);
+    }
+    {
+        var select = try b.opcodeHandler(.{ .byte = .select });
+        select.wip.cursor = .{ .block = try select.wip.block(0, "Entry") };
+        const new_vsp = try writeSelectHandler(b, &select);
+        try select.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&select.wip),
+            .vsp = new_vsp,
+            .stp = OpcodeHandlerParam.stp.arg(&select.wip),
+        });
+        try select.finish(b);
     }
 }
 
@@ -1592,18 +1652,6 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
 }
 
 fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
-    const local_memmove_attrs = attrs: {
-        var attrs = FunctionAttributes.Wip{};
-        defer attrs.deinit(&b.module);
-        for (0..2) |i| {
-            try attrs.addParamAttr(i, .{ .@"align" = value_stack_alignment }, &b.module);
-            try attrs.addParamAttr(i, .noundef, &b.module);
-            try attrs.addParamAttr(i, .nonnull, &b.module);
-            try attrs.addParamAttr(i, .{ .dereferenceable = 16 }, &b.module);
-        }
-        break :attrs try attrs.finish(&b.module);
-    };
-    const local_memmove_overload = [3]Type{ .ptr, .ptr, b.size_type };
     const value_size_bytes = try b.sizeIntValue(16);
     {
         var local_get = try b.opcodeHandler(.{ .byte = .@"local.get" });
@@ -1619,11 +1667,12 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
             &.{try wip.extractValue(decode_result, &.{0}, "")},
             "",
         );
+        // TODO: use memcpy here
         _ = try wip.callIntrinsic(
             .normal,
-            local_memmove_attrs,
+            b.value_copy.attributes,
             .memmove,
-            &local_memmove_overload,
+            &b.value_copy.overload,
             &.{ OpcodeHandlerParam.vsp.arg(wip), src_addr, value_size_bytes, .false },
             "",
         );
@@ -1650,11 +1699,12 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
             &.{try wip.extractValue(decode_result, &.{0}, "")},
             "",
         );
+        // TODO: use memcpy here
         _ = try wip.callIntrinsic(
             .normal,
-            local_memmove_attrs,
+            b.value_copy.attributes,
             .memmove,
-            &local_memmove_overload,
+            &b.value_copy.overload,
             &.{ dst_addr, try local_set.operandAt(b, 0), value_size_bytes, .false },
             "",
         );
