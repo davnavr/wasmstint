@@ -1591,6 +1591,7 @@ const FloatInfo = struct {
 fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
     for (@as([]const FloatInfo, &b.float_info)) |*float_info| {
         const float_ty = float_info.float_ty;
+        const int_ty = float_info.int_ty;
         const prefix = float_info.prefix;
 
         for (&[4]WipFunction.Instruction.Tag{
@@ -1690,14 +1691,10 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
         }
 
         {
-            var op = try b.opcodeHandlerFromPrefixedName(
-                ByteOpcode,
-                prefix,
-                "copysign",
-            );
+            var op = try b.opcodeHandlerFromPrefixedName(ByteOpcode, prefix, "copysign");
             op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
-            // Less instructions if done the scalar way instead of calling the copysign intrinsic
-            const bin_op = try op.binOp(b, float_info.int_ty);
+            // Less instructions if done the scalar way instead of calling the .copysign intrinsic
+            const bin_op = try op.binOp(b, int_ty);
             try bin_op.writeResult(
                 &op,
                 try op.wip.bin(
@@ -1714,6 +1711,22 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
                 .stp = OpcodeHandlerParam.stp.arg(&op.wip),
             });
             try op.finish(b);
+        }
+        {
+            var abs = try b.opcodeHandlerFromPrefixedName(ByteOpcode, prefix, "abs");
+            abs.wip.cursor = .{ .block = try abs.wip.block(0, "Entry") };
+            const un_op = try abs.unOp(b, int_ty);
+            // Less instructions if done the scalar way instead of calling the .abs intrinsic
+            try un_op.writeResult(
+                &abs,
+                try abs.wip.bin(.@"and", un_op.c_1, float_info.magnitude_mask, ""),
+            );
+            try abs.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&abs.wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(&abs.wip),
+                .stp = OpcodeHandlerParam.stp.arg(&abs.wip),
+            });
+            try abs.finish(b);
         }
     }
 }
