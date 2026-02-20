@@ -1667,11 +1667,10 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
             &.{try wip.extractValue(decode_result, &.{0}, "")},
             "",
         );
-        // TODO: use memcpy here
         _ = try wip.callIntrinsic(
             .normal,
             b.value_copy.attributes,
-            .memmove,
+            .memcpy,
             &b.value_copy.overload,
             &.{ OpcodeHandlerParam.vsp.arg(wip), src_addr, value_size_bytes, .false },
             "",
@@ -1699,11 +1698,10 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
             &.{try wip.extractValue(decode_result, &.{0}, "")},
             "",
         );
-        // TODO: use memcpy here
         _ = try wip.callIntrinsic(
             .normal,
             b.value_copy.attributes,
-            .memmove,
+            .memcpy,
             &b.value_copy.overload,
             &.{ dst_addr, try local_set.operandAt(b, 0), value_size_bytes, .false },
             "",
