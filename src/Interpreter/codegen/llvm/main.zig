@@ -1958,6 +1958,30 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try conv.finish(b);
         }
     }
+    {
+        var demote = try b.opcodeHandler(.{ .byte = .@"f32.demote_f64" });
+        demote.wip.cursor = .{ .block = try demote.wip.block(0, "Entry") };
+        const un_op = try demote.unOp(b, .double);
+        try un_op.writeResult(&demote, try demote.wip.cast(.fptrunc, un_op.c_1, .float, ""));
+        try demote.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&demote.wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(&demote.wip),
+            .stp = OpcodeHandlerParam.stp.arg(&demote.wip),
+        });
+        try demote.finish(b);
+    }
+    {
+        var promote = try b.opcodeHandler(.{ .byte = .@"f64.promote_f32" });
+        promote.wip.cursor = .{ .block = try promote.wip.block(0, "Entry") };
+        const un_op = try promote.unOp(b, .float);
+        try un_op.writeResult(&promote, try promote.wip.cast(.fpext, un_op.c_1, .double, ""));
+        try promote.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&promote.wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(&promote.wip),
+            .stp = OpcodeHandlerParam.stp.arg(&promote.wip),
+        });
+        try promote.finish(b);
+    }
 }
 
 const std = @import("std");
