@@ -1594,6 +1594,35 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
         const int_ty = float_info.int_ty;
         const prefix = float_info.prefix;
 
+        {
+            const byte_width = @divExact(float_ty.scalarBits(&b.module), 8);
+            var c = try b.opcodeHandlerFromPrefixedName(ByteOpcode, prefix, "const");
+            c.wip.cursor = .{ .block = try c.wip.block(0, "Entry") };
+            const vip_0 = OpcodeHandlerParam.vip.arg(&c.wip);
+            const imm = try c.wip.load(.normal, int_ty, vip_0, .fromByteUnits(1), "");
+            const new_vip = try c.wip.gep(
+                .inbounds,
+                .i8,
+                vip_0,
+                &.{try b.sizeIntValue(byte_width)},
+                "",
+            );
+
+            _ = try c.wip.store(
+                .normal,
+                imm,
+                OpcodeHandlerParam.vsp.arg(&c.wip),
+                value_stack_alignment,
+            );
+            const new_vsp = try c.adjustVspBy(b, 1);
+            try c.jmpToNextHandler(b, .{
+                .vip = new_vip,
+                .vsp = new_vsp,
+                .stp = OpcodeHandlerParam.stp.arg(&c.wip),
+            });
+            try c.finish(b);
+        }
+
         for (&[6]struct { llvm.Builder.FloatCondition, []const u8 }{
             .{ .oeq, "eq" },
             .{ .une, "ne" },
