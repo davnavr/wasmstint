@@ -146,10 +146,13 @@ const Builder = struct {
     byte_opcode_lookup: std.EnumSet(ByteOpcode) = .initEmpty(),
 
     out_of_fuel_handler: Function.Index = .none,
+    skip_uleb_idx: Function.Index = .none,
     decode_uleb_idx: Function.Index = .none,
     trap_with_numeric_code: Function.Index = .none,
+    trap_memory_access_oob: Function.Index = .none,
 
     opcode_handler_writing_lock: std.debug.SafetyLock = .{},
+    mem_inst: Type = .none,
     value_structs: struct {
         i64: Type = .none,
     } = .{},
@@ -277,6 +280,13 @@ const Builder = struct {
             },
         };
 
+        b.mem_inst = try b.module.structType(.normal, &.{
+            .ptr,
+            b.size_type,
+            b.size_type,
+            b.size_type,
+            .ptr,
+        });
         b.value_structs = .{
             .i64 = try b.module.structType(.normal, &.{ .i64, .i64 }),
         };
@@ -504,14 +514,29 @@ const Builder = struct {
         return try b.opcodeHandler(try .fromPrefixedName(E, b.scratch, prefix, name));
     }
 
-    fn callDecodeUlebIdx(b: *Builder, wip: *WipFunction, ip: Value) Oom!Value {
+    /// Yields an `{ i32, ptr }` containing the decoded index and updated VIP value.
+    fn callDecodeUlebIdx(b: *Builder, wip: *WipFunction, vip: Value) Oom!Value {
         return wip.call(
             .normal,
             b.decode_uleb_idx.ptr(&b.module).call_conv,
             .none,
             b.decode_uleb_idx.typeOf(&b.module),
             b.decode_uleb_idx.toValue(&b.module),
-            &.{ip},
+            &.{vip},
+            "",
+        );
+    }
+
+    /// Yields the updated `VIP` value (a `ptr`).
+    fn callSkipUlebIdx(b: *Builder, wip: *WipFunction, vip: Value) Oom!Value {
+        std.debug.assert(vip.typeOfWip(wip) == .ptr);
+        return wip.call(
+            .normal,
+            b.skip_uleb_idx.ptr(&b.module).call_conv,
+            .none,
+            b.skip_uleb_idx.typeOf(&b.module),
+            b.skip_uleb_idx.toValue(&b.module),
+            &.{vip},
             "",
         );
     }
@@ -565,7 +590,42 @@ const Opcode = union(enum) {
     }
 };
 
+const byte_alignment = llvm.Builder.Alignment.fromByteUnits(1);
 const value_stack_alignment = llvm.Builder.Alignment.fromByteUnits(16);
+
+const MemInstField = enum(u8) {
+    base,
+    size,
+    capacity,
+    limit,
+    vtable,
+
+    /// Obtains a `ptr` to a field of a `ptr` to a `MemInst`.
+    fn gep(field: MemInstField, wip: *WipFunction, b: *Builder, ptr: Value) Oom!Value {
+        std.debug.assert(ptr.typeOfWip(wip) == .ptr);
+        const field_ptr = try wip.gep(
+            .inbounds,
+            b.mem_inst,
+            ptr,
+            &.{ .@"0", try b.module.intValue(.i32, @intFromEnum(field)) },
+            "",
+        );
+        std.debug.assert(field_ptr.typeOfWip(wip) == .ptr);
+        return field_ptr;
+    }
+
+    fn typeOf(field: MemInstField, b: *Builder) Type {
+        return switch (field) {
+            .base, .vtable => .ptr,
+            .size, .capacity, .limit => b.size_type,
+        };
+    }
+
+    /// Loads a field given a `ptr` to a `MemInst`.
+    fn load(field: MemInstField, wip: *WipFunction, b: *Builder, ptr: Value) Oom!Value {
+        return try wip.load(.normal, field.typeOf(b), try field.gep(wip, b, ptr), .default, "");
+    }
+};
 
 const OpcodeHandler = struct {
     wip: WipFunction,
@@ -643,7 +703,10 @@ const OpcodeHandler = struct {
         handler: *OpcodeHandler,
         b: *Builder,
         /// `0` means the value on top of the stack, `1` the value below that, and so on.
-        index: u8,
+        ///
+        /// Negative values are used to push new values onto the top of the stack, though the VSP
+        /// must be adjusted correctly before jumping to the next opcode handler.
+        index: i9,
     ) Oom!Value {
         const offset = -@as(i64, index) - 1;
         return try handler.wip.gep(
@@ -745,11 +808,151 @@ const OpcodeHandler = struct {
         );
     }
 
+    /// Assumes that the `memarg` is located at `OpcodeHandlerParam.vip`
+    fn linearMemoryAccess(
+        handler: *OpcodeHandler,
+        b: *Builder,
+        /// Offset from VSP to `i32` memory offset, where `0` is the top of the stack.
+        offset_idx: u8,
+        /// The size, in bytes, of the memory being accessed.
+        access_size: std.mem.Alignment,
+        /// Where control flow goes after the bounds check is successful.
+        ///
+        /// The cursor of the `WipFunction` is set to this value.
+        bounds_check_success: Function.Block.Index,
+    ) Oom!LinearMemoryAccess {
+        const wip = &handler.wip;
+        const vip_after_align = try b.callSkipUlebIdx(wip, OpcodeHandlerParam.vip.arg(wip));
+        const decode_offset = try b.callDecodeUlebIdx(wip, vip_after_align);
+
+        const vip_after_offset = try wip.extractValue(decode_offset, &.{1}, "");
+        const imm_offset = try wip.extractValue(decode_offset, &.{0}, "");
+
+        const arg_offset = try wip.load(
+            .normal,
+            .i32,
+            try handler.operandAt(b, offset_idx),
+            value_stack_alignment,
+            "",
+        );
+
+        const add_offsets = try wip.callIntrinsic(
+            .normal,
+            .none,
+            .@"uadd.with.overflow",
+            &.{.i32},
+            &.{ imm_offset, arg_offset },
+            "",
+        );
+        const load_offset = try wip.extractValue(add_offsets, &.{0}, "");
+        const end_offset = try wip.callIntrinsic(
+            .normal,
+            .none,
+            .@"uadd.with.overflow",
+            &.{.i32},
+            &.{ load_offset, try b.module.intValue(.i32, access_size.toByteUnits()) },
+            "",
+        );
+        const final_offset = try wip.cast(.zext, load_offset, b.size_type, "");
+
+        const mem_inst_ptr = try wip.load(
+            .normal,
+            .ptr,
+            // Would need GEP here to support multi-memory
+            OpcodeHandlerParam.memories.arg(wip),
+            .default,
+            "",
+        );
+        const oob = try wip.block(2, "MemoryAccessOob");
+        const no_offset_overflow = try wip.block(1, "NoOffsetOverflow");
+        _ = try wip.brCond(
+            try wip.bin(
+                .@"or",
+                try wip.extractValue(add_offsets, &.{1}, ""),
+                try wip.extractValue(end_offset, &.{1}, ""),
+                "",
+            ),
+            oob,
+            no_offset_overflow,
+            .else_likely,
+        );
+
+        {
+            wip.cursor = .{ .block = no_offset_overflow };
+            const mem_size = try MemInstField.size.load(wip, b, mem_inst_ptr);
+            _ = try wip.brCond(
+                try wip.icmp(
+                    .ule,
+                    try wip.cast(
+                        .zext,
+                        try wip.extractValue(end_offset, &.{0}, ""),
+                        b.size_type,
+                        "",
+                    ),
+                    mem_size,
+                    "",
+                ),
+                bounds_check_success,
+                oob,
+                .then_likely,
+            );
+        }
+
+        wip.cursor = .{ .block = oob };
+        _ = try wip.callIntrinsicAssumeCold();
+        _ = try wip.ret(
+            try wip.call(
+                .tail,
+                b.ffi_call_conv,
+                .none,
+                b.trap_memory_access_oob.typeOf(&b.module),
+                b.trap_memory_access_oob.toValue(&b.module),
+                &.{
+                    try wip.gep(
+                        .inbounds,
+                        .i8,
+                        OpcodeHandlerParam.vip.arg(wip),
+                        &.{try b.sizeIntValue(-1)},
+                        "",
+                    ), // TODO: provide u8, usize pair so trap handler can call calculateTrapIp
+                    OpcodeHandlerParam.vsp.arg(wip),
+                    OpcodeHandlerParam.eip.arg(wip),
+                    OpcodeHandlerParam.stp.arg(wip),
+                    OpcodeHandlerParam.ctx.arg(wip),
+                    mem_inst_ptr,
+                    try b.module.intValue(b.size_type, 0), // memidx
+                    try wip.cast(.zext, arg_offset, b.size_type, ""), // address
+                    try wip.cast(.zext, imm_offset, b.size_type, ""), // offset
+                    try b.module.intValue(b.size_type, @intFromEnum(access_size)), // size
+                },
+                "",
+            ),
+        );
+
+        wip.cursor = .{ .block = bounds_check_success };
+        const final_ptr = try wip.gep(
+            .inbounds,
+            .i8,
+            try MemInstField.base.load(wip, b, mem_inst_ptr),
+            &.{final_offset},
+            "",
+        );
+        std.debug.assert(final_ptr.typeOfWip(wip) == .ptr);
+        return .{ .ptr = final_ptr, .vip = vip_after_offset };
+    }
+
     fn finish(handler: *OpcodeHandler, b: *Builder) Oom!void {
         try handler.wip.finish();
         handler.wip.deinit();
         b.opcode_handler_writing_lock.unlock();
     }
+};
+
+const LinearMemoryAccess = struct {
+    /// A `ptr` into WASM linear memory.
+    ptr: Value,
+    /// Refers to the first byte after the `memarg`
+    vip: Value,
 };
 
 const OpcodeHandlerParam = enum(u4) {
@@ -889,6 +1092,71 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         _ = try wip.ret(result);
         try wip.finish();
     }
+    const uleb_helper_attrs = attrs: {
+        var attrs = FunctionAttributes.Wip{};
+        try b.commonFnAttributes(&attrs);
+        try b.fnAttributes(&attrs, &.{ .mustprogress, .willreturn, .norecurse });
+        for (&[6]Attribute{
+            .readonly,
+            .nonnull,
+            .noundef,
+            .{ .dereferenceable = 1 },
+            .@"noalias",
+            .nofree,
+        }) |a| {
+            try attrs.addParamAttr(0, a, &b.module);
+        }
+        break :attrs try attrs.finish(&b.module);
+    };
+    const uleb_cont_mask = try b.module.intValue(.i8, 0x80);
+    const size_1 = try b.sizeIntValue(1);
+    {
+        b.skip_uleb_idx = try b.addFunction(
+            try b.strtabStringSymbolPrefixed("skipUlebIndex"),
+            try b.fnType(.ptr, &.{.ptr}),
+            if (b.target.cpu.arch == .x86_64) .preserve_mostcc else .fastcc,
+            .{ .linkage = .internal, .preemption = .dso_local },
+        );
+        b.skip_uleb_idx.setAttributes(uleb_helper_attrs, &b.module);
+
+        var wip = try b.wipFunction(b.skip_uleb_idx);
+        defer wip.deinit();
+
+        const entry_blk = try wip.block(0, "Entry");
+        const ret_blk = try wip.block(2, "ReturnCommon");
+        const loop_body = try wip.block(2, "LoopBody");
+        wip.cursor = .{ .block = entry_blk };
+        const byte_0 = try wip.load(.normal, .i8, wip.arg(0), .default, "");
+        const vip_1 = try wip.gep(.inbounds, .i8, wip.arg(0), &.{size_1}, "");
+        _ = try wip.brCond(
+            try wip.icmp(.ult, byte_0, uleb_cont_mask, ""),
+            ret_blk,
+            loop_body,
+            .then_likely,
+        );
+
+        wip.cursor = .{ .block = loop_body };
+        const current_vip = try wip.phi(.ptr, "");
+        _ = try wip.callIntrinsicAssumeCold();
+        const current_byte = try wip.load(.normal, .i8, current_vip.toValue(), .default, "");
+        const next_vip = try wip.gep(.inbounds, .i8, current_vip.toValue(), &.{size_1}, "");
+        current_vip.finish(&.{ vip_1, next_vip }, &.{ entry_blk, loop_body }, &wip);
+        _ = try wip.brCond(
+            try wip.icmp(.ult, current_byte, uleb_cont_mask, ""),
+            ret_blk,
+            loop_body,
+            .then_likely,
+        );
+
+        {
+            wip.cursor = .{ .block = ret_blk };
+            const ret_phi = try wip.phi(.ptr, "");
+            ret_phi.finish(&.{ vip_1, next_vip }, &.{ entry_blk, loop_body }, &wip);
+            _ = try wip.ret(ret_phi.toValue());
+        }
+
+        try wip.finish();
+    }
     {
         const ret_ty = try b.module.structType(.normal, &.{ .i32, .ptr });
         b.decode_uleb_idx = try b.addFunction(
@@ -897,45 +1165,21 @@ fn buildLlvmModule(b: *Builder) Oom!void {
             if (b.target.cpu.arch == .x86_64) .preserve_mostcc else .fastcc,
             .{ .linkage = .internal, .preemption = .dso_local },
         );
-        const param_attrs = [6]Attribute{
-            .readonly,
-            .nonnull,
-            .noundef,
-            .{ .dereferenceable = 1 },
-            .@"noalias",
-            .nofree,
-        };
-        {
-            var attrs = FunctionAttributes.Wip{};
-            try b.commonFnAttributes(&attrs);
-            try b.fnAttributes(&attrs, &.{ .mustprogress, .willreturn, .norecurse });
-            for (&param_attrs) |a| {
-                try attrs.addParamAttr(0, a, &b.module);
-            }
-            try b.setFnAttributes(b.decode_uleb_idx, &attrs);
-        }
+        b.decode_uleb_idx.setAttributes(uleb_helper_attrs, &b.module);
 
         var wip = try b.wipFunction(b.decode_uleb_idx);
         defer wip.deinit();
-
-        const cont_mask = try b.module.intValue(.i8, 0x80);
 
         const entry_blk = try wip.block(0, "Entry");
         wip.cursor = .{ .block = entry_blk };
         const vip_0 = wip.arg(0);
         const byte_0 = try wip.load(.normal, .i8, vip_0, .default, "");
-        const vip_1 = try wip.gep(
-            .inbounds,
-            .i8,
-            vip_0,
-            &.{try b.sizeIntValue(1)},
-            "",
-        );
+        const vip_1 = try wip.gep(.inbounds, .i8, vip_0, &.{size_1}, "");
         const ret_single_byte = try wip.block(1, "ReturnSingleByte");
         const loop_body = try wip.block(2, "LoopBody");
         const acc_0 = try wip.cast(.zext, byte_0, .i32, "");
         _ = try wip.brCond(
-            try wip.icmp(.ult, byte_0, cont_mask, ""),
+            try wip.icmp(.ult, byte_0, uleb_cont_mask, ""),
             ret_single_byte,
             loop_body,
             .then_likely,
@@ -978,16 +1222,10 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         );
         // TODO(zig): `add nuw nsw` not supported
         const next_shift = try wip.bin(.@"add nsw", shift_phi.toValue(), shift_7, "");
-        const next_vip = try wip.gep(
-            .inbounds,
-            .i8,
-            vip_phi.toValue(),
-            &.{try b.sizeIntValue(1)},
-            "",
-        );
+        const next_vip = try wip.gep(.inbounds, .i8, vip_phi.toValue(), &.{size_1}, "");
         const loop_ret = try wip.block(1, "ReturnMultiByte");
         _ = try wip.brCond(
-            try wip.icmp(.ult, next_byte, cont_mask, ""),
+            try wip.icmp(.ult, next_byte, uleb_cont_mask, ""),
             loop_ret,
             loop_body,
             .then_likely,
@@ -1012,12 +1250,39 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         );
         var attrs = FunctionAttributes.Wip{};
         try b.commonFnAttributes(&attrs);
-        try b.fnAttributes(&attrs, &.{ .mustprogress, .willreturn, .norecurse });
-        try b.setFnAttributes(b.decode_uleb_idx, &attrs);
+        try b.fnAttributes(&attrs, &.{ .mustprogress, .willreturn, .norecurse, .cold });
+        try b.setFnAttributes(b.trap_with_numeric_code, &attrs);
+    }
+    {
+        b.trap_memory_access_oob = try b.addFunction(
+            try b.strtabStringSymbolPrefixed("trapMemoryAccessOutOfBounds"),
+            try b.fnType(
+                .i32,
+                &[10]Type{
+                    .ptr,
+                    .ptr,
+                    .ptr,
+                    .ptr,
+                    .ptr,
+                    .ptr,
+                    b.size_type,
+                    b.size_type,
+                    b.size_type,
+                    b.size_type,
+                },
+            ),
+            b.ffi_call_conv,
+            .{ .linkage = .external, .preemption = .dso_local },
+        );
+        var attrs = FunctionAttributes.Wip{};
+        try b.commonFnAttributes(&attrs);
+        try b.fnAttributes(&attrs, &.{ .mustprogress, .willreturn, .norecurse, .cold });
+        try b.setFnAttributes(b.trap_memory_access_oob, &attrs);
     }
 
     try buildControlOpcodeHandlers(b);
     try buildLocalOpcodeHandlers(b);
+    try buildMemoryLoadOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
     try buildFloatOpcodeHandlers(b);
 
@@ -1128,6 +1393,53 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
             .stp = OpcodeHandlerParam.stp.arg(&end.wip),
         });
         try end.finish(b);
+    }
+}
+
+fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
+    const extending_loads = [6]struct {
+        WipFunction.Instruction.Tag,
+        std.mem.Alignment,
+        Type,
+        []const u8,
+    }{
+        .{ .zext, .@"1", .i8, "load8_u" },
+        .{ .sext, .@"1", .i8, "load8_s" },
+        .{ .zext, .@"2", .i16, "load16_u" },
+        .{ .sext, .@"2", .i16, "load16_s" },
+        .{ .zext, .@"4", .i32, "load32_u" },
+        .{ .sext, .@"4", .i32, "load32_s" },
+    };
+
+    for (&[2]Type{ .i32, .i64 }) |int_ty| {
+        for (extending_loads[0..(if (int_ty == .i64) 6 else 4)]) |info| {
+            const cast, const access_size, const load_ty, const name = info;
+            var load = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), name);
+
+            load.wip.cursor = .{ .block = try load.wip.block(0, "Entry") };
+            const perform_load = try load.wip.block(1, "Load");
+            const access = try load.linearMemoryAccess(b, 0, access_size, perform_load);
+            const loaded_value = try load.wip.cast(
+                cast,
+                try load.wip.load(.normal, load_ty, access.ptr, byte_alignment, ""),
+                int_ty,
+                "",
+            );
+
+            _ = try load.wip.store(
+                .normal,
+                loaded_value,
+                try load.operandAt(b, 0),
+                value_stack_alignment,
+            );
+
+            try load.jmpToNextHandler(b, .{
+                .vip = access.vip,
+                .vsp = OpcodeHandlerParam.vsp.arg(&load.wip),
+                .stp = OpcodeHandlerParam.stp.arg(&load.wip),
+            });
+            try load.finish(b);
+        }
     }
 }
 
@@ -1607,7 +1919,7 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             var c = try b.opcodeHandlerFromPrefixedName(ByteOpcode, prefix, "const");
             c.wip.cursor = .{ .block = try c.wip.block(0, "Entry") };
             const vip_0 = OpcodeHandlerParam.vip.arg(&c.wip);
-            const imm = try c.wip.load(.normal, int_ty, vip_0, .fromByteUnits(1), "");
+            const imm = try c.wip.load(.normal, int_ty, vip_0, byte_alignment, "");
             const new_vip = try c.wip.gep(
                 .inbounds,
                 .i8,
@@ -1992,7 +2304,6 @@ const ByteOpcode = opcodes.ByteOpcode;
 
 const llvm = std.zig.llvm;
 const Attribute = llvm.Builder.Attribute;
-const Block = llvm.Builder.Block;
 const CallConv = llvm.Builder.CallConv;
 const Constant = llvm.Builder.Constant;
 const Global = llvm.Builder.Global;

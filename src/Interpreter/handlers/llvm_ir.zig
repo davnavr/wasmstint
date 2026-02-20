@@ -207,16 +207,40 @@ fn trapWithNumericCode(
     ctx: *Interpreter,
     code: usize,
 ) callconv(calling_convention) Transition {
-    const trap = switch (@as(Interpreter.Trap.Code, @enumFromInt(code))) {
+    @branchHint(.cold);
+    const trap = switch (@as(Trap.Code, @enumFromInt(code))) {
         inline .unreachable_code_reached,
         .integer_division_by_zero,
         .integer_overflow,
         .invalid_conversion_to_integer,
-        => |chosen| Interpreter.Trap.init(comptime chosen, {}),
+        => |chosen| Trap.init(comptime chosen, {}),
         else => unreachable,
     };
 
     return Transition.trapAt(trap_ip, eip, sp, stp, ctx, trap);
+}
+
+fn trapMemoryAccessOutOfBounds(
+    trap_ip: Ip,
+    sp: Sp,
+    eip: Eip,
+    stp: Stp,
+    ctx: *Interpreter,
+    memory: *const runtime.MemInst,
+    mem_idx: usize,
+    address: usize,
+    offset: usize,
+    size: usize,
+) callconv(calling_convention) Transition {
+    @branchHint(.cold);
+    const oob_info = Trap.MemoryAccessOutOfBounds.init(@enumFromInt(mem_idx), .access, .{
+        .address = address + offset,
+        .size = @enumFromInt(size),
+        .maximum = memory.size,
+    });
+
+    const trap_info = Trap.init(.memory_access_out_of_bounds, oob_info);
+    return Transition.trapAt(trap_ip, eip, sp, stp, ctx, trap_info);
 }
 
 comptime {
@@ -224,6 +248,7 @@ comptime {
         "interruptOutOfFuel",
         "returnFromWasm",
         "trapWithNumericCode",
+        "trapMemoryAccessOutOfBounds",
     }) |name| {
         @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
     }
@@ -261,6 +286,7 @@ const builtin = @import("builtin");
 
 const opcodes = @import("opcodes");
 const Interpreter = @import("../../Interpreter.zig");
+const Trap = Interpreter.Trap;
 const runtime = @import("../../runtime.zig");
 
 const Instr = @import("../Instr.zig");
