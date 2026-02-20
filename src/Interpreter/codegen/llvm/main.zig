@@ -1594,6 +1594,36 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
         const int_ty = float_info.int_ty;
         const prefix = float_info.prefix;
 
+        for (&[6]struct { llvm.Builder.FloatCondition, []const u8 }{
+            .{ .oeq, "eq" },
+            .{ .une, "ne" },
+            .{ .olt, "lt" },
+            .{ .ogt, "gt" },
+            .{ .ole, "le" },
+            .{ .oge, "ge" },
+        }) |info| {
+            const cond, const name = info;
+            var cmp = try b.opcodeHandlerFromPrefixedName(ByteOpcode, prefix, name);
+            cmp.wip.cursor = .{ .block = try cmp.wip.block(0, "Entry") };
+            const bin_op = try cmp.binOp(b, float_ty);
+            try bin_op.writeResult(
+                &cmp,
+                try cmp.wip.cast(
+                    .zext,
+                    try cmp.wip.fcmp(.normal, cond, bin_op.c_1, bin_op.c_2, ""),
+                    .i32,
+                    "",
+                ),
+            );
+            const new_vsp = try cmp.adjustVspBy(b, -1);
+            try cmp.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&cmp.wip),
+                .vsp = new_vsp,
+                .stp = OpcodeHandlerParam.stp.arg(&cmp.wip),
+            });
+            try cmp.finish(b);
+        }
+
         for (&[4]WipFunction.Instruction.Tag{
             .fadd,
             .fsub,
