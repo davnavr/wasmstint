@@ -1586,6 +1586,14 @@ const FloatInfo = struct {
             },
         };
     }
+
+    fn floatBounds(b: *llvm.Builder, min: u32, max: u32) Oom!struct { Value, Value } {
+        return .{ try b.floatValue(@bitCast(min)), try b.floatValue(@bitCast(max)) };
+    }
+
+    fn doubleBounds(b: *llvm.Builder, min: u64, max: u64) Oom!struct { Value, Value } {
+        return .{ try b.doubleValue(@bitCast(min)), try b.doubleValue(@bitCast(max)) };
+    }
 };
 
 fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
@@ -1819,6 +1827,142 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
                 .vsp = OpcodeHandlerParam.vsp.arg(&conv.wip),
                 .stp = OpcodeHandlerParam.stp.arg(&conv.wip),
             });
+            try conv.finish(b);
+        }
+        for ([4]struct { WipFunction.Instruction.Tag, Type }{
+            .{ .fptosi, .i32 },
+            .{ .fptoui, .i32 },
+            .{ .fptosi, .i64 },
+            .{ .fptoui, .i64 },
+        }) |info| {
+            const cast, const to_int_ty = info;
+            _ = b.scratch.reset(.retain_capacity);
+            var conv = try b.opcodeHandler(
+                Opcode.fromName(
+                    ByteOpcode,
+                    try std.fmt.allocPrint(b.scratch.allocator(), "{t}.trunc_{s}_{c}", .{
+                        to_int_ty,
+                        float_info.prefix,
+                        @tagName(cast)[4],
+                    }),
+                ),
+            );
+            const entry_blk = try conv.wip.block(0, "Entry");
+            conv.wip.cursor = .{ .block = entry_blk };
+            const trap_ip = try conv.wip.gep(
+                .inbounds,
+                .i8,
+                OpcodeHandlerParam.vip.arg(&conv.wip),
+                &.{try b.sizeIntValue(-1)},
+                "",
+            );
+            const un_op = try conv.unOp(b, float_ty);
+            const is_nan = try conv.wip.fcmp(.normal, .uno, un_op.c_1, un_op.c_1, "");
+            const not_nan = try conv.wip.block(1, "NotNan");
+            const trap = try conv.wip.block(3, "Trap");
+            _ = try conv.wip.brCond(is_nan, trap, not_nan, .else_likely);
+
+            const in_bounds = try conv.wip.block(1, "InBounds");
+            conv.wip.cursor = .{ .block = not_nan };
+            const min_bound, const max_bound = switch (float_ty) {
+                .float => switch (to_int_ty) {
+                    .i32 => try FloatInfo.floatBounds(
+                        &b.module,
+                        switch (cast) {
+                            .fptosi => 0xCF00_0000, // -2_147_483_648
+                            .fptoui => 0xBF7F_FFFF, // -0.99...
+                            else => unreachable,
+                        },
+                        switch (cast) {
+                            .fptosi => 0x4EFF_FFFF,
+                            .fptoui => 0x4F7F_FFFF,
+                            else => unreachable,
+                        },
+                    ),
+                    .i64 => try FloatInfo.floatBounds(
+                        &b.module,
+                        switch (cast) {
+                            .fptosi => 0xDF00_0000, // -9_223_372_036_854_776_000
+                            .fptoui => 0xBF7F_FFFF, // -0.9999...
+                            else => unreachable,
+                        },
+                        switch (cast) {
+                            .fptosi => 0x5EFF_FFFF, // 9_223_371_487_098_962_000
+                            .fptoui => 0x5F7F_FFFF, // 18_446_742_974_197_924_000
+                            else => unreachable,
+                        },
+                    ),
+                    else => unreachable,
+                },
+                .double => switch (to_int_ty) {
+                    .i32 => try FloatInfo.doubleBounds(
+                        &b.module,
+                        switch (cast) {
+                            .fptosi => 0xC1E0_0000_001F_FFFF,
+                            .fptoui => 0xBFEF_FFFF_FFFF_FFFF, // -0.99...
+                            else => unreachable,
+                        },
+                        switch (cast) {
+                            .fptosi => 0x41DF_FFFF_FFFF_FFFF,
+                            .fptoui => 0x41EF_FFFF_FFFF_FFFF, // 4_294_967_295.99...
+                            else => unreachable,
+                        },
+                    ),
+                    .i64 => try FloatInfo.doubleBounds(
+                        &b.module,
+                        switch (cast) {
+                            .fptosi => 0xC3E0_0000_0000_0000, // -9_223_372_036_854_776_000
+                            .fptoui => 0xBFEF_FFFF_FFFF_FFFF, // -0.9999999999999999...
+                            else => unreachable,
+                        },
+                        switch (cast) {
+                            .fptosi => 0x43DF_FFFF_FFFF_FFFF, // 9_223_372_036_854_775_000
+                            .fptoui => 0x43EF_FFFF_FFFF_FFFF, // 18_446_744_073_709_550_000
+                            else => unreachable,
+                        },
+                    ),
+                    else => unreachable,
+                },
+                else => unreachable,
+            };
+            const above_min_bound = try conv.wip.block(1, "InBounds");
+            _ = try conv.wip.brCond(
+                try conv.wip.fcmp(.normal, .oge, un_op.c_1, min_bound, ""),
+                above_min_bound,
+                trap,
+                .then_likely,
+            );
+
+            conv.wip.cursor = .{ .block = above_min_bound };
+            _ = try conv.wip.brCond(
+                try conv.wip.fcmp(.normal, .ole, un_op.c_1, max_bound, ""),
+                in_bounds,
+                trap,
+                .then_likely,
+            );
+
+            conv.wip.cursor = .{ .block = in_bounds };
+            try un_op.writeResult(&conv, try conv.wip.cast(cast, un_op.c_1, to_int_ty, ""));
+            try conv.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&conv.wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(&conv.wip),
+                .stp = OpcodeHandlerParam.stp.arg(&conv.wip),
+            });
+
+            conv.wip.cursor = .{ .block = trap };
+            const trap_code = (try conv.wip.phi(b.size_type, ""));
+            _ = try conv.wip.callIntrinsicAssumeCold();
+            const overflow = try NumericTrapCode.integer_overflow.toValue(b);
+            trap_code.finish(
+                &.{
+                    try NumericTrapCode.invalid_conversion_to_integer.toValue(b),
+                    overflow,
+                    overflow,
+                },
+                &.{ entry_blk, not_nan, above_min_bound },
+                &conv.wip,
+            );
+            try conv.jmpTrapWithNumericCode(b, trap_ip, trap_code.toValue());
             try conv.finish(b);
         }
     }
