@@ -687,6 +687,7 @@ const OpcodeHandler = struct {
     }
 
     fn adjustVspBy(handler: *OpcodeHandler, b: *Builder, amt: i64) Oom!Value {
+        std.debug.assert(amt != 0);
         return try handler.wip.gep(
             .inbounds,
             b.value_structs.i64,
@@ -1573,7 +1574,124 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
 }
 
 fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
-    for (&[2]Type{ .i32, .i64 }) |int_ty| {
+    const size_1 = try b.sizeIntValue(1);
+    const leb_continue_bit = try b.module.intValue(.i8, 0x80);
+    const leb_value_bits = try b.module.intValue(.i8, 0x7F);
+    for (
+        &[2]Type{ .i32, .i64 },
+        &[2]u7{ 32, 64 },
+        &[2]u8{ 5, 10 },
+    ) |int_ty, bit_width, max_leb_size| {
+        const zero = try b.module.intValue(int_ty, 0);
+        {
+            const max_shift = try b.module.intValue(int_ty, (max_leb_size - 1) * 7);
+            var op = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), "const");
+            const entry_blk = try op.wip.block(0, "Entry");
+            op.wip.cursor = .{ .block = entry_blk };
+
+            const loop_body = try op.wip.block(2, "LoopBody");
+            _ = try op.wip.br(loop_body);
+
+            op.wip.cursor = .{ .block = loop_body };
+            const current_vip = try op.wip.phi(.ptr, "VIP");
+            const current_acc = try op.wip.phi(int_ty, "");
+            const current_shift = try op.wip.phi(int_ty, "shift");
+            _ = try op.wip.callIntrinsic(.normal, .none, .assume, &.{}, &.{
+                try op.wip.icmp(.ule, current_shift.toValue(), max_shift, ""),
+            }, "");
+
+            const loaded_byte = try op.wip.load(
+                .normal,
+                .i8,
+                current_vip.toValue(),
+                .default,
+                "byte",
+            );
+            const new_bits = try op.wip.bin(.@"and", loaded_byte, leb_value_bits, "");
+            const acc_with_current_byte = try op.wip.bin(
+                .@"or",
+                current_acc.toValue(),
+                try op.wip.bin(
+                    .shl,
+                    try op.wip.cast(.zext, new_bits, int_ty, ""),
+                    current_shift.toValue(),
+                    "",
+                ),
+                "",
+            );
+
+            const has_more = try op.wip.icmp(
+                .eq,
+                try op.wip.bin(.@"and", loaded_byte, leb_continue_bit, ""),
+                leb_continue_bit,
+                "",
+            );
+            const new_vip = try op.wip.gep(.inbounds, .i8, current_vip.toValue(), &.{size_1}, "");
+            current_vip.finish(
+                &.{ OpcodeHandlerParam.vip.arg(&op.wip), new_vip },
+                &.{ entry_blk, loop_body },
+                &op.wip,
+            );
+            const new_shift = try op.wip.bin(
+                .@"add nsw",
+                current_shift.toValue(),
+                try b.module.intValue(int_ty, 7),
+                "",
+            );
+            current_shift.finish(&.{ zero, new_shift }, &.{ entry_blk, loop_body }, &op.wip);
+            current_acc.finish(
+                &.{ zero, acc_with_current_byte },
+                &.{ entry_blk, loop_body },
+                &op.wip,
+            );
+
+            const decoded = try op.wip.block(1, "ConstDecoded");
+            _ = try op.wip.brCond(has_more, loop_body, decoded, .else_likely);
+
+            const done = try op.wip.block(2, "Done");
+            op.wip.cursor = .{ .block = decoded };
+            const sign_ext = try op.wip.block(1, "SignExtend");
+            const needs_sign_extension = try op.wip.icmp(.ult, new_shift, max_shift, "");
+            _ = try op.wip.brCond(needs_sign_extension, sign_ext, done, .none);
+
+            op.wip.cursor = .{ .block = sign_ext };
+            const ext_shift_amt = try op.wip.bin(
+                .@"sub nuw",
+                try b.module.intValue(int_ty, bit_width),
+                new_shift,
+                "",
+            );
+            const acc_sign_extended = try op.wip.bin(
+                .@"ashr exact",
+                try op.wip.bin(.@"shl nuw", acc_with_current_byte, ext_shift_amt, ""),
+                ext_shift_amt,
+                "",
+            );
+            _ = try op.wip.br(done);
+
+            op.wip.cursor = .{ .block = done };
+            const result = try op.wip.phi(int_ty, "c");
+            result.finish(
+                &.{ acc_with_current_byte, acc_sign_extended },
+                &.{ decoded, sign_ext },
+                &op.wip,
+            );
+
+            _ = try op.wip.store(
+                .normal,
+                result.toValue(),
+                OpcodeHandlerParam.vsp.arg(&op.wip),
+                value_stack_alignment,
+            );
+            const new_vsp = try op.adjustVspBy(b, 1);
+            try op.jmpToNextHandler(b, .{
+                .vip = new_vip,
+                .vsp = new_vsp,
+                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
+            });
+            try op.finish(b);
+        }
+
         for (&[6]WipFunction.Instruction.Tag{
             .add,
             .sub,
@@ -1606,7 +1724,6 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
                 else => unreachable,
             }),
         );
-        const zero = try b.module.intValue(int_ty, 0);
         const neg_one = try b.module.intValue(int_ty, -1);
         {
             var div_s = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), "div_s");
