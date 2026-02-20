@@ -1561,6 +1561,10 @@ const FloatInfo = struct {
     int_ty: Type,
     prefix: []const u8,
     canonical_nan: Value,
+    /// Of type `int_ty`.
+    sign_bit: Value,
+    /// Of type `int_ty`.
+    magnitude_mask: Value,
 
     fn init(b: *llvm.Builder) Oom![2]FloatInfo {
         return [2]FloatInfo{
@@ -1569,12 +1573,16 @@ const FloatInfo = struct {
                 .int_ty = .i32,
                 .prefix = "f32",
                 .canonical_nan = try b.floatValue(@bitCast(@as(u32, 0x7FC0_0000))),
+                .sign_bit = try b.intValue(.i32, 0x8000_0000),
+                .magnitude_mask = try b.intValue(.i32, 0x7FFF_FFFF),
             },
             .{
                 .float_ty = .double,
                 .int_ty = .i64,
                 .prefix = "f64",
                 .canonical_nan = try b.doubleValue(@bitCast(@as(u64, 0x7FF8_0000_0000_0000))),
+                .sign_bit = try b.intValue(.i64, 0x8000_0000_0000_0000),
+                .magnitude_mask = try b.intValue(.i64, 0x7FFF_FFFF_FFFF_FFFF),
             },
         };
     }
@@ -1676,6 +1684,33 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try op.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&op.wip),
                 .vsp = OpcodeHandlerParam.vsp.arg(&op.wip),
+                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
+            });
+            try op.finish(b);
+        }
+
+        {
+            var op = try b.opcodeHandlerFromPrefixedName(
+                ByteOpcode,
+                prefix,
+                "copysign",
+            );
+            op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
+            // Less instructions if done the scalar way instead of calling the copysign intrinsic
+            const bin_op = try op.binOp(b, float_info.int_ty);
+            try bin_op.writeResult(
+                &op,
+                try op.wip.bin(
+                    .@"or",
+                    try op.wip.bin(.@"and", bin_op.c_1, float_info.magnitude_mask, ""),
+                    try op.wip.bin(.@"and", bin_op.c_2, float_info.sign_bit, ""),
+                    "",
+                ),
+            );
+            const new_vsp = try op.adjustVspBy(b, -1);
+            try op.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&op.wip),
+                .vsp = new_vsp,
                 .stp = OpcodeHandlerParam.stp.arg(&op.wip),
             });
             try op.finish(b);
