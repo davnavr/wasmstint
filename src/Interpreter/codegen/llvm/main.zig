@@ -483,6 +483,9 @@ const Builder = struct {
             .{ .linkage = .internal, .preemption = .dso_local },
         );
         func.setAttributes(b.opcode_handler.fn_attrs, &b.module);
+        if (b.target.cpu.arch.isX86()) {
+            func.setAlignment(.fromByteUnits(16), &b.module);
+        }
         b.opcode_handler_writing_lock.lock();
         return .{
             .wip = try WipFunction.init(
