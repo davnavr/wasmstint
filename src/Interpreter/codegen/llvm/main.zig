@@ -1849,21 +1849,9 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             );
             const entry_blk = try conv.wip.block(0, "Entry");
             conv.wip.cursor = .{ .block = entry_blk };
-            const trap_ip = try conv.wip.gep(
-                .inbounds,
-                .i8,
-                OpcodeHandlerParam.vip.arg(&conv.wip),
-                &.{try b.sizeIntValue(-1)},
-                "",
-            );
             const un_op = try conv.unOp(b, float_ty);
-            const is_nan = try conv.wip.fcmp(.normal, .uno, un_op.c_1, un_op.c_1, "");
-            const not_nan = try conv.wip.block(1, "NotNan");
-            const trap = try conv.wip.block(3, "Trap");
-            _ = try conv.wip.brCond(is_nan, trap, not_nan, .else_likely);
+            const trap = try conv.wip.block(2, "Trap");
 
-            const in_bounds = try conv.wip.block(1, "InBounds");
-            conv.wip.cursor = .{ .block = not_nan };
             const min_bound, const max_bound = switch (float_ty) {
                 .float => switch (to_int_ty) {
                     .i32 => try FloatInfo.floatBounds(
@@ -1933,6 +1921,7 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
                 .then_likely,
             );
 
+            const in_bounds = try conv.wip.block(1, "InBounds");
             conv.wip.cursor = .{ .block = above_min_bound };
             _ = try conv.wip.brCond(
                 try conv.wip.fcmp(.normal, .ole, un_op.c_1, max_bound, ""),
@@ -1950,19 +1939,22 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             });
 
             conv.wip.cursor = .{ .block = trap };
-            const trap_code = (try conv.wip.phi(b.size_type, ""));
             _ = try conv.wip.callIntrinsicAssumeCold();
-            const overflow = try NumericTrapCode.integer_overflow.toValue(b);
-            trap_code.finish(
-                &.{
-                    try NumericTrapCode.invalid_conversion_to_integer.toValue(b),
-                    overflow,
-                    overflow,
-                },
-                &.{ entry_blk, not_nan, above_min_bound },
-                &conv.wip,
+            const trap_ip = try conv.wip.gep(
+                .inbounds,
+                .i8,
+                OpcodeHandlerParam.vip.arg(&conv.wip),
+                &.{try b.sizeIntValue(-1)},
+                "",
             );
-            try conv.jmpTrapWithNumericCode(b, trap_ip, trap_code.toValue());
+            const is_nan = try conv.wip.fcmp(.normal, .uno, un_op.c_1, un_op.c_1, "");
+            try conv.jmpTrapWithNumericCode(b, trap_ip, try conv.wip.select(
+                .normal,
+                is_nan,
+                try NumericTrapCode.invalid_conversion_to_integer.toValue(b),
+                try NumericTrapCode.integer_overflow.toValue(b),
+                "",
+            ));
             try conv.finish(b);
         }
     }
