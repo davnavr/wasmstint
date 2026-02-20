@@ -1473,6 +1473,19 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
 }
 
 fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
+    const local_memmove_attrs = attrs: {
+        var attrs = FunctionAttributes.Wip{};
+        defer attrs.deinit(&b.module);
+        for (0..2) |i| {
+            try attrs.addParamAttr(i, .{ .@"align" = value_stack_alignment }, &b.module);
+            try attrs.addParamAttr(i, .noundef, &b.module);
+            try attrs.addParamAttr(i, .nonnull, &b.module);
+            try attrs.addParamAttr(i, .{ .dereferenceable = 16 }, &b.module);
+        }
+        break :attrs try attrs.finish(&b.module);
+    };
+    const local_memmove_overload = [3]Type{ .ptr, .ptr, b.size_type };
+    const value_size_bytes = try b.sizeIntValue(16);
     {
         var local_get = try b.opcodeHandler(.{ .byte = .@"local.get" });
         const wip = &local_get.wip;
@@ -1489,25 +1502,10 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
         );
         _ = try wip.callIntrinsic(
             .normal,
-            attrs: {
-                var attrs = FunctionAttributes.Wip{};
-                defer attrs.deinit(&b.module);
-                for (0..2) |i| {
-                    try attrs.addParamAttr(i, .{ .@"align" = value_stack_alignment }, &b.module);
-                    try attrs.addParamAttr(i, .noundef, &b.module);
-                    try attrs.addParamAttr(i, .nonnull, &b.module);
-                    try attrs.addParamAttr(i, .{ .dereferenceable = 16 }, &b.module);
-                }
-                break :attrs try attrs.finish(&b.module);
-            },
+            local_memmove_attrs,
             .memmove,
-            &.{ .ptr, .ptr, b.size_type },
-            &.{
-                OpcodeHandlerParam.vsp.arg(wip),
-                src_addr,
-                try b.sizeIntValue(16),
-                .false,
-            },
+            &local_memmove_overload,
+            &.{ OpcodeHandlerParam.vsp.arg(wip), src_addr, value_size_bytes, .false },
             "",
         );
 
@@ -1518,6 +1516,37 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
             .stp = OpcodeHandlerParam.stp.arg(wip),
         });
         try local_get.finish(b);
+    }
+    {
+        var local_set = try b.opcodeHandler(.{ .byte = .@"local.set" });
+        const wip = &local_set.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const decode_result = try b.callDecodeUlebIdx(wip, OpcodeHandlerParam.vip.arg(wip));
+        const new_vip = try wip.extractValue(decode_result, &.{1}, "");
+        const dst_addr = try wip.gep(
+            .inbounds,
+            b.value_structs.i64,
+            OpcodeHandlerParam.locals.arg(wip),
+            &.{try wip.extractValue(decode_result, &.{0}, "")},
+            "",
+        );
+        _ = try wip.callIntrinsic(
+            .normal,
+            local_memmove_attrs,
+            .memmove,
+            &local_memmove_overload,
+            &.{ dst_addr, try local_set.operandAt(b, 0), value_size_bytes, .false },
+            "",
+        );
+
+        const new_vsp = try local_set.adjustVspBy(b, -1);
+        try local_set.jmpToNextHandler(b, .{
+            .vip = new_vip,
+            .vsp = new_vsp,
+            .stp = OpcodeHandlerParam.stp.arg(wip),
+        });
+        try local_set.finish(b);
     }
 }
 
