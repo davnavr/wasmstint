@@ -122,6 +122,7 @@ const Builder = struct {
     /// `usize`.
     size_type: Type = .none,
     target_info: TargetInfo,
+    float_info: [2]FloatInfo = undefined,
 
     scratch: *ArenaAllocator,
     module: llvm.Builder,
@@ -184,6 +185,8 @@ const Builder = struct {
                 .ccc,
             .opcode_handler = undefined,
         };
+
+        b.float_info = try FloatInfo.init(&b.module);
 
         inline for (comptime std.meta.fieldNames(@FieldType(Builder, "string_constants"))) |name| {
             @field(b.string_constants, name) = try b.module.string(name);
@@ -1394,7 +1397,7 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             });
             try op.finish(b);
         }
-        for ([2]struct { llvm.Builder.Intrinsic, []const u8 }{
+        for ([2]struct { Intrinsic, []const u8 }{
             .{ .fshl, "rotl" },
             .{ .fshr, "rotr" },
         }) |info| {
@@ -1421,7 +1424,7 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             });
             try op.finish(b);
         }
-        for ([2]struct { llvm.Builder.Intrinsic, []const u8 }{
+        for ([2]struct { Intrinsic, []const u8 }{
             .{ .ctlz, "clz" },
             .{ .cttz, "ctz" },
         }) |info| {
@@ -1550,12 +1553,49 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
     }
 }
 
+const FloatInfo = struct {
+    float_ty: Type,
+    int_ty: Type,
+    prefix: []const u8,
+    canonical_nan_bit: Value,
+
+    fn init(b: *llvm.Builder) Oom![2]FloatInfo {
+        return [2]FloatInfo{
+            .{
+                .float_ty = .float,
+                .int_ty = .i32,
+                .prefix = "f32",
+                .canonical_nan_bit = try b.intValue(.i32, 0x0040_0000),
+            },
+            .{
+                .float_ty = .double,
+                .int_ty = .i64,
+                .prefix = "f64",
+                .canonical_nan_bit = try b.intValue(.i64, 0x0008_0000_0000_0000),
+            },
+        };
+    }
+
+    fn setCanonicalNanBit(info: *const FloatInfo, wip: *WipFunction, value: Value) Oom!Value {
+        std.debug.assert(value.typeOfWip(wip) == info.float_ty);
+        return try wip.cast(
+            .bitcast,
+            try wip.bin(
+                .@"or",
+                try wip.cast(.bitcast, value, info.int_ty, ""),
+                info.canonical_nan_bit,
+                "",
+            ),
+            info.float_ty,
+            "",
+        );
+    }
+};
+
 fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
-    for (&[2]struct { Type, []const u8 }{
-        .{ .float, "f32" },
-        .{ .double, "f64" },
-    }) |float_info| {
-        const float_ty, const prefix = float_info;
+    for (@as([]const FloatInfo, &b.float_info)) |*float_info| {
+        const float_ty = float_info.float_ty;
+        const prefix = float_info.prefix;
 
         for (&[4]WipFunction.Instruction.Tag{
             .fadd,
@@ -1571,6 +1611,37 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
             const bin_op = try op.binOp(b, float_ty);
             try bin_op.writeResult(&op, try op.wip.bin(op_tag, bin_op.c_1, bin_op.c_2, ""));
+            const new_vsp = try op.adjustVspBy(b, -1);
+            try op.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&op.wip),
+                .vsp = new_vsp,
+                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
+            });
+            try op.finish(b);
+        }
+
+        for (&[2]Intrinsic{ .minimum, .maximum }) |intrin| {
+            var op = try b.opcodeHandlerFromPrefixedName(
+                ByteOpcode,
+                prefix,
+                @tagName(intrin)[0..3],
+            );
+            op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
+            const bin_op = try op.binOp(b, float_ty);
+            const chosen = try op.wip.callIntrinsic(
+                .normal,
+                .none,
+                intrin,
+                &.{float_ty},
+                &.{ bin_op.c_1, bin_op.c_2 },
+                "",
+            );
+            const is_nan = try op.wip.fcmp(.normal, .uno, chosen, chosen, "");
+            const set_canonical_nan_bit = try float_info.setCanonicalNanBit(&op.wip, chosen);
+            try bin_op.writeResult(
+                &op,
+                try op.wip.select(.normal, is_nan, set_canonical_nan_bit, chosen, ""),
+            );
             const new_vsp = try op.adjustVspBy(b, -1);
             try op.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&op.wip),
@@ -1596,6 +1667,7 @@ const Constant = llvm.Builder.Constant;
 const Global = llvm.Builder.Global;
 const Function = llvm.Builder.Function;
 const FunctionAttributes = llvm.Builder.FunctionAttributes;
+const Intrinsic = llvm.Builder.Intrinsic;
 const String = llvm.Builder.String;
 const StrtabString = llvm.Builder.StrtabString;
 const Type = llvm.Builder.Type;
