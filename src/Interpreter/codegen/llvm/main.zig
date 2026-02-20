@@ -1013,6 +1013,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     try buildControlOpcodeHandlers(b);
     try buildLocalOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
+    try buildFloatOpcodeHandlers(b);
 
     try b.setDispatchTableInitializer(ByteOpcode);
 }
@@ -1545,6 +1546,38 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
                 .stp = OpcodeHandlerParam.stp.arg(&cmp.wip),
             });
             try cmp.finish(b);
+        }
+    }
+}
+
+fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
+    for (&[2]struct { Type, []const u8 }{
+        .{ .float, "f32" },
+        .{ .double, "f64" },
+    }) |float_info| {
+        const float_ty, const prefix = float_info;
+
+        for (&[4]WipFunction.Instruction.Tag{
+            .fadd,
+            .fsub,
+            .fmul,
+            .fdiv,
+        }) |op_tag| {
+            var op = try b.opcodeHandlerFromPrefixedName(
+                ByteOpcode,
+                prefix,
+                @tagName(op_tag)[1..],
+            );
+            op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
+            const bin_op = try op.binOp(b, float_ty);
+            try bin_op.writeResult(&op, try op.wip.bin(op_tag, bin_op.c_1, bin_op.c_2, ""));
+            const new_vsp = try op.adjustVspBy(b, -1);
+            try op.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&op.wip),
+                .vsp = new_vsp,
+                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
+            });
+            try op.finish(b);
         }
     }
 }
