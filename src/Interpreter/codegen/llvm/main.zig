@@ -1799,6 +1799,28 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             });
             try neg.finish(b);
         }
+
+        for ([4]struct { WipFunction.Instruction.Tag, Type, []const u8 }{
+            .{ .sitofp, .i32, "convert_i32_s" },
+            .{ .uitofp, .i32, "convert_i32_u" },
+            .{ .sitofp, .i64, "convert_i64_s" },
+            .{ .uitofp, .i64, "convert_i64_u" },
+        }) |info| {
+            const cast, const to_int_ty, const name = info;
+            var conv = try b.opcodeHandlerFromPrefixedName(ByteOpcode, prefix, name);
+            conv.wip.cursor = .{ .block = try conv.wip.block(0, "Entry") };
+            const un_op = try conv.unOp(b, to_int_ty);
+            try un_op.writeResult(
+                &conv,
+                try conv.wip.cast(cast, un_op.c_1, float_ty, ""),
+            );
+            try conv.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&conv.wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(&conv.wip),
+                .stp = OpcodeHandlerParam.stp.arg(&conv.wip),
+            });
+            try conv.finish(b);
+        }
     }
 }
 
