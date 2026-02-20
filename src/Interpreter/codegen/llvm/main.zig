@@ -1053,7 +1053,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         );
         {
             var attrs = try b.opcode_handler.fn_attrs.toWip(&b.module);
-            try b.fnAttributes(&attrs, &.{ .mustprogress, .willreturn, .cold });
+            try b.fnAttributes(&attrs, &.{ .mustprogress, .cold });
             try b.setFnAttributes(b.out_of_fuel_handler, &attrs);
         }
         var wip = try b.wipFunction(b.out_of_fuel_handler);
@@ -1068,7 +1068,6 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         {
             var attrs = FunctionAttributes.Wip{};
             try b.commonFnAttributes(&attrs);
-            try attrs.addFnAttr(.willreturn, &b.module);
             try b.setFnAttributes(helper, &attrs);
         }
 
@@ -1251,7 +1250,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         );
         var attrs = FunctionAttributes.Wip{};
         try b.commonFnAttributes(&attrs);
-        try b.fnAttributes(&attrs, &.{ .mustprogress, .willreturn, .norecurse, .cold });
+        try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .cold });
         try b.setFnAttributes(b.trap_with_numeric_code, &attrs);
     }
     {
@@ -1277,7 +1276,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         );
         var attrs = FunctionAttributes.Wip{};
         try b.commonFnAttributes(&attrs);
-        try b.fnAttributes(&attrs, &.{ .mustprogress, .willreturn, .norecurse, .cold });
+        try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .cold });
         try b.setFnAttributes(b.trap_memory_access_oob, &attrs);
     }
 
@@ -1337,7 +1336,6 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         {
             var attrs = FunctionAttributes.Wip{};
             try b.commonFnAttributes(&attrs);
-            try attrs.addFnAttr(.willreturn, &b.module);
             try b.setFnAttributes(helper, &attrs);
         }
 
@@ -1416,6 +1414,66 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
             .stp = OpcodeHandlerParam.stp.arg(&end.wip),
         });
         try end.finish(b);
+    }
+    {
+        const helper = try b.addFunction(
+            try b.strtabStringSymbolPrefixed("invokeWithinWasm"),
+            try b.fnType(
+                .i32,
+                &[10]Type{ .ptr, .ptr, .ptr, .ptr, b.size_type, .ptr, .ptr, .ptr, .ptr, .ptr },
+            ),
+            b.ffi_call_conv,
+            .{ .linkage = .external, .preemption = .dso_local },
+        );
+        {
+            var attrs = FunctionAttributes.Wip{};
+            try b.commonFnAttributes(&attrs);
+            try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse });
+            try b.setFnAttributes(helper, &attrs);
+        }
+
+        var call = try b.opcodeHandler(.{ .byte = .call });
+        call.wip.cursor = .{ .block = try call.wip.block(0, "Entry") };
+        const start_vip = OpcodeHandlerParam.vip.arg(&call.wip);
+        const call_ip = try call.wip.gep(.inbounds, .i8, start_vip, &.{try b.sizeIntValue(-1)}, "");
+
+        const decode_func_idx = try b.callDecodeUlebIdx(&call.wip, start_vip);
+        const new_vip = try call.wip.extractValue(decode_func_idx, &.{1}, "vip");
+        const func_idx = try call.wip.cast(
+            .zext,
+            try call.wip.extractValue(decode_func_idx, &.{0}, "func_idx"),
+            b.size_type,
+            "",
+        );
+
+        var helper_args = [10]Value{
+            if (b.options.optimize == .Debug)
+                OpcodeHandlerParam.locals.arg(&call.wip)
+            else
+                try b.module.undefValue(.ptr),
+            OpcodeHandlerParam.vsp.arg(&call.wip),
+            OpcodeHandlerParam.module.arg(&call.wip),
+            OpcodeHandlerParam.fuel.arg(&call.wip),
+            func_idx,
+            OpcodeHandlerParam.ctx.arg(&call.wip),
+            new_vip,
+            OpcodeHandlerParam.stp.arg(&call.wip),
+            OpcodeHandlerParam.eip.arg(&call.wip),
+            call_ip,
+        };
+        _ = try call.wip.ret(
+            try call.wip.call(
+                .tail,
+                b.ffi_call_conv,
+                .none,
+                helper.typeOf(&b.module),
+                helper.toValue(&b.module),
+                &helper_args,
+                "",
+            ),
+        );
+
+        try call.finish(b);
     }
 }
 

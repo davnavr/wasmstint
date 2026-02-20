@@ -5,7 +5,7 @@ pub const OpcodeHandler = fn () callconv(.naked) Transition;
 
 const symbol_prefix = @import("options").symbol_prefix;
 
-const calling_convention: CallingConvention = cc: {
+const ffi_cc: CallingConvention = cc: {
     if (builtin.cpu.arch == .x86_64 and
         CallingConvention.c == .x86_64_sysv and
         builtin.zig_backend == .stage2_llvm)
@@ -20,7 +20,7 @@ const calling_convention: CallingConvention = cc: {
 const opcodeHandlerTrampoline = @extern(
     *const fn (
         locals: common.Locals,
-        sp: Sp,
+        vsp: Sp,
         module: runtime.ModuleInst,
         fuel: *const Interpreter.Fuel,
         memories: [*]const *runtime.MemInst,
@@ -29,7 +29,7 @@ const opcodeHandlerTrampoline = @extern(
         stp: Stp,
         eip: Eip,
         handler: *const OpcodeHandler,
-    ) callconv(calling_convention) Transition,
+    ) callconv(ffi_cc) Transition,
     .{ .name = symbol_prefix ++ "opcodeHandlerTrampoline" },
 );
 
@@ -105,7 +105,7 @@ fn interruptOutOfFuel(
     sp: Sp,
     stp: Stp,
     ctx: *Interpreter,
-) callconv(calling_convention) Transition {
+) callconv(ffi_cc) Transition {
     return Transition.interrupted(.init(vip, eip), sp, stp, ctx, .out_of_fuel);
 }
 
@@ -121,7 +121,7 @@ fn returnFromWasm(
     _: Stp,
     old_eip: Eip,
     _: *const OpcodeHandler,
-) callconv(calling_convention) Transition {
+) callconv(ffi_cc) Transition {
     const popped = ctx.stack.popFrame(old_sp, .from_stack_top);
     if (builtin.mode == .Debug) {
         std.debug.assert( // module mismatch
@@ -199,6 +199,90 @@ fn returnFromWasm(
     );
 }
 
+inline fn resumeAfterInvokeWithinWasm(
+    old_instr: Instr,
+    sp: Sp,
+    fuel: *Interpreter.Fuel,
+    stp: Stp,
+    locals: common.Locals,
+    module: runtime.ModuleInst,
+    interp: *Interpreter,
+) Transition {
+    if (builtin.zig_backend == .stage2_x86_64) {
+        // trampoline continues execution
+        return Transition.interrupted(old_instr, sp, stp, interp, .out_of_fuel);
+    } else {
+        var instr = old_instr;
+        const handler = instr.readNextOpcodeHandler(fuel, locals, module, interp);
+        return @call(
+            .always_tail,
+            @as(@TypeOf(&invokeWithinWasm), @ptrCast(opcodeHandlerTrampoline)),
+            .{
+                locals,
+                sp,
+                module,
+                fuel,
+                @intFromPtr(module.header().mems),
+                interp,
+                instr.next,
+                stp,
+                instr.end,
+                @as(*anyopaque, @ptrCast(@alignCast(handler))),
+            },
+        );
+    }
+}
+
+fn invokeWithinWasm(
+    locals_debug: common.Locals,
+    vsp: Sp,
+    module: runtime.ModuleInst,
+    fuel: *Interpreter.Fuel,
+    func_idx: usize,
+    ctx: *Interpreter,
+    vip: Ip,
+    stp: Stp,
+    eip: Eip,
+    call_ip_int: *anyopaque,
+) callconv(ffi_cc) Transition {
+    const call_ip: Ip = @ptrCast(call_ip_int);
+    switch (@as(opcodes.ByteOpcode, @enumFromInt(call_ip[0]))) {
+        .call => {},
+        else => |bad| switch (builtin.mode) {
+            .Debug, .ReleaseSafe => std.debug.panic(
+                "{t} (0x{X:0>2}) is not a valid call instruction",
+                .{ bad, @intFromEnum(bad) },
+            ),
+            .ReleaseFast, .ReleaseSmall => unreachable,
+        },
+    }
+
+    if (builtin.mode == .Debug) {
+        std.debug.assert( // bad locals ptr
+            @intFromPtr(ctx.stack.currentFrame().?.localValues(&ctx.stack).ptr) ==
+                @intFromPtr(locals_debug.ptr),
+        );
+    }
+
+    const callee = module.inner.funcInst(@enumFromInt(func_idx));
+    const arg_count = callee.signature().param_count;
+    const saved_sp = Stack.Saved.pop(
+        Stack.Values.init(vsp, &ctx.stack, arg_count, arg_count),
+        arg_count,
+    );
+
+    return common.invokeWithinWasm(
+        Instr.init(vip, eip),
+        call_ip,
+        saved_sp,
+        fuel,
+        stp,
+        ctx,
+        callee,
+        resumeAfterInvokeWithinWasm,
+    );
+}
+
 fn trapWithNumericCode(
     trap_ip: Ip,
     sp: Sp,
@@ -206,7 +290,7 @@ fn trapWithNumericCode(
     stp: Stp,
     ctx: *Interpreter,
     code: usize,
-) callconv(calling_convention) Transition {
+) callconv(ffi_cc) Transition {
     @branchHint(.cold);
     const trap = switch (@as(Trap.Code, @enumFromInt(code))) {
         inline .unreachable_code_reached,
@@ -231,7 +315,7 @@ fn trapMemoryAccessOutOfBounds(
     address: usize,
     offset: usize,
     size: usize,
-) callconv(calling_convention) Transition {
+) callconv(ffi_cc) Transition {
     @branchHint(.cold);
     const oob_info = Trap.MemoryAccessOutOfBounds.init(@enumFromInt(mem_idx), .access, .{
         .address = address + offset,
@@ -246,6 +330,7 @@ fn trapMemoryAccessOutOfBounds(
 comptime {
     for (&[_][]const u8{
         "interruptOutOfFuel",
+        "invokeWithinWasm",
         "returnFromWasm",
         "trapWithNumericCode",
         "trapMemoryAccessOutOfBounds",
@@ -254,7 +339,7 @@ comptime {
     }
 }
 
-fn panicInvalidByteOpcode(ip: Ip, eip: Eip) callconv(calling_convention) noreturn {
+fn panicInvalidByteOpcode(ip: Ip, eip: Eip) callconv(ffi_cc) noreturn {
     @branchHint(.cold);
     const bad_ip = ip - 1;
     const bad_opcode: u8 = bad_ip[0];
@@ -290,7 +375,7 @@ const Trap = Interpreter.Trap;
 const runtime = @import("../../runtime.zig");
 
 const Instr = @import("../Instr.zig");
-// const Stack = @import("../Stack.zig");
+const Stack = @import("../Stack.zig");
 
 const common = @import("../handlers.zig");
 const Transition = common.Transition;
