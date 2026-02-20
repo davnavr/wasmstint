@@ -1650,6 +1650,21 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             });
             try op.finish(b);
         }
+        {
+            var sqrt = try b.opcodeHandlerFromPrefixedName(ByteOpcode, prefix, "sqrt");
+            sqrt.wip.cursor = .{ .block = try sqrt.wip.block(0, "Entry") };
+            const un_op = try sqrt.unOp(b, float_ty);
+            try un_op.writeResult(
+                &sqrt,
+                try sqrt.wip.callIntrinsic(.normal, .none, .sqrt, &.{float_ty}, &.{un_op.c_1}, ""),
+            );
+            try sqrt.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&sqrt.wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(&sqrt.wip),
+                .stp = OpcodeHandlerParam.stp.arg(&sqrt.wip),
+            });
+            try sqrt.finish(b);
+        }
     }
 }
 
