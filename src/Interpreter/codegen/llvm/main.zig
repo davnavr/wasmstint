@@ -238,6 +238,7 @@ const Builder = struct {
                 var attrs = FunctionAttributes.Wip{};
                 defer attrs.deinit(&b.module);
                 try b.commonFnAttributes(&attrs);
+                try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse });
                 for (std.enums.values(OpcodeHandlerParam)) |param| {
                     const idx = @intFromEnum(param);
                     for (&[3]Attribute{ .nonnull, .nofree, .noundef }) |attr| {
