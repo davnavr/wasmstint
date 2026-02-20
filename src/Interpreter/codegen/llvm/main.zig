@@ -146,7 +146,7 @@ const Builder = struct {
     byte_opcode_lookup: std.EnumSet(ByteOpcode) = .initEmpty(),
 
     out_of_fuel_handler: Function.Index = .none,
-    skip_uleb_idx: Function.Index = .none,
+    skip_leb_idx: Function.Index = .none,
     decode_uleb_idx: Function.Index = .none,
     trap_with_numeric_code: Function.Index = .none,
     trap_memory_access_oob: Function.Index = .none,
@@ -532,10 +532,10 @@ const Builder = struct {
         std.debug.assert(vip.typeOfWip(wip) == .ptr);
         return wip.call(
             .normal,
-            b.skip_uleb_idx.ptr(&b.module).call_conv,
+            b.skip_leb_idx.ptr(&b.module).call_conv,
             .none,
-            b.skip_uleb_idx.typeOf(&b.module),
-            b.skip_uleb_idx.toValue(&b.module),
+            b.skip_leb_idx.typeOf(&b.module),
+            b.skip_leb_idx.toValue(&b.module),
             &.{vip},
             "",
         );
@@ -1111,15 +1111,15 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     const uleb_cont_mask = try b.module.intValue(.i8, 0x80);
     const size_1 = try b.sizeIntValue(1);
     {
-        b.skip_uleb_idx = try b.addFunction(
-            try b.strtabStringSymbolPrefixed("skipUlebIndex"),
+        b.skip_leb_idx = try b.addFunction(
+            try b.strtabStringSymbolPrefixed("skipLebIndex"),
             try b.fnType(.ptr, &.{.ptr}),
             if (b.target.cpu.arch == .x86_64) .preserve_mostcc else .fastcc,
             .{ .linkage = .internal, .preemption = .dso_local },
         );
-        b.skip_uleb_idx.setAttributes(uleb_helper_attrs, &b.module);
+        b.skip_leb_idx.setAttributes(uleb_helper_attrs, &b.module);
 
-        var wip = try b.wipFunction(b.skip_uleb_idx);
+        var wip = try b.wipFunction(b.skip_leb_idx);
         defer wip.deinit();
 
         const entry_blk = try wip.block(0, "Entry");
@@ -1301,6 +1301,17 @@ const NumericTrapCode = enum(u8) {
 };
 
 fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
+    {
+        var nop = try b.opcodeHandler(.{ .byte = .nop });
+        nop.wip.cursor = .{ .block = try nop.wip.block(0, "Entry") };
+        try nop.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&nop.wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(&nop.wip),
+            .stp = OpcodeHandlerParam.stp.arg(&nop.wip),
+        });
+        try nop.finish(b);
+    }
+
     const return_handler: Function.Index = ret: {
         var ret = try b.opcodeHandler(.{ .byte = .@"return" });
         const index = ret.wip.function;
