@@ -1649,6 +1649,34 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             });
             try sqrt.finish(b);
         }
+        for (&[4]Intrinsic{ .ceil, .floor, .trunc, .roundeven }) |intrin| {
+            var op = try b.opcodeHandlerFromPrefixedName(
+                ByteOpcode,
+                prefix,
+                if (intrin == .roundeven) "nearest" else @tagName(intrin),
+            );
+            op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
+            const un_op = try op.unOp(b, float_ty);
+            const rounded = try op.wip.callIntrinsic(
+                .normal,
+                .none,
+                intrin,
+                &.{float_ty},
+                &.{un_op.c_1},
+                "",
+            );
+            const is_nan = try op.wip.fcmp(.normal, .uno, rounded, rounded, "");
+            try un_op.writeResult(
+                &op,
+                try op.wip.select(.normal, is_nan, float_info.canonical_nan, rounded, ""),
+            );
+            try op.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&op.wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(&op.wip),
+                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
+            });
+            try op.finish(b);
+        }
     }
 }
 
