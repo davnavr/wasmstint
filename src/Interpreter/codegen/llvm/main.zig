@@ -636,21 +636,15 @@ const OpcodeHandler = struct {
     fn operandAt(
         handler: *OpcodeHandler,
         b: *Builder,
-        ty: Type,
         /// `0` means the value on top of the stack, `1` the value below that, and so on.
         index: u8,
     ) Oom!Value {
         const offset = -@as(i64, index) - 1;
-        const offset_mul: i64 = switch (ty) {
-            .i32 => 4,
-            .i64 => 2,
-            else => unreachable,
-        };
         return try handler.wip.gep(
             .inbounds,
-            ty,
+            b.value_structs.i64,
             OpcodeHandlerParam.vsp.arg(&handler.wip),
-            &.{try b.sizeIntValue(offset * offset_mul)},
+            &.{try b.sizeIntValue(offset)},
             "",
         );
     }
@@ -669,15 +663,10 @@ const OpcodeHandler = struct {
     /// Loads two operands of type `ty` from the operand stack, and calculates the `ptr`
     /// where the result is written.
     fn binOp(handler: *OpcodeHandler, b: *Builder, ty: Type) Oom!BinOpOperands {
-        const c_1_addr = try handler.operandAt(b, ty, 1);
+        const c_2_addr = try handler.operandAt(b, 0);
+        const c_1_addr = try handler.operandAt(b, 1);
         return .{
-            .c_2 = try handler.wip.load(
-                .normal,
-                ty,
-                try handler.operandAt(b, ty, 0),
-                value_stack_alignment,
-                "",
-            ),
+            .c_2 = try handler.wip.load(.normal, ty, c_2_addr, value_stack_alignment, ""),
             .c_1 = try handler.wip.load(.normal, ty, c_1_addr, value_stack_alignment, ""),
             .result = c_1_addr,
         };
@@ -694,7 +683,7 @@ const OpcodeHandler = struct {
     };
 
     fn unOp(handler: *OpcodeHandler, b: *Builder, ty: Type) Oom!UnOpOperands {
-        const result = try handler.operandAt(b, ty, 0);
+        const result = try handler.operandAt(b, 0);
         return .{
             .c_1 = try handler.wip.load(.normal, ty, result, value_stack_alignment, ""),
             .result = result,
@@ -713,7 +702,7 @@ const OpcodeHandler = struct {
     };
 
     fn testOp(handler: *OpcodeHandler, b: *Builder, ty: Type) Oom!TestOpOperands {
-        const result = try handler.operandAt(b, .i32, 0);
+        const result = try handler.operandAt(b, 0);
         return .{
             .c_1 = try handler.wip.load(.normal, ty, result, value_stack_alignment, ""),
             .result = result,
