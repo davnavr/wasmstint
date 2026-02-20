@@ -1728,6 +1728,18 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             });
             try abs.finish(b);
         }
+        {
+            var neg = try b.opcodeHandlerFromPrefixedName(ByteOpcode, prefix, "neg");
+            neg.wip.cursor = .{ .block = try neg.wip.block(0, "Entry") };
+            const un_op = try neg.unOp(b, float_ty);
+            try un_op.writeResult(&neg, try neg.wip.un(.fneg, un_op.c_1, ""));
+            try neg.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&neg.wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(&neg.wip),
+                .stp = OpcodeHandlerParam.stp.arg(&neg.wip),
+            });
+            try neg.finish(b);
+        }
     }
 }
 
