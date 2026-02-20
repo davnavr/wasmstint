@@ -694,10 +694,29 @@ const OpcodeHandler = struct {
     };
 
     fn unOp(handler: *OpcodeHandler, b: *Builder, ty: Type) Oom!UnOpOperands {
-        const addr = try handler.operandAt(b, ty, 0);
+        const result = try handler.operandAt(b, ty, 0);
         return .{
-            .c_1 = try handler.wip.load(.normal, ty, addr, value_stack_alignment, ""),
-            .result = addr,
+            .c_1 = try handler.wip.load(.normal, ty, result, value_stack_alignment, ""),
+            .result = result,
+        };
+    }
+
+    const TestOpOperands = struct {
+        c_1: Value,
+        /// A `ptr` where the `i32` result of the test is written.
+        result: Value,
+
+        fn writeResult(op: TestOpOperands, handler: *OpcodeHandler, result: Value) Oom!void {
+            std.debug.assert(result.typeOfWip(&handler.wip) == .i32);
+            _ = try handler.wip.store(.normal, result, op.result, value_stack_alignment);
+        }
+    };
+
+    fn testOp(handler: *OpcodeHandler, b: *Builder, ty: Type) Oom!TestOpOperands {
+        const result = try handler.operandAt(b, .i32, 0);
+        return .{
+            .c_1 = try handler.wip.load(.normal, ty, result, value_stack_alignment, ""),
+            .result = result,
         };
     }
 
@@ -999,16 +1018,6 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         var attrs = FunctionAttributes.Wip{};
         try b.commonFnAttributes(&attrs);
         try b.fnAttributes(&attrs, &.{ .mustprogress, .willreturn, .norecurse });
-        // for (&[6]Attribute{
-        //     .readonly,
-        //     .nonnull,
-        //     .noundef,
-        //     .{ .dereferenceable = 1 },
-        //     .@"noalias",
-        //     .nofree,
-        // }) |a| {
-        //     try attrs.addParamAttr(0, a, &b.module);
-        // }
         try b.setFnAttributes(b.decode_uleb_idx, &attrs);
     }
 
@@ -1498,6 +1507,55 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
                 .stp = OpcodeHandlerParam.stp.arg(&extend.wip),
             });
             try extend.finish(b);
+        }
+
+        {
+            var eqz = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), "eqz");
+            eqz.wip.cursor = .{ .block = try eqz.wip.block(0, "Entry") };
+            const test_op = try eqz.testOp(b, int_ty);
+            try test_op.writeResult(
+                &eqz,
+                try eqz.wip.cast(.zext, try eqz.wip.icmp(.eq, test_op.c_1, zero, ""), .i32, ""),
+            );
+            try eqz.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&eqz.wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(&eqz.wip),
+                .stp = OpcodeHandlerParam.stp.arg(&eqz.wip),
+            });
+            try eqz.finish(b);
+        }
+        for ([10]struct { llvm.Builder.IntegerCondition, []const u8 }{
+            .{ .eq, "eq" },
+            .{ .ne, "ne" },
+            .{ .slt, "lt_s" },
+            .{ .ult, "lt_u" },
+            .{ .sgt, "gt_s" },
+            .{ .ugt, "gt_u" },
+            .{ .sle, "le_s" },
+            .{ .ule, "le_u" },
+            .{ .sge, "ge_s" },
+            .{ .uge, "ge_u" },
+        }) |info| {
+            const cond, const name = info;
+            var cmp = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), name);
+            cmp.wip.cursor = .{ .block = try cmp.wip.block(0, "Entry") };
+            const rel_op = try cmp.binOp(b, int_ty);
+            try rel_op.writeResult(
+                &cmp,
+                try cmp.wip.cast(
+                    .zext,
+                    try cmp.wip.icmp(cond, rel_op.c_1, rel_op.c_2, ""),
+                    .i32,
+                    "",
+                ),
+            );
+            const new_vsp = try cmp.adjustVspBy(b, -1);
+            try cmp.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&cmp.wip),
+                .vsp = new_vsp,
+                .stp = OpcodeHandlerParam.stp.arg(&cmp.wip),
+            });
+            try cmp.finish(b);
         }
     }
 }
