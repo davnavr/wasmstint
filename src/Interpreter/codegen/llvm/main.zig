@@ -1311,6 +1311,17 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         });
         try nop.finish(b);
     }
+    for (&[2]ByteOpcode{ .block, .loop }) |opcode| {
+        var block = try b.opcodeHandler(.{ .byte = opcode });
+        block.wip.cursor = .{ .block = try block.wip.block(0, "Entry") };
+        const new_vip = try b.callSkipUlebIdx(&block.wip, OpcodeHandlerParam.vip.arg(&block.wip));
+        try block.jmpToNextHandler(b, .{
+            .vip = new_vip,
+            .vsp = OpcodeHandlerParam.vsp.arg(&block.wip),
+            .stp = OpcodeHandlerParam.stp.arg(&block.wip),
+        });
+        try block.finish(b);
+    }
 
     const return_handler: Function.Index = ret: {
         var ret = try b.opcodeHandler(.{ .byte = .@"return" });
