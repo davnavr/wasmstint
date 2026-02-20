@@ -1557,7 +1557,7 @@ const FloatInfo = struct {
     float_ty: Type,
     int_ty: Type,
     prefix: []const u8,
-    canonical_nan_bit: Value,
+    canonical_nan: Value,
 
     fn init(b: *llvm.Builder) Oom![2]FloatInfo {
         return [2]FloatInfo{
@@ -1565,30 +1565,15 @@ const FloatInfo = struct {
                 .float_ty = .float,
                 .int_ty = .i32,
                 .prefix = "f32",
-                .canonical_nan_bit = try b.intValue(.i32, 0x0040_0000),
+                .canonical_nan = try b.floatValue(@bitCast(@as(u32, 0x7FC0_0000))),
             },
             .{
                 .float_ty = .double,
                 .int_ty = .i64,
                 .prefix = "f64",
-                .canonical_nan_bit = try b.intValue(.i64, 0x0008_0000_0000_0000),
+                .canonical_nan = try b.doubleValue(@bitCast(@as(u64, 0x7FF8_0000_0000_0000))),
             },
         };
-    }
-
-    fn setCanonicalNanBit(info: *const FloatInfo, wip: *WipFunction, value: Value) Oom!Value {
-        std.debug.assert(value.typeOfWip(wip) == info.float_ty);
-        return try wip.cast(
-            .bitcast,
-            try wip.bin(
-                .@"or",
-                try wip.cast(.bitcast, value, info.int_ty, ""),
-                info.canonical_nan_bit,
-                "",
-            ),
-            info.float_ty,
-            "",
-        );
     }
 };
 
@@ -1637,10 +1622,9 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
                 "",
             );
             const is_nan = try op.wip.fcmp(.normal, .uno, chosen, chosen, "");
-            const set_canonical_nan_bit = try float_info.setCanonicalNanBit(&op.wip, chosen);
             try bin_op.writeResult(
                 &op,
-                try op.wip.select(.normal, is_nan, set_canonical_nan_bit, chosen, ""),
+                try op.wip.select(.normal, is_nan, float_info.canonical_nan, chosen, ""),
             );
             const new_vsp = try op.adjustVspBy(b, -1);
             try op.jmpToNextHandler(b, .{
