@@ -1070,7 +1070,14 @@ const OpcodeHandler = struct {
             // Want fast path to be copying <= 1 values
             _ = try wip.callIntrinsic(
                 .normal,
-                b.value_copy.attributes,
+                attrs: {
+                    var attrs = try b.value_copy.attributes.toWip(&b.module);
+                    defer attrs.deinit(&b.module);
+                    for (0..2) |i| {
+                        _ = try attrs.removeParamAttr(i, .dereferenceable);
+                    }
+                    break :attrs try attrs.finish(&b.module);
+                },
                 .memmove,
                 &b.value_copy.overload,
                 &.{ dst_vsp, src_vsp, copy_count_in_bytes, .false },
@@ -1442,6 +1449,7 @@ const NumericTrapCode = enum(u8) {
 
 fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
     const size_neg_1 = try b.sizeIntValue(-1);
+    const i32_0 = try b.module.intValue(.i32, 0);
     {
         var nop = try b.opcodeHandler(.{ .byte = .nop });
         nop.wip.cursor = .{ .block = try nop.wip.block(0, "Entry") };
@@ -1515,7 +1523,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         const condition = try br.wip.icmp(
             .ne,
             try br.wip.load(.normal, .i32, condition_ptr, value_stack_alignment, ""),
-            try b.module.intValue(.i32, 0),
+            i32_0,
             "",
         );
         const true_blk = try br.wip.block(1, "True");
@@ -1651,7 +1659,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         const condition = try br_if.wip.icmp(
             .ne,
             try br_if.wip.load(.normal, .i32, condition_ptr, value_stack_alignment, ""),
-            try b.module.intValue(.i32, 0),
+            i32_0,
             "",
         );
         const true_blk = try br_if.wip.block(1, "True");
@@ -1692,6 +1700,51 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
             .stp = new_stp.toValue(),
         });
         try br_if.finish(b);
+    }
+    {
+        var br_table = try b.opcodeHandler(.{ .byte = .br_table });
+        const wip = &br_table.wip;
+        wip.cursor = .{ .block = try br_table.wip.block(0, "Entry") };
+        const initial_vip = OpcodeHandlerParam.vip.arg(wip);
+        const decoded_label_count = try b.callDecodeUlebIdx(wip, initial_vip);
+        const label_count = try wip.extractValue(decoded_label_count, &.{0}, "");
+        // No need to actually read label indices
+
+        const n_ptr = try br_table.operandAt(b, 0);
+        const n_unsafe = try wip.load(.normal, .i32, n_ptr, value_stack_alignment, "");
+        const n = try wip.callIntrinsic(
+            .normal,
+            .none,
+            .umin,
+            &.{.i32},
+            &.{ n_unsafe, label_count }, // if label_count is 0, only default target is available
+            "",
+        );
+
+        const chosen_stp_entry = try wip.gep(
+            .inbounds,
+            b.side_table_entry,
+            OpcodeHandlerParam.stp.arg(wip),
+            &.{
+                // Likely to hit OOM before overflow could happen, but validation could could
+                // check to ensure a limit is not exceeded
+                n,
+            },
+            "",
+        );
+
+        const branch = try br_table.takeBranch(b, .{
+            .branch_ip = try br_table.wip.gep(.inbounds, .i8, initial_vip, &.{size_neg_1}, ""),
+            .vsp = n_ptr,
+            .stp = chosen_stp_entry,
+        });
+
+        try br_table.jmpToNextHandler(b, .{
+            .vip = branch.vip,
+            .vsp = branch.vsp,
+            .stp = branch.stp,
+        });
+        try br_table.finish(b);
     }
     {
         const helper = try b.addFunction(

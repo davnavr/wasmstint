@@ -43,8 +43,8 @@ pub inline fn callOpcodeHandler(
     ctx: *Interpreter,
 ) Transition {
     std.log.debug(
-        "VIP={*}, EIP={*}, VSP={*}, LOC={*}, MODULE={*}",
-        .{ instr.next, instr.end, ctx.stack_top.ptr, locals.ptr, module.inner },
+        "VIP={*}, EIP={*}, VSP={*}, LOC={*}, MODULE={*}, STP={*}",
+        .{ instr.next, instr.end, ctx.stack_top.ptr, locals.ptr, module.inner, stp },
     ); // TODO: remove this
     var transition = opcodeHandlerTrampoline(
         locals,
