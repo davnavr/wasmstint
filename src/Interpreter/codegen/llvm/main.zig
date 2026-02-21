@@ -1426,6 +1426,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         try b.setFnAttributes(b.trap_memory_access_oob, &attrs);
     }
 
+    try buildNopOpcodeHandlers(b);
     try buildControlOpcodeHandlers(b);
     try buildParametricOpcodeHandlers(b);
     try buildLocalOpcodeHandlers(b);
@@ -1448,11 +1449,16 @@ const NumericTrapCode = enum(u8) {
     }
 };
 
-fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
-    const size_neg_1 = try b.sizeIntValue(-1);
-    const i32_0 = try b.module.intValue(.i32, 0);
-    {
-        var nop = try b.opcodeHandler(.{ .byte = .nop });
+fn buildNopOpcodeHandlers(b: *Builder) Oom!void {
+    for (&[_]ByteOpcode{
+        .nop,
+        .@"i32.reinterpret_f32",
+        .@"i64.reinterpret_f64",
+        .@"f32.reinterpret_i32",
+        .@"f64.reinterpret_i64",
+    }) |opcode| {
+        // LLVM could maybe deduplicate these
+        var nop = try b.opcodeHandler(.{ .byte = opcode });
         nop.wip.cursor = .{ .block = try nop.wip.block(0, "Entry") };
         try nop.jmpToNextHandler(b, .{
             .vip = OpcodeHandlerParam.vip.arg(&nop.wip),
@@ -1461,6 +1467,11 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         });
         try nop.finish(b);
     }
+}
+
+fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
+    const size_neg_1 = try b.sizeIntValue(-1);
+    const i32_0 = try b.module.intValue(.i32, 0);
     for (&[2]ByteOpcode{ .block, .loop }) |opcode| {
         var block = try b.opcodeHandler(.{ .byte = opcode });
         block.wip.cursor = .{ .block = try block.wip.block(0, "Entry") };
