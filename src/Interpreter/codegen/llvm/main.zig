@@ -1981,8 +1981,48 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
 }
 
 fn buildMemoryStoreOpcodeHandlers(b: *Builder) Oom!void {
+    const extending_stores = [3]struct { std.mem.Alignment, Type, []const u8 }{
+        .{ .@"1", .i8, "store8" },
+        .{ .@"2", .i16, "store16" },
+        .{ .@"4", .i32, "store32" },
+    };
+
     for (&[2]Type{ .i32, .i64 }, &[2][]const u8{ "f32", "f64" }) |int_ty, float_name| {
         // value to store is on top of the stack, with the address below that
+        for (extending_stores[0..(if (int_ty == .i64) 3 else 2)]) |info| {
+            const access_size, const store_ty, const name = info;
+            var store = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), name);
+
+            store.wip.cursor = .{ .block = try store.wip.block(0, "Entry") };
+            const perform_store = try store.wip.block(1, "Store");
+            const access = try store.linearMemoryAccess(
+                b,
+                1,
+                access_size,
+                perform_store,
+            );
+
+            _ = try store.wip.store(
+                .normal,
+                try store.wip.cast(.trunc, try store.wip.load(
+                    .normal,
+                    int_ty,
+                    try store.operandAt(b, 0),
+                    value_stack_alignment,
+                    "",
+                ), store_ty, ""),
+                access.ptr,
+                byte_alignment,
+            );
+
+            const new_vsp = try store.adjustVspBy(b, -2);
+            try store.jmpToNextHandler(b, .{
+                .vip = access.vip,
+                .vsp = new_vsp,
+                .stp = OpcodeHandlerParam.stp.arg(&store.wip),
+            });
+            try store.finish(b);
+        }
 
         // LLVM might have function deduplication to deal with float versions
         for ([2][]const u8{ @tagName(int_ty), float_name }) |name| {
