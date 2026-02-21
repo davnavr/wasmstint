@@ -1010,9 +1010,10 @@ const OpcodeHandler = struct {
     fn takeBranch(handler: *OpcodeHandler, b: *Builder, info: struct {
         branch_ip: Value,
         vsp: Value,
+        stp: Value = .none,
     }) Oom!TakeBranch {
         const wip = &handler.wip;
-        const stp = OpcodeHandlerParam.stp.arg(wip);
+        const stp = if (info.stp == .none) OpcodeHandlerParam.stp.arg(wip) else info.stp;
 
         const delta_ip = try SideTableEntryField.delta_ip.load(handler, b, stp);
         const copy_count_in_values = try wip.cast(
@@ -1631,6 +1632,57 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
 
         try br.jmpToNextHandler(b, .{ .vip = branch.vip, .vsp = branch.vsp, .stp = branch.stp });
         try br.finish(b);
+    }
+    {
+        // Basically the `if` handler, with the condition reversed.
+        var br_if = try b.opcodeHandler(.{ .byte = .br_if });
+        br_if.wip.cursor = .{ .block = try br_if.wip.block(0, "Entry") };
+        const initial_vip = OpcodeHandlerParam.vip.arg(&br_if.wip);
+        const condition_ptr = try br_if.operandAt(b, 0);
+        const condition = try br_if.wip.icmp(
+            .ne,
+            try br_if.wip.load(.normal, .i32, condition_ptr, value_stack_alignment, ""),
+            try b.module.intValue(.i32, 0),
+            "",
+        );
+        const true_blk = try br_if.wip.block(1, "True");
+        const false_blk = try br_if.wip.block(1, "False");
+        const jmp_blk = try br_if.wip.block(2, "JmpToNextHandler");
+        _ = try br_if.wip.brCond(condition, true_blk, false_blk, .unpredictable);
+
+        br_if.wip.cursor = .{ .block = true_blk };
+        // No need to read label
+        const branch = try br_if.takeBranch(b, .{
+            .branch_ip = try br_if.wip.gep(.inbounds, .i8, initial_vip, &.{size_neg_1}, ""),
+            .vsp = condition_ptr,
+        });
+        _ = try br_if.wip.br(jmp_blk);
+
+        br_if.wip.cursor = .{ .block = false_blk };
+        const vip_after_block_type = try b.callSkipUlebIdx(&br_if.wip, initial_vip);
+        const false_stp = try br_if.wip.gep(
+            .inbounds,
+            b.side_table_entry,
+            OpcodeHandlerParam.stp.arg(&br_if.wip),
+            &.{try b.sizeIntValue(1)},
+            "",
+        );
+        _ = try br_if.wip.br(jmp_blk);
+
+        br_if.wip.cursor = .{ .block = jmp_blk };
+        const new_vip = try br_if.wip.phi(.ptr, "vip");
+        const new_vsp = try br_if.wip.phi(.ptr, "vsp");
+        const new_stp = try br_if.wip.phi(.ptr, "stp");
+        const phi_blocks = [2]Function.Block.Index{ true_blk, false_blk };
+        new_vip.finish(&.{ branch.vip, vip_after_block_type }, &phi_blocks, &br_if.wip);
+        new_vsp.finish(&.{ branch.vsp, condition_ptr }, &phi_blocks, &br_if.wip);
+        new_stp.finish(&.{ branch.stp, false_stp }, &phi_blocks, &br_if.wip);
+        try br_if.jmpToNextHandler(b, .{
+            .vip = new_vip.toValue(),
+            .vsp = new_vsp.toValue(),
+            .stp = new_stp.toValue(),
+        });
+        try br_if.finish(b);
     }
     {
         const helper = try b.addFunction(
