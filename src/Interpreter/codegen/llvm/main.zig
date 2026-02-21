@@ -419,6 +419,8 @@ const Builder = struct {
         const ty = try b.module.arrayType(len, .ptr);
         const variable = try b.module.addVariable(name_str, ty, .default);
         variable.setAlignment(.fromByteUnits(b.cache_line_size), &b.module);
+        variable.setUnnamedAddr(.local_unnamed_addr, &b.module);
+        variable.setMutability(.constant, &b.module);
         return try b.module.addGlobal(name_str, .{
             .preemption = .dso_local,
             .type = ty,
