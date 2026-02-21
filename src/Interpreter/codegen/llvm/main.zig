@@ -154,6 +154,8 @@ const Builder = struct {
     opcode_handler_writing_lock: std.debug.SafetyLock = .{},
     mem_inst: Type = .none,
     side_table_entry: Type = .none,
+    module_info: Type = .none,
+    module_inst: Type = .none,
     value_structs: struct {
         i64: Type = .none,
     } = .{},
@@ -272,7 +274,7 @@ const Builder = struct {
                     const dereferenceable: ?u32 = switch (param) {
                         .fuel => 8,
                         .disp => @as(u32, b.ptr_size_bytes) * 256,
-                        // .module // don't know size of ModuleInst in advance
+                        .module => @as(u32, b.ptr_size_bytes) * 9,
                         else => null,
                     };
 
@@ -299,6 +301,35 @@ const Builder = struct {
             .ptr,
         });
         b.side_table_entry = try b.module.structType(.@"packed", &.{ .i32, .i16, .i8, .i8 });
+        b.module_info = try b.module.structType(.normal, &.{
+            .ptr, // types
+            .i32, // types_count
+            .i32, // custom_sections_count
+            .ptr, // custom_sections
+            .ptr, // func_types
+            .i32, // func_import_count
+            .i32, // code_count
+            .ptr, // code_section
+            .ptr, // code_entries
+            .ptr, // code
+            .ptr, // global_section
+            .ptr, // global_exprs
+            .ptr, // global_types
+            .ptr, // table_types
+            .ptr, // mem_types
+            // More fields not listed
+        });
+        b.module_inst = try b.module.structType(.normal, &.{
+            b.size_type, // buffer_len
+            .ptr, // module
+            .ptr, // func_imports
+            .ptr, // func_blocks
+            .ptr, // mems
+            .ptr, // tables
+            .ptr, // globals
+            .ptr, // datas_drop_mask
+            .ptr, // elems_drop_mask
+        });
         b.value_structs = .{
             .i64 = try b.module.structType(.normal, &.{ .i64, .i64 }),
         };
@@ -651,7 +682,7 @@ const MemInstField = enum(u8) {
         return field_ptr;
     }
 
-    fn typeOf(field: MemInstField, b: *Builder) Type {
+    fn typeOf(field: MemInstField, b: *const Builder) Type {
         return switch (field) {
             .base, .vtable => .ptr,
             .size, .capacity, .limit => b.size_type,
@@ -661,6 +692,114 @@ const MemInstField = enum(u8) {
     /// Loads a field given a `ptr` to a `MemInst`.
     fn load(field: MemInstField, wip: *WipFunction, b: *Builder, ptr: Value) Oom!Value {
         return try wip.load(.normal, field.typeOf(b), try field.gep(wip, b, ptr), .default, "");
+    }
+};
+
+const ModuleInfoField = enum(u6) {
+    types,
+    types_count,
+    custom_sections_count,
+    custom_sections,
+    func_types,
+    func_import_count,
+    code_count,
+    code_section,
+    code_entries,
+    code,
+    global_section,
+    global_exprs,
+    global_types,
+    table_types,
+    mem_types,
+    // More fields not listed
+
+    /// Obtains a `ptr` to a field within the `ModuleInst`.
+    fn gep(field: ModuleInfoField, wip: *WipFunction, b: *const Builder) Oom!Value {
+        return try wip.gepStruct(
+            b.module_info,
+            try ModuleInstField.module.load(wip, b),
+            @intFromEnum(field),
+            @tagName(field),
+        );
+    }
+
+    fn typeOf(field: ModuleInfoField) Type {
+        return switch (field) {
+            .types_count,
+            .custom_sections_count,
+            .func_import_count,
+            .code_count,
+            => .i32,
+            .types,
+            .custom_sections,
+            .func_types,
+            .code_section,
+            .code_entries,
+            .code,
+            .global_section,
+            .global_exprs,
+            .global_types,
+            .table_types,
+            .mem_types,
+            => .ptr,
+        };
+    }
+
+    fn load(field: ModuleInfoField, wip: *WipFunction, b: *const Builder) Oom!Value {
+        return try wip.load(
+            .normal,
+            field.typeOf(),
+            try field.gep(wip, b),
+            .default,
+            @tagName(field),
+        );
+    }
+};
+
+const ModuleInstField = enum(u4) {
+    buffer_len,
+    module,
+    func_imports,
+    func_blocks,
+    mems,
+    tables,
+    globals,
+    datas_drop_mask,
+    elems_drop_mask,
+
+    /// Obtains a `ptr` to a field within the `ModuleInst`.
+    fn gep(field: ModuleInstField, wip: *WipFunction, b: *const Builder) Oom!Value {
+        return try wip.gepStruct(
+            b.module_inst,
+            OpcodeHandlerParam.module.arg(wip),
+            @intFromEnum(field),
+            @tagName(field),
+        );
+    }
+
+    fn typeOf(field: ModuleInstField, b: *const Builder) Type {
+        return switch (field) {
+            .buffer_len => b.size_type,
+            .module,
+            .func_imports,
+            .func_blocks,
+            .mems,
+            .tables,
+            .globals,
+            .datas_drop_mask,
+            .elems_drop_mask,
+            => .ptr,
+        };
+    }
+
+    fn load(field: ModuleInstField, wip: *WipFunction, b: *const Builder) Oom!Value {
+        return try wip.load(
+            .normal,
+            field.typeOf(b),
+            try field.gep(wip, b),
+            .default,
+            @tagName(field),
+        );
     }
 };
 
@@ -1430,6 +1569,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     try buildControlOpcodeHandlers(b);
     try buildParametricOpcodeHandlers(b);
     try buildLocalOpcodeHandlers(b);
+    try buildGlobalOpcodeHandlers(b);
     try buildMemoryLoadOpcodeHandlers(b);
     try buildMemoryStoreOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
@@ -2140,6 +2280,106 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
             .stp = OpcodeHandlerParam.stp.arg(wip),
         });
         try local_set.finish(b);
+    }
+}
+
+fn buildGlobalOpcodeHandlers(b: *Builder) Oom!void {
+    const global_val_type_field_idx = try b.module.intValue(.i32, 0);
+    const global_type = try b.module.structType(.normal, &.{ .i8, .i8 });
+    for (&[2]ByteOpcode{ .@"global.get", .@"global.set" }) |opcode| {
+        var op = try b.opcodeHandler(.{ .byte = opcode });
+        const wip = &op.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const idx_result = try b.callDecodeUlebIdx(wip, OpcodeHandlerParam.vip.arg(wip));
+        const new_vip = try wip.extractValue(idx_result, &.{1}, "");
+        const global_idx = try wip.extractValue(idx_result, &.{0}, "");
+        const value_ptr = try wip.load(
+            .normal,
+            .ptr,
+            try wip.gep(
+                .inbounds,
+                .ptr,
+                try ModuleInstField.globals.load(wip, b),
+                &.{global_idx},
+                "",
+            ),
+            .default,
+            "",
+        );
+        const global_val_type = try wip.load(
+            .normal,
+            .i8,
+            try wip.gep(
+                .inbounds,
+                global_type,
+                try ModuleInfoField.global_types.load(wip, b),
+                &.{ global_idx, global_val_type_field_idx },
+                "",
+            ),
+            .default,
+            "val_type",
+        );
+
+        const store_types = [3]Type{ .i32, .i64, b.value_structs.i64 };
+        const done_blk = try wip.block(3, "Done");
+        var store_blocks: [3]Function.Block.Index = undefined;
+        for (
+            &store_blocks,
+            [3][]const u8{ "Store4", "Store8", "Store16" },
+            [3]u8{ 2, 3, 1 },
+        ) |*blk, name, incoming| {
+            blk.* = try wip.block(incoming, name);
+        }
+
+        // TODO: Maybe memcpy would work better here
+        const new_vsp, const src_ptr, const src_align, const dst_ptr, const dst_align =
+            ptrs: switch (opcode) {
+                .@"global.get" => .{
+                    try op.adjustVspBy(b, 1),
+                    value_ptr,
+                    .default,
+                    try op.operandAt(b, -1),
+                    value_stack_alignment,
+                },
+                .@"global.set" => {
+                    const src = try op.operandAt(b, 0);
+                    break :ptrs .{ src, src, value_stack_alignment, value_ptr, .default };
+                },
+                else => unreachable,
+            };
+
+        // Currently assumes that a future 32-bit port uses 64-bit references
+        var sw = try wip.@"switch"(global_val_type, store_blocks[1], 5, .none);
+        for (&[5]struct { u8, u2 }{
+            .{ 0x7F, 0 }, // i32
+            .{ 0x7E, 1 }, // i64
+            .{ 0x7D, 0 }, // f32
+            .{ 0x7C, 1 }, // f64
+            .{ 0x7B, 2 }, // v128
+        }) |info| {
+            try sw.addCase(try b.module.intConst(.i8, info.@"0"), store_blocks[info.@"1"], wip);
+        }
+        sw.finish(wip);
+
+        for (&store_types, &store_blocks) |ty, blk| {
+            wip.cursor = .{ .block = blk };
+            _ = try wip.store(
+                .normal,
+                try wip.load(.normal, ty, src_ptr, src_align, ""),
+                dst_ptr,
+                dst_align,
+            );
+            _ = try wip.br(done_blk);
+        }
+
+        wip.cursor = .{ .block = done_blk };
+        try op.jmpToNextHandler(b, .{
+            .vip = new_vip,
+            .vsp = new_vsp,
+            .stp = OpcodeHandlerParam.stp.arg(wip),
+        });
+        try op.finish(b);
     }
 }
 
