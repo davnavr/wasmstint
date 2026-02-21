@@ -269,10 +269,15 @@ const Builder = struct {
                         else => {},
                     }
 
-                    switch (param) {
-                        .fuel => try attrs.addParamAttr(idx, .{ .dereferenceable = 8 }, &b.module),
+                    const dereferenceable: ?u32 = switch (param) {
+                        .fuel => 8,
+                        .disp => @as(u32, b.ptr_size_bytes) * 256,
                         // .module // don't know size of ModuleInst in advance
-                        else => {},
+                        else => null,
+                    };
+
+                    if (dereferenceable) |size| {
+                        try attrs.addParamAttr(idx, .{ .dereferenceable = size }, &b.module);
                     }
 
                     switch (param) {
