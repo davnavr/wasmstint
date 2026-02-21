@@ -1430,6 +1430,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     try buildParametricOpcodeHandlers(b);
     try buildLocalOpcodeHandlers(b);
     try buildMemoryLoadOpcodeHandlers(b);
+    try buildMemoryStoreOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
     try buildFloatOpcodeHandlers(b);
 
@@ -1975,6 +1976,47 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
                 .stp = OpcodeHandlerParam.stp.arg(&load.wip),
             });
             try load.finish(b);
+        }
+    }
+}
+
+fn buildMemoryStoreOpcodeHandlers(b: *Builder) Oom!void {
+    for (&[2]Type{ .i32, .i64 }, &[2][]const u8{ "f32", "f64" }) |int_ty, float_name| {
+        // value to store is on top of the stack, with the address below that
+
+        // LLVM might have function deduplication to deal with float versions
+        for ([2][]const u8{ @tagName(int_ty), float_name }) |name| {
+            var store = try b.opcodeHandlerFromPrefixedName(ByteOpcode, name, "store");
+
+            store.wip.cursor = .{ .block = try store.wip.block(0, "Entry") };
+            const perform_store = try store.wip.block(1, "Store");
+            const access = try store.linearMemoryAccess(
+                b,
+                1,
+                .fromByteUnits(@divExact(int_ty.scalarBits(&b.module), 8)),
+                perform_store,
+            );
+
+            _ = try store.wip.store(
+                .normal,
+                try store.wip.load(
+                    .normal,
+                    int_ty,
+                    try store.operandAt(b, 0),
+                    value_stack_alignment,
+                    "",
+                ),
+                access.ptr,
+                byte_alignment,
+            );
+
+            const new_vsp = try store.adjustVspBy(b, -2);
+            try store.jmpToNextHandler(b, .{
+                .vip = access.vip,
+                .vsp = new_vsp,
+                .stp = OpcodeHandlerParam.stp.arg(&store.wip),
+            });
+            try store.finish(b);
         }
     }
 }
