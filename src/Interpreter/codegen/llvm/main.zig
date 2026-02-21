@@ -1548,6 +1548,24 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         try br.finish(b);
     }
     {
+        // LLVM could maybe deduplicate this with the `br` handler
+        var br = try b.opcodeHandler(.{ .byte = .@"else" });
+        br.wip.cursor = .{ .block = try br.wip.block(0, "Entry") };
+        // end of true branch of if, so jump to end
+        const branch = try br.takeBranch(b, .{
+            .branch_ip = try br.wip.gep(
+                .inbounds,
+                .i8,
+                OpcodeHandlerParam.vip.arg(&br.wip),
+                &.{size_neg_1},
+                "",
+            ),
+            .vsp = OpcodeHandlerParam.vsp.arg(&br.wip),
+        });
+        try br.jmpToNextHandler(b, .{ .vip = branch.vip, .vsp = branch.vsp, .stp = branch.stp });
+        try br.finish(b);
+    }
+    {
         var end = try b.opcodeHandler(.{ .byte = .end });
         end.wip.cursor = .{ .block = try end.wip.block(0, "Entry") };
         const is_return = try end.wip.icmp(
@@ -1611,11 +1629,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
             .vsp = OpcodeHandlerParam.vsp.arg(&br.wip),
         });
 
-        try br.jmpToNextHandler(b, .{
-            .vip = branch.vip,
-            .vsp = branch.vsp,
-            .stp = branch.stp,
-        });
+        try br.jmpToNextHandler(b, .{ .vip = branch.vip, .vsp = branch.vsp, .stp = branch.stp });
         try br.finish(b);
     }
     {
