@@ -1431,6 +1431,7 @@ const NumericTrapCode = enum(u8) {
 };
 
 fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
+    const size_neg_1 = try b.sizeIntValue(-1);
     {
         var nop = try b.opcodeHandler(.{ .byte = .nop });
         nop.wip.cursor = .{ .block = try nop.wip.block(0, "Entry") };
@@ -1497,6 +1498,56 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         break :ret index;
     };
     {
+        var br = try b.opcodeHandler(.{ .byte = .@"if" });
+        br.wip.cursor = .{ .block = try br.wip.block(0, "Entry") };
+        const initial_vip = OpcodeHandlerParam.vip.arg(&br.wip);
+        const condition_ptr = try br.operandAt(b, 0);
+        const condition = try br.wip.icmp(
+            .ne,
+            try br.wip.load(.normal, .i32, condition_ptr, value_stack_alignment, ""),
+            try b.module.intValue(.i32, 0),
+            "",
+        );
+        const true_blk = try br.wip.block(1, "True");
+        const false_blk = try br.wip.block(1, "False");
+        const jmp_blk = try br.wip.block(2, "JmpToNextHandler");
+        _ = try br.wip.brCond(condition, true_blk, false_blk, .unpredictable);
+
+        br.wip.cursor = .{ .block = false_blk };
+        // No need to read the block type
+        const branch = try br.takeBranch(b, .{
+            .branch_ip = try br.wip.gep(.inbounds, .i8, initial_vip, &.{size_neg_1}, ""),
+            .vsp = condition_ptr,
+        });
+        _ = try br.wip.br(jmp_blk);
+
+        br.wip.cursor = .{ .block = true_blk };
+        const vip_after_block_type = try b.callSkipUlebIdx(&br.wip, initial_vip);
+        const false_stp = try br.wip.gep(
+            .inbounds,
+            b.side_table_entry,
+            OpcodeHandlerParam.stp.arg(&br.wip),
+            &.{try b.sizeIntValue(1)},
+            "",
+        );
+        _ = try br.wip.br(jmp_blk);
+
+        br.wip.cursor = .{ .block = jmp_blk };
+        const new_vip = try br.wip.phi(.ptr, "vip");
+        const new_vsp = try br.wip.phi(.ptr, "vsp");
+        const new_stp = try br.wip.phi(.ptr, "stp");
+        const phi_blocks = [2]Function.Block.Index{ true_blk, false_blk };
+        new_vip.finish(&.{ vip_after_block_type, branch.vip }, &phi_blocks, &br.wip);
+        new_vsp.finish(&.{ condition_ptr, branch.vsp }, &phi_blocks, &br.wip);
+        new_stp.finish(&.{ false_stp, branch.stp }, &phi_blocks, &br.wip);
+        try br.jmpToNextHandler(b, .{
+            .vip = new_vip.toValue(),
+            .vsp = new_vsp.toValue(),
+            .stp = new_stp.toValue(),
+        });
+        try br.finish(b);
+    }
+    {
         var end = try b.opcodeHandler(.{ .byte = .end });
         end.wip.cursor = .{ .block = try end.wip.block(0, "Entry") };
         const is_return = try end.wip.icmp(
@@ -1505,7 +1556,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
                 .inbounds,
                 .i8,
                 OpcodeHandlerParam.vip.arg(&end.wip),
-                &.{try b.sizeIntValue(-1)},
+                &.{size_neg_1},
                 "",
             ),
             OpcodeHandlerParam.eip.arg(&end.wip),
@@ -1554,7 +1605,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
                 .inbounds,
                 .i8,
                 OpcodeHandlerParam.vip.arg(&br.wip),
-                &.{try b.sizeIntValue(-1)},
+                &.{size_neg_1},
                 "",
             ),
             .vsp = OpcodeHandlerParam.vsp.arg(&br.wip),
@@ -1587,7 +1638,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         var call = try b.opcodeHandler(.{ .byte = .call });
         call.wip.cursor = .{ .block = try call.wip.block(0, "Entry") };
         const start_vip = OpcodeHandlerParam.vip.arg(&call.wip);
-        const call_ip = try call.wip.gep(.inbounds, .i8, start_vip, &.{try b.sizeIntValue(-1)}, "");
+        const call_ip = try call.wip.gep(.inbounds, .i8, start_vip, &.{size_neg_1}, "");
 
         const decode_func_idx = try b.callDecodeUlebIdx(&call.wip, start_vip);
         const new_vip = try call.wip.extractValue(decode_func_idx, &.{1}, "vip");
