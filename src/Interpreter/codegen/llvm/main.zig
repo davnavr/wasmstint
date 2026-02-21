@@ -153,6 +153,7 @@ const Builder = struct {
 
     opcode_handler_writing_lock: std.debug.SafetyLock = .{},
     mem_inst: Type = .none,
+    side_table_entry: Type = .none,
     value_structs: struct {
         i64: Type = .none,
     } = .{},
@@ -292,6 +293,7 @@ const Builder = struct {
             b.size_type,
             .ptr,
         });
+        b.side_table_entry = try b.module.structType(.@"packed", &.{ .i32, .i16, .i8, .i8 });
         b.value_structs = .{
             .i64 = try b.module.structType(.normal, &.{ .i64, .i64 }),
         };
@@ -961,6 +963,107 @@ const OpcodeHandler = struct {
         return .{ .ptr = final_ptr, .vip = vip_after_offset };
     }
 
+    const SideTableEntryField = enum(u2) {
+        delta_ip,
+        delta_stp,
+        copy_count,
+        pop_count,
+
+        fn typeOf(field: SideTableEntryField) Type {
+            return switch (field) {
+                .delta_ip => .i32,
+                .delta_stp => .i16,
+                .copy_count, .pop_count => .i8,
+            };
+        }
+
+        fn load(
+            field: SideTableEntryField,
+            handler: *OpcodeHandler,
+            b: *Builder,
+            stp: Value,
+        ) Oom!Value {
+            const field_idx = try b.module.intValue(.i32, @intFromEnum(field));
+            return try handler.wip.load(
+                .normal,
+                field.typeOf(),
+                try handler.wip.gep(.inbounds, b.side_table_entry, stp, &.{ .@"0", field_idx }, ""),
+                .default,
+                "",
+            );
+        }
+    };
+
+    const TakeBranch = struct {
+        vip: Value,
+        vsp: Value,
+        stp: Value,
+    };
+
+    fn takeBranch(handler: *OpcodeHandler, b: *Builder, info: struct {
+        branch_ip: Value,
+        vsp: Value,
+    }) Oom!TakeBranch {
+        const wip = &handler.wip;
+        const stp = OpcodeHandlerParam.stp.arg(wip);
+
+        const delta_ip = try SideTableEntryField.delta_ip.load(handler, b, stp);
+        const copy_count_in_values = try wip.cast(
+            .zext,
+            try SideTableEntryField.copy_count.load(handler, b, stp),
+            b.size_type,
+            "",
+        );
+        const pop_count_in_values = try wip.cast(
+            .zext,
+            try SideTableEntryField.pop_count.load(handler, b, stp),
+            b.size_type,
+            "",
+        );
+        const delta_stp = try SideTableEntryField.delta_stp.load(handler, b, stp);
+
+        // Should perform signed subtraction
+        const new_vip = try wip.gep(.inbounds, .i8, info.branch_ip, &.{delta_ip}, "");
+        const new_stp = try wip.gep(.inbounds, b.side_table_entry, stp, &.{delta_stp}, "");
+
+        const size_0 = try b.sizeIntValue(0);
+        const dst_vsp = try wip.gep(.inbounds, b.value_structs.i64, info.vsp, &.{
+            try wip.bin(.@"sub nsw", size_0, pop_count_in_values, "negate"),
+        }, "");
+        const src_vsp = try wip.gep(.inbounds, b.value_structs.i64, info.vsp, &.{
+            try wip.bin(.@"sub nsw", size_0, copy_count_in_values, "negate"),
+        }, "");
+
+        const new_vsp = try wip.gep(
+            .inbounds,
+            b.value_structs.i64,
+            dst_vsp,
+            &.{copy_count_in_values},
+            "",
+        );
+
+        {
+            const copy_count_in_bytes = try wip.bin(
+                .@"shl nsw",
+                copy_count_in_values,
+                try b.sizeIntValue(4),
+                "",
+            );
+
+            // Want fast path to be copying <= 1 values
+            _ = try wip.callIntrinsic(
+                .normal,
+                b.value_copy.attributes,
+                .memmove,
+                &b.value_copy.overload,
+                &.{ dst_vsp, src_vsp, copy_count_in_bytes, .false },
+                "",
+            );
+        }
+
+        return .{ .vip = new_vip, .vsp = new_vsp, .stp = new_stp };
+    }
+
     fn finish(handler: *OpcodeHandler, b: *Builder) Oom!void {
         try handler.wip.finish();
         handler.wip.deinit();
@@ -1434,6 +1537,28 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
             .stp = OpcodeHandlerParam.stp.arg(&end.wip),
         });
         try end.finish(b);
+    }
+    {
+        var br = try b.opcodeHandler(.{ .byte = .br });
+        br.wip.cursor = .{ .block = try br.wip.block(0, "Entry") };
+        // No need to read label idx
+        const branch = try br.takeBranch(b, .{
+            .branch_ip = try br.wip.gep(
+                .inbounds,
+                .i8,
+                OpcodeHandlerParam.vip.arg(&br.wip),
+                &.{try b.sizeIntValue(-1)},
+                "",
+            ),
+            .vsp = OpcodeHandlerParam.vsp.arg(&br.wip),
+        });
+
+        try br.jmpToNextHandler(b, .{
+            .vip = branch.vip,
+            .vsp = branch.vsp,
+            .stp = branch.stp,
+        });
+        try br.finish(b);
     }
     {
         const helper = try b.addFunction(
