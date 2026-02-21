@@ -157,10 +157,10 @@ const Builder = struct {
     value_structs: struct {
         i64: Type = .none,
     } = .{},
-    value_copy: struct {
-        attributes: FunctionAttributes,
-        overload: [3]Type,
-    } = undefined,
+    /// For `memset` of values.
+    value_set: struct { attributes: FunctionAttributes, overload: [2]Type } = undefined,
+    /// For `memcpy`/`memmove` of values.
+    value_copy: struct { attributes: FunctionAttributes, overload: [3]Type } = undefined,
 
     fn init(
         b: *Builder,
@@ -301,6 +301,15 @@ const Builder = struct {
         b.side_table_entry = try b.module.structType(.@"packed", &.{ .i32, .i16, .i8, .i8 });
         b.value_structs = .{
             .i64 = try b.module.structType(.normal, &.{ .i64, .i64 }),
+        };
+        b.value_set = .{
+            .attributes = attrs: {
+                var attrs = FunctionAttributes.Wip{};
+                defer attrs.deinit(&b.module);
+                try attrs.addParamAttr(0, .{ .@"align" = value_stack_alignment }, &b.module);
+                break :attrs try attrs.finish(&b.module);
+            },
+            .overload = [2]Type{ .ptr, b.size_type },
         };
         b.value_copy = .{
             .attributes = attrs: {
@@ -1747,21 +1756,43 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
 }
 
 fn writeSelectHandler(b: *Builder, select: *OpcodeHandler) Oom!Value {
+    const condition_ptr = try select.operandAt(b, 0);
     const condition_value = try select.wip.load(
         .normal,
         .i32,
-        try select.operandAt(b, 0),
+        condition_ptr,
         value_stack_alignment,
         "",
     );
-    const condition = try select.wip.icmp(.ne, condition_value, try b.module.intValue(.i32, 0), "");
-    // If true, value already in result location is kept the same.
+
+    const value_size_bytes = try b.sizeIntValue(16);
+
+    if (b.options.optimize == .Debug) {
+        _ = try select.wip.callIntrinsic(
+            .normal,
+            b.value_set.attributes,
+            .@"memset.inline",
+            &b.value_set.overload,
+            &.{ condition_ptr, try b.module.intValue(.i8, 0xCC), value_size_bytes, .false },
+            "",
+        );
+    }
+
+    const condition = try select.wip.cast(
+        .zext,
+        // Inverted, `0` if condition was `true`
+        try select.wip.icmp(.eq, condition_value, try b.module.intValue(.i32, 0), ""),
+        .i32,
+        "",
+    );
+    // If `true`, value already in result location is kept the same.
     const dst_ptr = try select.operandAt(b, 2);
     const src_ptr = try select.wip.gep(
         .inbounds,
         b.value_structs.i64,
         dst_ptr,
-        &.{try select.wip.bin(.@"sub nuw", .true, condition, "")},
+        // If `true`, offset is `0`; otherwise, offset is `1`
+        &.{condition},
         "",
     );
 
@@ -1770,7 +1801,7 @@ fn writeSelectHandler(b: *Builder, select: *OpcodeHandler) Oom!Value {
         b.value_copy.attributes,
         .memmove,
         &b.value_copy.overload,
-        &.{ dst_ptr, src_ptr, try b.sizeIntValue(16), .false },
+        &.{ dst_ptr, src_ptr, value_size_bytes, .false },
         "",
     );
 
@@ -1785,14 +1816,9 @@ fn buildParametricOpcodeHandlers(b: *Builder) Oom!void {
         if (b.options.optimize == .Debug) {
             _ = try drop.wip.callIntrinsic(
                 .normal,
-                attrs: {
-                    var attrs = FunctionAttributes.Wip{};
-                    defer attrs.deinit(&b.module);
-                    try attrs.addParamAttr(0, .{ .@"align" = value_stack_alignment }, &b.module);
-                    break :attrs try attrs.finish(&b.module);
-                },
+                b.value_set.attributes,
                 .@"memset.inline",
-                &.{ .ptr, b.size_type },
+                &b.value_set.overload,
                 &.{
                     try drop.operandAt(b, 0),
                     try b.module.intValue(.i8, 0xCC),
