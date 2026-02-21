@@ -1933,8 +1933,8 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
         });
         try local_get.finish(b);
     }
-    {
-        var local_set = try b.opcodeHandler(.{ .byte = .@"local.set" });
+    for (&[2]ByteOpcode{ .@"local.set", .@"local.tee" }) |opcode| {
+        var local_set = try b.opcodeHandler(.{ .byte = opcode });
         const wip = &local_set.wip;
 
         wip.cursor = .{ .block = try wip.block(0, "Entry") };
@@ -1956,7 +1956,11 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
             "",
         );
 
-        const new_vsp = try local_set.adjustVspBy(b, -1);
+        const new_vsp = switch (opcode) {
+            .@"local.set" => try local_set.adjustVspBy(b, -1),
+            .@"local.tee" => OpcodeHandlerParam.vsp.arg(wip),
+            else => unreachable,
+        };
         try local_set.jmpToNextHandler(b, .{
             .vip = new_vip,
             .vsp = new_vsp,
