@@ -1456,6 +1456,7 @@ fn buildNopOpcodeHandlers(b: *Builder) Oom!void {
         .@"i64.reinterpret_f64",
         .@"f32.reinterpret_i32",
         .@"f64.reinterpret_i64",
+        .@"i32.wrap_i64",
     }) |opcode| {
         // LLVM could maybe deduplicate these
         var nop = try b.opcodeHandler(.{ .byte = opcode });
@@ -2631,6 +2632,26 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             });
             try cmp.finish(b);
         }
+    }
+
+    for (&[2]struct { WipFunction.Instruction.Tag, u7 }{
+        .{ .sext, 's' },
+        .{ .zext, 'u' },
+    }) |info| {
+        const cast, const suffix = info;
+        var name_buf = "i64.extend_i32_?".*;
+        name_buf[name_buf.len - 1] = suffix;
+
+        var extend = try b.opcodeHandler(.fromName(ByteOpcode, &name_buf));
+        extend.wip.cursor = .{ .block = try extend.wip.block(0, "Entry") };
+        const un_op = try extend.unOp(b, .i32);
+        try un_op.writeResult(&extend, try extend.wip.cast(cast, un_op.c_1, .i64, ""));
+        try extend.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&extend.wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(&extend.wip),
+            .stp = OpcodeHandlerParam.stp.arg(&extend.wip),
+        });
+        try extend.finish(b);
     }
 }
 
