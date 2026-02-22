@@ -2286,8 +2286,40 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
 fn buildGlobalOpcodeHandlers(b: *Builder) Oom!void {
     const global_val_type_field_idx = try b.module.intValue(.i32, 0);
     const global_type = try b.module.structType(.normal, &.{ .i8, .i8 });
+
+    const i3_ty = try b.module.intType(3);
+    const block_jmp_lookup_len = 17;
+    const block_jmp_lookup = try b.module.addVariable(
+        try b.strtabStringSymbolPrefixed("global_val_type_size"),
+        try b.module.arrayType(block_jmp_lookup_len, i3_ty),
+        .default,
+    );
+    {
+        block_jmp_lookup.setUnnamedAddr(.local_unnamed_addr, &b.module);
+        block_jmp_lookup.setMutability(.constant, &b.module);
+        const size_undef = try b.module.undefConst(i3_ty);
+        var entries: [block_jmp_lookup_len]Constant = @splat(size_undef);
+        const size_4 = try b.module.intConst(i3_ty, 0);
+        const size_8 = try b.module.intConst(i3_ty, 1);
+        // Currently assumes that a future 32-bit port uses 64-bit references
+        entries[0] = size_8; // externref
+        entries[1] = size_8; // funcref
+
+        entries[12] = try b.module.intConst(i3_ty, 2); // v128
+        entries[13] = size_8; // f64
+        entries[14] = size_4; // f32
+        entries[15] = size_8; // i64
+        entries[16] = size_4; // i32
+
+        try block_jmp_lookup.setInitializer(
+            try b.module.arrayConst(block_jmp_lookup.typeOf(&b.module), &entries),
+            &b.module,
+        );
+    }
+
     for (&[2]ByteOpcode{ .@"global.get", .@"global.set" }) |opcode| {
         var op = try b.opcodeHandler(.{ .byte = opcode });
+        const func_idx = op.wip.function;
         const wip = &op.wip;
 
         wip.cursor = .{ .block = try wip.block(0, "Entry") };
@@ -2320,19 +2352,14 @@ fn buildGlobalOpcodeHandlers(b: *Builder) Oom!void {
             .default,
             "val_type",
         );
+        const chosen_blk = try wip.load(.normal, i3_ty, try wip.gep(
+            .inbounds,
+            i3_ty,
+            block_jmp_lookup.toValue(&b.module),
+            &.{try wip.bin(.@"sub nuw", global_val_type, try b.module.intValue(.i8, 0x6F), "")},
+            "",
+        ), .default, "");
 
-        const store_types = [3]Type{ .i32, .i64, b.value_structs.i64 };
-        const done_blk = try wip.block(3, "Done");
-        var store_blocks: [3]Function.Block.Index = undefined;
-        for (
-            &store_blocks,
-            [3][]const u8{ "Store4", "Store8", "Store16" },
-            [3]u8{ 2, 3, 1 },
-        ) |*blk, name, incoming| {
-            blk.* = try wip.block(incoming, name);
-        }
-
-        // TODO: Maybe memcpy would work better here
         const new_vsp, const src_ptr, const src_align, const dst_ptr, const dst_align =
             ptrs: switch (opcode) {
                 .@"global.get" => .{
@@ -2349,20 +2376,31 @@ fn buildGlobalOpcodeHandlers(b: *Builder) Oom!void {
                 else => unreachable,
             };
 
-        // Currently assumes that a future 32-bit port uses 64-bit references
-        var sw = try wip.@"switch"(global_val_type, store_blocks[1], 5, .none);
-        for (&[5]struct { u8, u2 }{
-            .{ 0x7F, 0 }, // i32
-            .{ 0x7E, 1 }, // i64
-            .{ 0x7D, 0 }, // f32
-            .{ 0x7C, 1 }, // f64
-            .{ 0x7B, 2 }, // v128
-        }) |info| {
-            try sw.addCase(try b.module.intConst(.i8, info.@"0"), store_blocks[info.@"1"], wip);
+        var block_indices: [3]Function.Block.Index = undefined;
+        for (&block_indices, [3][]const u8{ "Store4", "Store8", "Store16" }) |*blk, name| {
+            blk.* = try wip.block(1, name);
         }
-        sw.finish(wip);
 
-        for (&store_types, &store_blocks) |ty, blk| {
+        const block_array = try b.module.addVariable(
+            try b.strtabStringConcat(&.{ b.options.symbol_prefix, @tagName(opcode), "blocks" }),
+            try b.module.arrayType(3, .ptr),
+            .default,
+        );
+        block_array.setUnnamedAddr(.local_unnamed_addr, &b.module);
+        block_array.setMutability(.constant, &b.module);
+
+        _ = try wip.indirectbr(
+            try wip.load(
+                .normal,
+                .ptr,
+                try wip.gep(.normal, .ptr, block_array.toValue(&b.module), &.{chosen_blk}, ""),
+                .default,
+                "",
+            ),
+            &block_indices,
+        );
+
+        for (block_indices, [3]Type{ .i32, .i64, b.value_structs.i64 }) |blk, ty| {
             wip.cursor = .{ .block = blk };
             _ = try wip.store(
                 .normal,
@@ -2370,16 +2408,23 @@ fn buildGlobalOpcodeHandlers(b: *Builder) Oom!void {
                 dst_ptr,
                 dst_align,
             );
-            _ = try wip.br(done_blk);
+            try op.jmpToNextHandler(b, .{
+                .vip = new_vip,
+                .vsp = new_vsp,
+                .stp = OpcodeHandlerParam.stp.arg(wip),
+            });
         }
 
-        wip.cursor = .{ .block = done_blk };
-        try op.jmpToNextHandler(b, .{
-            .vip = new_vip,
-            .vsp = new_vsp,
-            .stp = OpcodeHandlerParam.stp.arg(wip),
-        });
         try op.finish(b);
+
+        var block_constants: [3]Constant = undefined;
+        for (block_indices, &block_constants) |blk_idx, *c| {
+            c.* = try b.module.blockAddrConst(func_idx, blk_idx);
+        }
+        try block_array.setInitializer(
+            try b.module.arrayConst(block_array.typeOf(&b.module), &block_constants),
+            &b.module,
+        );
     }
 }
 
