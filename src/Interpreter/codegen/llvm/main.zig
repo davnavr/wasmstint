@@ -466,12 +466,9 @@ const Builder = struct {
         variable.setAlignment(.fromByteUnits(b.cache_line_size), &b.module);
         variable.setUnnamedAddr(.local_unnamed_addr, &b.module);
         variable.setMutability(.constant, &b.module);
-        return try b.module.addGlobal(name_str, .{
-            .preemption = .dso_local,
-            .type = ty,
-            .kind = .{ .variable = variable },
-            .unnamed_addr = .local_unnamed_addr,
-        });
+        const global = variable.ptrConst(&b.module).global;
+        global.ptr(&b.module).preemption = .dso_local;
+        return global;
     }
 
     fn setDispatchTableInitializer(b: *Builder, comptime E: type) Oom!void {
@@ -2332,6 +2329,7 @@ fn buildGlobalOpcodeHandlers(b: *Builder) Oom!void {
         block_jmp_lookup.setLinkage(.internal, &b.module);
         block_jmp_lookup.setUnnamedAddr(.local_unnamed_addr, &b.module);
         block_jmp_lookup.setMutability(.constant, &b.module);
+        block_jmp_lookup.ptrConst(&b.module).global.ptr(&b.module).preemption = .dso_local;
         const size_undef = try b.module.undefConst(i3_ty);
         var entries: [block_jmp_lookup_len]Constant = @splat(size_undef);
         const size_4 = try b.module.intConst(i3_ty, 0);
@@ -2424,6 +2422,7 @@ fn buildGlobalOpcodeHandlers(b: *Builder) Oom!void {
         block_array.setLinkage(.internal, &b.module);
         block_array.setUnnamedAddr(.local_unnamed_addr, &b.module);
         block_array.setMutability(.constant, &b.module);
+        block_array.ptrConst(&b.module).global.ptr(&b.module).preemption = .dso_local;
 
         _ = try wip.indirectbr(
             try wip.load(
