@@ -479,17 +479,49 @@ const Builder = struct {
             .none
         else handler: switch (E) {
             ByteOpcode => {
-                const handler = try b.addFfiFunction(
+                const panic = try b.addFfiFunction(
                     "panicInvalidByteOpcode",
                     &@as([2]Type, @splat(.ptr)),
                     .void,
                 );
-                var attrs = FunctionAttributes.Wip{};
-                try b.commonFnAttributes(&attrs);
-                try attrs.addFnAttr(.noreturn, &b.module);
-                try b.setFnAttributes(handler, &attrs);
+                {
+                    var attrs = FunctionAttributes.Wip{};
+                    try b.commonFnAttributes(&attrs);
+                    try attrs.addFnAttr(.noreturn, &b.module);
+                    try b.setFnAttributes(panic, &attrs);
+                }
 
-                break :handler handler;
+                const func = try b.addFunction(
+                    try b.strtabStringSymbolPrefixed("invalidByteOpcode"),
+                    b.opcode_handler.type,
+                    b.opcode_handler.call_conv,
+                    .{ .linkage = .internal, .preemption = .dso_local },
+                );
+                {
+                    var attrs = try b.opcode_handler.fn_attrs.toWip(&b.module);
+                    try b.fnAttributes(&attrs, &.{ .noreturn, .cold });
+                    try b.setFnAttributes(func, &attrs);
+                }
+
+                var wip = try WipFunction.init(&b.module, .{
+                    .function = func,
+                    .strip = b.options.strip,
+                });
+
+                wip.cursor = .{ .block = try wip.block(0, "Entry") };
+                _ = try wip.call(
+                    .tail,
+                    b.ffi_call_conv,
+                    .none,
+                    panic.typeOf(&b.module),
+                    panic.toValue(&b.module),
+                    &[2]Value{ OpcodeHandlerParam.vip.arg(&wip), OpcodeHandlerParam.eip.arg(&wip) },
+                    "",
+                );
+                _ = try wip.@"unreachable"();
+                try wip.finish();
+
+                break :handler func;
             },
             else => @compileError(@typeName(E)),
         };
@@ -497,7 +529,7 @@ const Builder = struct {
         const invalid: Constant = if (invalid_handler == .none)
             try b.module.undefConst(.ptr)
         else
-            invalid_handler.toConst(&b.module);
+            invalid_handler.ptrConst(&b.module).global.toConst();
 
         const table_global_idx: Global.Index = switch (E) {
             ByteOpcode => b.dispatch_tables.byte,
