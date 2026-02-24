@@ -23,7 +23,6 @@ const opcodeHandlerTrampoline = @extern(
         vsp: Sp,
         module: runtime.ModuleInst,
         fuel: *const Interpreter.Fuel,
-        memories: [*]const *runtime.MemInst,
         ctx: *Interpreter,
         vip: Ip,
         stp: Stp,
@@ -51,7 +50,6 @@ pub inline fn callOpcodeHandler(
         ctx.stack_top,
         module,
         fuel,
-        module.header().mems,
         ctx,
         instr.next,
         stp,
@@ -77,7 +75,6 @@ pub inline fn callOpcodeHandler(
             ctx.stack_top,
             new_module,
             fuel,
-            new_module.header().mems,
             ctx,
             new_instr.next,
             current_frame.wasm.stp,
@@ -112,17 +109,16 @@ fn interruptOutOfFuel(
 fn returnFromWasm(
     // Dummy parameters so LLVM can generate tail calls
     _: common.Locals,
-    old_sp: Sp,
+    old_vsp: Sp,
     old_module: runtime.ModuleInst,
     fuel: *Interpreter.Fuel,
-    _: [*]const *runtime.MemInst,
     ctx: *Interpreter,
     _: Ip,
     _: Stp,
     old_eip: Eip,
     _: *const OpcodeHandler,
 ) callconv(ffi_cc) Transition {
-    const popped = ctx.stack.popFrame(old_sp, .from_stack_top);
+    const popped = ctx.stack.popFrame(old_vsp, .from_stack_top);
     if (builtin.mode == .Debug) {
         std.debug.assert( // module mismatch
             @intFromPtr(popped.info.callee.expanded().wasm.module.inner) ==
@@ -170,11 +166,10 @@ fn returnFromWasm(
                         .always_tail,
                         @as(@TypeOf(&returnFromWasm), @ptrCast(opcodeHandlerTrampoline)),
                         .{
-                            new_locals.ptr,
+                            new_locals,
                             popped.top,
                             wasm.module,
                             fuel,
-                            wasm.module.header().mems,
                             ctx,
                             instr.next,
                             frame.wasm.stp,
@@ -201,51 +196,49 @@ fn returnFromWasm(
 
 inline fn resumeAfterInvokeWithinWasm(
     old_instr: Instr,
-    sp: Sp,
+    vsp: Sp,
     fuel: *Interpreter.Fuel,
     stp: Stp,
     locals: common.Locals,
     module: runtime.ModuleInst,
-    interp: *Interpreter,
+    ctx: *Interpreter,
 ) Transition {
     if (builtin.zig_backend == .stage2_x86_64) {
         // trampoline continues execution
-        return Transition.interrupted(old_instr, sp, stp, interp, .out_of_fuel);
+        return Transition.interrupted(old_instr, vsp, stp, ctx, .out_of_fuel);
     } else {
         var instr = old_instr;
-        const handler = instr.readNextOpcodeHandler(fuel, locals, module, interp);
+        const handler = instr.readNextOpcodeHandler(fuel, locals, module, ctx);
         return @call(
             .always_tail,
             @as(@TypeOf(&invokeWithinWasm), @ptrCast(opcodeHandlerTrampoline)),
             .{
-                locals,
-                sp,
+                @as(*anyopaque, @ptrCast(locals.ptr)),
+                vsp,
                 module,
                 fuel,
-                @intFromPtr(module.header().mems),
-                interp,
+                ctx,
                 instr.next,
                 stp,
                 instr.end,
-                @as(*anyopaque, @ptrCast(@alignCast(handler))),
+                @intFromPtr(handler),
             },
         );
     }
 }
 
 fn invokeWithinWasm(
-    locals_debug: common.Locals,
+    call_ip_int: *anyopaque,
     vsp: Sp,
     module: runtime.ModuleInst,
     fuel: *Interpreter.Fuel,
-    func_idx: usize,
     ctx: *Interpreter,
     vip: Ip,
     stp: Stp,
     eip: Eip,
-    call_ip_int: *anyopaque,
+    func_idx: usize,
 ) callconv(ffi_cc) Transition {
-    const call_ip: Ip = @ptrCast(call_ip_int);
+    const call_ip: Ip = @ptrCast(@constCast(call_ip_int));
     switch (@as(opcodes.ByteOpcode, @enumFromInt(call_ip[0]))) {
         .call => {},
         else => |bad| switch (builtin.mode) {
@@ -258,10 +251,12 @@ fn invokeWithinWasm(
     }
 
     if (builtin.mode == .Debug) {
-        std.debug.assert( // bad locals ptr
-            @intFromPtr(ctx.stack.currentFrame().?.localValues(&ctx.stack).ptr) ==
-                @intFromPtr(locals_debug.ptr),
-        );
+        const current_frame = ctx.stack.currentFrame().?;
+        const expected_eip = @intFromPtr(current_frame.wasm.eip);
+        const actual_eip = @intFromPtr(eip);
+        if (expected_eip != actual_eip) {
+            std.debug.panic("expected EIP={X}, got {X}", .{ expected_eip, actual_eip });
+        }
     }
 
     const callee = module.inner.funcInst(@enumFromInt(func_idx));
