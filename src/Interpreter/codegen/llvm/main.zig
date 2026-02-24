@@ -2329,6 +2329,7 @@ fn buildGlobalOpcodeHandlers(b: *Builder) Oom!void {
         .default,
     );
     {
+        block_jmp_lookup.setLinkage(.internal, &b.module);
         block_jmp_lookup.setUnnamedAddr(.local_unnamed_addr, &b.module);
         block_jmp_lookup.setMutability(.constant, &b.module);
         const size_undef = try b.module.undefConst(i3_ty);
@@ -2416,10 +2417,11 @@ fn buildGlobalOpcodeHandlers(b: *Builder) Oom!void {
         }
 
         const block_array = try b.module.addVariable(
-            try b.strtabStringConcat(&.{ b.options.symbol_prefix, @tagName(opcode), "blocks" }),
+            try b.strtabStringConcat(&.{ b.options.symbol_prefix, @tagName(opcode), "_blocks" }),
             try b.module.arrayType(3, .ptr),
             .default,
         );
+        block_array.setLinkage(.internal, &b.module);
         block_array.setUnnamedAddr(.local_unnamed_addr, &b.module);
         block_array.setMutability(.constant, &b.module);
 
