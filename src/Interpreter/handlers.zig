@@ -176,29 +176,17 @@ const DispatchNextOpcode = fn (
     *Interpreter,
 ) callconv(.@"inline") Transition;
 
-/// Attempts to allocate a stack frame for the `target_function`, with arguments expected to be on
-/// top of the value stack, and then resumes execution.
-///
-/// To ensure the interpreter cannot overflow the stack, opcode handlers must ensure this function
-/// is called inline.
-///
-/// If enough stack space is not available, then the interpreter is interrupted and the IP is set to
-/// `call_ip`, which is a pointer to the call instruction to restart.
-pub inline fn invokeWithinWasm(
+/// See `invokeWithinWasm`
+pub inline fn invokeWithinWasmWithCallbacks(
     old_instr: Instr,
-    /// Pointer to the byte containing the call opcode.
     call_ip: Ip,
-    /// Stores the stack before the `call` instruction was executed. Parameters to pass to the
-    /// `callee` begin at the bottom at index `0`.
-    ///
-    /// Restored if a `.call_stack_exhausted` interrupt occurred.
     saved_sp: Stack.Saved,
     fuel: *Interpreter.Fuel,
     old_stp: Stp,
     interp: *Interpreter,
     callee: runtime.FuncInst,
-    comptime dispatchNextOpcode: DispatchNextOpcode,
-) Transition {
+    callbacks: anytype,
+) @TypeOf(callbacks).Result {
     var coz_begin = coz.begin("wasmstint.Interpreter.invokeWithinWasm");
     defer coz_begin.end();
 
@@ -228,14 +216,14 @@ pub inline fn invokeWithinWasm(
             //     "WASM CALL EXHAUSTED STACK (depth = {}, ver = {})\n",
             //     .{ interp.call_depth, interp.version.number },
             // );
-            return Transition.callStackExhaustion(
+            return callbacks.callStackExhaustion(Transition.callStackExhaustion(
                 call_ip,
                 old_instr.end,
                 saved_sp,
                 old_stp,
                 interp,
                 callee,
-            );
+            ));
         },
         error.ValidationNeeded => @panic("TODO: awaiting_validation"),
     };
@@ -259,11 +247,9 @@ pub inline fn invokeWithinWasm(
             //     "AFTER CALL args={*}, sp={*}\n",
             //     .{ args.ptr, new_frame.top().ptr },
             // );
-            return dispatchNextOpcode(
-                Instr.init(new_frame.frame.wasm.ip, new_frame.frame.wasm.eip),
-                new_frame.top(),
+            return callbacks.intoWasmFunction(
+                new_frame,
                 fuel,
-                new_frame.frame.wasm.stp,
                 Locals{ .ptr = new_locals.ptr },
                 wasm.module,
                 interp,
@@ -275,15 +261,82 @@ pub inline fn invokeWithinWasm(
             //     "new_frame.top() = {*}, args = {*}",
             //     .{ new_frame.top().ptr, args.ptr },
             // );
-            return Transition.awaitingHost(
+            return callbacks.intoHostFunction(Transition.awaitingHost(
                 new_frame.top(),
                 interp,
                 &host.signature,
                 .calling_host,
                 saved_token,
-            );
+            ));
         },
     }
+}
+
+fn InvokeWithinWasmCallbacks(comptime dispatchNextOpcode: DispatchNextOpcode) type {
+    return struct {
+        pub const Result = Transition;
+
+        inline fn forwardTransition(_: @This(), t: Transition) Transition {
+            return t;
+        }
+
+        pub const callStackExhaustion = forwardTransition;
+        pub const intoHostFunction = forwardTransition;
+
+        pub inline fn intoWasmFunction(
+            _: @This(),
+            new_frame: Stack.PushedFrame,
+            fuel: *Interpreter.Fuel,
+            new_locals: Locals,
+            module: runtime.ModuleInst,
+            ctx: *Interpreter,
+        ) Transition {
+            return dispatchNextOpcode(
+                Instr.init(new_frame.frame.wasm.ip, new_frame.frame.wasm.eip),
+                new_frame.top(),
+                fuel,
+                new_frame.frame.wasm.stp,
+                new_locals,
+                module,
+                ctx,
+            );
+        }
+    };
+}
+
+/// Attempts to allocate a stack frame for the `target_function`, with arguments expected to be on
+/// top of the value stack, and then resumes execution.
+///
+/// To ensure the interpreter cannot overflow the stack, opcode handlers must ensure this function
+/// is called inline.
+///
+/// If enough stack space is not available, then the interpreter is interrupted and the IP is set to
+/// `call_ip`, which is a pointer to the call instruction to restart.
+pub inline fn invokeWithinWasm(
+    old_instr: Instr,
+    /// Pointer to the byte containing the call opcode.
+    call_ip: Ip,
+    /// Stores the stack before the `call` instruction was executed. Parameters to pass to the
+    /// `callee` begin at the bottom at index `0`.
+    ///
+    /// Restored if a `.call_stack_exhausted` interrupt occurred.
+    saved_sp: Stack.Saved,
+    fuel: *Interpreter.Fuel,
+    old_stp: Stp,
+    interp: *Interpreter,
+    callee: runtime.FuncInst,
+    comptime dispatchNextOpcode: DispatchNextOpcode,
+) Transition {
+    return invokeWithinWasmWithCallbacks(
+        old_instr,
+        call_ip,
+        saved_sp,
+        fuel,
+        old_stp,
+        interp,
+        callee,
+        (InvokeWithinWasmCallbacks(dispatchNextOpcode)){},
+    );
 }
 
 /// Entrypoint for performing a tail call within a WebAssembly function.

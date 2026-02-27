@@ -156,6 +156,7 @@ const Builder = struct {
     side_table_entry: Type = .none,
     module_info: Type = .none,
     module_inst: Type = .none,
+    struct_3_ptrs: Type = .none,
     value_structs: struct {
         i64: Type = .none,
     } = .{},
@@ -256,7 +257,8 @@ const Builder = struct {
                         .locals, .vsp => 16,
                         .module => b.cache_line_size,
                         // TODO: read datalayout to determine alignment of u64 Fuel/STP
-                        .memories, .ctx => b.ptr_size_bytes,
+                        .memories, .ctx, .disp => b.ptr_size_bytes,
+                        .stp => 8,
                         else => null,
                     };
 
@@ -330,6 +332,7 @@ const Builder = struct {
             .ptr, // datas_drop_mask
             .ptr, // elems_drop_mask
         });
+        b.struct_3_ptrs = try b.module.structType(.normal, &@as([3]Type, @splat(Type.ptr)));
         b.value_structs = .{
             .i64 = try b.module.structType(.normal, &.{ .i64, .i64 }),
         };
@@ -843,6 +846,11 @@ const OpcodeHandler = struct {
             vsp: Value,
             vip: Value,
             stp: Value,
+            // Used in function calls.
+            locals: Value = .none,
+            module: Value = .none,
+            memories: Value = .none,
+            eip: Value = .none,
         },
     ) Oom!void {
         const wip = &handler.wip;
@@ -871,11 +879,22 @@ const OpcodeHandler = struct {
 
         var args: [10]Value = undefined;
         for (&args, std.enums.values(OpcodeHandlerParam)) |*a, param| {
-            a.* = switch (param) {
-                .vsp => updates.vsp,
-                .vip => after_next_ip_byte,
-                .stp => updates.stp,
-                else => param.arg(wip),
+            a.* = arg: {
+                switch (param) {
+                    .vsp => break :arg updates.vsp,
+                    .vip => break :arg after_next_ip_byte,
+                    .stp => break :arg updates.stp,
+                    inline .locals,
+                    .module,
+                    .memories,
+                    .eip,
+                    => |tag| if (@field(updates, @tagName(tag)) != .none) {
+                        break :arg @field(updates, @tagName(tag));
+                    },
+                    else => {},
+                }
+
+                break :arg param.arg(wip);
             };
         }
         _ = try wip.ret(
@@ -889,6 +908,79 @@ const OpcodeHandler = struct {
                 "",
             ),
         );
+    }
+
+    /// Cursor of `wip` should be in the same basic block as the call to the helper function
+    /// that produced the `wasm_frame`.
+    fn jmpToHostOrNextHandler(
+        handler: *OpcodeHandler,
+        b: *Builder,
+        out_alloca: Value,
+        /// A `null` value indicates that a transition to the host should be performed.
+        wasm_frame: Value,
+    ) Oom!void {
+        std.debug.assert(out_alloca.typeOfWip(&handler.wip) == .ptr);
+        std.debug.assert(wasm_frame.typeOfWip(&handler.wip) == .ptr);
+        const returned_to_wasm = try handler.wip.block(1, "ReturnedToWasm");
+        const returned_to_host = try handler.wip.block(1, "ReturnedToHost");
+        _ = try handler.wip.brCond(
+            try handler.wip.icmp(.ne, wasm_frame, try b.module.nullValue(.ptr), ""),
+            returned_to_wasm,
+            returned_to_host,
+            .none,
+        );
+
+        const alloca_ty = b.struct_3_ptrs;
+        const wasm_frame_ty = b.struct_3_ptrs;
+        handler.wip.cursor = .{ .block = returned_to_wasm };
+        const new_module = try handler.wip.load(
+            .normal,
+            .ptr,
+            try handler.wip.gepStruct(alloca_ty, out_alloca, 2, ""),
+            .default,
+            "module",
+        );
+        try handler.jmpToNextHandler(b, .{
+            .vsp = try handler.wip.load(
+                .normal,
+                .ptr,
+                try handler.wip.gepStruct(alloca_ty, out_alloca, 1, ""),
+                .default,
+                "VSP",
+            ),
+            .vip = try handler.wip.load(.normal, .ptr, wasm_frame, .default, "VIP"),
+            .stp = try handler.wip.load(
+                .normal,
+                .ptr,
+                try handler.wip.gepStruct(wasm_frame_ty, wasm_frame, 2, ""),
+                .default,
+                "STP",
+            ),
+            .locals = try handler.wip.load(.normal, .ptr, out_alloca, .default, "locals"),
+            .module = new_module,
+            .memories = try handler.wip.load(
+                .normal,
+                .ptr,
+                try handler.wip.gepStruct(
+                    b.module_inst,
+                    new_module,
+                    @intFromEnum(ModuleInstField.mems),
+                    "",
+                ),
+                .default,
+                "mems",
+            ),
+            .eip = try handler.wip.load(
+                .normal,
+                .ptr,
+                try handler.wip.gepStruct(wasm_frame_ty, wasm_frame, 1, ""),
+                .default,
+                "EIP",
+            ),
+        });
+
+        handler.wip.cursor = .{ .block = returned_to_host };
+        _ = try handler.wip.ret(try handler.wip.load(.normal, .i32, out_alloca, .default, ""));
     }
 
     fn adjustVspBy(handler: *OpcodeHandler, b: *Builder, amt: i64) Oom!Value {
@@ -1274,12 +1366,16 @@ const OpcodeHandlerParam = enum(u4) {
     locals,
     vsp,
     module,
+    /// Preserved across WASM function calls.
     fuel,
+    /// Derived from `module`.
     memories,
+    /// Preserved across WASM function calls.
     ctx,
     vip,
     stp,
     eip,
+    /// Preserved across WASM function calls.
     disp,
 
     fn arg(param: OpcodeHandlerParam, wip: *WipFunction) Value {
@@ -1665,7 +1761,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
 
         const helper = try b.addFunction(
             try b.strtabStringSymbolPrefixed("returnFromWasm"),
-            try b.fnType(.i32, &@as([9]Type, @splat(.ptr))),
+            try b.fnType(.ptr, &@as([4]Type, @splat(.ptr))),
             b.ffi_call_conv,
             .{ .linkage = .external, .preemption = .dso_local },
         );
@@ -1676,30 +1772,45 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         }
 
         ret.wip.cursor = .{ .block = try ret.wip.block(0, "Entry") };
-        const dummy_arg = try b.module.poisonValue(.ptr);
-        const args = [9]Value{
-            dummy_arg,
-            OpcodeHandlerParam.vsp.arg(&ret.wip),
-            OpcodeHandlerParam.module.arg(&ret.wip),
-            OpcodeHandlerParam.fuel.arg(&ret.wip),
-            OpcodeHandlerParam.ctx.arg(&ret.wip),
-            dummy_arg,
-            dummy_arg,
-            OpcodeHandlerParam.eip.arg(&ret.wip),
-            dummy_arg,
-        };
-        _ = try ret.wip.ret(
-            try ret.wip.call(
-                .tail,
+        const out_alloca = try ret.wip.alloca(
+            .normal,
+            b.struct_3_ptrs,
+            try b.sizeIntValue(1),
+            .default,
+            .default,
+            "",
+        );
+
+        const wasm_frame = call: {
+            const args = [4]Value{
+                out_alloca,
+                OpcodeHandlerParam.vsp.arg(&ret.wip),
+                OpcodeHandlerParam.ctx.arg(&ret.wip),
+                if (b.options.optimize == .Debug)
+                    OpcodeHandlerParam.eip.arg(&ret.wip)
+                else
+                    try b.module.undefValue(.ptr),
+            };
+            var attrs = FunctionAttributes.Wip{};
+            try attrs.addRetAttr(.{ .dereferenceable_or_null = 3 * b.ptr_size_bytes }, &b.module);
+            try attrs.addParamAttr(0, .writeonly, &b.module);
+            for (0..2) |i| {
+                for ([3]Attribute{ .nonnull, .noundef, .nofree }) |attr| {
+                    try attrs.addParamAttr(i, attr, &b.module);
+                }
+            }
+            break :call try ret.wip.call(
+                .normal,
                 b.ffi_call_conv,
-                .none,
+                try attrs.finish(&b.module),
                 helper.typeOf(&b.module),
                 helper.toValue(&b.module),
                 &args,
                 "",
-            ),
-        );
+            );
+        };
 
+        try ret.jmpToHostOrNextHandler(b, out_alloca, wasm_frame);
         try ret.finish(b);
         break :ret index;
     };
@@ -1938,8 +2049,8 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         const helper = try b.addFunction(
             try b.strtabStringSymbolPrefixed("invokeWithinWasm"),
             try b.fnType(
-                .i32,
-                &@as([9]Type, @as([8]Type, @splat(.ptr)) ++ .{b.size_type}),
+                .ptr,
+                &@as([10]Type, @as([9]Type, @splat(.ptr)) ++ .{b.size_type}),
             ),
             b.ffi_call_conv,
             .{ .linkage = .external, .preemption = .dso_local },
@@ -1953,6 +2064,15 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
 
         var call = try b.opcodeHandler(.{ .byte = .call });
         call.wip.cursor = .{ .block = try call.wip.block(0, "Entry") };
+        const out_alloca = try call.wip.alloca(
+            .normal,
+            b.struct_3_ptrs,
+            try b.sizeIntValue(1),
+            .default,
+            .default,
+            "",
+        );
+
         const start_vip = OpcodeHandlerParam.vip.arg(&call.wip);
         const call_ip = try call.wip.gep(.inbounds, .i8, start_vip, &.{size_neg_1}, "");
 
@@ -1965,29 +2085,40 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
             "",
         );
 
-        var helper_args = [9]Value{
-            call_ip,
-            OpcodeHandlerParam.vsp.arg(&call.wip),
-            OpcodeHandlerParam.module.arg(&call.wip),
-            OpcodeHandlerParam.fuel.arg(&call.wip),
-            OpcodeHandlerParam.ctx.arg(&call.wip),
-            new_vip,
-            OpcodeHandlerParam.stp.arg(&call.wip),
-            OpcodeHandlerParam.eip.arg(&call.wip),
-            func_idx,
-        };
-        _ = try call.wip.ret(
-            try call.wip.call(
-                .tail,
+        const wasm_frame = call: {
+            var args = [10]Value{
+                out_alloca,
+                call_ip,
+                OpcodeHandlerParam.vsp.arg(&call.wip),
+                OpcodeHandlerParam.module.arg(&call.wip),
+                OpcodeHandlerParam.fuel.arg(&call.wip),
+                OpcodeHandlerParam.ctx.arg(&call.wip),
+                new_vip,
+                OpcodeHandlerParam.stp.arg(&call.wip),
+                OpcodeHandlerParam.eip.arg(&call.wip),
+                func_idx,
+            };
+            var attrs = FunctionAttributes.Wip{};
+            try attrs.addRetAttr(.{ .dereferenceable_or_null = 3 * b.ptr_size_bytes }, &b.module);
+            try attrs.addParamAttr(0, .writeonly, &b.module);
+            for (0..9) |i| {
+                for ([3]Attribute{ .nonnull, .noundef, .nofree }) |attr| {
+                    try attrs.addParamAttr(i, attr, &b.module);
+                }
+            }
+
+            break :call try call.wip.call(
+                .normal,
                 b.ffi_call_conv,
-                .none,
+                try attrs.finish(&b.module),
                 helper.typeOf(&b.module),
                 helper.toValue(&b.module),
-                &helper_args,
+                &args,
                 "",
-            ),
-        );
+            );
+        };
 
+        try call.jmpToHostOrNextHandler(b, out_alloca, wasm_frame);
         try call.finish(b);
     }
 }

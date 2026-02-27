@@ -16,6 +16,7 @@ const ffi_cc: CallingConvention = cc: {
     break :cc .c;
 };
 
+// TODO: use inline asm to call this w/ x86_64_regcall_v3_sysv
 /// Sets up a stack frame for the assembly opcode handler, before invoking it.
 const opcodeHandlerTrampoline = @extern(
     *const fn (
@@ -45,7 +46,7 @@ pub inline fn callOpcodeHandler(
         "VIP={*}, EIP={*}, VSP={*}, LOC={*}, MODULE={*}, STP={*}",
         .{ instr.next, instr.end, ctx.stack_top.ptr, locals.ptr, module.inner, stp },
     ); // TODO: remove this
-    var transition = opcodeHandlerTrampoline(
+    return opcodeHandlerTrampoline(
         locals,
         ctx.stack_top,
         module,
@@ -56,34 +57,6 @@ pub inline fn callOpcodeHandler(
         instr.end,
         handler,
     );
-
-    // Zig x86-64 backend does not support tail calls, and tail calls cannot be emulated with
-    // inline `asm` due to the need to preserve callee-saved registers.
-    while (builtin.zig_backend != .stage2_llvm and
-        ctx.current_state == .interrupted and
-        ctx.current_state.interrupted.cause == .out_of_fuel and
-        fuel.remaining > 0)
-    {
-        const current_frame = ctx.stack.frameAt(ctx.stack.current_frame).?;
-        const wasm_func = current_frame.function.expanded().wasm;
-        const new_module = wasm_func.module;
-        var new_instr = Instr.init(current_frame.wasm.ip, current_frame.wasm.eip);
-        const new_locals = common.Locals{ .ptr = current_frame.localValues(&ctx.stack).ptr };
-        const new_handler = new_instr.readNextOpcodeHandler(fuel, new_locals, new_module, ctx);
-        transition = opcodeHandlerTrampoline(
-            new_locals,
-            ctx.stack_top,
-            new_module,
-            fuel,
-            ctx,
-            new_instr.next,
-            current_frame.wasm.stp,
-            new_instr.end,
-            new_handler,
-        );
-    }
-
-    return transition;
 }
 
 pub const outOfFuelHandler = @extern(
@@ -106,26 +79,34 @@ fn interruptOutOfFuel(
     return Transition.interrupted(.init(vip, eip), sp, stp, ctx, .out_of_fuel);
 }
 
+const UpdateState = extern union {
+    transition: Transition,
+    to_wasm: ToWasm,
+
+    const ToWasm = extern struct {
+        locals: common.Locals,
+        vsp: Sp,
+        module: runtime.ModuleInst,
+        // fuel never changes
+        // memories derived from `module`
+        // ctx never changes
+        // vip, stp, eip provided in return value
+        // caller knows disp
+    };
+};
+
+/// Returns `null` if control returned to the host (when the call stack is empty, or the caller was
+/// a host function).
 fn returnFromWasm(
-    // Dummy parameters so LLVM can generate tail calls
-    _: common.Locals,
+    output: *UpdateState,
     old_vsp: Sp,
-    old_module: runtime.ModuleInst,
-    fuel: *Interpreter.Fuel,
     ctx: *Interpreter,
-    _: Ip,
-    _: Stp,
-    old_eip: Eip,
-    _: *const OpcodeHandler,
-) callconv(ffi_cc) Transition {
+    old_eip_debug: Eip,
+) callconv(ffi_cc) ?*const Stack.Frame.Wasm {
     const popped = ctx.stack.popFrame(old_vsp, .from_stack_top);
     if (builtin.mode == .Debug) {
-        std.debug.assert( // module mismatch
-            @intFromPtr(popped.info.callee.expanded().wasm.module.inner) ==
-                @intFromPtr(old_module.inner),
-        );
         const expected_eip = @intFromPtr(popped.info.wasm.eip);
-        const actual_eip = @intFromPtr(old_eip);
+        const actual_eip = @intFromPtr(old_eip_debug);
         if (expected_eip != actual_eip) {
             std.debug.panic("expected EIP={X}, got {X}", .{ expected_eip, actual_eip });
         }
@@ -139,45 +120,14 @@ fn returnFromWasm(
         const frame = ctx.stack.frameAt(ctx.stack.current_frame).?;
         switch (frame.function.expanded()) {
             .wasm => |wasm| {
-                var instr = Instr.init(frame.wasm.ip, frame.wasm.eip);
-                if (builtin.zig_backend == .stage2_x86_64) {
-                    // trampoline continues execution
-                    return Transition.interrupted(
-                        instr,
-                        popped.top,
-                        frame.wasm.stp,
-                        ctx,
-                        .out_of_fuel,
-                    );
-                } else {
-                    const new_locals = common.Locals{
-                        .ptr = frame.localValues(&ctx.stack).ptr,
-                    };
-                    const handler = instr.readNextOpcodeHandler(
-                        fuel,
-                        new_locals,
-                        wasm.module,
-                        ctx,
-                    );
-
-                    // ABI of the functions are the same, so this call is fine.
-                    // Optimizer seems to emit a direct `jmp` despite function pointers here.
-                    return @call(
-                        .always_tail,
-                        @as(@TypeOf(&returnFromWasm), @ptrCast(opcodeHandlerTrampoline)),
-                        .{
-                            new_locals,
-                            popped.top,
-                            wasm.module,
-                            fuel,
-                            ctx,
-                            instr.next,
-                            frame.wasm.stp,
-                            instr.end,
-                            handler,
-                        },
-                    );
-                }
+                output.* = .{
+                    .to_wasm = .{
+                        .locals = common.Locals{ .ptr = frame.localValues(&ctx.stack).ptr },
+                        .vsp = popped.top,
+                        .module = wasm.module,
+                    },
+                };
+                return &frame.wasm;
             },
             .host => break :return_to_host,
         }
@@ -185,50 +135,50 @@ fn returnFromWasm(
         comptime unreachable;
     }
 
-    return Transition.awaitingHost(
-        popped.top,
-        ctx,
-        popped.signature,
-        .returning_to_host,
-        .wrote_ip_and_stp_to_the_current_stack_frame, // no need to save, since this returns to host
-    );
+    output.* = .{
+        .transition = Transition.awaitingHost(
+            popped.top,
+            ctx,
+            popped.signature,
+            .returning_to_host,
+            // no need to save, since this returns to host
+            .wrote_ip_and_stp_to_the_current_stack_frame,
+        ),
+    };
+    return null;
 }
 
-inline fn resumeAfterInvokeWithinWasm(
-    old_instr: Instr,
-    vsp: Sp,
-    fuel: *Interpreter.Fuel,
-    stp: Stp,
-    locals: common.Locals,
-    module: runtime.ModuleInst,
-    ctx: *Interpreter,
-) Transition {
-    if (builtin.zig_backend == .stage2_x86_64) {
-        // trampoline continues execution
-        return Transition.interrupted(old_instr, vsp, stp, ctx, .out_of_fuel);
-    } else {
-        var instr = old_instr;
-        const handler = instr.readNextOpcodeHandler(fuel, locals, module, ctx);
-        return @call(
-            .always_tail,
-            @as(@TypeOf(&invokeWithinWasm), @ptrCast(opcodeHandlerTrampoline)),
-            .{
-                @as(*anyopaque, @ptrCast(locals.ptr)),
-                vsp,
-                module,
-                fuel,
-                ctx,
-                instr.next,
-                stp,
-                instr.end,
-                @intFromPtr(handler),
-            },
-        );
+const InvokeWithinWasmCallback = struct {
+    pub const Result = ?*const Stack.Frame.Wasm;
+
+    state: *UpdateState,
+
+    inline fn transitionIntoHost(out: InvokeWithinWasmCallback, transition: Transition) Result {
+        out.state.* = .{ .transition = transition };
+        return null;
     }
-}
+
+    pub const callStackExhaustion = transitionIntoHost;
+    pub const intoHostFunction = transitionIntoHost;
+
+    pub inline fn intoWasmFunction(
+        out: InvokeWithinWasmCallback,
+        new_frame: Stack.PushedFrame,
+        _: *Interpreter.Fuel,
+        locals: common.Locals,
+        module: runtime.ModuleInst,
+        _: *Interpreter,
+    ) Result {
+        out.state.* = .{
+            .to_wasm = .{ .locals = locals, .vsp = new_frame.top(), .module = module },
+        };
+        return &new_frame.frame.wasm;
+    }
+};
 
 fn invokeWithinWasm(
-    call_ip_int: *anyopaque,
+    output: *UpdateState,
+    call_ip: Ip,
     vsp: Sp,
     module: runtime.ModuleInst,
     fuel: *Interpreter.Fuel,
@@ -237,8 +187,7 @@ fn invokeWithinWasm(
     stp: Stp,
     eip: Eip,
     func_idx: usize,
-) callconv(ffi_cc) Transition {
-    const call_ip: Ip = @ptrCast(@constCast(call_ip_int));
+) callconv(ffi_cc) ?*const Stack.Frame.Wasm {
     switch (@as(opcodes.ByteOpcode, @enumFromInt(call_ip[0]))) {
         .call => {},
         else => |bad| switch (builtin.mode) {
@@ -266,7 +215,7 @@ fn invokeWithinWasm(
         arg_count,
     );
 
-    return common.invokeWithinWasm(
+    return common.invokeWithinWasmWithCallbacks(
         Instr.init(vip, eip),
         call_ip,
         saved_sp,
@@ -274,7 +223,7 @@ fn invokeWithinWasm(
         stp,
         ctx,
         callee,
-        resumeAfterInvokeWithinWasm,
+        InvokeWithinWasmCallback{ .state = output },
     );
 }
 
