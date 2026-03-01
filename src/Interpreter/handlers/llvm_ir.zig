@@ -227,6 +227,48 @@ fn invokeWithinWasm(
     );
 }
 
+fn invokeWithinWasmIndirect(
+    output: *UpdateState,
+    call_ip: Ip,
+    /// Does not have the `i32` index popped.
+    vsp: Sp,
+    callee: runtime.FuncRef,
+    fuel: *Interpreter.Fuel,
+    ctx: *Interpreter,
+    vip: Ip,
+    stp: Stp,
+    eip: Eip,
+    expected_signature: *const Module.FuncType,
+) callconv(ffi_cc) ?*const Stack.Frame.Wasm {
+    const pop_count = 1 + expected_signature.param_count;
+    const saved_sp = Stack.Saved.pop(
+        Stack.Values.init(vsp, &ctx.stack, pop_count, pop_count),
+        pop_count,
+    );
+
+    const actual_signature = callee.signature();
+    if (!expected_signature.matches(actual_signature)) {
+        const info = Interpreter.Trap.init(
+            .indirect_call_signature_mismatch,
+            .{ .expected = expected_signature, .actual = actual_signature },
+        );
+
+        output.* = .{ .transition = Transition.trap(vip, .none, eip, vsp, stp, ctx, info) };
+        return null;
+    }
+
+    return common.invokeWithinWasmWithCallbacks(
+        Instr.init(vip, eip),
+        call_ip,
+        saved_sp,
+        fuel,
+        stp,
+        ctx,
+        callee.funcInst(),
+        InvokeWithinWasmCallback{ .state = output },
+    );
+}
+
 fn trapWithNumericCode(
     trap_ip: Ip,
     sp: Sp,
@@ -271,13 +313,41 @@ fn trapMemoryAccessOutOfBounds(
     return Transition.trapAt(trap_ip, eip, sp, stp, ctx, trap_info);
 }
 
+fn trapCallIndirectAccessOob(
+    trap_ip: Ip,
+    vsp: Sp,
+    eip: Eip,
+    stp: Stp,
+    table_idx: usize,
+    ctx: *Interpreter,
+) callconv(ffi_cc) Transition {
+    const oob_info = Trap.TableAccessOutOfBounds.init(@enumFromInt(table_idx), .call_indirect);
+    const info = Interpreter.Trap.init(.table_access_out_of_bounds, oob_info);
+    return Transition.trap(trap_ip, .none, eip, vsp, stp, ctx, info);
+}
+
+fn trapIndirectCallToNull(
+    trap_ip: Ip,
+    vsp: Sp,
+    eip: Eip,
+    stp: Stp,
+    elem_idx: usize,
+    ctx: *Interpreter,
+) callconv(ffi_cc) Transition {
+    const info = Interpreter.Trap.init(.indirect_call_to_null, .{ .index = @intCast(elem_idx) });
+    return Transition.trap(trap_ip, .none, eip, vsp, stp, ctx, info);
+}
+
 comptime {
     for (&[_][]const u8{
         "interruptOutOfFuel",
         "invokeWithinWasm",
+        "invokeWithinWasmIndirect",
         "returnFromWasm",
         "trapWithNumericCode",
         "trapMemoryAccessOutOfBounds",
+        "trapCallIndirectAccessOob",
+        "trapIndirectCallToNull",
     }) |name| {
         @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
     }
@@ -314,6 +384,8 @@ const CallingConvention = std.builtin.CallingConvention;
 const builtin = @import("builtin");
 
 const opcodes = @import("opcodes");
+const Module = @import("../../Module.zig");
+
 const Interpreter = @import("../../Interpreter.zig");
 const Trap = Interpreter.Trap;
 const runtime = @import("../../runtime.zig");

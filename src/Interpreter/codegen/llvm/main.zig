@@ -152,7 +152,9 @@ const Builder = struct {
     trap_memory_access_oob: Function.Index = .none,
 
     opcode_handler_writing_lock: std.debug.SafetyLock = .{},
+    func_type: Type = .none,
     mem_inst: Type = .none,
+    table_inst: Type = .none,
     side_table_entry: Type = .none,
     module_info: Type = .none,
     module_inst: Type = .none,
@@ -295,11 +297,20 @@ const Builder = struct {
             },
         };
 
+        b.func_type = try b.module.structType(.normal, &.{ .ptr, .i16, .i16 });
         b.mem_inst = try b.module.structType(.normal, &.{
             .ptr,
             b.size_type,
             b.size_type,
             b.size_type,
+            .ptr,
+        });
+        b.table_inst = try b.module.structType(.normal, &.{
+            .ptr,
+            .i8,
+            .i32,
+            .i32,
+            .i32,
             .ptr,
         });
         b.side_table_entry = try b.module.structType(.@"packed", &.{ .i32, .i16, .i8, .i8 });
@@ -486,8 +497,7 @@ const Builder = struct {
                 );
                 {
                     var attrs = FunctionAttributes.Wip{};
-                    try b.commonFnAttributes(&attrs);
-                    try attrs.addFnAttr(.noreturn, &b.module);
+                    try b.fnAttributes(&attrs, &.{ .noreturn, .norecurse, .nounwind });
                     try b.setFnAttributes(panic, &attrs);
                 }
 
@@ -710,7 +720,6 @@ const MemInstField = enum(u8) {
             &.{ .@"0", try b.module.intValue(.i32, @intFromEnum(field)) },
             "",
         );
-        std.debug.assert(field_ptr.typeOfWip(wip) == .ptr);
         return field_ptr;
     }
 
@@ -724,6 +733,38 @@ const MemInstField = enum(u8) {
     /// Loads a field given a `ptr` to a `MemInst`.
     fn load(field: MemInstField, wip: *WipFunction, b: *Builder, ptr: Value) Oom!Value {
         return try wip.load(.normal, field.typeOf(b), try field.gep(wip, b, ptr), .default, "");
+    }
+};
+
+const TableInstField = enum {
+    base,
+    elem_type,
+    len,
+    capacity,
+    limit,
+
+    fn gep(field: TableInstField, wip: *WipFunction, b: *Builder, table: Value) Oom!Value {
+        std.debug.assert(table.typeOfWip(wip) == .ptr);
+        const field_ptr = try wip.gep(
+            .inbounds,
+            b.table_inst,
+            table,
+            &.{ .@"0", try b.module.intValue(.i32, @intFromEnum(field)) },
+            "",
+        );
+        return field_ptr;
+    }
+
+    fn typeOf(field: TableInstField) Type {
+        return switch (field) {
+            .base => .ptr,
+            .elem_type => .i8,
+            .len, .capacity, .limit => .i32,
+        };
+    }
+
+    fn load(field: TableInstField, wip: *WipFunction, b: *Builder, table: Value) Oom!Value {
+        return try wip.load(.normal, field.typeOf(), try field.gep(wip, b, table), .default, "");
     }
 };
 
@@ -1093,16 +1134,38 @@ const OpcodeHandler = struct {
             break :args args;
         };
 
+        _ = try handler.wip.callIntrinsicAssumeCold();
         _ = try handler.wip.ret(
             try handler.wip.call(
-                .normal,
+                .tail,
                 b.ffi_call_conv,
-                .none,
+                attrs: {
+                    var attrs = try b.value_copy.attributes.toWip(&b.module);
+                    try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
+                    break :attrs try attrs.finish(&b.module);
+                },
                 b.trap_with_numeric_code.typeOf(&b.module),
                 b.trap_with_numeric_code.toValue(&b.module),
                 &params,
                 "",
             ),
+        );
+    }
+
+    /// Produces a `ptr` to a `TableInst`.
+    fn tableInstPtr(handler: *OpcodeHandler, b: *Builder, table_idx: Value) Oom!Value {
+        return try handler.wip.load(
+            .normal,
+            .ptr,
+            try handler.wip.gep(
+                .inbounds,
+                .ptr,
+                try ModuleInstField.tables.load(&handler.wip, b),
+                &.{table_idx},
+                "",
+            ),
+            .default,
+            "",
         );
     }
 
@@ -1450,7 +1513,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         const result = try wip.call(
             .tail,
             b.opcode_handler.call_conv,
-            .none,
+            .none, // TODO: could add nounwind norecurse here
             b.opcode_handler.type,
             wip.arg(8),
             &call_params,
@@ -1482,7 +1545,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         );
         {
             var attrs = FunctionAttributes.Wip{};
-            try b.commonFnAttributes(&attrs);
+            try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
             try b.setFnAttributes(helper, &attrs);
         }
 
@@ -1664,8 +1727,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
             .{ .linkage = .external, .preemption = .dso_local },
         );
         var attrs = FunctionAttributes.Wip{};
-        try b.commonFnAttributes(&attrs);
-        try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .cold });
+        try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .cold, .nounwind });
         try b.setFnAttributes(b.trap_with_numeric_code, &attrs);
     }
     {
@@ -1690,8 +1752,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
             .{ .linkage = .external, .preemption = .dso_local },
         );
         var attrs = FunctionAttributes.Wip{};
-        try b.commonFnAttributes(&attrs);
-        try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .cold });
+        try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .cold, .nounwind });
         try b.setFnAttributes(b.trap_memory_access_oob, &attrs);
     }
 
@@ -1767,7 +1828,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         );
         {
             var attrs = FunctionAttributes.Wip{};
-            try b.commonFnAttributes(&attrs);
+            try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
             try b.setFnAttributes(helper, &attrs);
         }
 
@@ -2057,8 +2118,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         );
         {
             var attrs = FunctionAttributes.Wip{};
-            try b.commonFnAttributes(&attrs);
-            try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse });
+            try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
             try b.setFnAttributes(helper, &attrs);
         }
 
@@ -2119,6 +2179,192 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         };
 
         try call.jmpToHostOrNextHandler(b, out_alloca, wasm_frame);
+        try call.finish(b);
+    }
+    {
+        var call = try b.opcodeHandler(.{ .byte = .call_indirect });
+        call.wip.cursor = .{ .block = try call.wip.block(0, "Entry") };
+        const out_alloca = try call.wip.alloca(
+            .normal,
+            b.struct_3_ptrs,
+            try b.sizeIntValue(1),
+            .default,
+            .default,
+            "",
+        );
+
+        const start_vip = OpcodeHandlerParam.vip.arg(&call.wip);
+        const initial_vsp = OpcodeHandlerParam.vsp.arg(&call.wip);
+        const ctx = OpcodeHandlerParam.ctx.arg(&call.wip);
+        const eip = OpcodeHandlerParam.eip.arg(&call.wip);
+        const stp = OpcodeHandlerParam.stp.arg(&call.wip);
+        const call_ip = try call.wip.gep(.inbounds, .i8, start_vip, &.{size_neg_1}, "");
+
+        const decode_type_idx = try b.callDecodeUlebIdx(&call.wip, start_vip);
+        const vip_after_type_idx = try call.wip.extractValue(decode_type_idx, &.{1}, "");
+        const type_idx = try call.wip.extractValue(decode_type_idx, &.{0}, "type_idx");
+
+        const decode_table_idx = try b.callDecodeUlebIdx(&call.wip, vip_after_type_idx);
+        const vip_after_table_idx = try call.wip.extractValue(decode_table_idx, &.{1}, "");
+        const table_idx = try call.wip.extractValue(decode_table_idx, &.{0}, "table_idx");
+
+        const table_ptr = try call.tableInstPtr(b, table_idx);
+        const table_len = try TableInstField.len.load(&call.wip, b, table_ptr);
+
+        const elem_idx = try call.wip.load(
+            .normal,
+            .i32,
+            try call.operandAt(b, 0),
+            value_stack_alignment,
+            "",
+        );
+        const in_bounds = try call.wip.block(1, "InBounds");
+        const out_of_bounds = try call.wip.block(1, "OutOfBounds");
+        _ = try call.wip.brCond(
+            try call.wip.icmp(.ult, elem_idx, table_len, ""),
+            in_bounds,
+            out_of_bounds,
+            .then_likely,
+        );
+
+        call.wip.cursor = .{ .block = in_bounds };
+        const expected_signature_ptr = try call.wip.gep(
+            .inbounds,
+            b.func_type,
+            try ModuleInfoField.types.load(&call.wip, b),
+            &.{type_idx},
+            "",
+        );
+
+        const func_ref = try call.wip.load(
+            .normal,
+            .ptr,
+            try call.wip.gep(
+                .inbounds,
+                .ptr,
+                try call.wip.load(.normal, .ptr, table_ptr, .default, "base"),
+                // Index cannot be interpreted as negative
+                &.{try call.wip.cast(.zext, elem_idx, b.size_type, "")},
+                "",
+            ),
+            .default,
+            "",
+        );
+
+        const null_elem = try call.wip.block(1, "Null");
+        const call_helper = try call.wip.block(1, "Invoke");
+        _ = try call.wip.brCond(
+            try call.wip.icmp(.ne, func_ref, try b.module.nullValue(.ptr), ""),
+            call_helper,
+            null_elem,
+            .then_likely,
+        );
+
+        call.wip.cursor = .{ .block = call_helper };
+        const wasm_frame = call: {
+            const helper = try b.addFunction(
+                try b.strtabStringSymbolPrefixed("invokeWithinWasmIndirect"),
+                try b.fnType(.ptr, &@as([10]Type, @splat(.ptr))),
+                b.ffi_call_conv,
+                .{ .linkage = .external, .preemption = .dso_local },
+            );
+            {
+                var attrs = FunctionAttributes.Wip{};
+                try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
+                try b.setFnAttributes(helper, &attrs);
+            }
+
+            var args = [10]Value{
+                out_alloca,
+                call_ip,
+                initial_vsp,
+                func_ref,
+                OpcodeHandlerParam.fuel.arg(&call.wip),
+                ctx,
+                vip_after_table_idx,
+                stp,
+                eip,
+                expected_signature_ptr,
+            };
+
+            var attrs = FunctionAttributes.Wip{};
+            try attrs.addRetAttr(.{ .dereferenceable_or_null = 3 * b.ptr_size_bytes }, &b.module);
+            try attrs.addParamAttr(0, .writeonly, &b.module);
+            for (0..10) |i| {
+                for ([3]Attribute{ .nonnull, .noundef, .nofree }) |attr| {
+                    try attrs.addParamAttr(i, attr, &b.module);
+                }
+            }
+
+            break :call try call.wip.call(
+                .normal,
+                b.ffi_call_conv,
+                try attrs.finish(&b.module),
+                helper.typeOf(&b.module),
+                helper.toValue(&b.module),
+                &args,
+                "",
+            );
+        };
+        try call.jmpToHostOrNextHandler(b, out_alloca, wasm_frame);
+
+        const trap_helper_type = try b.fnType(
+            .i32,
+            &[6]Type{ .ptr, .ptr, .ptr, .ptr, b.size_type, .ptr },
+        );
+        const trap_helper_attrs = attrs: {
+            var attrs = FunctionAttributes.Wip{};
+            try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind, .cold });
+            break :attrs try attrs.finish(&b.module);
+        };
+
+        call.wip.cursor = .{ .block = out_of_bounds };
+        var trap_helper_args = [6]Value{
+            call_ip,
+            initial_vsp,
+            eip,
+            stp,
+            try call.wip.cast(.zext, table_idx, b.size_type, ""),
+            ctx,
+        };
+        _ = try call.wip.callIntrinsicAssumeCold();
+        _ = try call.wip.ret(
+            try call.wip.call(
+                .tail,
+                b.ffi_call_conv,
+                trap_helper_attrs,
+                trap_helper_type,
+                (try b.addFunction(
+                    try b.strtabStringSymbolPrefixed("trapCallIndirectAccessOob"),
+                    trap_helper_type,
+                    b.ffi_call_conv,
+                    .{ .linkage = .external, .preemption = .dso_local },
+                )).toValue(&b.module),
+                &trap_helper_args,
+                "",
+            ),
+        );
+
+        call.wip.cursor = .{ .block = null_elem };
+        _ = try call.wip.callIntrinsicAssumeCold();
+        trap_helper_args[4] = try call.wip.cast(.zext, elem_idx, b.size_type, "");
+        _ = try call.wip.ret(
+            try call.wip.call(
+                .tail,
+                b.ffi_call_conv,
+                trap_helper_attrs,
+                trap_helper_type,
+                (try b.addFunction(
+                    try b.strtabStringSymbolPrefixed("trapIndirectCallToNull"),
+                    trap_helper_type,
+                    b.ffi_call_conv,
+                    .{ .linkage = .external, .preemption = .dso_local },
+                )).toValue(&b.module),
+                &trap_helper_args,
+                "",
+            ),
+        );
+
         try call.finish(b);
     }
 }
