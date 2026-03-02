@@ -4033,6 +4033,60 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             ));
             try conv.finish(b);
         }
+        for ([4]struct { u7, Type }{
+            .{ 's', .i32 },
+            .{ 'u', .i32 },
+            .{ 's', .i64 },
+            .{ 'u', .i64 },
+        }) |info| {
+            const signedness, const to_int_ty = info;
+            _ = b.scratch.reset(.retain_capacity);
+            var conv = try b.opcodeHandler(
+                Opcode.fromName(
+                    opcodes.FCPrefixOpcode,
+                    try std.fmt.allocPrint(b.scratch.allocator(), "{t}.trunc_sat_{s}_{c}", .{
+                        to_int_ty,
+                        float_info.prefix,
+                        signedness,
+                    }),
+                ),
+            );
+            const entry_blk = try conv.wip.block(0, "Entry");
+            conv.wip.cursor = .{ .block = entry_blk };
+            const un_op = try conv.unOp(b, float_ty);
+
+            const helper = try b.addFunction(
+                try b.module.strtabString(
+                    try std.fmt.allocPrint(
+                        b.scratch.allocator(),
+                        "llvm.fpto{[sign]c}i.sat.{[int]t}.{[float]s}",
+                        .{ .sign = signedness, .int = to_int_ty, .float = float_info.prefix },
+                    ),
+                ),
+                try b.fnType(to_int_ty, &.{float_info.float_ty}),
+                .default,
+                .{},
+            );
+
+            try un_op.writeResult(
+                &conv,
+                try conv.wip.call(
+                    .normal,
+                    .default,
+                    .none,
+                    helper.typeOf(&b.module),
+                    helper.toValue(&b.module),
+                    &.{un_op.c_1},
+                    "",
+                ),
+            );
+            try conv.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&conv.wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(&conv.wip),
+                .stp = OpcodeHandlerParam.stp.arg(&conv.wip),
+            });
+            try conv.finish(b);
+        }
     }
     {
         var demote = try b.opcodeHandler(.{ .byte = .@"f32.demote_f64" });
