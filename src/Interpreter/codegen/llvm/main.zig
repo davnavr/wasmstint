@@ -139,6 +139,7 @@ const Builder = struct {
         call_conv: CallConv,
         type: Type,
         fn_attrs: FunctionAttributes,
+        param_attrs: FunctionAttributes,
     },
     dispatch_tables: struct {
         byte: Global.Index = .none,
@@ -238,61 +239,67 @@ const Builder = struct {
 
         b.target_features = try b.module.string(target_features.items);
         b.size_type = try b.module.intType(ptr_bit_size);
+        const opcode_handler_param_attrs = attrs: {
+            var attrs = FunctionAttributes.Wip{};
+            defer attrs.deinit(&b.module);
+            for (std.enums.values(OpcodeHandlerParam)) |param| {
+                const idx = @intFromEnum(param);
+                for (&[3]Attribute{ .nonnull, .nofree, .noundef }) |attr| {
+                    try attrs.addParamAttr(idx, attr, &b.module);
+                }
+
+                const alignment: ?u16 = switch (param) {
+                    .locals, .vsp => 16,
+                    .module => b.cache_line_size,
+                    // TODO: read datalayout to determine alignment of u64 Fuel/STP
+                    .memories, .ctx, .disp => b.ptr_size_bytes,
+                    .stp => 8,
+                    else => null,
+                };
+
+                if (alignment) |a| {
+                    try attrs.addParamAttr(idx, .{ .@"align" = .fromByteUnits(a) }, &b.module);
+                }
+
+                switch (param) {
+                    .locals, .vsp, .fuel, .stp, .disp => {
+                        try attrs.addParamAttr(idx, .@"noalias", &b.module);
+                    },
+                    else => {},
+                }
+
+                const dereferenceable: ?u32 = switch (param) {
+                    .fuel => 8,
+                    .disp => @as(u32, b.ptr_size_bytes) * 256,
+                    .module => @as(u32, b.ptr_size_bytes) * 9,
+                    else => null,
+                };
+
+                if (dereferenceable) |size| {
+                    try attrs.addParamAttr(idx, .{ .dereferenceable = size }, &b.module);
+                }
+
+                switch (param) {
+                    .ctx, .vip, .stp, .eip, .disp => {
+                        try attrs.addParamAttr(idx, .readonly, &b.module);
+                    },
+                    else => {},
+                }
+            }
+            break :attrs try attrs.finish(&b.module);
+        };
         b.opcode_handler = .{
             .call_conv = switch (config.target.cpu.arch) {
                 .x86_64, .aarch64, .riscv64 => .ghccc,
                 else => .tailcc,
             },
             .type = try b.fnType(.i32, &@as([10]Type, @splat(Type.ptr))),
+            .param_attrs = opcode_handler_param_attrs,
             .fn_attrs = attrs: {
-                var attrs = FunctionAttributes.Wip{};
+                var attrs = try opcode_handler_param_attrs.toWip(&b.module);
                 defer attrs.deinit(&b.module);
                 try b.commonFnAttributes(&attrs);
                 try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse });
-                for (std.enums.values(OpcodeHandlerParam)) |param| {
-                    const idx = @intFromEnum(param);
-                    for (&[3]Attribute{ .nonnull, .nofree, .noundef }) |attr| {
-                        try attrs.addParamAttr(idx, attr, &b.module);
-                    }
-
-                    const alignment: ?u16 = switch (param) {
-                        .locals, .vsp => 16,
-                        .module => b.cache_line_size,
-                        // TODO: read datalayout to determine alignment of u64 Fuel/STP
-                        .memories, .ctx, .disp => b.ptr_size_bytes,
-                        .stp => 8,
-                        else => null,
-                    };
-
-                    if (alignment) |a| {
-                        try attrs.addParamAttr(idx, .{ .@"align" = .fromByteUnits(a) }, &b.module);
-                    }
-
-                    switch (param) {
-                        .locals, .vsp, .fuel, .stp, .disp => {
-                            try attrs.addParamAttr(idx, .@"noalias", &b.module);
-                        },
-                        else => {},
-                    }
-
-                    const dereferenceable: ?u32 = switch (param) {
-                        .fuel => 8,
-                        .disp => @as(u32, b.ptr_size_bytes) * 256,
-                        .module => @as(u32, b.ptr_size_bytes) * 9,
-                        else => null,
-                    };
-
-                    if (dereferenceable) |size| {
-                        try attrs.addParamAttr(idx, .{ .dereferenceable = size }, &b.module);
-                    }
-
-                    switch (param) {
-                        .ctx, .vip, .stp, .eip, .disp => {
-                            try attrs.addParamAttr(idx, .readonly, &b.module);
-                        },
-                        else => {},
-                    }
-                }
                 break :attrs try attrs.finish(&b.module);
             },
         };
@@ -1480,6 +1487,14 @@ fn buildLlvmModule(b: *Builder) Oom!void {
             var attributes = FunctionAttributes.Wip{};
             try b.commonFnAttributes(&attributes);
             try attributes.addFnAttr(.norecurse, &b.module);
+            for (0..2) |i| {
+                try attributes.addParamAttr(i, .{ .@"align" = value_stack_alignment }, &b.module);
+            }
+            for (0..9) |i| {
+                for (&[3]Attribute{ .nonnull, .nofree, .noundef }) |attr| {
+                    try attributes.addParamAttr(i, attr, &b.module);
+                }
+            }
             try b.setFnAttributes(trampoline, &attributes);
         }
         var wip = try b.wipFunction(trampoline);
@@ -1513,7 +1528,11 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         const result = try wip.call(
             .tail,
             b.opcode_handler.call_conv,
-            .none, // TODO: could add nounwind norecurse here
+            attrs: {
+                var attrs = try b.opcode_handler.param_attrs.toWip(&b.module);
+                try b.fnAttributes(&attrs, &.{ .mustprogress, .nounwind, .norecurse });
+                break :attrs try attrs.finish(&b.module);
+            },
             b.opcode_handler.type,
             wip.arg(8),
             &call_params,
