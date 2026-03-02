@@ -392,12 +392,80 @@ fn panicInvalidByteOpcode(ip: Ip, eip: Eip) callconv(ffi_cc) noreturn {
     );
 }
 
+const FmtOpcodeBytes = struct {
+    bytes: []const u8,
+
+    pub fn format(f: FmtOpcodeBytes, out: *std.Io.Writer) std.Io.Writer.Error!void {
+        for (0.., f.bytes) |i, b| {
+            if (i == 0) {
+                try out.writeAll("0x");
+            } else {
+                try out.writeByte(' ');
+            }
+
+            try out.writeAll(&std.fmt.bytesToHex([1]u8{b}, .upper));
+        }
+    }
+};
+
+const FmtInvalidPrefixedOpcodeName = struct {
+    name: ?[]const u8,
+
+    pub fn format(f: FmtInvalidPrefixedOpcodeName, out: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (f.name) |name| {
+            try out.writeAll(name);
+            try out.writeByte(',');
+        }
+    }
+};
+
+fn panicInvalidPrefixedOpcode(
+    /// Points to first byte after the opcode bytes.
+    ip: Ip,
+    eip: Eip,
+    prefix: usize,
+) callconv(ffi_cc) noreturn {
+    @branchHint(.cold);
+    const prefix_byte: u8 = @intCast(prefix);
+    var decoded: u32 = 0;
+    const first_opcode_byte, const name: ?[]const u8 = result: {
+        for (1..5) |i| {
+            const ptr = ip - i;
+            decoded = @shlExact(decoded, 7) | @as(u32, ptr[0] & 0x7F);
+            const opcode_name = name: switch (prefix_byte) {
+                0xFC => @tagName(
+                    std.enums.fromInt(opcodes.FCPrefixOpcode, decoded) orelse break :name null,
+                ),
+                0xFD => @tagName(
+                    std.enums.fromInt(opcodes.FDPrefixOpcode, decoded) orelse break :name null,
+                ),
+                else => unreachable,
+            };
+
+            const maybe_prefix = ptr - 1;
+            if (maybe_prefix[0] == prefix_byte and (i == 4 or opcode_name != null)) {
+                break :result .{ maybe_prefix, opcode_name };
+            }
+        }
+
+        unreachable;
+    };
+
+    std.debug.panic(
+        "invalid instruction {[bytes]f} ({[name]f} {[value]d}) @ {[ip]X}, EIP={[eip]X}",
+        .{
+            .bytes = FmtOpcodeBytes{ .bytes = first_opcode_byte[0 .. ip - first_opcode_byte] },
+            .name = FmtInvalidPrefixedOpcodeName{ .name = name },
+            .value = decoded,
+            .ip = @intFromPtr(first_opcode_byte),
+            .eip = @intFromPtr(eip),
+        },
+    );
+}
+
 comptime {
     if (builtin.mode != .ReleaseSmall) {
-        for (&[_][]const u8{
-            "panicInvalidByteOpcode",
-            // "panicInvalidPrefixedOpcode",
-        }) |name| {
+        for (&[_][]const u8{ "panicInvalidByteOpcode", "panicInvalidPrefixedOpcode" }) |name| {
             @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
         }
     }

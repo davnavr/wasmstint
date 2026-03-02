@@ -139,18 +139,22 @@ const Builder = struct {
         call_conv: CallConv,
         type: Type,
         fn_attrs: FunctionAttributes,
-        param_attrs: FunctionAttributes,
+        invoke_attrs: FunctionAttributes,
+        panic_invalid_attrs: FunctionAttributes,
     },
     dispatch_tables: struct {
         byte: Global.Index = .none,
+        fc: Global.Index = .none,
     } = .{},
     byte_opcode_lookup: std.EnumSet(ByteOpcode) = .initEmpty(),
+    fc_prefix_opcode_lookup: std.EnumSet(opcodes.FCPrefixOpcode) = .initEmpty(),
 
     out_of_fuel_handler: Function.Index = .none,
     skip_leb_idx: Function.Index = .none,
     decode_uleb_idx: Function.Index = .none,
     trap_with_numeric_code: Function.Index = .none,
     trap_memory_access_oob: Function.Index = .none,
+    panic_invalid_prefixed_opcode: Function.Index = .none,
 
     opcode_handler_writing_lock: std.debug.SafetyLock = .{},
     func_type: Type = .none,
@@ -294,12 +298,23 @@ const Builder = struct {
                 else => .tailcc,
             },
             .type = try b.fnType(.i32, &@as([10]Type, @splat(Type.ptr))),
-            .param_attrs = opcode_handler_param_attrs,
             .fn_attrs = attrs: {
                 var attrs = try opcode_handler_param_attrs.toWip(&b.module);
                 defer attrs.deinit(&b.module);
                 try b.commonFnAttributes(&attrs);
                 try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse });
+                break :attrs try attrs.finish(&b.module);
+            },
+            .invoke_attrs = attrs: {
+                var attrs = try opcode_handler_param_attrs.toWip(&b.module);
+                try b.fnAttributes(&attrs, &.{ .mustprogress, .nounwind, .norecurse });
+                break :attrs try attrs.finish(&b.module);
+            },
+            .panic_invalid_attrs = attrs: {
+                var attrs = try opcode_handler_param_attrs.toWip(&b.module);
+                defer attrs.deinit(&b.module);
+                try b.commonFnAttributes(&attrs);
+                try b.fnAttributes(&attrs, &.{ .noreturn, .norecurse, .cold });
                 break :attrs try attrs.finish(&b.module);
             },
         };
@@ -480,13 +495,16 @@ const Builder = struct {
         return try .init(&b.module, .{ .function = func, .strip = b.options.strip });
     }
 
-    fn addDispatchTable(b: *Builder, name: []const u8, len: u16) Oom!Global.Index {
+    fn addDispatchTable(b: *Builder, name: []const u8, len: u16, options: struct {
+        linkage: llvm.Builder.Linkage = .internal,
+    }) Oom!Global.Index {
         const name_str = try b.strtabStringSymbolPrefixed(name);
         const ty = try b.module.arrayType(len, .ptr);
         const variable = try b.module.addVariable(name_str, ty, .default);
         variable.setAlignment(.fromByteUnits(b.cache_line_size), &b.module);
         variable.setUnnamedAddr(.local_unnamed_addr, &b.module);
         variable.setMutability(.constant, &b.module);
+        variable.setLinkage(options.linkage, &b.module);
         const global = variable.ptrConst(&b.module).global;
         global.ptr(&b.module).preemption = .dso_local;
         return global;
@@ -514,11 +532,7 @@ const Builder = struct {
                     b.opcode_handler.call_conv,
                     .{ .linkage = .internal, .preemption = .dso_local },
                 );
-                {
-                    var attrs = try b.opcode_handler.fn_attrs.toWip(&b.module);
-                    try b.fnAttributes(&attrs, &.{ .noreturn, .cold });
-                    try b.setFnAttributes(func, &attrs);
-                }
+                func.setAttributes(b.opcode_handler.panic_invalid_attrs, &b.module);
 
                 var wip = try WipFunction.init(&b.module, .{
                     .function = func,
@@ -540,6 +554,45 @@ const Builder = struct {
 
                 break :handler func;
             },
+            opcodes.FCPrefixOpcode => {
+                const func = try b.addFunction(
+                    try b.strtabStringSymbolPrefixed(switch (E) {
+                        opcodes.FCPrefixOpcode => "invalidFCPrefixOpcode",
+                        else => comptime unreachable,
+                    }),
+                    b.opcode_handler.type,
+                    b.opcode_handler.call_conv,
+                    .{ .linkage = .internal, .preemption = .dso_local },
+                );
+                func.setAttributes(b.opcode_handler.panic_invalid_attrs, &b.module);
+
+                var wip = try WipFunction.init(&b.module, .{
+                    .function = func,
+                    .strip = b.options.strip,
+                });
+
+                wip.cursor = .{ .block = try wip.block(0, "Entry") };
+                _ = try wip.call(
+                    .tail,
+                    b.ffi_call_conv,
+                    .none,
+                    b.panic_invalid_prefixed_opcode.typeOf(&b.module),
+                    b.panic_invalid_prefixed_opcode.toValue(&b.module),
+                    &[3]Value{
+                        OpcodeHandlerParam.vip.arg(&wip),
+                        OpcodeHandlerParam.eip.arg(&wip),
+                        try b.sizeIntValue(switch (E) {
+                            opcodes.FCPrefixOpcode => 0xFC,
+                            else => comptime unreachable,
+                        }),
+                    },
+                    "",
+                );
+                _ = try wip.@"unreachable"();
+                try wip.finish();
+
+                break :handler func;
+            },
             else => @compileError(@typeName(E)),
         };
 
@@ -550,6 +603,7 @@ const Builder = struct {
 
         const table_global_idx: Global.Index = switch (E) {
             ByteOpcode => b.dispatch_tables.byte,
+            opcodes.FCPrefixOpcode => b.dispatch_tables.fc,
             else => @compileError(@typeName(E)),
         };
 
@@ -558,17 +612,21 @@ const Builder = struct {
         const len = table_global.type.aggregateLen(&b.module);
         const set: *const std.EnumSet(E) = switch (E) {
             ByteOpcode => &b.byte_opcode_lookup,
+            opcodes.FCPrefixOpcode => &b.fc_prefix_opcode_lookup,
             else => @compileError(@typeName(E)),
         };
 
         _ = b.scratch.reset(.retain_capacity);
         const values = try b.scratch.allocator().alloc(Constant, len);
         var name_arena = ArenaAllocator.init(b.scratch.allocator());
+        var opcode_count: usize = 0;
         for (values, 0..len) |*v, i| {
             v.* = val: {
                 invalid: {
                     const opcode = std.enums.fromInt(E, i) orelse break :invalid;
                     if (!set.contains(opcode)) break :invalid;
+
+                    defer opcode_count += 1;
 
                     _ = name_arena.reset(.retain_capacity);
                     const handler_name = try b.module.strtabString(try std.mem.concat(
@@ -584,6 +642,8 @@ const Builder = struct {
             };
         }
 
+        std.debug.assert(opcode_count == set.count()); // check that length is correct
+
         try table_var.setInitializer(
             try b.module.arrayConst(table_global.type, values),
             &b.module,
@@ -595,6 +655,7 @@ const Builder = struct {
             inline else => |value, kind| {
                 const set: *std.EnumSet(@TypeOf(value)) = switch (kind) {
                     .byte => &b.byte_opcode_lookup,
+                    .fc => &b.fc_prefix_opcode_lookup,
                 };
 
                 if (set.contains(value)) std.debug.panic("duplicate handler for {t}", .{value});
@@ -665,7 +726,7 @@ const Builder = struct {
 
 const Opcode = union(enum) {
     byte: ByteOpcode,
-    // fc: opcodes.FCPrefixOpcode,
+    fc: opcodes.FCPrefixOpcode,
     // fd: opcodes.FDPrefixOpcode,
 
     fn init(comptime E: type, opcode: E) Opcode {
@@ -673,7 +734,7 @@ const Opcode = union(enum) {
             Opcode,
             switch (E) {
                 ByteOpcode => "byte",
-                // opcodes.FCPrefixOpcode => "fc",
+                opcodes.FCPrefixOpcode => "fc",
                 // opcodes.FDPrefixOpcode => "fd",
                 else => @compileError(@typeName(Type)),
             },
@@ -684,7 +745,7 @@ const Opcode = union(enum) {
     fn name(opcode: Opcode) []const u8 {
         return switch (opcode) {
             .byte => |byte| if (byte != .@"select t") @tagName(byte) else "select_t",
-            // inline else => |n| @tagName(n),
+            inline else => |n| @tagName(n),
         };
     }
 
@@ -949,7 +1010,7 @@ const OpcodeHandler = struct {
             try wip.call(
                 .musttail,
                 b.opcode_handler.call_conv,
-                .none,
+                b.opcode_handler.invoke_attrs,
                 b.opcode_handler.type,
                 next_handler,
                 &args,
@@ -1465,7 +1526,17 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     );
     try b.module.globals.ensureUnusedCapacity(b.module.gpa, 3);
 
-    b.dispatch_tables.byte = try b.addDispatchTable("byte_dispatch_table", 256);
+    b.dispatch_tables.byte = try b.addDispatchTable("byte_dispatch_table", 256, .{
+        .linkage = .external,
+    });
+    b.dispatch_tables.fc = try b.addDispatchTable(
+        "fc_prefix_dispatch_table",
+        switch (b.options.optimize) {
+            .Debug, .ReleaseSafe => 64,
+            .ReleaseSmall, .ReleaseFast => 18,
+        },
+        .{},
+    );
 
     {
         const trampoline = try b.addFfiFunction(
@@ -1528,11 +1599,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         const result = try wip.call(
             .tail,
             b.opcode_handler.call_conv,
-            attrs: {
-                var attrs = try b.opcode_handler.param_attrs.toWip(&b.module);
-                try b.fnAttributes(&attrs, &.{ .mustprogress, .nounwind, .norecurse });
-                break :attrs try attrs.finish(&b.module);
-            },
+            b.opcode_handler.invoke_attrs,
             b.opcode_handler.type,
             wip.arg(8),
             &call_params,
@@ -1774,6 +1841,17 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .cold, .nounwind });
         try b.setFnAttributes(b.trap_memory_access_oob, &attrs);
     }
+    {
+        b.panic_invalid_prefixed_opcode = try b.addFunction(
+            try b.strtabStringSymbolPrefixed("panicInvalidPrefixedOpcode"),
+            try b.fnType(.void, &[3]Type{ .ptr, .ptr, b.size_type }),
+            b.ffi_call_conv,
+            .{ .linkage = .external, .preemption = .dso_local },
+        );
+        var attrs = FunctionAttributes.Wip{};
+        try b.fnAttributes(&attrs, &.{ .norecurse, .cold, .nounwind, .noreturn });
+        try b.setFnAttributes(b.panic_invalid_prefixed_opcode, &attrs);
+    }
 
     try buildNopOpcodeHandlers(b);
     try buildControlOpcodeHandlers(b);
@@ -1785,8 +1863,11 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     try buildMemoryManagementOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
     try buildFloatOpcodeHandlers(b);
+    try buildPrefixOpcodeHandlers(b);
 
-    try b.setDispatchTableInitializer(ByteOpcode);
+    inline for ([2]type{ ByteOpcode, opcodes.FCPrefixOpcode }) |OpcodeType| {
+        try b.setDispatchTableInitializer(OpcodeType);
+    }
 }
 
 const NumericTrapCode = enum(u8) {
@@ -3976,6 +4057,160 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             .stp = OpcodeHandlerParam.stp.arg(&promote.wip),
         });
         try promote.finish(b);
+    }
+}
+
+fn buildPrefixOpcodeHandlers(b: *Builder) Oom!void {
+    const size_1 = try b.sizeIntValue(1);
+    const continuation = try b.module.intValue(.i8, 0x80);
+    const value_mask = try b.module.intValue(.i8, 0x7F);
+
+    for (&[1]struct { ByteOpcode, Global.Index }{
+        .{ .@"0xFC", b.dispatch_tables.fc },
+    }) |info| {
+        var handler = try b.opcodeHandler(.{ .byte = info.@"0" });
+        const wip = &handler.wip;
+
+        const jmp_args_template: [10]Value = args: {
+            var args: [10]Value = undefined;
+            for (std.enums.values(OpcodeHandlerParam), &args) |p, *a| {
+                a.* = switch (p) {
+                    .vip => undefined,
+                    else => p.arg(wip),
+                };
+            }
+            break :args args;
+        };
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const table = Global.Index.ptrConst(info.@"1", &b.module).kind.variable.toValue(&b.module);
+
+        var blocks: [6]Function.Block.Index = undefined;
+        {
+            var name_buf: [7]u8 = "Length1".*;
+            for (blocks[0..5]) |*blk| {
+                defer name_buf[name_buf.len - 1] += 1;
+                blk.* = try wip.block(1, &name_buf);
+            }
+        }
+
+        const start_vip = OpcodeHandlerParam.vip.arg(wip);
+        const first_byte = try wip.load(.normal, .i8, start_vip, .default, "first_byte");
+        const vip_after_byte_0 = try wip.gep(.inbounds, .i8, start_vip, &.{size_1}, "");
+        const after_first_byte = try wip.block(1, "AfterFirstByte");
+        _ = try wip.brCond(
+            try wip.icmp(.ult, first_byte, continuation, ""),
+            blocks[0],
+            after_first_byte,
+            .then_likely,
+        );
+
+        wip.cursor = .{ .block = blocks[0] };
+        {
+            const target = try wip.load(
+                .normal,
+                .ptr,
+                try wip.gep(
+                    .inbounds,
+                    .ptr,
+                    table,
+                    &.{try wip.cast(.zext, first_byte, b.size_type, "")},
+                    "",
+                ),
+                .default,
+                "",
+            );
+            var args = jmp_args_template;
+            args[@intFromEnum(OpcodeHandlerParam.vip)] = vip_after_byte_0;
+
+            _ = try wip.ret(
+                try wip.call(
+                    .musttail,
+                    b.opcode_handler.call_conv,
+                    b.opcode_handler.invoke_attrs,
+                    b.opcode_handler.type,
+                    target,
+                    &args,
+                    "",
+                ),
+            );
+        }
+
+        wip.cursor = .{ .block = after_first_byte };
+        var accumulator = try wip.cast(
+            .zext,
+            try wip.bin(.@"and", first_byte, value_mask, ""),
+            b.size_type,
+            "",
+        );
+        _ = try wip.br(blocks[1]);
+
+        var current_vip = vip_after_byte_0;
+        var jmp_to_handler_name = "JumpToHandlerLength2".*;
+        for (1..5, blocks[1..5], blocks[2..6]) |i, current_blk, next_blk| {
+            wip.cursor = .{ .block = current_blk };
+            if (i >= 3) {
+                _ = try wip.callIntrinsicAssumeCold();
+            }
+
+            const next_byte = try wip.load(.normal, .i8, current_vip, .default, "");
+            const vip_after_next_byte = try wip.gep(.inbounds, .i8, current_vip, &.{size_1}, "");
+            defer current_vip = vip_after_next_byte;
+            accumulator = try wip.bin(
+                .@"or",
+                try wip.bin(
+                    .@"shl nuw",
+                    try wip.cast(
+                        .zext,
+                        try wip.bin(.@"and", next_byte, value_mask, ""),
+                        b.size_type,
+                        "",
+                    ),
+                    try b.sizeIntValue(@intCast(i * 7)),
+                    "",
+                ),
+                // Having this as first argument causes "Invalid record" LLVM error?
+                accumulator,
+                "",
+            );
+
+            if (i < 4) {
+                const jmp_to_handler = try wip.block(1, &jmp_to_handler_name);
+                defer jmp_to_handler_name[jmp_to_handler_name.len - 1] += 1;
+                _ = try wip.brCond(
+                    try wip.icmp(.ult, next_byte, continuation, ""),
+                    jmp_to_handler,
+                    next_blk,
+                    .then_likely,
+                );
+
+                wip.cursor = .{ .block = jmp_to_handler };
+            }
+
+            const target = try wip.load(
+                .normal,
+                .ptr,
+                try wip.gep(.inbounds, .ptr, table, &.{accumulator}, ""),
+                .default,
+                "",
+            );
+            var args = jmp_args_template;
+            args[@intFromEnum(OpcodeHandlerParam.vip)] = vip_after_next_byte;
+
+            _ = try wip.ret(
+                try wip.call(
+                    .musttail,
+                    b.opcode_handler.call_conv,
+                    b.opcode_handler.invoke_attrs,
+                    b.opcode_handler.type,
+                    target,
+                    &args,
+                    "",
+                ),
+            );
+        }
+
+        try handler.finish(b);
     }
 }
 
