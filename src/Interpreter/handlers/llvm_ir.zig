@@ -269,6 +269,29 @@ fn invokeWithinWasmIndirect(
     );
 }
 
+fn memoryGrowReallocate(
+    new_size: usize,
+    /// `vsp - 1` refers to `(i32.const -1)`, indicating growth failure.
+    vsp: Sp,
+    vip: Ip,
+    eip: Eip,
+    /// Pointer to memory to grow
+    mem: *runtime.MemInst,
+    ctx: *Interpreter,
+    stp: Stp,
+) callconv(ffi_cc) Transition {
+    const result = &(vsp.ptr - 1)[0];
+    std.debug.assert(result.i32 == -1);
+    return Transition.interrupted(.init(vip, eip), vsp, stp, ctx, .{
+        .memory_grow = .{
+            .old_size = mem.size,
+            .new_size = new_size,
+            .memory = mem,
+            .result = result,
+        },
+    });
+}
+
 fn trapWithNumericCode(
     trap_ip: Ip,
     sp: Sp,
@@ -344,6 +367,7 @@ comptime {
         "invokeWithinWasm",
         "invokeWithinWasmIndirect",
         "returnFromWasm",
+        "memoryGrowReallocate",
         "trapWithNumericCode",
         "trapMemoryAccessOutOfBounds",
         "trapCallIndirectAccessOob",

@@ -1763,6 +1763,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     try buildGlobalOpcodeHandlers(b);
     try buildMemoryLoadOpcodeHandlers(b);
     try buildMemoryStoreOpcodeHandlers(b);
+    try buildMemoryManagementOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
     try buildFloatOpcodeHandlers(b);
 
@@ -2618,6 +2619,185 @@ fn buildMemoryStoreOpcodeHandlers(b: *Builder) Oom!void {
             });
             try store.finish(b);
         }
+    }
+}
+
+fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
+    {
+        const size_neg_one = try b.module.intValue(.i32, -1);
+        const size_ty = switch (b.ptr_size_bytes) {
+            4 => try b.module.intType(33),
+            8 => b.size_type,
+            else => unreachable,
+        };
+
+        var grow = try b.opcodeHandler(.{ .byte = .@"memory.grow" });
+        const wip = &grow.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const stack_top = try grow.operandAt(b, 0);
+
+        const start_vip = OpcodeHandlerParam.vip.arg(wip);
+        const stp = OpcodeHandlerParam.stp.arg(wip);
+        const initial_vsp = OpcodeHandlerParam.vsp.arg(wip);
+
+        const decode_mem_idx = try b.callDecodeUlebIdx(wip, start_vip);
+        // const mem_idx = try wip.extractValue(decode_mem_idx, &.{0}, "mem_idx");
+        const vip_after_mem_idx = try wip.extractValue(decode_mem_idx, &.{1}, "vip_after_mem_idx");
+
+        // Assumes 32-bit memories
+        const delta_in_pages = try wip.load(
+            .normal,
+            .i32,
+            stack_top,
+            value_stack_alignment,
+            "delta_in_pages",
+        );
+        const try_delta_in_bytes = try wip.callIntrinsic(
+            .normal,
+            .none,
+            .@"umul.with.overflow",
+            &.{.i32},
+            &.{ delta_in_pages, try b.module.intValue(.i32, 65536) },
+            "",
+        );
+
+        const delta_in_bytes = try wip.extractValue(try_delta_in_bytes, &.{0}, "delta_in_bytes");
+        const delta_would_overflow = try wip.extractValue(try_delta_in_bytes, &.{1}, "");
+
+        const delta_no_overflow = try wip.block(1, "CheckAgainstLimit");
+        const growth_failed = try wip.block(2, "GrowthFailed");
+        _ = try wip.brCond(delta_would_overflow, growth_failed, delta_no_overflow, .else_likely);
+
+        wip.cursor = .{ .block = delta_no_overflow };
+        const mem_ptr = try wip.load(
+            .normal,
+            .ptr,
+            // Would need GEP here to support multi-memory
+            OpcodeHandlerParam.memories.arg(wip),
+            .default,
+            "",
+        );
+        const old_mem_size = try MemInstField.size.load(wip, b, mem_ptr);
+        const old_mem_size_ext = try wip.cast(.zext, old_mem_size, size_ty, "");
+        const mem_limit_ext = try wip.cast(
+            .zext,
+            try MemInstField.limit.load(wip, b, mem_ptr),
+            size_ty,
+            "",
+        );
+
+        // Assumed to be never exceed `std.math.maxInt(u33) - 1`
+        const desired_size_ext = try wip.bin(
+            .@"add nuw",
+            old_mem_size_ext,
+            try wip.cast(.zext, delta_in_bytes, size_ty, ""),
+            "",
+        );
+
+        const within_limit = try wip.block(1, "WithinLimit");
+        _ = try wip.brCond(
+            try wip.icmp(.ult, desired_size_ext, mem_limit_ext, ""),
+            within_limit,
+            growth_failed,
+            .then_likely,
+        );
+
+        wip.cursor = .{ .block = within_limit };
+        const mem_capacity_ext = try wip.cast(
+            .zext,
+            try MemInstField.capacity.load(wip, b, mem_ptr),
+            size_ty,
+            "",
+        );
+
+        const within_capacity = try wip.block(1, "WithinCapacity");
+        const needs_reallocation = try wip.block(1, "Reallocate");
+        _ = try wip.brCond(
+            try wip.icmp(.ule, desired_size_ext, mem_capacity_ext, ""),
+            within_capacity,
+            needs_reallocation,
+            .none,
+        );
+
+        wip.cursor = .{ .block = within_capacity };
+        // Currently assumes bytes past capacity are always zero (page allocator),
+        // will need memset otherwise
+        _ = try wip.store(.normal, old_mem_size, stack_top, value_stack_alignment);
+        _ = try wip.store(
+            .normal,
+            try wip.cast(.trunc, desired_size_ext, b.size_type, "desired_size"),
+            try MemInstField.size.gep(wip, b, mem_ptr),
+            .default,
+        );
+        const jmp_to_next = try wip.block(2, "JumpToNextOpcode");
+        _ = try wip.br(jmp_to_next);
+
+        {
+            wip.cursor = .{ .block = needs_reallocation };
+            _ = try wip.store(.normal, size_neg_one, stack_top, value_stack_alignment);
+
+            const helper = try b.addFunction(
+                try b.strtabStringSymbolPrefixed("memoryGrowReallocate"),
+                try b.fnType(.i32, &([1]Type{b.size_type} ++ @as([6]Type, @splat(.ptr)))),
+                b.ffi_call_conv,
+                .{ .linkage = .external, .preemption = .dso_local },
+            );
+            {
+                var attrs = FunctionAttributes.Wip{};
+                try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
+                try b.setFnAttributes(helper, &attrs);
+            }
+
+            const args = [7]Value{
+                try wip.cast(.zext, desired_size_ext, b.size_type, "new_size"),
+                initial_vsp,
+                vip_after_mem_idx,
+                OpcodeHandlerParam.eip.arg(wip),
+                mem_ptr,
+                OpcodeHandlerParam.ctx.arg(wip),
+                stp,
+            };
+
+            _ = try wip.ret(
+                try wip.call(
+                    .tail,
+                    b.ffi_call_conv,
+                    attrs: {
+                        var attrs = FunctionAttributes.Wip{};
+                        for (1..7) |i| {
+                            for ([3]Attribute{ .nonnull, .noundef, .nofree }) |a| {
+                                try attrs.addParamAttr(i, a, &b.module);
+                            }
+                        }
+                        try attrs.addParamAttr(
+                            4,
+                            .{ .dereferenceable = b.ptr_size_bytes * 5 },
+                            &b.module,
+                        );
+                        break :attrs try attrs.finish(&b.module);
+                    },
+                    helper.typeOf(&b.module),
+                    helper.toValue(&b.module),
+                    &args,
+                    "",
+                ),
+            );
+        }
+
+        wip.cursor = .{ .block = growth_failed };
+        _ = try wip.callIntrinsicAssumeCold();
+        _ = try wip.store(.normal, size_neg_one, stack_top, value_stack_alignment);
+        _ = try wip.br(jmp_to_next);
+
+        wip.cursor = .{ .block = jmp_to_next };
+        try grow.jmpToNextHandler(b, .{
+            .vsp = initial_vsp,
+            .vip = vip_after_mem_idx,
+            .stp = stp,
+        });
+
+        try grow.finish(b);
     }
 }
 
