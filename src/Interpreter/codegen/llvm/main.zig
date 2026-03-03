@@ -2916,7 +2916,7 @@ fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
 
         const within_limit = try wip.block(1, "WithinLimit");
         _ = try wip.brCond(
-            try wip.icmp(.ult, desired_size_ext, mem_limit_ext, ""),
+            try wip.icmp(.ule, desired_size_ext, mem_limit_ext, ""),
             within_limit,
             growth_failed,
             .then_likely,
