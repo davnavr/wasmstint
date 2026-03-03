@@ -1092,7 +1092,7 @@ const OpcodeHandler = struct {
         _ = try handler.wip.ret(try handler.wip.load(.normal, .i32, out_alloca, .default, ""));
     }
 
-    fn adjustVspBy(handler: *OpcodeHandler, b: *Builder, amt: i64) Oom!Value {
+    fn adjustVspBy(handler: *OpcodeHandler, b: *Builder, amt: i8) Oom!Value {
         std.debug.assert(amt != 0);
         return try handler.wip.gep(
             .inbounds,
@@ -2724,6 +2724,39 @@ fn buildMemoryStoreOpcodeHandlers(b: *Builder) Oom!void {
 
 fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
     const page_size = try b.module.intValue(.i32, 65536);
+    {
+        var size = try b.opcodeHandler(.{ .byte = .@"memory.size" });
+        const wip = &size.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const start_vip = OpcodeHandlerParam.vip.arg(wip);
+        const decode_mem_idx = try b.callDecodeUlebIdx(wip, start_vip);
+        // const mem_idx = try wip.extractValue(decode_mem_idx, &.{0}, "mem_idx");
+        const vip_after_mem_idx = try wip.extractValue(decode_mem_idx, &.{1}, "vip_after_mem_idx");
+        const mem_ptr = try wip.load(
+            .normal,
+            .ptr,
+            // Would need GEP here to support multi-memory
+            OpcodeHandlerParam.memories.arg(wip),
+            .default,
+            "",
+        );
+        const mem_size = try wip.cast(.trunc, try MemInstField.size.load(wip, b, mem_ptr), .i32, "");
+        _ = try wip.store(
+            .normal,
+            try wip.bin(.@"udiv exact", mem_size, page_size, ""),
+            try size.operandAt(b, -1),
+            value_stack_alignment,
+        );
+
+        const new_vsp = try size.adjustVspBy(b, 1);
+        try size.jmpToNextHandler(b, .{
+            .vip = vip_after_mem_idx,
+            .vsp = new_vsp,
+            .stp = OpcodeHandlerParam.stp.arg(&size.wip),
+        });
+        try size.finish(b);
+    }
     {
         const size_neg_one = try b.module.intValue(.i32, -1);
         const size_ty = switch (b.ptr_size_bytes) {
