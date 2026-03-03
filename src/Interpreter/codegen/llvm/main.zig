@@ -1903,6 +1903,21 @@ fn buildNopOpcodeHandlers(b: *Builder) Oom!void {
 }
 
 fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
+    {
+        var trap = try b.opcodeHandler(.{ .byte = .@"unreachable" });
+        trap.wip.cursor = .{ .block = try trap.wip.block(0, "Entry") };
+        const trap_ip = try trap.wip.gep(
+            .inbounds,
+            .i8,
+            OpcodeHandlerParam.vip.arg(&trap.wip),
+            &.{try b.sizeIntValue(-1)},
+            "",
+        );
+
+        try trap.jmpTrapWithNumericCode(b, trap_ip, try b.sizeIntValue(0));
+        try trap.finish(b);
+    }
+
     const size_neg_1 = try b.sizeIntValue(-1);
     const i32_0 = try b.module.intValue(.i32, 0);
     for (&[2]ByteOpcode{ .block, .loop }) |opcode| {
