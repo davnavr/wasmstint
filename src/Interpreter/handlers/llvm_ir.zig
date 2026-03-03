@@ -356,6 +356,28 @@ fn trapMemoryFillOutOfBounds(
     );
 }
 
+fn trapMemoryInitOutOfBounds(
+    vip: Ip,
+    vsp: Sp,
+    eip: Eip,
+    stp: Stp,
+    ctx: *Interpreter,
+    mem_idx: usize,
+    data_idx: usize,
+) callconv(ffi_cc) Transition {
+    @branchHint(.cold);
+    _ = @as(Module.DataIdx, @enumFromInt(data_idx));
+    return Transition.trap(
+        vip,
+        .{ .fc = .@"memory.init" },
+        eip,
+        vsp,
+        stp,
+        ctx,
+        .init(.memory_access_out_of_bounds, .init(@enumFromInt(mem_idx), .@"memory.init", {})),
+    );
+}
+
 fn trapMemoryCopyOutOfBounds(
     vip: Ip,
     vsp: Sp,
@@ -413,6 +435,7 @@ comptime {
         "trapWithNumericCode",
         "trapMemoryAccessOutOfBounds",
         "trapMemoryFillOutOfBounds",
+        "trapMemoryInitOutOfBounds",
         "trapMemoryCopyOutOfBounds",
         "trapCallIndirectAccessOob",
         "trapIndirectCallToNull",

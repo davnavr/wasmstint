@@ -275,7 +275,7 @@ const Builder = struct {
                 const dereferenceable: ?u32 = switch (param) {
                     .fuel => 8,
                     .disp => @as(u32, b.ptr_size_bytes) * 256,
-                    .module => @as(u32, b.ptr_size_bytes) * 9,
+                    .module => @as(u32, b.ptr_size_bytes) * 32,
                     else => null,
                 };
 
@@ -352,7 +352,35 @@ const Builder = struct {
             .ptr, // global_types
             .ptr, // table_types
             .ptr, // mem_types
-            // More fields not listed
+            .i32, // start
+            .i8, // table_count
+            .i8, // table_import_count
+            .i8, // mem_count
+            .i8, // mem_import_count
+            .i32, // global_count
+            .i32, // global_import_count
+            .ptr, // import_section
+            .ptr, // func_imports
+            .ptr, // table_imports
+            .ptr, // mem_imports
+            .ptr, // global_imports
+            .ptr, // export_section
+            .ptr, // exports
+            .i32, // export_count
+            .i16, // init_max_stack
+            .i8, // has_data_count_section
+            .ptr, // elem_section
+            .ptr, // elems
+            .ptr, // active_elems
+            .ptr, // non_declarative_elems_mask
+            .i16, // elems_count
+            .i16, // active_elems_count
+            .i16, // active_datas_count
+            .i16, // datas_count
+            .ptr, // data_section
+            .ptr, // datas_ptrs
+            .ptr, // datas_lens
+            .ptr, // active_datas
         });
         b.module_inst = try b.module.structType(.normal, &.{
             b.size_type, // buffer_len
@@ -852,7 +880,35 @@ const ModuleInfoField = enum(u6) {
     global_types,
     table_types,
     mem_types,
-    // More fields not listed
+    start,
+    table_count,
+    table_import_count,
+    mem_count,
+    mem_import_count,
+    global_count,
+    global_import_count,
+    import_section,
+    func_imports,
+    table_imports,
+    mem_imports,
+    global_imports,
+    export_section,
+    exports,
+    export_count,
+    init_max_stack,
+    has_data_count_section,
+    elem_section,
+    elems,
+    active_elems,
+    non_declarative_elems_mask,
+    elems_count,
+    active_elems_count,
+    active_datas_count,
+    datas_count,
+    data_section,
+    datas_ptrs,
+    datas_lens,
+    active_datas,
 
     /// Obtains a `ptr` to a field within the `ModuleInst`.
     fn gep(field: ModuleInfoField, wip: *WipFunction, b: *const Builder) Oom!Value {
@@ -870,7 +926,23 @@ const ModuleInfoField = enum(u6) {
             .custom_sections_count,
             .func_import_count,
             .code_count,
+            .start,
+            .global_count,
+            .global_import_count,
+            .export_count,
             => .i32,
+            .table_count,
+            .table_import_count,
+            .mem_count,
+            .mem_import_count,
+            .has_data_count_section,
+            => .i8,
+            .init_max_stack,
+            .elems_count,
+            .active_elems_count,
+            .active_datas_count,
+            .datas_count,
+            => .i16,
             .types,
             .custom_sections,
             .func_types,
@@ -882,6 +954,21 @@ const ModuleInfoField = enum(u6) {
             .global_types,
             .table_types,
             .mem_types,
+            .import_section,
+            .func_imports,
+            .table_imports,
+            .mem_imports,
+            .global_imports,
+            .export_section,
+            .exports,
+            .elem_section,
+            .elems,
+            .active_elems,
+            .non_declarative_elems_mask,
+            .data_section,
+            .datas_ptrs,
+            .datas_lens,
+            .active_datas,
             => .ptr,
         };
     }
@@ -3138,12 +3225,13 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
             );
             const dst_size = src_size;
 
+            const len = try wip.cast(.zext, n, addr_ty, "");
             const src_in_bounds = try wip.icmp(
                 .ule,
                 try wip.bin(
                     .@"add nuw",
                     try wip.cast(.zext, src_offset, addr_ty, ""),
-                    try wip.cast(.zext, n, addr_ty, ""),
+                    len,
                     "",
                 ),
                 src_size,
@@ -3154,7 +3242,7 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
                 try wip.bin(
                     .@"add nuw",
                     try wip.cast(.zext, dst_offset, addr_ty, ""),
-                    try wip.cast(.zext, n, addr_ty, ""),
+                    len,
                     "",
                 ),
                 dst_size,
@@ -3253,6 +3341,234 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
         }
 
         try copy.finish(b);
+    }
+    {
+        var init = try b.opcodeHandler(.{ .fc = .@"memory.init" });
+        const wip = &init.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const start_vip = OpcodeHandlerParam.vip.arg(wip);
+        const stp = OpcodeHandlerParam.stp.arg(&init.wip);
+
+        const decode_data_idx = try b.callDecodeUlebIdx(wip, start_vip);
+        const data_idx = try wip.extractValue(decode_data_idx, &.{0}, "data_idx");
+        const vip_after_data_idx = try wip.extractValue(
+            decode_data_idx,
+            &.{1},
+            "vip_after_data_idx",
+        );
+
+        const decode_mem_idx = try b.callDecodeUlebIdx(wip, vip_after_data_idx);
+        const mem_idx = try wip.extractValue(decode_mem_idx, &.{0}, "mem_idx");
+        const vip_after_mem_idx = try wip.extractValue(decode_mem_idx, &.{1}, "vip_after_mem_idx");
+
+        const mem_ptr = try wip.load(
+            .normal,
+            .ptr,
+            // Would need GEP here to support multi-memory
+            OpcodeHandlerParam.memories.arg(wip),
+            .default,
+            "",
+        );
+
+        const n = try wip.load(.normal, .i32, try init.operandAt(b, 0), value_stack_alignment, "n");
+        const src_offset = try wip.load(
+            .normal,
+            .i32,
+            try init.operandAt(b, 1),
+            value_stack_alignment,
+            "src_offset",
+        );
+        const dst_offset = try wip.load(
+            .normal,
+            .i32,
+            try init.operandAt(b, 2),
+            value_stack_alignment,
+            "dst_offset",
+        );
+
+        const data_len = len: {
+            const len = try wip.load(
+                .normal,
+                .i32,
+                try wip.gep(
+                    .inbounds,
+                    .i32,
+                    try ModuleInfoField.datas_lens.load(wip, b),
+                    &.{data_idx},
+                    "",
+                ),
+                .default,
+                "",
+            );
+
+            const bits_per_flag_word = try b.module.intValue(.i32, 32);
+            const flag_word = try wip.load(
+                .normal,
+                .i32,
+                try wip.gep(
+                    .inbounds,
+                    .i32,
+                    try ModuleInstField.datas_drop_mask.load(wip, b),
+                    &.{try wip.cast(
+                        .zext,
+                        try wip.bin(.udiv, data_idx, bits_per_flag_word, ""),
+                        b.size_type,
+                        "",
+                    )},
+                    "",
+                ),
+                .default,
+                "flag_word",
+            );
+
+            const flag_bit = try wip.cast(
+                .trunc,
+                try wip.bin(
+                    .lshr,
+                    flag_word,
+                    try wip.bin(.urem, data_idx, bits_per_flag_word, ""),
+                    "",
+                ),
+                .i1,
+                "flag_bit",
+            );
+
+            break :len try wip.bin(
+                .@"and",
+                len,
+                try wip.cast(.sext, flag_bit, .i32, ""),
+                "",
+            );
+        };
+
+        const copy_blk = try wip.block(1, "Copy");
+        const oob_blk = try wip.block(1, "OutOfBounds");
+        {
+            const len = try wip.cast(.zext, n, addr_ty, "");
+            const src_size = try wip.cast(.zext, data_len, addr_ty, "");
+            const dst_size = try wip.cast(
+                .zext,
+                try MemInstField.size.load(wip, b, mem_ptr),
+                addr_ty,
+                "",
+            );
+
+            const src_in_bounds = try wip.icmp(
+                .ule,
+                try wip.bin(.@"add nuw", try wip.cast(.zext, src_offset, addr_ty, ""), len, ""),
+                src_size,
+                "src_in_bounds",
+            );
+            const dst_in_bounds = try wip.icmp(
+                .ule,
+                try wip.bin(.@"add nuw", try wip.cast(.zext, dst_offset, addr_ty, ""), len, ""),
+                dst_size,
+                "dst_in_bounds",
+            );
+
+            _ = try wip.brCond(
+                try wip.bin(.@"and", src_in_bounds, dst_in_bounds, ""),
+                copy_blk,
+                oob_blk,
+                .then_likely,
+            );
+        }
+
+        {
+            wip.cursor = .{ .block = copy_blk };
+            const data_base = try wip.load(
+                .normal,
+                .ptr,
+                try wip.gep(
+                    .inbounds,
+                    .ptr,
+                    try ModuleInfoField.datas_ptrs.load(wip, b),
+                    &.{data_idx},
+                    "",
+                ),
+                .default,
+                "",
+            );
+
+            const src_ptr = try wip.gep(
+                .inbounds,
+                .i8,
+                data_base,
+                &.{try wip.cast(.zext, src_offset, b.size_type, "")},
+                "",
+            );
+
+            const dst_ptr = try wip.gep(
+                .inbounds,
+                .i8,
+                try MemInstField.base.load(wip, b, mem_ptr),
+                &.{try wip.cast(.zext, dst_offset, b.size_type, "")},
+                "",
+            );
+
+            _ = try wip.callIntrinsic(
+                .normal,
+                .none,
+                .memcpy,
+                &.{ .ptr, .ptr, b.size_type },
+                &.{ dst_ptr, src_ptr, try wip.cast(.zext, n, b.size_type, ""), .false },
+                "",
+            );
+            const new_vsp = try init.adjustVspBy(b, -3);
+            try init.jmpToNextHandler(b, .{
+                .vip = vip_after_mem_idx,
+                .vsp = new_vsp,
+                .stp = stp,
+            });
+        }
+        {
+            wip.cursor = .{ .block = oob_blk };
+            _ = try wip.callIntrinsicAssumeCold();
+            const helper = try b.addFunction(
+                try b.strtabStringSymbolPrefixed("trapMemoryInitOutOfBounds"),
+                try b.fnType(
+                    .i32,
+                    &[7]Type{ .ptr, .ptr, .ptr, .ptr, .ptr, b.size_type, b.size_type },
+                ),
+                b.ffi_call_conv,
+                .{ .linkage = .external, .preemption = .dso_local },
+            );
+            {
+                var attrs = FunctionAttributes.Wip{};
+                try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
+                try b.setFnAttributes(helper, &attrs);
+            }
+
+            _ = try wip.ret(
+                try wip.call(
+                    .tail,
+                    b.ffi_call_conv,
+                    attrs: {
+                        var attrs = FunctionAttributes.Wip{};
+                        for (0..5) |i| {
+                            for (&[4]Attribute{ .nonnull, .readonly, .noundef, .nofree }) |a| {
+                                try attrs.addParamAttr(i, a, &b.module);
+                            }
+                        }
+                        break :attrs try attrs.finish(&b.module);
+                    },
+                    helper.typeOf(&b.module),
+                    helper.toValue(&b.module),
+                    &[7]Value{
+                        start_vip,
+                        OpcodeHandlerParam.vsp.arg(wip),
+                        OpcodeHandlerParam.eip.arg(wip),
+                        stp,
+                        OpcodeHandlerParam.ctx.arg(wip),
+                        try wip.cast(.zext, mem_idx, b.size_type, ""),
+                        try wip.cast(.zext, data_idx, b.size_type, ""),
+                    },
+                    "",
+                ),
+            );
+        }
+        try init.finish(b);
     }
 }
 
