@@ -1255,32 +1255,35 @@ const OpcodeHandler = struct {
         const decode_offset = try b.callDecodeUlebIdx(wip, vip_after_align);
 
         const vip_after_offset = try wip.extractValue(decode_offset, &.{1}, "");
-        const imm_offset = try wip.extractValue(decode_offset, &.{0}, "");
+        // Assumes that only 32-bit memories are supported.
+        // Not i33, since end offset calculation could overflow that
+        const addr_ty = try b.module.intType(34);
 
-        const arg_offset = try wip.load(
-            .normal,
-            .i32,
-            try handler.operandAt(b, offset_idx),
-            value_stack_alignment,
+        const imm_offset = try wip.cast(
+            .zext,
+            try wip.extractValue(decode_offset, &.{0}, ""),
+            addr_ty,
+            "",
+        );
+        const arg_offset = try wip.cast(
+            .zext,
+            try wip.load(
+                .normal,
+                .i32,
+                try handler.operandAt(b, offset_idx),
+                value_stack_alignment,
+                "",
+            ),
+            addr_ty,
             "",
         );
 
-        const add_offsets = try wip.callIntrinsic(
-            .normal,
-            .none,
-            .@"uadd.with.overflow",
-            &.{.i32},
-            &.{ imm_offset, arg_offset },
-            "",
-        );
-        const load_offset = try wip.extractValue(add_offsets, &.{0}, "");
-        const end_offset = try wip.callIntrinsic(
-            .normal,
-            .none,
-            .@"uadd.with.overflow",
-            &.{.i32},
-            &.{ load_offset, try b.module.intValue(.i32, access_size.toByteUnits()) },
-            "",
+        const load_offset = try wip.bin(.@"add nuw", imm_offset, arg_offset, "load_offset");
+        const end_offset = try wip.bin(
+            .@"add nuw",
+            load_offset,
+            try b.module.intValue(addr_ty, access_size.toByteUnits()),
+            "end_offset",
         );
         const final_offset = try wip.cast(.zext, load_offset, b.size_type, "");
 
@@ -1292,40 +1295,19 @@ const OpcodeHandler = struct {
             .default,
             "",
         );
-        const oob = try wip.block(2, "MemoryAccessOob");
-        const no_offset_overflow = try wip.block(1, "NoOffsetOverflow");
+        const oob = try wip.block(1, "MemoryAccessOob");
+        const mem_size = try MemInstField.size.load(wip, b, mem_inst_ptr);
         _ = try wip.brCond(
-            try wip.bin(
-                .@"or",
-                try wip.extractValue(add_offsets, &.{1}, ""),
-                try wip.extractValue(end_offset, &.{1}, ""),
+            try wip.icmp(
+                .ule,
+                try wip.cast(.zext, end_offset, b.size_type, ""),
+                mem_size,
                 "",
             ),
+            bounds_check_success,
             oob,
-            no_offset_overflow,
-            .else_likely,
+            .then_likely,
         );
-
-        {
-            wip.cursor = .{ .block = no_offset_overflow };
-            const mem_size = try MemInstField.size.load(wip, b, mem_inst_ptr);
-            _ = try wip.brCond(
-                try wip.icmp(
-                    .ule,
-                    try wip.cast(
-                        .zext,
-                        try wip.extractValue(end_offset, &.{0}, ""),
-                        b.size_type,
-                        "",
-                    ),
-                    mem_size,
-                    "",
-                ),
-                bounds_check_success,
-                oob,
-                .then_likely,
-            );
-        }
 
         wip.cursor = .{ .block = oob };
         _ = try wip.callIntrinsicAssumeCold();
