@@ -356,6 +356,28 @@ fn trapMemoryFillOutOfBounds(
     );
 }
 
+fn trapMemoryCopyOutOfBounds(
+    vip: Ip,
+    vsp: Sp,
+    eip: Eip,
+    stp: Stp,
+    interp: *Interpreter,
+    src_mem: usize,
+    dst_mem: usize,
+) callconv(ffi_cc) Transition {
+    @branchHint(.cold);
+    std.debug.assert(src_mem == dst_mem);
+    return Transition.trap(
+        vip,
+        .{ .fc = .@"memory.copy" },
+        eip,
+        vsp,
+        stp,
+        interp,
+        .init(.memory_access_out_of_bounds, .init(@enumFromInt(src_mem), .@"memory.copy", {})),
+    );
+}
+
 fn trapCallIndirectAccessOob(
     trap_ip: Ip,
     vsp: Sp,
@@ -391,6 +413,7 @@ comptime {
         "trapWithNumericCode",
         "trapMemoryAccessOutOfBounds",
         "trapMemoryFillOutOfBounds",
+        "trapMemoryCopyOutOfBounds",
         "trapCallIndirectAccessOob",
         "trapIndirectCallToNull",
     }) |name| {

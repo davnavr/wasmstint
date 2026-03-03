@@ -2989,7 +2989,7 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
             "offset",
         );
 
-        const copy_blk = try wip.block(1, "Copy");
+        const fill_blk = try wip.block(1, "Fill");
         const oob_blk = try wip.block(1, "OutOfBounds");
         _ = try wip.brCond(
             try wip.icmp(
@@ -3003,13 +3003,13 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
                 mem_size,
                 "",
             ),
-            copy_blk,
+            fill_blk,
             oob_blk,
             .then_likely,
         );
 
         {
-            wip.cursor = .{ .block = copy_blk };
+            wip.cursor = .{ .block = fill_blk };
             const dst_ptr = try wip.gep(
                 .inbounds,
                 .i8,
@@ -3040,6 +3040,7 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
         }
         {
             wip.cursor = .{ .block = oob_blk };
+            _ = try wip.callIntrinsicAssumeCold();
             const helper = try b.addFunction(
                 try b.strtabStringSymbolPrefixed("trapMemoryFillOutOfBounds"),
                 try b.fnType(.i32, &[6]Type{ .ptr, .ptr, .ptr, .ptr, b.size_type, .ptr }),
@@ -3083,6 +3084,175 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
         }
 
         try fill.finish(b);
+    }
+    {
+        var copy = try b.opcodeHandler(.{ .fc = .@"memory.copy" });
+        const wip = &copy.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const start_vip = OpcodeHandlerParam.vip.arg(wip);
+        const stp = OpcodeHandlerParam.stp.arg(&copy.wip);
+
+        const decode_dst_idx = try b.callDecodeUlebIdx(wip, start_vip);
+        const dst_idx = try wip.extractValue(decode_dst_idx, &.{0}, "dst_idx");
+        const vip_after_dst_idx = try wip.extractValue(decode_dst_idx, &.{1}, "vip_after_dst_idx");
+
+        const decode_src_idx = try b.callDecodeUlebIdx(wip, vip_after_dst_idx);
+        const src_idx = try wip.extractValue(decode_src_idx, &.{0}, "src_idx");
+        const vip_after_src_idx = try wip.extractValue(decode_src_idx, &.{1}, "vip_after_src_idx");
+
+        const src_mem = try wip.load(
+            .normal,
+            .ptr,
+            // Would need GEP here to support multi-memory
+            OpcodeHandlerParam.memories.arg(wip),
+            .default,
+            "",
+        );
+        const dst_mem = src_mem;
+
+        const n = try wip.load(.normal, .i32, try copy.operandAt(b, 0), value_stack_alignment, "n");
+        const src_offset = try wip.load(
+            .normal,
+            .i32,
+            try copy.operandAt(b, 1),
+            value_stack_alignment,
+            "src_offset",
+        );
+        const dst_offset = try wip.load(
+            .normal,
+            .i32,
+            try copy.operandAt(b, 2),
+            value_stack_alignment,
+            "dst_offset",
+        );
+
+        const copy_blk = try wip.block(1, "Copy");
+        const oob_blk = try wip.block(1, "OutOfBounds");
+        {
+            const src_size = try wip.cast(
+                .zext,
+                try MemInstField.size.load(wip, b, src_mem),
+                addr_ty,
+                "",
+            );
+            const dst_size = src_size;
+
+            const src_in_bounds = try wip.icmp(
+                .ule,
+                try wip.bin(
+                    .@"add nuw",
+                    try wip.cast(.zext, src_offset, addr_ty, ""),
+                    try wip.cast(.zext, n, addr_ty, ""),
+                    "",
+                ),
+                src_size,
+                "",
+            );
+            const dst_in_bounds = try wip.icmp(
+                .ule,
+                try wip.bin(
+                    .@"add nuw",
+                    try wip.cast(.zext, dst_offset, addr_ty, ""),
+                    try wip.cast(.zext, n, addr_ty, ""),
+                    "",
+                ),
+                dst_size,
+                "",
+            );
+
+            _ = try wip.brCond(
+                try wip.bin(.@"and", src_in_bounds, dst_in_bounds, ""),
+                copy_blk,
+                oob_blk,
+                .then_likely,
+            );
+        }
+        {
+            wip.cursor = .{ .block = copy_blk };
+            const dst_ptr = try wip.gep(
+                .inbounds,
+                .i8,
+                try MemInstField.base.load(wip, b, dst_mem),
+                &.{try wip.cast(.zext, dst_offset, b.size_type, "")},
+                "dst_ptr",
+            );
+            const src_ptr = try wip.gep(
+                .inbounds,
+                .i8,
+                try MemInstField.base.load(wip, b, src_mem),
+                &.{try wip.cast(.zext, src_offset, b.size_type, "")},
+                "src_ptr",
+            );
+            _ = try wip.callIntrinsic(
+                .normal,
+                .none,
+                .memmove, // maybe use "llvm.memmove.element.unordered.atomic"
+                &.{ .ptr, .ptr, b.size_type },
+                &.{
+                    dst_ptr,
+                    src_ptr,
+                    try wip.cast(.zext, n, b.size_type, "len"),
+                    .false,
+                },
+                "",
+            );
+
+            const new_vsp = try copy.adjustVspBy(b, -3);
+            try copy.jmpToNextHandler(b, .{
+                .vip = vip_after_src_idx,
+                .vsp = new_vsp,
+                .stp = stp,
+            });
+        }
+        {
+            wip.cursor = .{ .block = oob_blk };
+            _ = try wip.callIntrinsicAssumeCold();
+            const helper = try b.addFunction(
+                try b.strtabStringSymbolPrefixed("trapMemoryCopyOutOfBounds"),
+                try b.fnType(
+                    .i32,
+                    &[7]Type{ .ptr, .ptr, .ptr, .ptr, .ptr, b.size_type, b.size_type },
+                ),
+                b.ffi_call_conv,
+                .{ .linkage = .external, .preemption = .dso_local },
+            );
+            {
+                var attrs = FunctionAttributes.Wip{};
+                try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
+                try b.setFnAttributes(helper, &attrs);
+            }
+
+            _ = try wip.ret(
+                try wip.call(
+                    .tail,
+                    b.ffi_call_conv,
+                    attrs: {
+                        var attrs = FunctionAttributes.Wip{};
+                        for (0..5) |i| {
+                            for (&[3]Attribute{ .nonnull, .noundef, .nofree }) |a| {
+                                try attrs.addParamAttr(i, a, &b.module);
+                            }
+                        }
+                        break :attrs try attrs.finish(&b.module);
+                    },
+                    helper.typeOf(&b.module),
+                    helper.toValue(&b.module),
+                    &[7]Value{
+                        start_vip,
+                        OpcodeHandlerParam.vsp.arg(wip),
+                        OpcodeHandlerParam.eip.arg(wip),
+                        stp,
+                        OpcodeHandlerParam.ctx.arg(wip),
+                        try wip.cast(.zext, src_idx, b.size_type, ""),
+                        try wip.cast(.zext, dst_idx, b.size_type, ""),
+                    },
+                    "",
+                ),
+            );
+        }
+
+        try copy.finish(b);
     }
 }
 
