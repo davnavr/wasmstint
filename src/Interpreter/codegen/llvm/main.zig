@@ -2723,6 +2723,7 @@ fn buildMemoryStoreOpcodeHandlers(b: *Builder) Oom!void {
 }
 
 fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
+    const page_size = try b.module.intValue(.i32, 65536);
     {
         const size_neg_one = try b.module.intValue(.i32, -1);
         const size_ty = switch (b.ptr_size_bytes) {
@@ -2758,7 +2759,7 @@ fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
             .none,
             .@"umul.with.overflow",
             &.{.i32},
-            &.{ delta_in_pages, try b.module.intValue(.i32, 65536) },
+            &.{ delta_in_pages, page_size },
             "",
         );
 
@@ -2823,7 +2824,17 @@ fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
         wip.cursor = .{ .block = within_capacity };
         // Currently assumes bytes past capacity are always zero (page allocator),
         // will need memset otherwise
-        _ = try wip.store(.normal, old_mem_size, stack_top, value_stack_alignment);
+        _ = try wip.store(
+            .normal,
+            try wip.bin(
+                .@"udiv exact",
+                try wip.cast(.trunc, old_mem_size, .i32, ""),
+                page_size,
+                "",
+            ),
+            stack_top,
+            value_stack_alignment,
+        );
         _ = try wip.store(
             .normal,
             try wip.cast(.trunc, desired_size_ext, b.size_type, "desired_size"),
