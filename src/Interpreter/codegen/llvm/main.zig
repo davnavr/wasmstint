@@ -1843,6 +1843,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     try buildMemoryLoadOpcodeHandlers(b);
     try buildMemoryStoreOpcodeHandlers(b);
     try buildMemoryManagementOpcodeHandlers(b);
+    try buildBulkMemoryOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
     try buildFloatOpcodeHandlers(b);
     try buildPrefixOpcodeHandlers(b);
@@ -2939,6 +2940,149 @@ fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
         });
 
         try grow.finish(b);
+    }
+}
+
+fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
+    const addr_ty = switch (b.ptr_size_bytes) {
+        4 => try b.module.intType(33),
+        8 => b.size_type,
+        else => unreachable,
+    };
+    {
+        var fill = try b.opcodeHandler(.{ .fc = .@"memory.fill" });
+        const wip = &fill.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const start_vip = OpcodeHandlerParam.vip.arg(wip);
+        const stp = OpcodeHandlerParam.stp.arg(&fill.wip);
+        const decode_mem_idx = try b.callDecodeUlebIdx(wip, start_vip);
+        const mem_idx = try wip.extractValue(decode_mem_idx, &.{0}, "mem_idx");
+        const vip_after_mem_idx = try wip.extractValue(decode_mem_idx, &.{1}, "vip_after_mem_idx");
+        const mem_ptr = try wip.load(
+            .normal,
+            .ptr,
+            // Would need GEP here to support multi-memory
+            OpcodeHandlerParam.memories.arg(wip),
+            .default,
+            "",
+        );
+        const mem_size = try wip.cast(
+            .zext,
+            try MemInstField.size.load(wip, b, mem_ptr),
+            addr_ty,
+            "",
+        );
+
+        const n = try wip.load(.normal, .i32, try fill.operandAt(b, 0), value_stack_alignment, "n");
+        const dupe = try wip.cast(
+            .trunc,
+            try wip.load(.normal, .i32, try fill.operandAt(b, 1), value_stack_alignment, ""),
+            .i8,
+            "dupe",
+        );
+        const offset = try wip.load(
+            .normal,
+            .i32,
+            try fill.operandAt(b, 2),
+            value_stack_alignment,
+            "offset",
+        );
+
+        const copy_blk = try wip.block(1, "Copy");
+        const oob_blk = try wip.block(1, "OutOfBounds");
+        _ = try wip.brCond(
+            try wip.icmp(
+                .ule,
+                try wip.bin(
+                    .@"add nuw",
+                    try wip.cast(.zext, offset, addr_ty, ""),
+                    try wip.cast(.zext, n, addr_ty, ""),
+                    "",
+                ),
+                mem_size,
+                "",
+            ),
+            copy_blk,
+            oob_blk,
+            .then_likely,
+        );
+
+        {
+            wip.cursor = .{ .block = copy_blk };
+            const dst_ptr = try wip.gep(
+                .inbounds,
+                .i8,
+                try MemInstField.base.load(wip, b, mem_ptr),
+                &.{try wip.cast(.zext, offset, b.size_type, "")},
+                "dst_ptr",
+            );
+            _ = try wip.callIntrinsic(
+                .normal,
+                .none,
+                .memset,
+                &.{ .ptr, b.size_type },
+                &.{
+                    dst_ptr,
+                    dupe,
+                    try wip.cast(.zext, n, b.size_type, "len"),
+                    .false,
+                },
+                "",
+            );
+
+            const new_vsp = try fill.adjustVspBy(b, -3);
+            try fill.jmpToNextHandler(b, .{
+                .vip = vip_after_mem_idx,
+                .vsp = new_vsp,
+                .stp = stp,
+            });
+        }
+        {
+            wip.cursor = .{ .block = oob_blk };
+            const helper = try b.addFunction(
+                try b.strtabStringSymbolPrefixed("trapMemoryFillOutOfBounds"),
+                try b.fnType(.i32, &[6]Type{ .ptr, .ptr, .ptr, .ptr, b.size_type, .ptr }),
+                b.ffi_call_conv,
+                .{ .linkage = .external, .preemption = .dso_local },
+            );
+            {
+                var attrs = FunctionAttributes.Wip{};
+                try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
+                try b.setFnAttributes(helper, &attrs);
+            }
+
+            _ = try wip.ret(
+                try wip.call(
+                    .tail,
+                    b.ffi_call_conv,
+                    attrs: {
+                        var attrs = FunctionAttributes.Wip{};
+                        for (0..6) |i| {
+                            if (i == 4) continue;
+
+                            for (&[3]Attribute{ .nonnull, .noundef, .nofree }) |a| {
+                                try attrs.addParamAttr(i, a, &b.module);
+                            }
+                        }
+                        break :attrs try attrs.finish(&b.module);
+                    },
+                    helper.typeOf(&b.module),
+                    helper.toValue(&b.module),
+                    &[6]Value{
+                        start_vip,
+                        OpcodeHandlerParam.vsp.arg(wip),
+                        OpcodeHandlerParam.eip.arg(wip),
+                        stp,
+                        try wip.cast(.zext, mem_idx, b.size_type, ""),
+                        OpcodeHandlerParam.ctx.arg(wip),
+                    },
+                    "",
+                ),
+            );
+        }
+
+        try fill.finish(b);
     }
 }
 
