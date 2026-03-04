@@ -5058,6 +5058,27 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
 fn buildReferenceOpcodeHandlers(b: *Builder) Oom!void {
     const null_zero = try b.sizeIntValue(0);
     {
+        var op = try b.opcodeHandler(.{ .byte = .@"ref.null" });
+        const wip = &op.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const new_vip = try b.callSkipUlebIdx(&op.wip, OpcodeHandlerParam.vip.arg(&op.wip));
+        _ = try wip.store(
+            .normal,
+            null_zero,
+            OpcodeHandlerParam.vsp.arg(&op.wip),
+            value_stack_alignment,
+        );
+
+        const new_vsp = try op.adjustVspBy(b, 1);
+        try op.jmpToNextHandler(b, .{
+            .vip = new_vip,
+            .vsp = new_vsp,
+            .stp = OpcodeHandlerParam.stp.arg(&op.wip),
+        });
+        try op.finish(b);
+    }
+    {
         var is_null = try b.opcodeHandler(.{ .byte = .@"ref.is_null" });
         const wip = &is_null.wip;
 
