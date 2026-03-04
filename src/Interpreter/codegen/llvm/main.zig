@@ -3148,6 +3148,101 @@ fn buildTableAccessOpcodeHandlers(b: *Builder) Oom!void {
 
         try get.finish(b);
     }
+    {
+        var set = try b.opcodeHandler(.{ .byte = .@"table.set" });
+        const wip = &set.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const start_vip = OpcodeHandlerParam.vip.arg(wip);
+        const stp = OpcodeHandlerParam.stp.arg(&set.wip);
+
+        const decode_table_idx = try b.callDecodeUlebIdx(wip, start_vip);
+        const table_idx = try wip.extractValue(decode_table_idx, &.{0}, "table_idx");
+        const vip_after_table_idx = try wip.extractValue(
+            decode_table_idx,
+            &.{1},
+            "vip_after_table_idx",
+        );
+
+        const index = try wip.load(
+            .normal,
+            .i32,
+            try set.operandAt(b, 1),
+            value_stack_alignment,
+            "index",
+        );
+
+        const table_ptr = try set.tableInstPtr(b, table_idx);
+
+        const in_bounds = try wip.block(1, "Load");
+        const out_of_bounds = try wip.block(1, "OutOfBounds");
+        _ = try wip.brCond(
+            try wip.icmp(
+                .ult,
+                index,
+                try TableInstField.len.load(wip, b, table_ptr),
+                "bounds_check",
+            ),
+            in_bounds,
+            out_of_bounds,
+            .then_likely,
+        );
+
+        {
+            wip.cursor = .{ .block = in_bounds };
+            const dst_ptr = try wip.gep(
+                .inbounds,
+                .ptr,
+                try TableInstField.base.load(wip, b, table_ptr),
+                &.{try wip.cast(.zext, index, gep_index_ty, "")},
+                "dst_ptr",
+            );
+
+            const stack_top = try set.operandAt(b, 0);
+            const elem = try wip.load(.normal, .ptr, stack_top, value_stack_alignment, "elem");
+            _ = try wip.store(.normal, elem, dst_ptr, .default);
+
+            const new_vsp = try set.adjustVspBy(b, -2);
+            try set.jmpToNextHandler(b, .{
+                .vsp = new_vsp,
+                .vip = vip_after_table_idx,
+                .stp = stp,
+            });
+        }
+
+        {
+            wip.cursor = .{ .block = out_of_bounds };
+            _ = try wip.callIntrinsicAssumeCold();
+            _ = try wip.ret(
+                try wip.call(
+                    .tail,
+                    b.ffi_call_conv,
+                    trap_oob_helper_attrs,
+                    trap_oob_helper_ty,
+                    trap_oob_helper_value,
+                    &[8]Value{
+                        start_vip,
+                        OpcodeHandlerParam.vsp.arg(wip),
+                        OpcodeHandlerParam.eip.arg(wip),
+                        stp,
+                        OpcodeHandlerParam.ctx.arg(wip),
+                        table_ptr,
+                        index,
+                        // Bit 7 set to 1 to indicate table.set
+                        try wip.bin(
+                            .@"and",
+                            try wip.cast(.trunc, table_idx, .i8, ""),
+                            try b.module.intValue(.i8, 0x80),
+                            "",
+                        ),
+                    },
+                    "",
+                ),
+            );
+        }
+
+        try set.finish(b);
+    }
 }
 
 fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
