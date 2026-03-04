@@ -1930,6 +1930,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     try buildMemoryLoadOpcodeHandlers(b);
     try buildMemoryStoreOpcodeHandlers(b);
     try buildMemoryManagementOpcodeHandlers(b);
+    try buildTableAccessOpcodeHandlers(b);
     try buildBulkMemoryOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
     try buildFloatOpcodeHandlers(b);
@@ -3027,6 +3028,125 @@ fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
         });
 
         try grow.finish(b);
+    }
+}
+
+fn buildTableAccessOpcodeHandlers(b: *Builder) Oom!void {
+    const gep_index_ty = switch (b.ptr_size_bytes) {
+        4 => b.size_type,
+        8 => try b.module.intType(33),
+        else => unreachable,
+    };
+
+    const trap_oob_helper_ty = try b.fnType(
+        .i32,
+        &[8]Type{ .ptr, .ptr, .ptr, .ptr, .ptr, .ptr, .i32, .i8 },
+    );
+    const trap_oob_helper = try b.addFunction(
+        try b.strtabStringSymbolPrefixed("trapTableAccessOutOfBounds"),
+        trap_oob_helper_ty,
+        b.ffi_call_conv,
+        .{ .linkage = .external, .preemption = .dso_local },
+    );
+    const trap_oob_helper_value = trap_oob_helper.toValue(&b.module);
+    {
+        var attrs = FunctionAttributes.Wip{};
+        try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .cold, .nounwind });
+        try b.setFnAttributes(trap_oob_helper, &attrs);
+    }
+    const trap_oob_helper_attrs = attrs: {
+        var attrs = FunctionAttributes.Wip{};
+        for (0..6) |i| {
+            for (&[3]Attribute{ .noundef, .readonly, .nonnull }) |a| {
+                try attrs.addParamAttr(i, a, &b.module);
+            }
+        }
+        break :attrs try attrs.finish(&b.module);
+    };
+
+    {
+        var get = try b.opcodeHandler(.{ .byte = .@"table.get" });
+        const wip = &get.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const start_vip = OpcodeHandlerParam.vip.arg(wip);
+        const stp = OpcodeHandlerParam.stp.arg(&get.wip);
+        const start_vsp = OpcodeHandlerParam.vsp.arg(wip);
+
+        const decode_table_idx = try b.callDecodeUlebIdx(wip, start_vip);
+        const table_idx = try wip.extractValue(decode_table_idx, &.{0}, "table_idx");
+        const vip_after_table_idx = try wip.extractValue(
+            decode_table_idx,
+            &.{1},
+            "vip_after_table_idx",
+        );
+
+        const stack_top = try get.operandAt(b, 0);
+        const index = try wip.load(.normal, .i32, stack_top, value_stack_alignment, "index");
+
+        const table_ptr = try get.tableInstPtr(b, table_idx);
+
+        const in_bounds = try wip.block(1, "Load");
+        const out_of_bounds = try wip.block(1, "OutOfBounds");
+        _ = try wip.brCond(
+            try wip.icmp(
+                .ult,
+                index,
+                try TableInstField.len.load(wip, b, table_ptr),
+                "bounds_check",
+            ),
+            in_bounds,
+            out_of_bounds,
+            .then_likely,
+        );
+
+        {
+            wip.cursor = .{ .block = in_bounds };
+            const src_ptr = try wip.gep(
+                .inbounds,
+                .ptr,
+                try TableInstField.base.load(wip, b, table_ptr),
+                &.{try wip.cast(.zext, index, gep_index_ty, "")},
+                "src_ptr",
+            );
+
+            const elem = try wip.load(.normal, .ptr, src_ptr, .default, "elem");
+            _ = try wip.store(.normal, elem, stack_top, .default);
+
+            try get.jmpToNextHandler(b, .{
+                .vsp = start_vsp,
+                .vip = vip_after_table_idx,
+                .stp = stp,
+            });
+        }
+
+        {
+            wip.cursor = .{ .block = out_of_bounds };
+            _ = try wip.callIntrinsicAssumeCold();
+            _ = try wip.ret(
+                try wip.call(
+                    .tail,
+                    b.ffi_call_conv,
+                    trap_oob_helper_attrs,
+                    trap_oob_helper_ty,
+                    trap_oob_helper_value,
+                    &[8]Value{
+                        start_vip,
+                        start_vsp,
+                        OpcodeHandlerParam.eip.arg(wip),
+                        stp,
+                        OpcodeHandlerParam.ctx.arg(wip),
+                        table_ptr,
+                        index,
+                        // Bit 7 set to 0 to indicate table.get
+                        try wip.cast(.trunc, table_idx, .i8, ""),
+                    },
+                    "",
+                ),
+            );
+        }
+
+        try get.finish(b);
     }
 }
 

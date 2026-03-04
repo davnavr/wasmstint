@@ -400,6 +400,44 @@ fn trapMemoryCopyOutOfBounds(
     );
 }
 
+fn trapTableAccessOutOfBounds(
+    trap_ip: Ip,
+    vsp: Sp,
+    eip: Eip,
+    stp: Stp,
+    ctx: *Interpreter,
+    table: *const runtime.TableInst,
+    index: u32,
+    info_bits: u8,
+) callconv(ffi_cc) Transition {
+    @branchHint(.cold);
+    const Info = packed struct(u8) {
+        table: Module.TableIdx,
+        cause: enum(u1) { @"table.get" = 0, @"table.set" = 1 },
+    };
+
+    const access_info: Info = @bitCast(info_bits);
+    const trap_info = Trap.init(
+        .table_access_out_of_bounds,
+        Trap.TableAccessOutOfBounds.init(access_info.table, switch (access_info.cause) {
+            inline else => |trap_cause| @unionInit(
+                Trap.TableAccessOutOfBounds.Cause,
+                @tagName(trap_cause),
+                .{ .index = index, .maximum = table.len },
+            ),
+        }),
+    );
+
+    return Transition.trapAt(
+        trap_ip,
+        eip,
+        vsp,
+        stp,
+        ctx,
+        trap_info,
+    );
+}
+
 fn trapCallIndirectAccessOob(
     trap_ip: Ip,
     vsp: Sp,
@@ -437,6 +475,7 @@ comptime {
         "trapMemoryFillOutOfBounds",
         "trapMemoryInitOutOfBounds",
         "trapMemoryCopyOutOfBounds",
+        "trapTableAccessOutOfBounds",
         "trapCallIndirectAccessOob",
         "trapIndirectCallToNull",
     }) |name| {
