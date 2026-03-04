@@ -1934,6 +1934,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     try buildBulkMemoryOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
     try buildFloatOpcodeHandlers(b);
+    try buildReferenceOpcodeHandlers(b);
     try buildPrefixOpcodeHandlers(b);
 
     inline for ([2]type{ ByteOpcode, opcodes.FCPrefixOpcode }) |OpcodeType| {
@@ -5051,6 +5052,31 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             .stp = OpcodeHandlerParam.stp.arg(&promote.wip),
         });
         try promote.finish(b);
+    }
+}
+
+fn buildReferenceOpcodeHandlers(b: *Builder) Oom!void {
+    const null_zero = try b.sizeIntValue(0);
+    {
+        var is_null = try b.opcodeHandler(.{ .byte = .@"ref.is_null" });
+        const wip = &is_null.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const stack_top = try is_null.operandAt(b, 0);
+        const elem = try wip.load(.normal, b.size_type, stack_top, value_stack_alignment, "elem");
+        _ = try wip.store(
+            .normal,
+            try wip.cast(.zext, try wip.icmp(.eq, elem, null_zero, ""), .i32, ""),
+            stack_top,
+            value_stack_alignment,
+        );
+
+        try is_null.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&is_null.wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(&is_null.wip),
+            .stp = OpcodeHandlerParam.stp.arg(&is_null.wip),
+        });
+        try is_null.finish(b);
     }
 }
 
