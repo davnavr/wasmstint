@@ -3342,7 +3342,8 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
 
         try copy.finish(b);
     }
-    const bits_per_flag_word = try b.module.intValue(.i32, 32);
+    const drop_flag_size = try b.module.intValue(.i32, 32);
+    const drop_flag_bit_index_mask = try b.module.intValue(.i32, 32 - 1);
     {
         var init = try b.opcodeHandler(.{ .fc = .@"memory.init" });
         const wip = &init.wip;
@@ -3412,7 +3413,7 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
                     try ModuleInstField.datas_drop_mask.load(wip, b),
                     &.{try wip.cast(
                         .zext,
-                        try wip.bin(.udiv, data_idx, bits_per_flag_word, ""),
+                        try wip.bin(.udiv, data_idx, drop_flag_size, ""),
                         b.size_type,
                         "",
                     )},
@@ -3427,7 +3428,7 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
                 try wip.bin(
                     .lshr,
                     flag_word,
-                    try wip.bin(.urem, data_idx, bits_per_flag_word, ""),
+                    try wip.bin(.@"and", data_idx, drop_flag_bit_index_mask, ""),
                     "",
                 ),
                 .i1,
@@ -3589,7 +3590,7 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
             try ModuleInstField.datas_drop_mask.load(wip, b),
             &.{try wip.cast(
                 .zext,
-                try wip.bin(.udiv, data_idx, bits_per_flag_word, ""),
+                try wip.bin(.udiv, data_idx, drop_flag_size, ""),
                 b.size_type,
                 "",
             )},
@@ -3598,16 +3599,15 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
 
         const flag_word = try wip.load(.normal, .i32, flag_word_ptr, .default, "flag_word");
 
-        const one = try b.module.intValue(.i32, 1);
         const unset_flag_bit = try wip.bin(
             .xor,
             try wip.bin(
                 .@"shl nuw",
-                one,
-                try wip.bin(.urem, data_idx, bits_per_flag_word, ""),
+                try b.module.intValue(.i32, 1),
+                try wip.bin(.@"and", data_idx, drop_flag_bit_index_mask, ""),
                 "",
             ),
-            one,
+            try b.module.intValue(.i32, -1),
             "unset_flag_bit",
         );
 
