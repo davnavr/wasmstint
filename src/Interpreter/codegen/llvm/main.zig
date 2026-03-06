@@ -1310,19 +1310,21 @@ const OpcodeHandler = struct {
 
     /// Produces a `ptr` to a `TableInst`.
     fn tableInstPtr(handler: *OpcodeHandler, b: *Builder, table_idx: Value) Oom!Value {
-        return try handler.wip.load(
-            .normal,
+        const wip = &handler.wip;
+        // TableIdx is currently a `u7`.
+        const max_table_idx = try b.module.intValue(table_idx.typeOfWip(wip), std.math.maxInt(u7));
+        const table_idx_range = try wip.icmp(.ule, table_idx, max_table_idx, "");
+        _ = try wip.callIntrinsic(.normal, .none, .assume, &.{}, &.{table_idx_range}, "");
+
+        const table_ptr_ptr = try wip.gep(
+            .inbounds,
             .ptr,
-            try handler.wip.gep(
-                .inbounds,
-                .ptr,
-                try ModuleInstField.tables.load(&handler.wip, b),
-                &.{table_idx},
-                "",
-            ),
-            .default,
+            try ModuleInstField.tables.load(wip, b),
+            &.{table_idx},
             "",
         );
+
+        return try wip.load(.normal, .ptr, table_ptr_ptr, .default, "table");
     }
 
     /// Assumes that the `memarg` is located at `OpcodeHandlerParam.vip`
