@@ -1925,6 +1925,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         try b.setFnAttributes(b.panic_invalid_prefixed_opcode, &attrs);
     }
     {
+        // Equivalent to `llvm.experimental.memset.pattern`
         b.fill_table_elements = try b.addFunction(
             try b.strtabStringSymbolPrefixed("fillTableElements"),
             try b.fnType(.void, &.{ .ptr, b.size_type, .i32 }),
@@ -2004,6 +2005,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     try buildTableAccessOpcodeHandlers(b);
     try buildTableManagementOpcodeHandlers(b);
     try buildBulkMemoryOpcodeHandlers(b);
+    try buildBulkTableOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
     try buildFloatOpcodeHandlers(b);
     try buildReferenceOpcodeHandlers(b);
@@ -4125,6 +4127,195 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
             .stp = OpcodeHandlerParam.stp.arg(wip),
         });
         try drop.finish(b);
+    }
+}
+
+fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
+    const addr_ty = try b.module.intType(33);
+    {
+        var copy = try b.opcodeHandler(.{ .fc = .@"table.copy" });
+        const wip = &copy.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const start_vip = OpcodeHandlerParam.vip.arg(wip);
+        const stp = OpcodeHandlerParam.stp.arg(&copy.wip);
+
+        const decode_dst_idx = try b.callDecodeUlebIdx(wip, start_vip);
+        const dst_idx = try wip.extractValue(decode_dst_idx, &.{0}, "dst_idx");
+        const vip_after_dst_idx = try wip.extractValue(decode_dst_idx, &.{1}, "vip_after_dst_idx");
+
+        const decode_src_idx = try b.callDecodeUlebIdx(wip, vip_after_dst_idx);
+        const src_idx = try wip.extractValue(decode_src_idx, &.{0}, "src_idx");
+        const vip_after_src_idx = try wip.extractValue(decode_src_idx, &.{1}, "vip_after_src_idx");
+
+        const dst_table = try copy.tableInstPtr(b, dst_idx);
+        const src_table = try copy.tableInstPtr(b, src_idx);
+
+        const n = try wip.load(.normal, .i32, try copy.operandAt(b, 0), value_stack_alignment, "n");
+        const src_offset = try wip.load(
+            .normal,
+            .i32,
+            try copy.operandAt(b, 1),
+            value_stack_alignment,
+            "src_offset",
+        );
+        const dst_offset = try wip.load(
+            .normal,
+            .i32,
+            try copy.operandAt(b, 2),
+            value_stack_alignment,
+            "dst_offset",
+        );
+
+        const copy_blk = try wip.block(1, "Copy");
+        const oob_blk = try wip.block(1, "OutOfBounds");
+        {
+            const src_len = try wip.cast(
+                .zext,
+                try TableInstField.len.load(wip, b, src_table),
+                addr_ty,
+                "src_len",
+            );
+            const dst_len = try wip.cast(
+                .zext,
+                try TableInstField.len.load(wip, b, dst_table),
+                addr_ty,
+                "dst_len",
+            );
+
+            const len = try wip.cast(.zext, n, addr_ty, "");
+            const src_in_bounds = try wip.icmp(
+                .ule,
+                try wip.bin(
+                    .@"add nuw",
+                    try wip.cast(.zext, src_offset, addr_ty, ""),
+                    len,
+                    "",
+                ),
+                src_len,
+                "",
+            );
+            const dst_in_bounds = try wip.icmp(
+                .ule,
+                try wip.bin(
+                    .@"add nuw",
+                    try wip.cast(.zext, dst_offset, addr_ty, ""),
+                    len,
+                    "",
+                ),
+                dst_len,
+                "",
+            );
+
+            _ = try wip.brCond(
+                try wip.bin(.@"and", src_in_bounds, dst_in_bounds, ""),
+                copy_blk,
+                oob_blk,
+                .then_likely,
+            );
+        }
+        {
+            wip.cursor = .{ .block = copy_blk };
+            const dst_ptr = try wip.gep(
+                .inbounds,
+                .ptr,
+                try TableInstField.base.load(wip, b, dst_table),
+                &.{try wip.cast(.zext, dst_offset, b.size_type, "")},
+                "dst_ptr",
+            );
+            const src_ptr = try wip.gep(
+                .inbounds,
+                .ptr,
+                try TableInstField.base.load(wip, b, src_table),
+                &.{try wip.cast(.zext, src_offset, b.size_type, "")},
+                "src_ptr",
+            );
+            _ = try wip.callIntrinsic(
+                .normal,
+                attrs: {
+                    var attrs = FunctionAttributes.Wip{};
+                    for (&[3]Attribute{
+                        .{ .@"align" = llvm.Builder.Alignment.fromByteUnits(b.ptr_size_bytes) },
+                        .nonnull,
+                        .noundef,
+                    }) |a| {
+                        for (0..2) |i| {
+                            try attrs.addParamAttr(i, a, &b.module);
+                        }
+                    }
+                    break :attrs try attrs.finish(&b.module);
+                },
+                .memmove,
+                &.{ .ptr, .ptr, b.size_type },
+                &.{
+                    dst_ptr,
+                    src_ptr,
+                    try wip.bin(
+                        .@"mul nuw",
+                        try wip.cast(.zext, n, b.size_type, "len"),
+                        try b.sizeIntValue(b.ptr_size_bytes),
+                        "",
+                    ),
+                    .false,
+                },
+                "",
+            );
+
+            const new_vsp = try copy.adjustVspBy(b, -3);
+            try copy.jmpToNextHandler(b, .{
+                .vip = vip_after_src_idx,
+                .vsp = new_vsp,
+                .stp = stp,
+            });
+        }
+        {
+            wip.cursor = .{ .block = oob_blk };
+            _ = try wip.callIntrinsicAssumeCold();
+            const helper = try b.addFunction(
+                try b.strtabStringSymbolPrefixed("trapTableCopyOutOfBounds"),
+                try b.fnType(
+                    .i32,
+                    &[7]Type{ .ptr, .ptr, .ptr, .ptr, .ptr, .i32, .i32 },
+                ),
+                b.ffi_call_conv,
+                .{ .linkage = .external, .preemption = .dso_local },
+            );
+            {
+                var attrs = FunctionAttributes.Wip{};
+                try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
+                try b.setFnAttributes(helper, &attrs);
+            }
+
+            _ = try wip.ret(
+                try wip.call(
+                    .tail,
+                    b.ffi_call_conv,
+                    attrs: {
+                        var attrs = FunctionAttributes.Wip{};
+                        for (0..5) |i| {
+                            for (&[3]Attribute{ .nonnull, .noundef, .nofree }) |a| {
+                                try attrs.addParamAttr(i, a, &b.module);
+                            }
+                        }
+                        break :attrs try attrs.finish(&b.module);
+                    },
+                    helper.typeOf(&b.module),
+                    helper.toValue(&b.module),
+                    &[7]Value{
+                        start_vip,
+                        OpcodeHandlerParam.vsp.arg(wip),
+                        OpcodeHandlerParam.eip.arg(wip),
+                        stp,
+                        OpcodeHandlerParam.ctx.arg(wip),
+                        src_idx,
+                        dst_idx,
+                    },
+                    "",
+                ),
+            );
+        }
+
+        try copy.finish(b);
     }
 }
 

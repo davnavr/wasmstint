@@ -468,6 +468,26 @@ fn trapTableAccessOutOfBounds(
     );
 }
 
+fn trapTableCopyOutOfBounds(
+    vip: Ip,
+    vsp: Sp,
+    eip: Eip,
+    stp: Stp,
+    ctx: *Interpreter,
+    src_table_idx: u32,
+    dst_table_idx: u32,
+) callconv(ffi_cc) Transition {
+    @branchHint(.cold);
+    _ = dst_table_idx;
+    const info = Trap.init(
+        .table_access_out_of_bounds,
+        // Include both indices eventually
+        Trap.TableAccessOutOfBounds.init(@enumFromInt(src_table_idx), .@"table.copy"),
+    );
+
+    return Transition.trap(vip, .{ .fc = .@"table.copy" }, eip, vsp, stp, ctx, info);
+}
+
 fn trapCallIndirectAccessOob(
     trap_ip: Ip,
     vsp: Sp,
@@ -508,6 +528,7 @@ comptime {
         "trapMemoryInitOutOfBounds",
         "trapMemoryCopyOutOfBounds",
         "trapTableAccessOutOfBounds",
+        "trapTableCopyOutOfBounds",
         "trapCallIndirectAccessOob",
         "trapIndirectCallToNull",
     }) |name| {
