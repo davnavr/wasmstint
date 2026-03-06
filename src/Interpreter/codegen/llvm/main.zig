@@ -1935,12 +1935,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         {
             var attrs = FunctionAttributes.Wip{};
             try b.commonFnAttributes(&attrs);
-            try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse });
-
-            switch (b.options.optimize) {
-                .Debug, .ReleaseSmall => {},
-                .ReleaseSafe, .ReleaseFast => try attrs.addFnAttr(.inlinehint, &b.module),
-            }
+            try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .willreturn, .nocallback });
 
             for (&[_]Attribute{
                 .@"noalias",
