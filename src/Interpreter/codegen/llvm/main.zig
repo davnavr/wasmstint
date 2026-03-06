@@ -3322,6 +3322,35 @@ fn buildTableAccessOpcodeHandlers(b: *Builder) Oom!void {
 }
 
 fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
+    {
+        var size = try b.opcodeHandler(.{ .fc = .@"table.size" });
+        const wip = &size.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const decode_table_idx = try b.callDecodeUlebIdx(wip, OpcodeHandlerParam.vip.arg(wip));
+        const table_idx = try wip.extractValue(decode_table_idx, &.{0}, "table_idx");
+        const vip_after_table_idx = try wip.extractValue(
+            decode_table_idx,
+            &.{1},
+            "vip_after_table_idx",
+        );
+
+        const table_ptr = try size.tableInstPtr(b, table_idx);
+        _ = try wip.store(
+            .normal,
+            try TableInstField.len.load(wip, b, table_ptr),
+            try size.operandAt(b, -1),
+            value_stack_alignment,
+        );
+
+        const new_vsp = try size.adjustVspBy(b, 1);
+        try size.jmpToNextHandler(b, .{
+            .vip = vip_after_table_idx,
+            .vsp = new_vsp,
+            .stp = OpcodeHandlerParam.stp.arg(&size.wip),
+        });
+        try size.finish(b);
+    }
     const idx_ty = try b.module.intType(33);
     {
         var grow = try b.opcodeHandler(.{ .fc = .@"table.grow" });
@@ -3340,13 +3369,7 @@ fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
             "vip_after_table_idx",
         );
 
-        const table_ptr = try wip.gep(
-            .inbounds,
-            .ptr,
-            try ModuleInstField.tables.load(wip, b),
-            &.{try wip.cast(.zext, table_idx, b.size_type, "")},
-            "",
-        );
+        const table_ptr = try grow.tableInstPtr(b, table_idx);
 
         const delta_ptr = try grow.operandAt(b, 0);
         const delta = try wip.load(
