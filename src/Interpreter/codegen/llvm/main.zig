@@ -2016,6 +2016,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     try buildTableManagementOpcodeHandlers(b);
     try buildBulkMemoryOpcodeHandlers(b);
     try buildBulkTableOpcodeHandlers(b);
+    try buildBulkDropOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
     try buildFloatOpcodeHandlers(b);
     try buildReferenceOpcodeHandlers(b);
@@ -4025,59 +4026,6 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
         }
         try init.finish(b);
     }
-    {
-        var drop = try b.opcodeHandler(.{ .fc = .@"data.drop" });
-        const wip = &drop.wip;
-
-        wip.cursor = .{ .block = try wip.block(0, "Entry") };
-        const decode_data_idx = try b.callDecodeUlebIdx(wip, OpcodeHandlerParam.vip.arg(wip));
-        const data_idx = try wip.extractValue(decode_data_idx, &.{0}, "data_idx");
-        const vip_after_data_idx = try wip.extractValue(
-            decode_data_idx,
-            &.{1},
-            "vip_after_data_idx",
-        );
-
-        const flag_word_ptr = try wip.gep(
-            .inbounds,
-            .i32,
-            try ModuleInstField.datas_drop_mask.load(wip, b),
-            &.{try wip.cast(
-                .zext,
-                try wip.bin(.udiv, data_idx, drop_flag_size, ""),
-                b.size_type,
-                "",
-            )},
-            "",
-        );
-
-        const flag_word = try wip.load(.normal, .i32, flag_word_ptr, .default, "flag_word");
-
-        const unset_flag_bit = try wip.bin(
-            .xor,
-            try wip.bin(
-                .@"shl nuw",
-                try b.module.intValue(.i32, 1),
-                try wip.bin(.@"and", data_idx, drop_flag_bit_index_mask, ""),
-                "",
-            ),
-            try b.module.intValue(.i32, -1),
-            "unset_flag_bit",
-        );
-
-        _ = try wip.store(
-            .normal,
-            try wip.bin(.@"and", flag_word, unset_flag_bit, ""),
-            flag_word_ptr,
-            .default,
-        );
-        try drop.jmpToNextHandler(b, .{
-            .vip = vip_after_data_idx,
-            .vsp = OpcodeHandlerParam.vsp.arg(wip),
-            .stp = OpcodeHandlerParam.stp.arg(wip),
-        });
-        try drop.finish(b);
-    }
 }
 
 fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
@@ -4728,6 +4676,52 @@ fn buildGlobalOpcodeHandlers(b: *Builder) Oom!void {
             try b.module.arrayConst(block_array.typeOf(&b.module), &block_constants),
             &b.module,
         );
+    }
+}
+
+fn buildBulkDropOpcodeHandlers(b: *Builder) Oom!void {
+    const drop_flag_size = try b.module.intValue(.i32, 32);
+    const drop_flag_bit_index_mask = try b.module.intValue(.i32, 32 - 1);
+    const xor_not_mask = try b.module.intValue(.i32, -1);
+    const one_to_shift = try b.module.intValue(.i32, 1);
+    for (
+        &[2]opcodes.FCPrefixOpcode{ .@"data.drop", .@"elem.drop" },
+        &[2]ModuleInstField{ .datas_drop_mask, .elems_drop_mask },
+    ) |opcode, drop_flags_field| {
+        var drop = try b.opcodeHandler(.{ .fc = opcode });
+        const wip = &drop.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const decode_idx = try b.callDecodeUlebIdx(wip, OpcodeHandlerParam.vip.arg(wip));
+        const idx = try wip.extractValue(decode_idx, &.{0}, "idx");
+        const vip_after_idx = try wip.extractValue(decode_idx, &.{1}, "vip_after_idx");
+
+        const flag_word_ptr = try wip.gep(
+            .inbounds,
+            .i32,
+            try drop_flags_field.load(wip, b),
+            &.{try wip.cast(.zext, try wip.bin(.udiv, idx, drop_flag_size, ""), b.size_type, "")},
+            "",
+        );
+
+        const flag_word = try wip.load(.normal, .i32, flag_word_ptr, .default, "flag_word");
+
+        const flag_word_bit_idx = try wip.bin(.@"and", idx, drop_flag_bit_index_mask, "");
+        const unset_flag_bit_mask = try wip.bin(
+            .xor,
+            try wip.bin(.@"shl nuw", one_to_shift, flag_word_bit_idx, ""),
+            xor_not_mask,
+            "unset_flag_bit",
+        );
+
+        const unset_flag_bit = try wip.bin(.@"and", flag_word, unset_flag_bit_mask, "");
+        _ = try wip.store(.normal, unset_flag_bit, flag_word_ptr, .default);
+        try drop.jmpToNextHandler(b, .{
+            .vip = vip_after_idx,
+            .vsp = OpcodeHandlerParam.vsp.arg(wip),
+            .stp = OpcodeHandlerParam.stp.arg(wip),
+        });
+        try drop.finish(b);
     }
 }
 
