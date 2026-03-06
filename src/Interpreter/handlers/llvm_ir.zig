@@ -292,6 +292,16 @@ fn memoryGrowReallocate(
     });
 }
 
+fn constructFuncRef(
+    func_index: i32,
+    module: runtime.ModuleInst,
+) callconv(ffi_cc) runtime.FuncRef.Nullable {
+    return @as(
+        runtime.FuncRef.Nullable,
+        @bitCast(module.inner.funcRef(@enumFromInt(func_index))),
+    );
+}
+
 fn trapWithNumericCode(
     trap_ip: Ip,
     sp: Sp,
@@ -470,6 +480,7 @@ comptime {
         "invokeWithinWasmIndirect",
         "returnFromWasm",
         "memoryGrowReallocate",
+        "constructFuncRef",
         "trapWithNumericCode",
         "trapMemoryAccessOutOfBounds",
         "trapMemoryFillOutOfBounds",

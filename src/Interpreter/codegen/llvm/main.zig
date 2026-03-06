@@ -1931,6 +1931,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     try buildMemoryStoreOpcodeHandlers(b);
     try buildMemoryManagementOpcodeHandlers(b);
     try buildTableAccessOpcodeHandlers(b);
+    try buildTableManagementOpcodeHandlers(b);
     try buildBulkMemoryOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
     try buildFloatOpcodeHandlers(b);
@@ -3245,6 +3246,8 @@ fn buildTableAccessOpcodeHandlers(b: *Builder) Oom!void {
         try set.finish(b);
     }
 }
+
+fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {}
 
 fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
     const addr_ty = switch (b.ptr_size_bytes) {
@@ -5098,6 +5101,58 @@ fn buildReferenceOpcodeHandlers(b: *Builder) Oom!void {
             .stp = OpcodeHandlerParam.stp.arg(&is_null.wip),
         });
         try is_null.finish(b);
+    }
+    {
+        var func = try b.opcodeHandler(.{ .byte = .@"ref.func" });
+        const wip = &func.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const decode_func_idx = try b.callDecodeUlebIdx(wip, OpcodeHandlerParam.vip.arg(&func.wip));
+        const vip_after_func_idx = try wip.extractValue(decode_func_idx, &.{1}, "");
+        const func_idx = try wip.extractValue(decode_func_idx, &.{0}, "func_idx");
+
+        const helper = try b.addFunction(
+            try b.strtabStringSymbolPrefixed("constructFuncRef"),
+            try b.fnType(b.size_type, &.{ .i32, .ptr }),
+            b.ffi_call_conv,
+            .{ .linkage = .external, .preemption = .dso_local },
+        );
+        {
+            var attrs = FunctionAttributes.Wip{};
+            try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
+            try b.setFnAttributes(helper, &attrs);
+        }
+
+        const ref = try wip.call(
+            .normal,
+            b.ffi_call_conv,
+            attrs: {
+                var attrs = FunctionAttributes.Wip{};
+                for (&[3]Attribute{ .nonnull, .noundef, .readonly }) |a| {
+                    try attrs.addParamAttr(1, a, &b.module);
+                }
+                break :attrs try attrs.finish(&b.module);
+            },
+            helper.typeOf(&b.module),
+            helper.toValue(&b.module),
+            &[2]Value{ func_idx, OpcodeHandlerParam.module.arg(&func.wip) },
+            "ref",
+        );
+
+        _ = try wip.store(
+            .normal,
+            ref,
+            OpcodeHandlerParam.vsp.arg(&func.wip),
+            value_stack_alignment,
+        );
+
+        const new_vsp = try func.adjustVspBy(b, 1);
+        try func.jmpToNextHandler(b, .{
+            .vip = vip_after_func_idx,
+            .vsp = new_vsp,
+            .stp = OpcodeHandlerParam.stp.arg(&func.wip),
+        });
+        try func.finish(b);
     }
 }
 
