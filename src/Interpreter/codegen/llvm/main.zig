@@ -155,6 +155,7 @@ const Builder = struct {
     trap_with_numeric_code: Function.Index = .none,
     trap_memory_access_oob: Function.Index = .none,
     panic_invalid_prefixed_opcode: Function.Index = .none,
+    fill_table_elements: Function.Index = .none,
 
     opcode_handler_writing_lock: std.debug.SafetyLock = .{},
     func_type: Type = .none,
@@ -1921,6 +1922,79 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         try b.fnAttributes(&attrs, &.{ .norecurse, .cold, .nounwind, .noreturn });
         try b.setFnAttributes(b.panic_invalid_prefixed_opcode, &attrs);
     }
+    {
+        b.fill_table_elements = try b.addFunction(
+            try b.strtabStringSymbolPrefixed("fillTableElements"),
+            try b.fnType(.void, &.{ .ptr, b.size_type, .i32 }),
+            if (b.target.cpu.arch == .x86_64) .preserve_mostcc else .fastcc,
+            .{ .linkage = .internal, .preemption = .dso_local },
+        );
+        const size_alignment = llvm.Builder.Alignment.fromByteUnits(b.ptr_size_bytes);
+        {
+            var attrs = FunctionAttributes.Wip{};
+            try b.commonFnAttributes(&attrs);
+            try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse });
+
+            switch (b.options.optimize) {
+                .Debug, .ReleaseSmall => {},
+                .ReleaseSafe, .ReleaseFast => try attrs.addFnAttr(.inlinehint, &b.module),
+            }
+
+            for (&[_]Attribute{
+                .@"noalias",
+                .noundef,
+                .nonnull,
+                .nofree,
+                .writeonly,
+                .{ .@"align" = size_alignment },
+            }) |a| {
+                try attrs.addParamAttr(0, a, &b.module);
+            }
+            try b.setFnAttributes(b.fill_table_elements, &attrs);
+        }
+
+        var wip = try b.wipFunction(b.fill_table_elements);
+        defer wip.deinit();
+
+        const entry_block = try wip.block(0, "Entry");
+        const check_done = try wip.block(2, "CheckDone");
+        wip.cursor = .{ .block = entry_block };
+        const base = wip.arg(0);
+        const elem = wip.arg(1);
+        const len = try wip.cast(.zext, wip.arg(2), b.size_type, "len");
+        _ = try wip.br(check_done);
+
+        wip.cursor = .{ .block = check_done };
+        var current_index = try wip.phi(b.size_type, "current_index"); // 0 when coming from entry block
+        const fill_elem = try wip.block(1, "FillElem");
+        const done = try wip.block(1, "Return");
+        _ = try wip.brCond(
+            try wip.icmp(.ult, current_index.toValue(), len, "is_done"),
+            fill_elem,
+            done,
+            .none,
+        );
+
+        {
+            wip.cursor = .{ .block = fill_elem };
+            const index = current_index.toValue();
+            const dst_ptr = try wip.gep(.inbounds, b.size_type, base, &.{index}, "dst_ptr");
+            _ = try wip.store(.normal, elem, dst_ptr, size_alignment);
+
+            const new_index = try wip.bin(.@"add nuw", index, try b.sizeIntValue(1), "new_index");
+            current_index.finish(
+                &.{ try b.sizeIntValue(0), new_index },
+                &.{ entry_block, fill_elem },
+                &wip,
+            );
+            _ = try wip.br(check_done);
+        }
+
+        wip.cursor = .{ .block = done };
+        _ = try wip.retVoid();
+
+        try wip.finish();
+    }
 
     try buildNopOpcodeHandlers(b);
     try buildControlOpcodeHandlers(b);
@@ -3247,7 +3321,196 @@ fn buildTableAccessOpcodeHandlers(b: *Builder) Oom!void {
     }
 }
 
-fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {}
+fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
+    const idx_ty = try b.module.intType(33);
+    {
+        var grow = try b.opcodeHandler(.{ .fc = .@"table.grow" });
+        const wip = &grow.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const start_vip = OpcodeHandlerParam.vip.arg(wip);
+        const stp = OpcodeHandlerParam.stp.arg(wip);
+        // const initial_vsp = OpcodeHandlerParam.vsp.arg(wip);
+
+        const decode_table_idx = try b.callDecodeUlebIdx(wip, start_vip);
+        const table_idx = try wip.extractValue(decode_table_idx, &.{0}, "table_idx");
+        const vip_after_table_idx = try wip.extractValue(
+            decode_table_idx,
+            &.{1},
+            "vip_after_table_idx",
+        );
+
+        const table_ptr = try wip.gep(
+            .inbounds,
+            .ptr,
+            try ModuleInstField.tables.load(wip, b),
+            &.{try wip.cast(.zext, table_idx, b.size_type, "")},
+            "",
+        );
+
+        const delta_ptr = try grow.operandAt(b, 0);
+        const delta = try wip.load(
+            .normal,
+            .i32,
+            delta_ptr,
+            value_stack_alignment,
+            "delta",
+        );
+        const elem_or_result_ptr = try grow.operandAt(b, 1);
+        const elem = try wip.load(
+            .normal,
+            b.size_type,
+            elem_or_result_ptr,
+            value_stack_alignment,
+            "elem",
+        );
+
+        const old_size = try TableInstField.len.load(wip, b, table_ptr);
+        const new_size_extended = try wip.bin(
+            .@"add nuw",
+            try wip.cast(.zext, old_size, idx_ty, ""),
+            try wip.cast(.zext, delta, idx_ty, ""),
+            "new_size.0",
+        );
+
+        const within_limit = try wip.block(1, "WithinLimit");
+        const growth_failed = try wip.block(1, "GrowthFailed");
+        _ = try wip.brCond(
+            try wip.icmp(
+                .ule,
+                new_size_extended,
+                try wip.cast(
+                    .zext,
+                    try TableInstField.limit.load(wip, b, table_ptr),
+                    idx_ty,
+                    "limit",
+                ),
+                "within_limit",
+            ),
+            within_limit,
+            growth_failed,
+            .then_likely,
+        );
+
+        wip.cursor = .{ .block = within_limit };
+        const new_size = try wip.cast(.trunc, new_size_extended, .i32, "new_size.1");
+
+        const within_capacity = try wip.block(1, "WithinCapacity");
+        const reallocation_needed = try wip.block(1, "ReallocationNeeded");
+        _ = try wip.brCond(
+            try wip.icmp(
+                .ule,
+                new_size,
+                try TableInstField.capacity.load(wip, b, table_ptr),
+                "within_capacity",
+            ),
+            within_capacity,
+            reallocation_needed,
+            .none,
+        );
+
+        const jmp_to_next = try wip.block(2, "JumpToNextOpcode");
+        {
+            wip.cursor = .{ .block = within_capacity };
+            _ = try wip.call(
+                .normal,
+                b.fill_table_elements.ptrConst(&b.module).call_conv,
+                .none,
+                b.fill_table_elements.typeOf(&b.module),
+                b.fill_table_elements.toValue(&b.module),
+                &.{
+                    try wip.gep(
+                        .inbounds,
+                        b.size_type,
+                        try TableInstField.base.load(wip, b, table_ptr),
+                        &.{try wip.cast(.zext, old_size, b.size_type, "old_size")},
+                        "",
+                    ),
+                    elem,
+                    try wip.bin(.@"sub nuw", new_size, old_size, "uninit_len"),
+                },
+                "",
+            );
+
+            _ = try wip.store(
+                .normal,
+                new_size,
+                try TableInstField.len.gep(wip, b, table_ptr),
+                .default,
+            );
+
+            _ = try wip.store(.normal, old_size, elem_or_result_ptr, value_stack_alignment);
+            _ = try wip.br(jmp_to_next);
+        }
+        const growth_failed_value = try b.module.intValue(.i32, -1);
+        {
+            wip.cursor = .{ .block = reallocation_needed };
+            _ = try wip.store(
+                .normal,
+                growth_failed_value,
+                elem_or_result_ptr,
+                value_stack_alignment,
+            );
+
+            const helper = try b.addFunction(
+                try b.strtabStringSymbolPrefixed("tableGrowReallocate"),
+                try b.fnType(.i32, &([1]Type{.i32} ++ @as([6]Type, @splat(.ptr)))),
+                b.ffi_call_conv,
+                .{ .linkage = .external, .preemption = .dso_local },
+            );
+            {
+                var attrs = FunctionAttributes.Wip{};
+                try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
+                try b.setFnAttributes(helper, &attrs);
+            }
+
+            const args = [7]Value{
+                new_size,
+                delta_ptr,
+                vip_after_table_idx,
+                OpcodeHandlerParam.eip.arg(wip),
+                stp,
+                OpcodeHandlerParam.ctx.arg(wip),
+                table_ptr,
+            };
+
+            _ = try wip.ret(
+                try wip.call(
+                    .tail,
+                    b.ffi_call_conv,
+                    attrs: {
+                        var attrs = FunctionAttributes.Wip{};
+                        for (1..7) |i| {
+                            for ([3]Attribute{ .nonnull, .noundef, .nofree }) |a| {
+                                try attrs.addParamAttr(i, a, &b.module);
+                            }
+                        }
+                        break :attrs try attrs.finish(&b.module);
+                    },
+                    helper.typeOf(&b.module),
+                    helper.toValue(&b.module),
+                    &args,
+                    "",
+                ),
+            );
+        }
+
+        wip.cursor = .{ .block = growth_failed };
+        _ = try wip.callIntrinsicAssumeCold();
+        _ = try wip.store(.normal, growth_failed_value, elem_or_result_ptr, value_stack_alignment);
+        _ = try wip.br(jmp_to_next);
+
+        wip.cursor = .{ .block = jmp_to_next };
+        const new_vsp = try grow.adjustVspBy(b, -1);
+        try grow.jmpToNextHandler(b, .{
+            .vip = vip_after_table_idx,
+            .vsp = new_vsp,
+            .stp = stp,
+        });
+
+        try grow.finish(b);
+    }
+}
 
 fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
     const addr_ty = switch (b.ptr_size_bytes) {

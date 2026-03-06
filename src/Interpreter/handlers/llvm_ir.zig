@@ -292,6 +292,26 @@ fn memoryGrowReallocate(
     });
 }
 
+fn tableGrowReallocate(
+    new_len: u32,
+    /// `vsp - 1` is the element to replicate, and where the `i32` result is stored.
+    vsp: Sp,
+    vip: Ip,
+    eip: Eip,
+    stp: Stp,
+    ctx: *Interpreter,
+    table: *runtime.TableInst,
+) callconv(ffi_cc) Transition {
+    return Transition.interrupted(.init(vip, eip), vsp, stp, ctx, .{
+        .table_grow = .{
+            .old_len = table.len,
+            .new_len = @intCast(new_len),
+            .table = table,
+            .elem = &(vsp.ptr - 1)[0],
+        },
+    });
+}
+
 fn constructFuncRef(
     func_index: i32,
     module: runtime.ModuleInst,
@@ -480,6 +500,7 @@ comptime {
         "invokeWithinWasmIndirect",
         "returnFromWasm",
         "memoryGrowReallocate",
+        "tableGrowReallocate",
         "constructFuncRef",
         "trapWithNumericCode",
         "trapMemoryAccessOutOfBounds",
