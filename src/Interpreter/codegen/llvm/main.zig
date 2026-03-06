@@ -1042,7 +1042,7 @@ const OpcodeHandler = struct {
         updates: struct {
             vsp: Value,
             vip: Value,
-            stp: Value,
+            stp: Value = .none,
             // Used in function calls.
             locals: Value = .none,
             module: Value = .none,
@@ -1080,8 +1080,8 @@ const OpcodeHandler = struct {
                 switch (param) {
                     .vsp => break :arg updates.vsp,
                     .vip => break :arg after_next_ip_byte,
-                    .stp => break :arg updates.stp,
-                    inline .locals,
+                    inline .stp,
+                    .locals,
                     .module,
                     .memories,
                     .eip,
@@ -2053,7 +2053,6 @@ fn buildNopOpcodeHandlers(b: *Builder) Oom!void {
         try nop.jmpToNextHandler(b, .{
             .vip = OpcodeHandlerParam.vip.arg(&nop.wip),
             .vsp = OpcodeHandlerParam.vsp.arg(&nop.wip),
-            .stp = OpcodeHandlerParam.stp.arg(&nop.wip),
         });
         try nop.finish(b);
     }
@@ -2084,7 +2083,6 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         try block.jmpToNextHandler(b, .{
             .vip = new_vip,
             .vsp = OpcodeHandlerParam.vsp.arg(&block.wip),
-            .stp = OpcodeHandlerParam.stp.arg(&block.wip),
         });
         try block.finish(b);
     }
@@ -2261,7 +2259,6 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         try end.jmpToNextHandler(b, .{
             .vip = OpcodeHandlerParam.vip.arg(&end.wip),
             .vsp = OpcodeHandlerParam.vsp.arg(&end.wip),
-            .stp = OpcodeHandlerParam.stp.arg(&end.wip),
         });
         try end.finish(b);
     }
@@ -2714,7 +2711,6 @@ fn buildParametricOpcodeHandlers(b: *Builder) Oom!void {
         try drop.jmpToNextHandler(b, .{
             .vip = OpcodeHandlerParam.vip.arg(&drop.wip),
             .vsp = new_vsp,
-            .stp = OpcodeHandlerParam.stp.arg(&drop.wip),
         });
         try drop.finish(b);
     }
@@ -2725,7 +2721,6 @@ fn buildParametricOpcodeHandlers(b: *Builder) Oom!void {
         try select.jmpToNextHandler(b, .{
             .vip = OpcodeHandlerParam.vip.arg(&select.wip),
             .vsp = new_vsp,
-            .stp = OpcodeHandlerParam.stp.arg(&select.wip),
         });
         try select.finish(b);
     }
@@ -2771,7 +2766,6 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
             try load.jmpToNextHandler(b, .{
                 .vip = access.vip,
                 .vsp = OpcodeHandlerParam.vsp.arg(&load.wip),
-                .stp = OpcodeHandlerParam.stp.arg(&load.wip),
             });
             try load.finish(b);
         }
@@ -2800,7 +2794,6 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
             try load.jmpToNextHandler(b, .{
                 .vip = access.vip,
                 .vsp = OpcodeHandlerParam.vsp.arg(&load.wip),
-                .stp = OpcodeHandlerParam.stp.arg(&load.wip),
             });
             try load.finish(b);
         }
@@ -2837,11 +2830,7 @@ fn buildMemoryStoreOpcodeHandlers(b: *Builder) Oom!void {
             );
 
             const new_vsp = try store.adjustVspBy(b, -2);
-            try store.jmpToNextHandler(b, .{
-                .vip = access.vip,
-                .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(&store.wip),
-            });
+            try store.jmpToNextHandler(b, .{ .vip = access.vip, .vsp = new_vsp });
             try store.finish(b);
         }
 
@@ -2866,11 +2855,7 @@ fn buildMemoryStoreOpcodeHandlers(b: *Builder) Oom!void {
             );
 
             const new_vsp = try store.adjustVspBy(b, -2);
-            try store.jmpToNextHandler(b, .{
-                .vip = access.vip,
-                .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(&store.wip),
-            });
+            try store.jmpToNextHandler(b, .{ .vip = access.vip, .vsp = new_vsp });
             try store.finish(b);
         }
     }
@@ -2904,11 +2889,7 @@ fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
         );
 
         const new_vsp = try size.adjustVspBy(b, 1);
-        try size.jmpToNextHandler(b, .{
-            .vip = vip_after_mem_idx,
-            .vsp = new_vsp,
-            .stp = OpcodeHandlerParam.stp.arg(&size.wip),
-        });
+        try size.jmpToNextHandler(b, .{ .vip = vip_after_mem_idx, .vsp = new_vsp });
         try size.finish(b);
     }
     {
@@ -3329,11 +3310,7 @@ fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
         );
 
         const new_vsp = try size.adjustVspBy(b, 1);
-        try size.jmpToNextHandler(b, .{
-            .vip = vip_after_table_idx,
-            .vsp = new_vsp,
-            .stp = OpcodeHandlerParam.stp.arg(&size.wip),
-        });
+        try size.jmpToNextHandler(b, .{ .vip = vip_after_table_idx, .vsp = new_vsp });
         try size.finish(b);
     }
     const idx_ty = try b.module.intType(33);
@@ -4486,11 +4463,7 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
         );
 
         const new_vsp = try local_get.adjustVspBy(b, 1);
-        try local_get.jmpToNextHandler(b, .{
-            .vip = new_vip,
-            .vsp = new_vsp,
-            .stp = OpcodeHandlerParam.stp.arg(wip),
-        });
+        try local_get.jmpToNextHandler(b, .{ .vip = new_vip, .vsp = new_vsp });
         try local_get.finish(b);
     }
     for (&[2]ByteOpcode{ .@"local.set", .@"local.tee" }) |opcode| {
@@ -4521,11 +4494,7 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
             .@"local.tee" => OpcodeHandlerParam.vsp.arg(wip),
             else => unreachable,
         };
-        try local_set.jmpToNextHandler(b, .{
-            .vip = new_vip,
-            .vsp = new_vsp,
-            .stp = OpcodeHandlerParam.stp.arg(wip),
-        });
+        try local_set.jmpToNextHandler(b, .{ .vip = new_vip, .vsp = new_vsp });
         try local_set.finish(b);
     }
 }
@@ -4659,11 +4628,7 @@ fn buildGlobalOpcodeHandlers(b: *Builder) Oom!void {
                 dst_ptr,
                 dst_align,
             );
-            try op.jmpToNextHandler(b, .{
-                .vip = new_vip,
-                .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(wip),
-            });
+            try op.jmpToNextHandler(b, .{ .vip = new_vip, .vsp = new_vsp });
         }
 
         try op.finish(b);
@@ -4719,7 +4684,6 @@ fn buildBulkDropOpcodeHandlers(b: *Builder) Oom!void {
         try drop.jmpToNextHandler(b, .{
             .vip = vip_after_idx,
             .vsp = OpcodeHandlerParam.vsp.arg(wip),
-            .stp = OpcodeHandlerParam.stp.arg(wip),
         });
         try drop.finish(b);
     }
@@ -4836,11 +4800,7 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
                 value_stack_alignment,
             );
             const new_vsp = try op.adjustVspBy(b, 1);
-            try op.jmpToNextHandler(b, .{
-                .vip = new_vip,
-                .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
-            });
+            try op.jmpToNextHandler(b, .{ .vip = new_vip, .vsp = new_vsp });
             try op.finish(b);
         }
 
@@ -4864,7 +4824,6 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             try op.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&op.wip),
                 .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
             });
             try op.finish(b);
         }
@@ -4918,7 +4877,6 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             try div_s.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&div_s.wip),
                 .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(&div_s.wip),
             });
 
             div_s.wip.cursor = .{ .block = trap };
@@ -4965,7 +4923,6 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             try op.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&op.wip),
                 .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
             });
 
             op.wip.cursor = .{ .block = trap };
@@ -5029,7 +4986,6 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             try rem_s.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&rem_s.wip),
                 .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(&rem_s.wip),
             });
 
             rem_s.wip.cursor = .{ .block = trap };
@@ -5057,7 +5013,6 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             try op.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&op.wip),
                 .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
             });
             try op.finish(b);
         }
@@ -5084,7 +5039,6 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             try op.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&op.wip),
                 .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
             });
             try op.finish(b);
         }
@@ -5110,7 +5064,6 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             try op.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&op.wip),
                 .vsp = OpcodeHandlerParam.vsp.arg(&op.wip),
-                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
             });
             try op.finish(b);
         }
@@ -5129,7 +5082,6 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             try popcnt.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&popcnt.wip),
                 .vsp = OpcodeHandlerParam.vsp.arg(&popcnt.wip),
-                .stp = OpcodeHandlerParam.stp.arg(&popcnt.wip),
             });
             try popcnt.finish(b);
         }
@@ -5161,7 +5113,6 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             try extend.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&extend.wip),
                 .vsp = OpcodeHandlerParam.vsp.arg(&extend.wip),
-                .stp = OpcodeHandlerParam.stp.arg(&extend.wip),
             });
             try extend.finish(b);
         }
@@ -5177,7 +5128,6 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             try eqz.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&eqz.wip),
                 .vsp = OpcodeHandlerParam.vsp.arg(&eqz.wip),
-                .stp = OpcodeHandlerParam.stp.arg(&eqz.wip),
             });
             try eqz.finish(b);
         }
@@ -5210,7 +5160,6 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             try cmp.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&cmp.wip),
                 .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(&cmp.wip),
             });
             try cmp.finish(b);
         }
@@ -5231,7 +5180,6 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
         try extend.jmpToNextHandler(b, .{
             .vip = OpcodeHandlerParam.vip.arg(&extend.wip),
             .vsp = OpcodeHandlerParam.vsp.arg(&extend.wip),
-            .stp = OpcodeHandlerParam.stp.arg(&extend.wip),
         });
         try extend.finish(b);
     }
@@ -5304,11 +5252,7 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
                 value_stack_alignment,
             );
             const new_vsp = try c.adjustVspBy(b, 1);
-            try c.jmpToNextHandler(b, .{
-                .vip = new_vip,
-                .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(&c.wip),
-            });
+            try c.jmpToNextHandler(b, .{ .vip = new_vip, .vsp = new_vsp });
             try c.finish(b);
         }
 
@@ -5337,7 +5281,6 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try cmp.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&cmp.wip),
                 .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(&cmp.wip),
             });
             try cmp.finish(b);
         }
@@ -5360,7 +5303,6 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try op.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&op.wip),
                 .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
             });
             try op.finish(b);
         }
@@ -5390,7 +5332,6 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try op.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&op.wip),
                 .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
             });
             try op.finish(b);
         }
@@ -5405,7 +5346,6 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try sqrt.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&sqrt.wip),
                 .vsp = OpcodeHandlerParam.vsp.arg(&sqrt.wip),
-                .stp = OpcodeHandlerParam.stp.arg(&sqrt.wip),
             });
             try sqrt.finish(b);
         }
@@ -5433,7 +5373,6 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try op.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&op.wip),
                 .vsp = OpcodeHandlerParam.vsp.arg(&op.wip),
-                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
             });
             try op.finish(b);
         }
@@ -5456,7 +5395,6 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try op.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&op.wip),
                 .vsp = new_vsp,
-                .stp = OpcodeHandlerParam.stp.arg(&op.wip),
             });
             try op.finish(b);
         }
@@ -5472,7 +5410,6 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try abs.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&abs.wip),
                 .vsp = OpcodeHandlerParam.vsp.arg(&abs.wip),
-                .stp = OpcodeHandlerParam.stp.arg(&abs.wip),
             });
             try abs.finish(b);
         }
@@ -5484,7 +5421,6 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try neg.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&neg.wip),
                 .vsp = OpcodeHandlerParam.vsp.arg(&neg.wip),
-                .stp = OpcodeHandlerParam.stp.arg(&neg.wip),
             });
             try neg.finish(b);
         }
@@ -5506,7 +5442,6 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try conv.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&conv.wip),
                 .vsp = OpcodeHandlerParam.vsp.arg(&conv.wip),
-                .stp = OpcodeHandlerParam.stp.arg(&conv.wip),
             });
             try conv.finish(b);
         }
@@ -5616,7 +5551,6 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try conv.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&conv.wip),
                 .vsp = OpcodeHandlerParam.vsp.arg(&conv.wip),
-                .stp = OpcodeHandlerParam.stp.arg(&conv.wip),
             });
 
             conv.wip.cursor = .{ .block = trap };
@@ -5688,7 +5622,6 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try conv.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(&conv.wip),
                 .vsp = OpcodeHandlerParam.vsp.arg(&conv.wip),
-                .stp = OpcodeHandlerParam.stp.arg(&conv.wip),
             });
             try conv.finish(b);
         }
@@ -5701,7 +5634,6 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
         try demote.jmpToNextHandler(b, .{
             .vip = OpcodeHandlerParam.vip.arg(&demote.wip),
             .vsp = OpcodeHandlerParam.vsp.arg(&demote.wip),
-            .stp = OpcodeHandlerParam.stp.arg(&demote.wip),
         });
         try demote.finish(b);
     }
@@ -5713,7 +5645,6 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
         try promote.jmpToNextHandler(b, .{
             .vip = OpcodeHandlerParam.vip.arg(&promote.wip),
             .vsp = OpcodeHandlerParam.vsp.arg(&promote.wip),
-            .stp = OpcodeHandlerParam.stp.arg(&promote.wip),
         });
         try promote.finish(b);
     }
@@ -5735,11 +5666,7 @@ fn buildReferenceOpcodeHandlers(b: *Builder) Oom!void {
         );
 
         const new_vsp = try op.adjustVspBy(b, 1);
-        try op.jmpToNextHandler(b, .{
-            .vip = new_vip,
-            .vsp = new_vsp,
-            .stp = OpcodeHandlerParam.stp.arg(&op.wip),
-        });
+        try op.jmpToNextHandler(b, .{ .vip = new_vip, .vsp = new_vsp });
         try op.finish(b);
     }
     {
@@ -5759,7 +5686,6 @@ fn buildReferenceOpcodeHandlers(b: *Builder) Oom!void {
         try is_null.jmpToNextHandler(b, .{
             .vip = OpcodeHandlerParam.vip.arg(&is_null.wip),
             .vsp = OpcodeHandlerParam.vsp.arg(&is_null.wip),
-            .stp = OpcodeHandlerParam.stp.arg(&is_null.wip),
         });
         try is_null.finish(b);
     }
@@ -5808,11 +5734,7 @@ fn buildReferenceOpcodeHandlers(b: *Builder) Oom!void {
         );
 
         const new_vsp = try func.adjustVspBy(b, 1);
-        try func.jmpToNextHandler(b, .{
-            .vip = vip_after_func_idx,
-            .vsp = new_vsp,
-            .stp = OpcodeHandlerParam.stp.arg(&func.wip),
-        });
+        try func.jmpToNextHandler(b, .{ .vip = vip_after_func_idx, .vsp = new_vsp });
         try func.finish(b);
     }
 }
