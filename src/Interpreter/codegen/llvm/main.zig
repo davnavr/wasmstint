@@ -1194,7 +1194,7 @@ const OpcodeHandler = struct {
     /// Obtains a `ptr` value containing the address of the given stack operand.
     ///
     /// Note that this is based on the value of `vsp` on function entry.
-    fn operandAt(
+    fn gepOperandAt(
         handler: *OpcodeHandler,
         b: *Builder,
         /// `0` means the value on top of the stack, `1` the value below that, and so on.
@@ -1213,6 +1213,23 @@ const OpcodeHandler = struct {
         );
     }
 
+    fn loadOperandAt(
+        handler: *OpcodeHandler,
+        b: *Builder,
+        ty: Type,
+        /// `0` refers to the value currently on the top of the stack.
+        index: u8,
+        name: []const u8,
+    ) Oom!Value {
+        return try handler.wip.load(
+            .normal,
+            ty,
+            try handler.gepOperandAt(b, index),
+            value_stack_alignment,
+            name,
+        );
+    }
+
     const BinOpOperands = struct {
         c_2: Value,
         c_1: Value,
@@ -1227,11 +1244,10 @@ const OpcodeHandler = struct {
     /// Loads two operands of type `ty` from the operand stack, and calculates the `ptr`
     /// where the result is written.
     fn binOp(handler: *OpcodeHandler, b: *Builder, ty: Type) Oom!BinOpOperands {
-        const c_2_addr = try handler.operandAt(b, 0);
-        const c_1_addr = try handler.operandAt(b, 1);
+        const c_1_addr = try handler.gepOperandAt(b, 1);
         return .{
-            .c_2 = try handler.wip.load(.normal, ty, c_2_addr, value_stack_alignment, ""),
-            .c_1 = try handler.wip.load(.normal, ty, c_1_addr, value_stack_alignment, ""),
+            .c_2 = try handler.loadOperandAt(b, ty, 0, "c_2"),
+            .c_1 = try handler.wip.load(.normal, ty, c_1_addr, value_stack_alignment, "c_1"),
             .result = c_1_addr,
         };
     }
@@ -1247,9 +1263,9 @@ const OpcodeHandler = struct {
     };
 
     fn unOp(handler: *OpcodeHandler, b: *Builder, ty: Type) Oom!UnOpOperands {
-        const result = try handler.operandAt(b, 0);
+        const result = try handler.gepOperandAt(b, 0);
         return .{
-            .c_1 = try handler.wip.load(.normal, ty, result, value_stack_alignment, ""),
+            .c_1 = try handler.wip.load(.normal, ty, result, value_stack_alignment, "c_1"),
             .result = result,
         };
     }
@@ -1266,9 +1282,9 @@ const OpcodeHandler = struct {
     };
 
     fn testOp(handler: *OpcodeHandler, b: *Builder, ty: Type) Oom!TestOpOperands {
-        const result = try handler.operandAt(b, 0);
+        const result = try handler.gepOperandAt(b, 0);
         return .{
-            .c_1 = try handler.wip.load(.normal, ty, result, value_stack_alignment, ""),
+            .c_1 = try handler.wip.load(.normal, ty, result, value_stack_alignment, "c_1"),
             .result = result,
         };
     }
@@ -1357,13 +1373,7 @@ const OpcodeHandler = struct {
         );
         const arg_offset = try wip.cast(
             .zext,
-            try wip.load(
-                .normal,
-                .i32,
-                try handler.operandAt(b, offset_idx),
-                value_stack_alignment,
-                "",
-            ),
+            try handler.loadOperandAt(b, .i32, offset_idx, "offset"),
             addr_ty,
             "",
         );
@@ -2141,7 +2151,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         var br = try b.opcodeHandler(.{ .byte = .@"if" });
         br.wip.cursor = .{ .block = try br.wip.block(0, "Entry") };
         const initial_vip = OpcodeHandlerParam.vip.arg(&br.wip);
-        const condition_ptr = try br.operandAt(b, 0);
+        const condition_ptr = try br.gepOperandAt(b, 0);
         const condition = try br.wip.icmp(
             .ne,
             try br.wip.load(.normal, .i32, condition_ptr, value_stack_alignment, ""),
@@ -2277,7 +2287,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         var br_if = try b.opcodeHandler(.{ .byte = .br_if });
         br_if.wip.cursor = .{ .block = try br_if.wip.block(0, "Entry") };
         const initial_vip = OpcodeHandlerParam.vip.arg(&br_if.wip);
-        const condition_ptr = try br_if.operandAt(b, 0);
+        const condition_ptr = try br_if.gepOperandAt(b, 0);
         const condition = try br_if.wip.icmp(
             .ne,
             try br_if.wip.load(.normal, .i32, condition_ptr, value_stack_alignment, ""),
@@ -2332,7 +2342,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         const label_count = try wip.extractValue(decoded_label_count, &.{0}, "");
         // No need to actually read label indices
 
-        const n_ptr = try br_table.operandAt(b, 0);
+        const n_ptr = try br_table.gepOperandAt(b, 0);
         const n_unsafe = try wip.load(.normal, .i32, n_ptr, value_stack_alignment, "");
         const n = try wip.callIntrinsic(
             .normal,
@@ -2473,13 +2483,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         const table_ptr = try call.tableInstPtr(b, table_idx);
         const table_len = try TableInstField.len.load(&call.wip, b, table_ptr);
 
-        const elem_idx = try call.wip.load(
-            .normal,
-            .i32,
-            try call.operandAt(b, 0),
-            value_stack_alignment,
-            "",
-        );
+        const elem_idx = try call.loadOperandAt(b, .i32, 0, "elem_idx");
         const in_bounds = try call.wip.block(1, "InBounds");
         const out_of_bounds = try call.wip.block(1, "OutOfBounds");
         _ = try call.wip.brCond(
@@ -2632,13 +2636,13 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
 }
 
 fn writeSelectHandler(b: *Builder, select: *OpcodeHandler) Oom!Value {
-    const condition_ptr = try select.operandAt(b, 0);
+    const condition_ptr = try select.gepOperandAt(b, 0);
     const condition_value = try select.wip.load(
         .normal,
         .i32,
         condition_ptr,
         value_stack_alignment,
-        "",
+        "condition",
     );
 
     const value_size_bytes = try b.sizeIntValue(16);
@@ -2662,7 +2666,7 @@ fn writeSelectHandler(b: *Builder, select: *OpcodeHandler) Oom!Value {
         "",
     );
     // If `true`, value already in result location is kept the same.
-    const dst_ptr = try select.operandAt(b, 2);
+    const dst_ptr = try select.gepOperandAt(b, 2);
     const src_ptr = try select.wip.gep(
         .inbounds,
         b.value_structs.i64,
@@ -2696,7 +2700,7 @@ fn buildParametricOpcodeHandlers(b: *Builder) Oom!void {
                 .@"memset.inline",
                 &b.value_set.overload,
                 &.{
-                    try drop.operandAt(b, 0),
+                    try drop.gepOperandAt(b, 0),
                     try b.module.intValue(.i8, 0xCC),
                     try b.sizeIntValue(16),
                     .false,
@@ -2759,7 +2763,7 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
             _ = try load.wip.store(
                 .normal,
                 loaded_value,
-                try load.operandAt(b, 0),
+                try load.gepOperandAt(b, 0),
                 value_stack_alignment,
             );
 
@@ -2788,7 +2792,7 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
             _ = try load.wip.store(
                 .normal,
                 try load.wip.load(.normal, int_ty, access.ptr, byte_alignment, ""),
-                try load.operandAt(b, 0),
+                try load.gepOperandAt(b, 0),
                 value_stack_alignment,
             );
 
@@ -2826,13 +2830,7 @@ fn buildMemoryStoreOpcodeHandlers(b: *Builder) Oom!void {
 
             _ = try store.wip.store(
                 .normal,
-                try store.wip.cast(.trunc, try store.wip.load(
-                    .normal,
-                    int_ty,
-                    try store.operandAt(b, 0),
-                    value_stack_alignment,
-                    "",
-                ), store_ty, ""),
+                try store.wip.cast(.trunc, try store.loadOperandAt(b, int_ty, 0, ""), store_ty, ""),
                 access.ptr,
                 byte_alignment,
             );
@@ -2861,13 +2859,7 @@ fn buildMemoryStoreOpcodeHandlers(b: *Builder) Oom!void {
 
             _ = try store.wip.store(
                 .normal,
-                try store.wip.load(
-                    .normal,
-                    int_ty,
-                    try store.operandAt(b, 0),
-                    value_stack_alignment,
-                    "",
-                ),
+                try store.loadOperandAt(b, int_ty, 0, "value"),
                 access.ptr,
                 byte_alignment,
             );
@@ -2906,7 +2898,7 @@ fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
         _ = try wip.store(
             .normal,
             try wip.bin(.@"udiv exact", mem_size, page_size, ""),
-            try size.operandAt(b, -1),
+            try size.gepOperandAt(b, -1),
             value_stack_alignment,
         );
 
@@ -2930,7 +2922,7 @@ fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
         const wip = &grow.wip;
 
         wip.cursor = .{ .block = try wip.block(0, "Entry") };
-        const stack_top = try grow.operandAt(b, 0);
+        const stack_top = try grow.gepOperandAt(b, 0);
 
         const start_vip = OpcodeHandlerParam.vip.arg(wip);
         const stp = OpcodeHandlerParam.stp.arg(wip);
@@ -3156,7 +3148,7 @@ fn buildTableAccessOpcodeHandlers(b: *Builder) Oom!void {
             "vip_after_table_idx",
         );
 
-        const stack_top = try get.operandAt(b, 0);
+        const stack_top = try get.gepOperandAt(b, 0);
         const index = try wip.load(.normal, .i32, stack_top, value_stack_alignment, "index");
 
         const table_ptr = try get.tableInstPtr(b, table_idx);
@@ -3239,14 +3231,7 @@ fn buildTableAccessOpcodeHandlers(b: *Builder) Oom!void {
             "vip_after_table_idx",
         );
 
-        const index = try wip.load(
-            .normal,
-            .i32,
-            try set.operandAt(b, 1),
-            value_stack_alignment,
-            "index",
-        );
-
+        const index = try set.loadOperandAt(b, .i32, 1, "index");
         const table_ptr = try set.tableInstPtr(b, table_idx);
 
         const in_bounds = try wip.block(1, "Load");
@@ -3273,7 +3258,7 @@ fn buildTableAccessOpcodeHandlers(b: *Builder) Oom!void {
                 "dst_ptr",
             );
 
-            const stack_top = try set.operandAt(b, 0);
+            const stack_top = try set.gepOperandAt(b, 0);
             const elem = try wip.load(.normal, .ptr, stack_top, value_stack_alignment, "elem");
             _ = try wip.store(.normal, elem, dst_ptr, .default);
 
@@ -3338,7 +3323,7 @@ fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
         _ = try wip.store(
             .normal,
             try TableInstField.len.load(wip, b, table_ptr),
-            try size.operandAt(b, -1),
+            try size.gepOperandAt(b, -1),
             value_stack_alignment,
         );
 
@@ -3370,7 +3355,7 @@ fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
 
         const table_ptr = try grow.tableInstPtr(b, table_idx);
 
-        const delta_ptr = try grow.operandAt(b, 0);
+        const delta_ptr = try grow.gepOperandAt(b, 0);
         const delta = try wip.load(
             .normal,
             .i32,
@@ -3378,7 +3363,7 @@ fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
             value_stack_alignment,
             "delta",
         );
-        const elem_or_result_ptr = try grow.operandAt(b, 1);
+        const elem_or_result_ptr = try grow.gepOperandAt(b, 1);
         const elem = try wip.load(
             .normal,
             b.size_type,
@@ -3565,20 +3550,9 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
             "",
         );
 
-        const n = try wip.load(.normal, .i32, try fill.operandAt(b, 0), value_stack_alignment, "n");
-        const dupe = try wip.cast(
-            .trunc,
-            try wip.load(.normal, .i32, try fill.operandAt(b, 1), value_stack_alignment, ""),
-            .i8,
-            "dupe",
-        );
-        const offset = try wip.load(
-            .normal,
-            .i32,
-            try fill.operandAt(b, 2),
-            value_stack_alignment,
-            "offset",
-        );
+        const n = try fill.loadOperandAt(b, .i32, 0, "n");
+        const dupe = try wip.cast(.trunc, try fill.loadOperandAt(b, .i32, 1, ""), .i8, "dupe");
+        const offset = try fill.loadOperandAt(b, .i32, 2, "offset");
 
         const fill_blk = try wip.block(1, "Fill");
         const oob_blk = try wip.block(1, "OutOfBounds");
@@ -3702,21 +3676,9 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
         );
         const dst_mem = src_mem;
 
-        const n = try wip.load(.normal, .i32, try copy.operandAt(b, 0), value_stack_alignment, "n");
-        const src_offset = try wip.load(
-            .normal,
-            .i32,
-            try copy.operandAt(b, 1),
-            value_stack_alignment,
-            "src_offset",
-        );
-        const dst_offset = try wip.load(
-            .normal,
-            .i32,
-            try copy.operandAt(b, 2),
-            value_stack_alignment,
-            "dst_offset",
-        );
+        const n = try copy.loadOperandAt(b, .i32, 0, "n");
+        const src_offset = try copy.loadOperandAt(b, .i32, 1, "src_offset");
+        const dst_offset = try copy.loadOperandAt(b, .i32, 2, "dst_offset");
 
         const copy_blk = try wip.block(1, "Copy");
         const oob_blk = try wip.block(1, "OutOfBounds");
@@ -3877,21 +3839,9 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
             "",
         );
 
-        const n = try wip.load(.normal, .i32, try init.operandAt(b, 0), value_stack_alignment, "n");
-        const src_offset = try wip.load(
-            .normal,
-            .i32,
-            try init.operandAt(b, 1),
-            value_stack_alignment,
-            "src_offset",
-        );
-        const dst_offset = try wip.load(
-            .normal,
-            .i32,
-            try init.operandAt(b, 2),
-            value_stack_alignment,
-            "dst_offset",
-        );
+        const n = try init.loadOperandAt(b, .i32, 0, "n");
+        const src_offset = try init.loadOperandAt(b, .i32, 1, "src_offset");
+        const dst_offset = try init.loadOperandAt(b, .i32, 2, "dst_offset");
 
         const data_len = len: {
             const len = try wip.load(
@@ -4151,21 +4101,9 @@ fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
         const dst_table = try copy.tableInstPtr(b, dst_idx);
         const src_table = try copy.tableInstPtr(b, src_idx);
 
-        const n = try wip.load(.normal, .i32, try copy.operandAt(b, 0), value_stack_alignment, "n");
-        const src_offset = try wip.load(
-            .normal,
-            .i32,
-            try copy.operandAt(b, 1),
-            value_stack_alignment,
-            "src_offset",
-        );
-        const dst_offset = try wip.load(
-            .normal,
-            .i32,
-            try copy.operandAt(b, 2),
-            value_stack_alignment,
-            "dst_offset",
-        );
+        const n = try copy.loadOperandAt(b, .i32, 0, "n");
+        const src_offset = try copy.loadOperandAt(b, .i32, 1, "src_offset");
+        const dst_offset = try copy.loadOperandAt(b, .i32, 2, "dst_offset");
 
         const copy_blk = try wip.block(1, "Copy");
         const oob_blk = try wip.block(1, "OutOfBounds");
@@ -4333,27 +4271,9 @@ fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
         );
         const table_ptr = try fill.tableInstPtr(b, table_idx);
 
-        const n = try wip.load(
-            .normal,
-            .i32,
-            try fill.operandAt(b, 0),
-            value_stack_alignment,
-            "n",
-        );
-        const dupe = try wip.load(
-            .normal,
-            b.size_type,
-            try fill.operandAt(b, 1),
-            value_stack_alignment,
-            "dupe",
-        );
-        const offset = try wip.load(
-            .normal,
-            .i32,
-            try fill.operandAt(b, 2),
-            value_stack_alignment,
-            "offset",
-        );
+        const n = try fill.loadOperandAt(b, .i32, 0, "n");
+        const dupe = try fill.loadOperandAt(b, b.size_type, 1, "dupe");
+        const offset = try fill.loadOperandAt(b, .i32, 2, "offset");
 
         const fill_blk = try wip.block(1, "Fill");
         const oob_blk = try wip.block(1, "OutOfBounds");
@@ -4503,7 +4423,7 @@ fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
             b.value_copy.attributes,
             .memcpy,
             &b.value_copy.overload,
-            &.{ dst_addr, try local_set.operandAt(b, 0), value_size_bytes, .false },
+            &.{ dst_addr, try local_set.gepOperandAt(b, 0), value_size_bytes, .false },
             "",
         );
 
@@ -4606,11 +4526,11 @@ fn buildGlobalOpcodeHandlers(b: *Builder) Oom!void {
                     try op.adjustVspBy(b, 1),
                     value_ptr,
                     .default,
-                    try op.operandAt(b, -1),
+                    try op.gepOperandAt(b, -1),
                     value_stack_alignment,
                 },
                 .@"global.set" => {
-                    const src = try op.operandAt(b, 0);
+                    const src = try op.gepOperandAt(b, 0);
                     break :ptrs .{ src, src, value_stack_alignment, value_ptr, .default };
                 },
                 else => unreachable,
@@ -5692,7 +5612,7 @@ fn buildReferenceOpcodeHandlers(b: *Builder) Oom!void {
         const wip = &is_null.wip;
 
         wip.cursor = .{ .block = try wip.block(0, "Entry") };
-        const stack_top = try is_null.operandAt(b, 0);
+        const stack_top = try is_null.gepOperandAt(b, 0);
         const elem = try wip.load(.normal, b.size_type, stack_top, value_stack_alignment, "elem");
         _ = try wip.store(
             .normal,
