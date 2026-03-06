@@ -312,6 +312,41 @@ fn tableGrowReallocate(
     });
 }
 
+const TableInitStatus = enum(usize) {
+    success = 0,
+    out_of_bounds = 1,
+};
+
+fn tableInit(
+    /// Number of elements to initialize.
+    n: u32,
+    src_idx: u32,
+    dst_idx: u32,
+    /// The 3 operands to `table.init` are already popped.
+    vsp: Sp,
+    module: runtime.ModuleInst,
+    table_idx_raw: u32,
+    elem_idx_raw: u32,
+) callconv(ffi_cc) TableInitStatus {
+    const table_idx: Module.TableIdx = @enumFromInt(table_idx_raw);
+    const buffer_len = module.header().module.elementSegments()[elem_idx_raw].header.elem_max_stack;
+    const buffer = vsp.ptr[0..buffer_len];
+    @memset(buffer, undefined);
+    runtime.TableInst.init(
+        table_idx,
+        module,
+        @enumFromInt(elem_idx_raw),
+        n,
+        src_idx,
+        dst_idx,
+        buffer,
+    ) catch |e| switch (e) {
+        error.TableAccessOutOfBounds => return .out_of_bounds,
+    };
+
+    return .success;
+}
+
 fn constructFuncRef(
     func_index: i32,
     module: runtime.ModuleInst,
@@ -490,7 +525,7 @@ fn trapTableCopyOutOfBounds(
 
 fn trapTableFillOutOfBounds(
     trap_ip: Ip,
-    sp: Sp,
+    vsp: Sp,
     eip: Eip,
     stp: Stp,
     ctx: *Interpreter,
@@ -499,7 +534,22 @@ fn trapTableFillOutOfBounds(
     @branchHint(.cold);
     const oob_info = Trap.TableAccessOutOfBounds.init(@enumFromInt(table_idx), .@"table.fill");
     const info = Trap.init(.table_access_out_of_bounds, oob_info);
-    return Transition.trap(trap_ip, .{ .fc = .@"table.fill" }, eip, sp, stp, ctx, info);
+    return Transition.trap(trap_ip, .{ .fc = .@"table.fill" }, eip, vsp, stp, ctx, info);
+}
+
+fn trapTableInitOutOfBounds(
+    trap_ip: Ip,
+    vsp: Sp,
+    eip: Eip,
+    stp: Stp,
+    ctx: *Interpreter,
+    table_idx: u32,
+    data_idx: u32,
+) callconv(ffi_cc) Transition {
+    @branchHint(.cold);
+    _ = data_idx;
+    const info = Trap.init(.table_access_out_of_bounds, .init(@enumFromInt(table_idx), .@"table.init"));
+    return Transition.trap(trap_ip, .{ .fc = .@"table.init" }, eip, vsp, stp, ctx, info);
 }
 
 fn trapCallIndirectAccessOob(
@@ -535,6 +585,7 @@ comptime {
         "returnFromWasm",
         "memoryGrowReallocate",
         "tableGrowReallocate",
+        "tableInit",
         "constructFuncRef",
         "trapWithNumericCode",
         "trapMemoryAccessOutOfBounds",
@@ -544,6 +595,7 @@ comptime {
         "trapTableAccessOutOfBounds",
         "trapTableCopyOutOfBounds",
         "trapTableFillOutOfBounds",
+        "trapTableInitOutOfBounds",
         "trapCallIndirectAccessOob",
         "trapIndirectCallToNull",
     }) |name| {

@@ -4083,6 +4083,147 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
 fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
     const addr_ty = try b.module.intType(33);
     {
+        var init = try b.opcodeHandler(.{ .fc = .@"table.init" });
+        const wip = &init.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const start_vip = OpcodeHandlerParam.vip.arg(wip);
+        const stp = OpcodeHandlerParam.stp.arg(&init.wip);
+
+        const decode_elem_idx = try b.callDecodeUlebIdx(wip, start_vip);
+        const data_idx = try wip.extractValue(decode_elem_idx, &.{0}, "elem_idx");
+        const vip_after_elem_idx = try wip.extractValue(
+            decode_elem_idx,
+            &.{1},
+            "vip_after_elem_idx",
+        );
+
+        const decode_table_idx = try b.callDecodeUlebIdx(wip, vip_after_elem_idx);
+        const table_idx = try wip.extractValue(decode_table_idx, &.{0}, "table_idx");
+        const vip_after_table_idx = try wip.extractValue(
+            decode_table_idx,
+            &.{1},
+            "vip_after_table_idx",
+        );
+
+        {
+            // DataIdx is currently a `u16`.
+            const max_elem_idx = try b.module.intValue(.i32, std.math.maxInt(u16));
+            const elem_idx_range = try wip.icmp(.ule, data_idx, max_elem_idx, "");
+            _ = try wip.callIntrinsic(.normal, .none, .assume, &.{}, &.{elem_idx_range}, "");
+        }
+
+        const n = try init.loadOperandAt(b, .i32, 0, "n");
+        const src_offset = try init.loadOperandAt(b, .i32, 1, "src_offset");
+        const dst_offset = try init.loadOperandAt(b, .i32, 2, "dst_offset");
+        const new_vsp = try init.adjustVspBy(b, -3);
+
+        const success = try wip.block(1, "JmpToNextHandler");
+        const oob = try wip.block(1, "OutOfBounds");
+        const status = status: {
+            const arg_count = 7;
+            const helper = try b.addFunction(
+                try b.strtabStringSymbolPrefixed("tableInit"),
+                try b.fnType(
+                    b.size_type,
+                    &[arg_count]Type{ .i32, .i32, .i32, .ptr, .ptr, .i32, .i32 },
+                ),
+                b.ffi_call_conv,
+                .{ .linkage = .external, .preemption = .dso_local },
+            );
+            {
+                var attrs = FunctionAttributes.Wip{};
+                try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
+                try b.setFnAttributes(helper, &attrs);
+            }
+
+            break :status try wip.call(
+                .normal,
+                b.ffi_call_conv,
+                attrs: {
+                    var attrs = FunctionAttributes.Wip{};
+                    for (3..5) |i| {
+                        for (&[3]Attribute{ .noundef, .nonnull, .nofree }) |a| {
+                            try attrs.addParamAttr(i, a, &b.module);
+                        }
+                    }
+                    break :attrs try attrs.finish(&b.module);
+                },
+                helper.typeOf(&b.module),
+                helper.toValue(&b.module),
+                &[arg_count]Value{
+                    n,
+                    src_offset,
+                    dst_offset,
+                    new_vsp,
+                    OpcodeHandlerParam.module.arg(wip),
+                    table_idx,
+                    data_idx,
+                },
+                "",
+            );
+        };
+        _ = try wip.brCond(
+            try wip.icmp(.eq, status, try b.sizeIntValue(0), "check_status"),
+            success,
+            oob,
+            .then_likely,
+        );
+
+        {
+            wip.cursor = .{ .block = success };
+            try init.jmpToNextHandler(b, .{
+                .vip = vip_after_table_idx,
+                .vsp = new_vsp,
+                .stp = stp,
+            });
+        }
+        {
+            wip.cursor = .{ .block = oob };
+            _ = try wip.callIntrinsicAssumeCold();
+            const helper = try b.addFunction(
+                try b.strtabStringSymbolPrefixed("trapTableInitOutOfBounds"),
+                try b.fnType(.i32, &[7]Type{ .ptr, .ptr, .ptr, .ptr, .ptr, .i32, .i32 }),
+                b.ffi_call_conv,
+                .{ .linkage = .external, .preemption = .dso_local },
+            );
+            {
+                var attrs = FunctionAttributes.Wip{};
+                try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
+                try b.setFnAttributes(helper, &attrs);
+            }
+
+            _ = try wip.ret(
+                try wip.call(
+                    .tail,
+                    b.ffi_call_conv,
+                    attrs: {
+                        var attrs = FunctionAttributes.Wip{};
+                        for (0..5) |i| {
+                            for (&[4]Attribute{ .nonnull, .readonly, .noundef, .nofree }) |a| {
+                                try attrs.addParamAttr(i, a, &b.module);
+                            }
+                        }
+                        break :attrs try attrs.finish(&b.module);
+                    },
+                    helper.typeOf(&b.module),
+                    helper.toValue(&b.module),
+                    &[7]Value{
+                        start_vip,
+                        OpcodeHandlerParam.vsp.arg(wip),
+                        OpcodeHandlerParam.eip.arg(wip),
+                        stp,
+                        OpcodeHandlerParam.ctx.arg(wip),
+                        table_idx,
+                        data_idx,
+                    },
+                    "",
+                ),
+            );
+        }
+        try init.finish(b);
+    }
+    {
         var copy = try b.opcodeHandler(.{ .fc = .@"table.copy" });
         const wip = &copy.wip;
 
