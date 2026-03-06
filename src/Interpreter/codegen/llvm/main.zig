@@ -4317,6 +4317,138 @@ fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
 
         try copy.finish(b);
     }
+    {
+        var fill = try b.opcodeHandler(.{ .fc = .@"table.fill" });
+        const wip = &fill.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const start_vip = OpcodeHandlerParam.vip.arg(wip);
+        const stp = OpcodeHandlerParam.stp.arg(&fill.wip);
+        const decode_table_idx = try b.callDecodeUlebIdx(wip, start_vip);
+        const table_idx = try wip.extractValue(decode_table_idx, &.{0}, "table_idx");
+        const vip_after_table_idx = try wip.extractValue(
+            decode_table_idx,
+            &.{1},
+            "vip_after_table_idx",
+        );
+        const table_ptr = try fill.tableInstPtr(b, table_idx);
+
+        const n = try wip.load(
+            .normal,
+            .i32,
+            try fill.operandAt(b, 0),
+            value_stack_alignment,
+            "n",
+        );
+        const dupe = try wip.load(
+            .normal,
+            b.size_type,
+            try fill.operandAt(b, 1),
+            value_stack_alignment,
+            "dupe",
+        );
+        const offset = try wip.load(
+            .normal,
+            .i32,
+            try fill.operandAt(b, 2),
+            value_stack_alignment,
+            "offset",
+        );
+
+        const fill_blk = try wip.block(1, "Fill");
+        const oob_blk = try wip.block(1, "OutOfBounds");
+        {
+            const end_offset = try wip.bin(
+                .@"add nuw",
+                try wip.cast(.zext, offset, addr_ty, ""),
+                try wip.cast(.zext, n, addr_ty, ""),
+                "",
+            );
+            const table_len = try wip.cast(
+                .zext,
+                try TableInstField.len.load(wip, b, table_ptr),
+                addr_ty,
+                "len",
+            );
+
+            _ = try wip.brCond(
+                try wip.icmp(.ule, end_offset, table_len, ""),
+                fill_blk,
+                oob_blk,
+                .then_likely,
+            );
+        }
+        {
+            wip.cursor = .{ .block = fill_blk };
+            const dst_ptr = try wip.gep(
+                .inbounds,
+                .ptr,
+                try TableInstField.base.load(wip, b, table_ptr),
+                &.{try wip.cast(.zext, offset, b.size_type, "")},
+                "dst_ptr",
+            );
+            _ = try wip.call(
+                .normal,
+                b.fill_table_elements.ptrConst(&b.module).call_conv,
+                .none,
+                b.fill_table_elements.typeOf(&b.module),
+                b.fill_table_elements.toValue(&b.module),
+                &.{ dst_ptr, dupe, n },
+                "",
+            );
+
+            const new_vsp = try fill.adjustVspBy(b, -3);
+            try fill.jmpToNextHandler(b, .{
+                .vip = vip_after_table_idx,
+                .vsp = new_vsp,
+                .stp = stp,
+            });
+        }
+        {
+            wip.cursor = .{ .block = oob_blk };
+            _ = try wip.callIntrinsicAssumeCold();
+            const helper = try b.addFunction(
+                try b.strtabStringSymbolPrefixed("trapTableFillOutOfBounds"),
+                try b.fnType(.i32, &[6]Type{ .ptr, .ptr, .ptr, .ptr, .ptr, .i32 }),
+                b.ffi_call_conv,
+                .{ .linkage = .external, .preemption = .dso_local },
+            );
+            {
+                var attrs = FunctionAttributes.Wip{};
+                try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
+                try b.setFnAttributes(helper, &attrs);
+            }
+
+            _ = try wip.ret(
+                try wip.call(
+                    .tail,
+                    b.ffi_call_conv,
+                    attrs: {
+                        var attrs = FunctionAttributes.Wip{};
+                        for (0..5) |i| {
+                            for (&[3]Attribute{ .nonnull, .noundef, .nofree }) |a| {
+                                try attrs.addParamAttr(i, a, &b.module);
+                            }
+                        }
+                        break :attrs try attrs.finish(&b.module);
+                    },
+                    helper.typeOf(&b.module),
+                    helper.toValue(&b.module),
+                    &[6]Value{
+                        start_vip,
+                        OpcodeHandlerParam.vsp.arg(wip),
+                        OpcodeHandlerParam.eip.arg(wip),
+                        stp,
+                        OpcodeHandlerParam.ctx.arg(wip),
+                        table_idx,
+                    },
+                    "",
+                ),
+            );
+        }
+
+        try fill.finish(b);
+    }
 }
 
 fn buildLocalOpcodeHandlers(b: *Builder) Oom!void {
