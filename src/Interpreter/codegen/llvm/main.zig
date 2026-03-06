@@ -658,13 +658,20 @@ const Builder = struct {
                     defer opcode_count += 1;
 
                     _ = name_arena.reset(.retain_capacity);
-                    const handler_name = try b.module.strtabString(try std.mem.concat(
-                        name_arena.allocator(),
-                        u8,
-                        &.{ b.options.symbol_prefix, @tagName(opcode) },
-                    ));
+                    const handler_name_bytes = try std.mem.concat(name_arena.allocator(), u8, &.{
+                        b.options.symbol_prefix,
+                        Opcode.init(E, opcode).name(),
+                    });
+                    const handler_name = try b.module.strtabString(handler_name_bytes);
 
-                    break :val b.module.getGlobal(handler_name).?.toConst();
+                    if (b.module.getGlobal(handler_name)) |handler_global| {
+                        break :val handler_global.toConst();
+                    } else {
+                        std.debug.panic(
+                            "unable to find handler global for {s}",
+                            .{handler_name_bytes},
+                        );
+                    }
                 }
 
                 break :val invalid;
@@ -2722,6 +2729,40 @@ fn buildParametricOpcodeHandlers(b: *Builder) Oom!void {
             .vip = OpcodeHandlerParam.vip.arg(&select.wip),
             .vsp = new_vsp,
         });
+        try select.finish(b);
+    }
+    {
+        var select = try b.opcodeHandler(.{ .byte = .@"select t" });
+        const wip = &select.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const decode_type_count = try b.callDecodeUlebIdx(wip, OpcodeHandlerParam.vip.arg(wip));
+        const type_count = try wip.extractValue(decode_type_count, &.{0}, "type_count");
+        const vip_after_type_count = try wip.extractValue(
+            decode_type_count,
+            &.{1},
+            "vip_after_type_count",
+        );
+
+        const bad_type_count = try wip.block(1, "BadTypeCount");
+        const good_type_count = try wip.block(1, "Select");
+        _ = try wip.brCond(
+            try wip.icmp(.eq, type_count, try b.module.intValue(.i32, 1), ""),
+            good_type_count,
+            bad_type_count,
+            .then_likely,
+        );
+
+        wip.cursor = .{ .block = bad_type_count };
+        if (b.options.optimize != .ReleaseSmall) {
+            _ = try wip.callIntrinsic(.normal, .none, .trap, &.{}, &.{}, "");
+        }
+        _ = try wip.@"unreachable"();
+
+        wip.cursor = .{ .block = good_type_count };
+        const vip_after_val_type = try b.callSkipUlebIdx(wip, vip_after_type_count);
+        const new_vsp = try writeSelectHandler(b, &select);
+        try select.jmpToNextHandler(b, .{ .vip = vip_after_val_type, .vsp = new_vsp });
         try select.finish(b);
     }
 }
