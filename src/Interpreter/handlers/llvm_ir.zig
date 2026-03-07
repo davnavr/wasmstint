@@ -240,6 +240,17 @@ fn invokeWithinWasmIndirect(
     eip: Eip,
     expected_signature: *const Module.FuncType,
 ) callconv(ffi_cc) ?*const Stack.Frame.Wasm {
+    switch (@as(opcodes.ByteOpcode, @enumFromInt(call_ip[0]))) {
+        .call_indirect => {},
+        else => |bad| switch (builtin.mode) {
+            .Debug, .ReleaseSafe => std.debug.panic(
+                "{t} (0x{X:0>2}) is not a valid indirect call instruction",
+                .{ bad, @intFromEnum(bad) },
+            ),
+            .ReleaseFast, .ReleaseSmall => unreachable,
+        },
+    }
+
     const pop_count = 1 + expected_signature.param_count;
     const saved_sp = Stack.Saved.pop(
         Stack.Values.init(vsp, &ctx.stack, pop_count, pop_count),
@@ -267,6 +278,38 @@ fn invokeWithinWasmIndirect(
         callee.funcInst(),
         InvokeWithinWasmCallback{ .state = output },
     );
+}
+
+fn finishInvokeWithinWasm(
+    output: *UpdateState,
+    ctx: *Interpreter,
+    callee: runtime.FuncInst,
+    new_frame: *const Stack.PushedFrame,
+) ?*Stack.Frame.Wasm {
+    switch (callee.expanded()) {
+        .wasm => |wasm| {
+            output.* = .{
+                .to_wasm = .{
+                    .locals = .{ .ptr = new_frame.frame.localValues(&ctx.stack).ptr },
+                    .vsp = new_frame.top(),
+                    .module = wasm.module,
+                },
+            };
+            return &new_frame.frame.wasm;
+        },
+        .host => |host| {
+            output.* = .{
+                .transition = Transition.awaitingHost(
+                    new_frame.top(),
+                    ctx,
+                    &host.signature,
+                    .calling_host,
+                    .wrote_ip_and_stp_to_the_current_stack_frame,
+                ),
+            };
+            return null;
+        },
+    }
 }
 
 fn tailCallWithinWasm(
@@ -315,31 +358,72 @@ fn tailCallWithinWasm(
         },
     };
 
-    switch (callee.expanded()) {
-        .wasm => |wasm| {
-            output.* = .{
-                .to_wasm = .{
-                    .locals = .{ .ptr = new_frame.frame.localValues(&ctx.stack).ptr },
-                    .vsp = new_frame.top(),
-                    .module = wasm.module,
-                },
-            };
-            return &new_frame.frame.wasm;
-        },
-        .host => |host| {
-            output.* = .{
-                .transition = Transition.awaitingHost(
-                    new_frame.top(),
-                    ctx,
-                    &host.signature,
-                    .calling_host,
-                    .wrote_ip_and_stp_to_the_current_stack_frame,
-                ),
-            };
-            return null;
+    return finishInvokeWithinWasm(output, ctx, callee, &new_frame);
+}
+
+fn tailCallWithinWasmIndirect(
+    output: *UpdateState,
+    call_ip: Ip,
+    /// Does not have the `i32` index popped.
+    vsp: Sp,
+    callee: runtime.FuncRef,
+    ctx: *Interpreter,
+    vip: Ip,
+    stp: Stp,
+    eip: Eip,
+    expected_signature: *const Module.FuncType,
+) callconv(ffi_cc) ?*const Stack.Frame.Wasm {
+    switch (@as(opcodes.ByteOpcode, @enumFromInt(call_ip[0]))) {
+        .return_call_indirect => {},
+        else => |bad| switch (builtin.mode) {
+            .Debug, .ReleaseSafe => std.debug.panic(
+                "{t} (0x{X:0>2}) is not a valid indirect tail call instruction",
+                .{ bad, @intFromEnum(bad) },
+            ),
+            .ReleaseFast, .ReleaseSmall => unreachable,
         },
     }
+
+    if (builtin.mode == .Debug) {
+        const current_frame = ctx.stack.currentFrame().?;
+        const expected_eip = @intFromPtr(current_frame.wasm.eip);
+        const actual_eip = @intFromPtr(eip);
+        if (expected_eip != actual_eip) {
+            std.debug.panic("expected EIP={X}, got {X}", .{ expected_eip, actual_eip });
+        }
+    }
+
+    const pop_count = 1 + expected_signature.param_count;
+    const saved_sp = Stack.Saved.pop(
+        Stack.Values.init(vsp, &ctx.stack, pop_count, pop_count),
+        pop_count,
+    );
+
+    const actual_signature = callee.signature();
+    if (!expected_signature.matches(actual_signature)) {
+        const info = Interpreter.Trap.init(
+            .indirect_call_signature_mismatch,
+            .{ .expected = expected_signature, .actual = actual_signature },
+        );
+
+        output.* = .{ .transition = Transition.trap(vip, .none, eip, vsp, stp, ctx, info) };
+        return null;
+    }
+
+    const func = callee.funcInst();
+    const new_frame = common.replaceTopStackFrame(saved_sp, 1, ctx, func) catch |e| switch (e) {
+        // Not enough room for new stack frame
+        error.OutOfMemory => {
+            const oom = Transition.callStackExhaustion(call_ip, eip, saved_sp, stp, ctx, func);
+            output.* = .{ .transition = oom };
+            return null;
+        },
+    };
+
+    return finishInvokeWithinWasm(output, ctx, func, &new_frame);
 }
+
+// TODO: Common comptime helper for invoke helper functions (common code between normal and non-tail call versions)
 
 fn memoryGrowReallocate(
     new_size: usize,
@@ -656,6 +740,7 @@ comptime {
         "invokeWithinWasmIndirect",
         "returnFromWasm",
         "tailCallWithinWasm",
+        "tailCallWithinWasmIndirect",
         "memoryGrowReallocate",
         "tableGrowReallocate",
         "tableInit",

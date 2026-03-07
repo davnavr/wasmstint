@@ -2489,8 +2489,32 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         try call.jmpToHostOrNextHandler(b, out_alloca, wasm_frame);
         try call.finish(b);
     }
-    {
-        var call = try b.opcodeHandler(.{ .byte = .call_indirect });
+
+    // Indirect function calls (via table)
+    const trap_helper_type = try b.fnType(
+        .i32,
+        &[6]Type{ .ptr, .ptr, .ptr, .ptr, b.size_type, .ptr },
+    );
+    const trap_helper_attrs = attrs: {
+        var attrs = FunctionAttributes.Wip{};
+        try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind, .cold });
+        break :attrs try attrs.finish(&b.module);
+    };
+    const trap_call_indirect_access_oob = try b.addFunction(
+        try b.strtabStringSymbolPrefixed("trapCallIndirectAccessOob"),
+        trap_helper_type,
+        b.ffi_call_conv,
+        .{ .linkage = .external, .preemption = .dso_local },
+    );
+    const trap_indirect_call_to_null = try b.addFunction(
+        try b.strtabStringSymbolPrefixed("trapIndirectCallToNull"),
+        trap_helper_type,
+        b.ffi_call_conv,
+        .{ .linkage = .external, .preemption = .dso_local },
+    );
+
+    for (&[2]ByteOpcode{ .call_indirect, .return_call_indirect }) |opcode| {
+        var call = try b.opcodeHandler(.{ .byte = opcode });
         call.wip.cursor = .{ .block = try call.wip.block(0, "Entry") };
         const out_alloca = try call.wip.alloca(
             .normal,
@@ -2564,31 +2588,47 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
 
         call.wip.cursor = .{ .block = call_helper };
         const wasm_frame = call: {
+            const param_buf = comptime @as([10]Type, @splat(.ptr));
+            const helper_name: []const u8, const helper_params: []const Type = switch (opcode) {
+                .call_indirect => .{ "invokeWithinWasmIndirect", &param_buf },
+                .return_call_indirect => .{ "tailCallWithinWasmIndirect", param_buf[0..9] },
+                else => unreachable,
+            };
             const helper = try b.addFunction(
-                try b.strtabStringSymbolPrefixed("invokeWithinWasmIndirect"),
-                try b.fnType(.ptr, &@as([10]Type, @splat(.ptr))),
+                try b.strtabStringSymbolPrefixed(helper_name),
+                try b.fnType(.ptr, helper_params),
                 b.ffi_call_conv,
                 .{ .linkage = .external, .preemption = .dso_local },
             );
             helper.setAttributes(invoke_helper_attrs, &b.module);
 
-            var args = [10]Value{
+            var args_buf: [10]Value = undefined;
+            var args = std.ArrayList(Value).initBuffer(&args_buf);
+
+            args.appendSliceAssumeCapacity(&.{
                 out_alloca,
                 call_ip,
                 initial_vsp,
                 func_ref,
-                OpcodeHandlerParam.fuel.arg(&call.wip),
+            });
+            switch (opcode) {
+                .call_indirect => args.appendAssumeCapacity(OpcodeHandlerParam.fuel.arg(&call.wip)),
+                .return_call_indirect => {},
+                else => unreachable,
+            }
+            args.appendSliceAssumeCapacity(&.{
                 ctx,
                 vip_after_table_idx,
                 stp,
                 eip,
                 expected_signature_ptr,
-            };
+            });
+            std.debug.assert(args.items.len == helper_params.len);
 
             var attrs = FunctionAttributes.Wip{};
             try attrs.addRetAttr(.{ .dereferenceable_or_null = 3 * b.ptr_size_bytes }, &b.module);
             try attrs.addParamAttr(0, .writeonly, &b.module);
-            for (0..10) |i| {
+            for (0..helper_params.len) |i| {
                 for ([3]Attribute{ .nonnull, .noundef, .nofree }) |attr| {
                     try attrs.addParamAttr(i, attr, &b.module);
                 }
@@ -2600,21 +2640,11 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
                 try attrs.finish(&b.module),
                 helper.typeOf(&b.module),
                 helper.toValue(&b.module),
-                &args,
+                args.items,
                 "",
             );
         };
         try call.jmpToHostOrNextHandler(b, out_alloca, wasm_frame);
-
-        const trap_helper_type = try b.fnType(
-            .i32,
-            &[6]Type{ .ptr, .ptr, .ptr, .ptr, b.size_type, .ptr },
-        );
-        const trap_helper_attrs = attrs: {
-            var attrs = FunctionAttributes.Wip{};
-            try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind, .cold });
-            break :attrs try attrs.finish(&b.module);
-        };
 
         call.wip.cursor = .{ .block = out_of_bounds };
         var trap_helper_args = [6]Value{
@@ -2632,12 +2662,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
                 b.ffi_call_conv,
                 trap_helper_attrs,
                 trap_helper_type,
-                (try b.addFunction(
-                    try b.strtabStringSymbolPrefixed("trapCallIndirectAccessOob"),
-                    trap_helper_type,
-                    b.ffi_call_conv,
-                    .{ .linkage = .external, .preemption = .dso_local },
-                )).toValue(&b.module),
+                trap_call_indirect_access_oob.toValue(&b.module),
                 &trap_helper_args,
                 "",
             ),
@@ -2652,12 +2677,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
                 b.ffi_call_conv,
                 trap_helper_attrs,
                 trap_helper_type,
-                (try b.addFunction(
-                    try b.strtabStringSymbolPrefixed("trapIndirectCallToNull"),
-                    trap_helper_type,
-                    b.ffi_call_conv,
-                    .{ .linkage = .external, .preemption = .dso_local },
-                )).toValue(&b.module),
+                trap_indirect_call_to_null.toValue(&b.module),
                 &trap_helper_args,
                 "",
             ),
