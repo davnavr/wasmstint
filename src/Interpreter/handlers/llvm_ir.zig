@@ -186,7 +186,7 @@ fn invokeWithinWasm(
     vip: Ip,
     stp: Stp,
     eip: Eip,
-    func_idx: usize,
+    func_idx: u32,
 ) callconv(ffi_cc) ?*const Stack.Frame.Wasm {
     switch (@as(opcodes.ByteOpcode, @enumFromInt(call_ip[0]))) {
         .call => {},
@@ -267,6 +267,78 @@ fn invokeWithinWasmIndirect(
         callee.funcInst(),
         InvokeWithinWasmCallback{ .state = output },
     );
+}
+
+fn tailCallWithinWasm(
+    output: *UpdateState,
+    call_ip: Ip,
+    vsp: Sp,
+    module: runtime.ModuleInst,
+    ctx: *Interpreter,
+    stp: Stp,
+    eip: Eip,
+    func_idx: u32,
+) callconv(ffi_cc) ?*const Stack.Frame.Wasm {
+    switch (@as(opcodes.ByteOpcode, @enumFromInt(call_ip[0]))) {
+        .return_call => {},
+        else => |bad| switch (builtin.mode) {
+            .Debug, .ReleaseSafe => std.debug.panic(
+                "{t} (0x{X:0>2}) is not a valid tail call instruction",
+                .{ bad, @intFromEnum(bad) },
+            ),
+            .ReleaseFast, .ReleaseSmall => unreachable,
+        },
+    }
+
+    if (builtin.mode == .Debug) {
+        const current_frame = ctx.stack.currentFrame().?;
+        const expected_eip = @intFromPtr(current_frame.wasm.eip);
+        const actual_eip = @intFromPtr(eip);
+        if (expected_eip != actual_eip) {
+            std.debug.panic("expected EIP={X}, got {X}", .{ expected_eip, actual_eip });
+        }
+    }
+
+    const callee = module.inner.funcInst(@enumFromInt(func_idx));
+    const arg_count = callee.signature().param_count;
+    const saved_sp = Stack.Saved.pop(
+        Stack.Values.init(vsp, &ctx.stack, arg_count, arg_count),
+        arg_count,
+    );
+
+    const new_frame = common.replaceTopStackFrame(saved_sp, 0, ctx, callee) catch |e| switch (e) {
+        // Not enough room for new stack frame
+        error.OutOfMemory => {
+            const oom = Transition.callStackExhaustion(call_ip, eip, saved_sp, stp, ctx, callee);
+            output.* = .{ .transition = oom };
+            return null;
+        },
+    };
+
+    switch (callee.expanded()) {
+        .wasm => |wasm| {
+            output.* = .{
+                .to_wasm = .{
+                    .locals = .{ .ptr = new_frame.frame.localValues(&ctx.stack).ptr },
+                    .vsp = new_frame.top(),
+                    .module = wasm.module,
+                },
+            };
+            return &new_frame.frame.wasm;
+        },
+        .host => |host| {
+            output.* = .{
+                .transition = Transition.awaitingHost(
+                    new_frame.top(),
+                    ctx,
+                    &host.signature,
+                    .calling_host,
+                    .wrote_ip_and_stp_to_the_current_stack_frame,
+                ),
+            };
+            return null;
+        },
+    }
 }
 
 fn memoryGrowReallocate(
@@ -583,6 +655,7 @@ comptime {
         "invokeWithinWasm",
         "invokeWithinWasmIndirect",
         "returnFromWasm",
+        "tailCallWithinWasm",
         "memoryGrowReallocate",
         "tableGrowReallocate",
         "tableInit",

@@ -2390,23 +2390,31 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         });
         try br_table.finish(b);
     }
-    {
+
+    const invoke_helper_attrs = attrs: {
+        var attrs = FunctionAttributes.Wip{};
+        try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
+        break :attrs try attrs.finish(&b.module);
+    };
+
+    for (&[2]ByteOpcode{ .call, .return_call }) |opcode| {
+        const helper_name, const helper_params = switch (opcode) {
+            .call => .{ "invokeWithinWasm", &@as([10]Type, @as([9]Type, @splat(.ptr)) ++ .{.i32}) },
+            .return_call => .{
+                "tailCallWithinWasm",
+                &@as([8]Type, @as([7]Type, @splat(.ptr)) ++ .{.i32}),
+            },
+            else => unreachable,
+        };
         const helper = try b.addFunction(
-            try b.strtabStringSymbolPrefixed("invokeWithinWasm"),
-            try b.fnType(
-                .ptr,
-                &@as([10]Type, @as([9]Type, @splat(.ptr)) ++ .{b.size_type}),
-            ),
+            try b.strtabStringSymbolPrefixed(helper_name),
+            try b.fnType(.ptr, helper_params),
             b.ffi_call_conv,
             .{ .linkage = .external, .preemption = .dso_local },
         );
-        {
-            var attrs = FunctionAttributes.Wip{};
-            try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
-            try b.setFnAttributes(helper, &attrs);
-        }
+        helper.setAttributes(invoke_helper_attrs, &b.module);
 
-        var call = try b.opcodeHandler(.{ .byte = .call });
+        var call = try b.opcodeHandler(.{ .byte = opcode });
         call.wip.cursor = .{ .block = try call.wip.block(0, "Entry") };
         const out_alloca = try call.wip.alloca(
             .normal,
@@ -2422,31 +2430,47 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
 
         const decode_func_idx = try b.callDecodeUlebIdx(&call.wip, start_vip);
         const new_vip = try call.wip.extractValue(decode_func_idx, &.{1}, "vip");
-        const func_idx = try call.wip.cast(
-            .zext,
-            try call.wip.extractValue(decode_func_idx, &.{0}, "func_idx"),
-            b.size_type,
-            "",
-        );
+        const func_idx = try call.wip.extractValue(decode_func_idx, &.{0}, "func_idx");
 
         const wasm_frame = call: {
-            var args = [10]Value{
+            var attrs = FunctionAttributes.Wip{};
+            try attrs.addRetAttr(.{ .dereferenceable_or_null = 3 * b.ptr_size_bytes }, &b.module);
+            try attrs.addParamAttr(0, .writeonly, &b.module);
+            const param_attrs = [3]Attribute{ .nonnull, .noundef, .nofree };
+            var args_buf: [10]Value = undefined;
+            args_buf[0..4].* = [4]Value{
                 out_alloca,
                 call_ip,
                 OpcodeHandlerParam.vsp.arg(&call.wip),
                 OpcodeHandlerParam.module.arg(&call.wip),
-                OpcodeHandlerParam.fuel.arg(&call.wip),
-                OpcodeHandlerParam.ctx.arg(&call.wip),
-                new_vip,
-                OpcodeHandlerParam.stp.arg(&call.wip),
-                OpcodeHandlerParam.eip.arg(&call.wip),
-                func_idx,
             };
-            var attrs = FunctionAttributes.Wip{};
-            try attrs.addRetAttr(.{ .dereferenceable_or_null = 3 * b.ptr_size_bytes }, &b.module);
-            try attrs.addParamAttr(0, .writeonly, &b.module);
-            for (0..9) |i| {
-                for ([3]Attribute{ .nonnull, .noundef, .nofree }) |attr| {
+
+            const arg_count: u4 = count: switch (opcode) {
+                .call => {
+                    args_buf[4..10].* = [6]Value{
+                        OpcodeHandlerParam.fuel.arg(&call.wip),
+                        OpcodeHandlerParam.ctx.arg(&call.wip),
+                        new_vip,
+                        OpcodeHandlerParam.stp.arg(&call.wip),
+                        OpcodeHandlerParam.eip.arg(&call.wip),
+                        func_idx,
+                    };
+                    break :count 10;
+                },
+                .return_call => {
+                    args_buf[4..8].* = [4]Value{
+                        OpcodeHandlerParam.ctx.arg(&call.wip),
+                        OpcodeHandlerParam.stp.arg(&call.wip),
+                        OpcodeHandlerParam.eip.arg(&call.wip),
+                        func_idx,
+                    };
+                    break :count 8;
+                },
+                else => unreachable,
+            };
+
+            for (0..(arg_count - 1)) |i| {
+                for (&param_attrs) |attr| {
                     try attrs.addParamAttr(i, attr, &b.module);
                 }
             }
@@ -2457,7 +2481,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
                 try attrs.finish(&b.module),
                 helper.typeOf(&b.module),
                 helper.toValue(&b.module),
-                &args,
+                args_buf[0..arg_count],
                 "",
             );
         };
@@ -2546,11 +2570,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
                 b.ffi_call_conv,
                 .{ .linkage = .external, .preemption = .dso_local },
             );
-            {
-                var attrs = FunctionAttributes.Wip{};
-                try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
-                try b.setFnAttributes(helper, &attrs);
-            }
+            helper.setAttributes(invoke_helper_attrs, &b.module);
 
             var args = [10]Value{
                 out_alloca,
