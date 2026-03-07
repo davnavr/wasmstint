@@ -32,5 +32,6 @@
 (assert_return (invoke "grow" (i32.const 65527) (ref.extern 0xBBB)) (i32.const 10)) ;; 10
 (assert_return (invoke "get" (i32.const 0)) (ref.extern 0xAAAA))
 (assert_return (invoke "get" (i32.const 8)) (ref.extern 0xAAAA))
+(assert_return (invoke "get" (i32.const 10)) (ref.extern 0xBBB))
 (assert_return (invoke "get" (i32.const 1234)) (ref.extern 0xBBB))
 (assert_return (invoke "get" (i32.const 5678)) (ref.extern 0xBBB))

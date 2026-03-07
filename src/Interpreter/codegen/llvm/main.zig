@@ -3208,7 +3208,7 @@ fn buildTableAccessOpcodeHandlers(b: *Builder) Oom!void {
             );
 
             const elem = try wip.load(.normal, .ptr, src_ptr, .default, "elem");
-            _ = try wip.store(.normal, elem, stack_top, .default);
+            _ = try wip.store(.normal, elem, stack_top, value_stack_alignment);
 
             try get.jmpToNextHandler(b, .{
                 .vsp = start_vsp,
@@ -3475,16 +3475,7 @@ fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
             _ = try wip.store(.normal, old_size, elem_or_result_ptr, value_stack_alignment);
             _ = try wip.br(jmp_to_next);
         }
-        const growth_failed_value = try b.module.intValue(.i32, -1);
         {
-            wip.cursor = .{ .block = reallocation_needed };
-            _ = try wip.store(
-                .normal,
-                growth_failed_value,
-                elem_or_result_ptr,
-                value_stack_alignment,
-            );
-
             const helper = try b.addFunction(
                 try b.strtabStringSymbolPrefixed("tableGrowReallocate"),
                 try b.fnType(.i32, &([1]Type{.i32} ++ @as([6]Type, @splat(.ptr)))),
@@ -3497,6 +3488,7 @@ fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
                 try b.setFnAttributes(helper, &attrs);
             }
 
+            wip.cursor = .{ .block = reallocation_needed };
             const args = [7]Value{
                 new_size,
                 delta_ptr,
@@ -3530,6 +3522,7 @@ fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
 
         wip.cursor = .{ .block = growth_failed };
         _ = try wip.callIntrinsicAssumeCold();
+        const growth_failed_value = try b.module.intValue(.i32, -1);
         _ = try wip.store(.normal, growth_failed_value, elem_or_result_ptr, value_stack_alignment);
         _ = try wip.br(jmp_to_next);
 
