@@ -732,7 +732,7 @@ const Builder = struct {
     fn callDecodeUlebIdx(b: *Builder, wip: *WipFunction, vip: Value) Oom!Value {
         return wip.call(
             .normal,
-            b.decode_uleb_idx.ptr(&b.module).call_conv,
+            b.decode_uleb_idx.ptrConst(&b.module).call_conv,
             .none,
             b.decode_uleb_idx.typeOf(&b.module),
             b.decode_uleb_idx.toValue(&b.module),
@@ -1509,17 +1509,17 @@ const OpcodeHandler = struct {
             .zext,
             try SideTableEntryField.copy_count.load(handler, b, stp),
             b.size_type,
-            "",
+            "copy_count",
         );
         const pop_count_in_values = try wip.cast(
             .zext,
             try SideTableEntryField.pop_count.load(handler, b, stp),
             b.size_type,
-            "",
+            "pop_count",
         );
         const delta_stp = try SideTableEntryField.delta_stp.load(handler, b, stp);
 
-        // Should perform signed subtraction
+        // These GEPs must perform signed subtraction
         const new_vip = try wip.gep(.inbounds, .i8, info.branch_ip, &.{delta_ip}, "");
         const new_stp = try wip.gep(.inbounds, b.side_table_entry, stp, &.{delta_stp}, "");
 
@@ -1547,7 +1547,7 @@ const OpcodeHandler = struct {
                 "",
             );
 
-            // Want fast path to be copying <= 1 values
+            // TODO: Want fast path to be copying <= 1 values, use loop instead of memmove call
             _ = try wip.callIntrinsic(
                 .normal,
                 attrs: {
@@ -1830,7 +1830,13 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         const vip_1 = try wip.gep(.inbounds, .i8, vip_0, &.{size_1}, "");
         const ret_single_byte = try wip.block(1, "ReturnSingleByte");
         const loop_body = try wip.block(2, "LoopBody");
-        const acc_0 = try wip.cast(.zext, byte_0, .i32, "");
+        const value_bits_mask = try b.module.intValue(.i8, 0x7F);
+        const acc_0 = try wip.cast(
+            .zext,
+            try wip.bin(.@"and", byte_0, value_bits_mask, ""),
+            .i32,
+            "acc.0",
+        );
         _ = try wip.brCond(
             try wip.icmp(.ult, byte_0, uleb_cont_mask, ""),
             ret_single_byte,
@@ -1860,8 +1866,8 @@ fn buildLlvmModule(b: *Builder) Oom!void {
             "",
         );
 
-        const next_byte = try wip.load(.normal, .i8, vip_phi.toValue(), .default, "");
-        const next_value_bits = try wip.bin(.@"and", next_byte, try b.module.intValue(.i8, 0x7F), "");
+        const next_byte = try wip.load(.normal, .i8, vip_phi.toValue(), .default, "next_byte");
+        const next_value_bits = try wip.bin(.@"and", next_byte, value_bits_mask, "");
         const next_acc = try wip.bin(
             .@"or",
             try wip.bin(
@@ -2343,8 +2349,9 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         const wip = &br_table.wip;
         wip.cursor = .{ .block = try br_table.wip.block(0, "Entry") };
         const initial_vip = OpcodeHandlerParam.vip.arg(wip);
+        // TODO: label count is wrong, meaning umin could be OOB, check decodeUlebIdx impl!
         const decoded_label_count = try b.callDecodeUlebIdx(wip, initial_vip);
-        const label_count = try wip.extractValue(decoded_label_count, &.{0}, "");
+        const label_count = try wip.extractValue(decoded_label_count, &.{0}, "label_count");
         // No need to actually read label indices
 
         const n_ptr = try br_table.gepOperandAt(b, 0);
@@ -2363,9 +2370,9 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
             b.side_table_entry,
             OpcodeHandlerParam.stp.arg(wip),
             &.{
-                // Likely to hit OOM before overflow could happen, but validation could could
-                // check to ensure a limit is not exceeded
-                n,
+                // Likely to hit OOM before this is interpreted as negative, but validation could
+                // could check to ensure a limit is not exceeded
+                try wip.cast(.zext, n, b.size_type, ""),
             },
             "",
         );
