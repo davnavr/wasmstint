@@ -2398,8 +2398,8 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
     };
 
     for (&[2]ByteOpcode{ .call, .return_call }) |opcode| {
-        const helper_name, const helper_params = switch (opcode) {
-            .call => .{ "invokeWithinWasm", &@as([10]Type, @as([9]Type, @splat(.ptr)) ++ .{.i32}) },
+        const helper_name: []const u8, const helper_params: []const Type = switch (opcode) {
+            .call => .{ "invokeWithinWasm", &@as([9]Type, @as([8]Type, @splat(.ptr)) ++ .{.i32}) },
             .return_call => .{
                 "tailCallWithinWasm",
                 &@as([8]Type, @as([7]Type, @splat(.ptr)) ++ .{.i32}),
@@ -2433,43 +2433,36 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         const func_idx = try call.wip.extractValue(decode_func_idx, &.{0}, "func_idx");
 
         const wasm_frame = call: {
-            var attrs = FunctionAttributes.Wip{};
-            try attrs.addRetAttr(.{ .dereferenceable_or_null = 3 * b.ptr_size_bytes }, &b.module);
-            try attrs.addParamAttr(0, .writeonly, &b.module);
-            const param_attrs = [3]Attribute{ .nonnull, .noundef, .nofree };
             var args_buf: [10]Value = undefined;
-            args_buf[0..4].* = [4]Value{
+            var args = std.ArrayList(Value).initBuffer(&args_buf);
+            args.appendSliceAssumeCapacity(&.{
                 out_alloca,
                 call_ip,
                 OpcodeHandlerParam.vsp.arg(&call.wip),
                 OpcodeHandlerParam.module.arg(&call.wip),
-            };
+                OpcodeHandlerParam.ctx.arg(&call.wip),
+            });
 
-            const arg_count: u4 = count: switch (opcode) {
-                .call => {
-                    args_buf[4..10].* = [6]Value{
-                        OpcodeHandlerParam.fuel.arg(&call.wip),
-                        OpcodeHandlerParam.ctx.arg(&call.wip),
-                        new_vip,
-                        OpcodeHandlerParam.stp.arg(&call.wip),
-                        OpcodeHandlerParam.eip.arg(&call.wip),
-                        func_idx,
-                    };
-                    break :count 10;
-                },
-                .return_call => {
-                    args_buf[4..8].* = [4]Value{
-                        OpcodeHandlerParam.ctx.arg(&call.wip),
-                        OpcodeHandlerParam.stp.arg(&call.wip),
-                        OpcodeHandlerParam.eip.arg(&call.wip),
-                        func_idx,
-                    };
-                    break :count 8;
-                },
+            switch (opcode) {
+                .call => args.appendAssumeCapacity(new_vip),
+                .return_call => {},
                 else => unreachable,
-            };
+            }
 
-            for (0..(arg_count - 1)) |i| {
+            args.appendSliceAssumeCapacity(&.{
+                OpcodeHandlerParam.stp.arg(&call.wip),
+                OpcodeHandlerParam.eip.arg(&call.wip),
+                func_idx,
+            });
+
+            std.debug.assert(args.items.len == helper_params.len);
+
+            var attrs = FunctionAttributes.Wip{};
+            try attrs.addRetAttr(.{ .dereferenceable_or_null = 3 * b.ptr_size_bytes }, &b.module);
+            try attrs.addParamAttr(0, .writeonly, &b.module);
+            const param_attrs = [3]Attribute{ .nonnull, .noundef, .nofree };
+
+            for (0..(args.items.len - 1)) |i| {
                 for (&param_attrs) |attr| {
                     try attrs.addParamAttr(i, attr, &b.module);
                 }
@@ -2481,7 +2474,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
                 try attrs.finish(&b.module),
                 helper.typeOf(&b.module),
                 helper.toValue(&b.module),
-                args_buf[0..arg_count],
+                args.items,
                 "",
             );
         };
@@ -2588,47 +2581,34 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
 
         call.wip.cursor = .{ .block = call_helper };
         const wasm_frame = call: {
-            const param_buf = comptime @as([10]Type, @splat(.ptr));
-            const helper_name: []const u8, const helper_params: []const Type = switch (opcode) {
-                .call_indirect => .{ "invokeWithinWasmIndirect", &param_buf },
-                .return_call_indirect => .{ "tailCallWithinWasmIndirect", param_buf[0..9] },
-                else => unreachable,
-            };
             const helper = try b.addFunction(
-                try b.strtabStringSymbolPrefixed(helper_name),
-                try b.fnType(.ptr, helper_params),
+                try b.strtabStringSymbolPrefixed(switch (opcode) {
+                    .call_indirect => "invokeWithinWasmIndirect",
+                    .return_call_indirect => "tailCallWithinWasmIndirect",
+                    else => unreachable,
+                }),
+                try b.fnType(.ptr, &@as([9]Type, @splat(.ptr))),
                 b.ffi_call_conv,
                 .{ .linkage = .external, .preemption = .dso_local },
             );
             helper.setAttributes(invoke_helper_attrs, &b.module);
 
-            var args_buf: [10]Value = undefined;
-            var args = std.ArrayList(Value).initBuffer(&args_buf);
-
-            args.appendSliceAssumeCapacity(&.{
+            const args = [9]Value{
                 out_alloca,
                 call_ip,
                 initial_vsp,
                 func_ref,
-            });
-            switch (opcode) {
-                .call_indirect => args.appendAssumeCapacity(OpcodeHandlerParam.fuel.arg(&call.wip)),
-                .return_call_indirect => {},
-                else => unreachable,
-            }
-            args.appendSliceAssumeCapacity(&.{
                 ctx,
                 vip_after_table_idx,
                 stp,
                 eip,
                 expected_signature_ptr,
-            });
-            std.debug.assert(args.items.len == helper_params.len);
+            };
 
             var attrs = FunctionAttributes.Wip{};
             try attrs.addRetAttr(.{ .dereferenceable_or_null = 3 * b.ptr_size_bytes }, &b.module);
             try attrs.addParamAttr(0, .writeonly, &b.module);
-            for (0..helper_params.len) |i| {
+            for (0..args.len) |i| {
                 for ([3]Attribute{ .nonnull, .noundef, .nofree }) |attr| {
                     try attrs.addParamAttr(i, attr, &b.module);
                 }
@@ -2640,7 +2620,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
                 try attrs.finish(&b.module),
                 helper.typeOf(&b.module),
                 helper.toValue(&b.module),
-                args.items,
+                &args,
                 "",
             );
         };

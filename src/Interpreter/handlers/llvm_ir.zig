@@ -6,17 +6,19 @@ pub const OpcodeHandler = fn () callconv(.naked) Transition;
 const symbol_prefix = @import("options").symbol_prefix;
 
 const ffi_cc: CallingConvention = cc: {
+    // TODO: Critical! Possible ABI mismatch
+    // https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/X86/X86CallingConv.td#L27
     if (builtin.cpu.arch == .x86_64 and
         CallingConvention.c == .x86_64_sysv and
         builtin.zig_backend == .stage2_llvm)
     {
+        // TODO: regcall on x86-64 seems to emit code for saving XMM6-15 on Linux
         break :cc .{ .x86_64_regcall_v3_sysv = .{} };
     }
 
     break :cc .c;
 };
 
-// TODO: use inline asm to call this w/ x86_64_regcall_v3_sysv
 /// Sets up a stack frame for the assembly opcode handler, before invoking it.
 const opcodeHandlerTrampoline = @extern(
     *const fn (
@@ -148,40 +150,43 @@ fn returnFromWasm(
     return null;
 }
 
-const InvokeWithinWasmCallback = struct {
-    pub const Result = ?*const Stack.Frame.Wasm;
-
-    state: *UpdateState,
-
-    inline fn transitionIntoHost(out: InvokeWithinWasmCallback, transition: Transition) Result {
-        out.state.* = .{ .transition = transition };
-        return null;
+fn finishInvokeWithinWasm(
+    output: *UpdateState,
+    ctx: *Interpreter,
+    callee: runtime.FuncInst,
+    new_frame: *const Stack.PushedFrame,
+) ?*Stack.Frame.Wasm {
+    switch (callee.expanded()) {
+        .wasm => |wasm| {
+            output.* = .{
+                .to_wasm = .{
+                    .locals = .{ .ptr = new_frame.frame.localValues(&ctx.stack).ptr },
+                    .vsp = new_frame.top(),
+                    .module = wasm.module,
+                },
+            };
+            return &new_frame.frame.wasm;
+        },
+        .host => |host| {
+            output.* = .{
+                .transition = Transition.awaitingHost(
+                    new_frame.top(),
+                    ctx,
+                    &host.signature,
+                    .calling_host,
+                    .wrote_ip_and_stp_to_the_current_stack_frame,
+                ),
+            };
+            return null;
+        },
     }
-
-    pub const callStackExhaustion = transitionIntoHost;
-    pub const intoHostFunction = transitionIntoHost;
-
-    pub inline fn intoWasmFunction(
-        out: InvokeWithinWasmCallback,
-        new_frame: Stack.PushedFrame,
-        _: *Interpreter.Fuel,
-        locals: common.Locals,
-        module: runtime.ModuleInst,
-        _: *Interpreter,
-    ) Result {
-        out.state.* = .{
-            .to_wasm = .{ .locals = locals, .vsp = new_frame.top(), .module = module },
-        };
-        return &new_frame.frame.wasm;
-    }
-};
+}
 
 fn invokeWithinWasm(
     output: *UpdateState,
     call_ip: Ip,
     vsp: Sp,
     module: runtime.ModuleInst,
-    fuel: *Interpreter.Fuel,
     ctx: *Interpreter,
     vip: Ip,
     stp: Stp,
@@ -215,16 +220,21 @@ fn invokeWithinWasm(
         arg_count,
     );
 
-    return common.invokeWithinWasmWithCallbacks(
+    const new_frame = common.pushNewStackFrame(
         Instr.init(vip, eip),
-        call_ip,
         saved_sp,
-        fuel,
         stp,
         ctx,
         callee,
-        InvokeWithinWasmCallback{ .state = output },
-    );
+    ) catch |e| switch (e) {
+        error.OutOfMemory => {
+            const oom = Transition.callStackExhaustion(call_ip, eip, saved_sp, stp, ctx, callee);
+            output.* = .{ .transition = oom };
+            return null;
+        },
+    };
+
+    return finishInvokeWithinWasm(output, ctx, callee, &new_frame.pushed);
 }
 
 fn invokeWithinWasmIndirect(
@@ -233,7 +243,6 @@ fn invokeWithinWasmIndirect(
     /// Does not have the `i32` index popped.
     vsp: Sp,
     callee: runtime.FuncRef,
-    fuel: *Interpreter.Fuel,
     ctx: *Interpreter,
     vip: Ip,
     stp: Stp,
@@ -268,48 +277,22 @@ fn invokeWithinWasmIndirect(
         return null;
     }
 
-    return common.invokeWithinWasmWithCallbacks(
+    const func = callee.funcInst();
+    const new_frame = common.pushNewStackFrame(
         Instr.init(vip, eip),
-        call_ip,
         saved_sp,
-        fuel,
         stp,
         ctx,
-        callee.funcInst(),
-        InvokeWithinWasmCallback{ .state = output },
-    );
-}
-
-fn finishInvokeWithinWasm(
-    output: *UpdateState,
-    ctx: *Interpreter,
-    callee: runtime.FuncInst,
-    new_frame: *const Stack.PushedFrame,
-) ?*Stack.Frame.Wasm {
-    switch (callee.expanded()) {
-        .wasm => |wasm| {
-            output.* = .{
-                .to_wasm = .{
-                    .locals = .{ .ptr = new_frame.frame.localValues(&ctx.stack).ptr },
-                    .vsp = new_frame.top(),
-                    .module = wasm.module,
-                },
-            };
-            return &new_frame.frame.wasm;
-        },
-        .host => |host| {
-            output.* = .{
-                .transition = Transition.awaitingHost(
-                    new_frame.top(),
-                    ctx,
-                    &host.signature,
-                    .calling_host,
-                    .wrote_ip_and_stp_to_the_current_stack_frame,
-                ),
-            };
+        func,
+    ) catch |e| switch (e) {
+        error.OutOfMemory => {
+            const oom = Transition.callStackExhaustion(call_ip, eip, saved_sp, stp, ctx, func);
+            output.* = .{ .transition = oom };
             return null;
         },
-    }
+    };
+
+    return finishInvokeWithinWasm(output, ctx, func, &new_frame.pushed);
 }
 
 fn tailCallWithinWasm(
