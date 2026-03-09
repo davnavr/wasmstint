@@ -210,6 +210,23 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             );
             try op.finish(b);
         }
+
+        for (&[2]WipFunction.Instruction.Tag{ .add, .sub }) |instr| {
+            var op = try b.opcodeHandlerFromPrefixedName(
+                FDPrefixOpcode,
+                @tagName(interp),
+                @tagName(instr),
+            );
+            op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
+            const bin_op = try op.binOp(b, vector_ty);
+            try bin_op.writeResult(&op, try op.wip.bin(instr, bin_op.c_1, bin_op.c_2, ""));
+            const new_vsp = try op.adjustVspBy(b, -1);
+            try op.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&op.wip),
+                .vsp = new_vsp,
+            });
+            try op.finish(b);
+        }
     }
 
     const i8x16 = try Interpretation.i8x16.vectorType(b);
