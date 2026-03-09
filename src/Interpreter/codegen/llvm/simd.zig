@@ -227,6 +227,19 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             });
             try op.finish(b);
         }
+
+        const zeroes = try b.module.splatConst(vector_ty, try b.module.intConst(lane_ty, 0));
+        {
+            var neg = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), "neg");
+            neg.wip.cursor = .{ .block = try neg.wip.block(0, "Entry") };
+            const un_op = try neg.unOp(b, vector_ty);
+            try un_op.writeResult(&neg, try neg.wip.bin(.sub, zeroes.toValue(), un_op.c_1, ""));
+            try neg.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&neg.wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(&neg.wip),
+            });
+            try neg.finish(b);
+        }
     }
 
     const i8x16 = try Interpretation.i8x16.vectorType(b);
