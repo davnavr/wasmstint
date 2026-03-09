@@ -679,6 +679,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     try buildFloatOpcodeHandlers(b);
     try buildReferenceOpcodeHandlers(b);
     try buildPrefixOpcodeHandlers(b);
+    try @import("simd.zig").buildOpcodeHandlers(b);
 
     inline for ([3]type{
         ByteOpcode,
