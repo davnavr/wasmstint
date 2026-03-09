@@ -144,9 +144,11 @@ const Builder = struct {
     dispatch_tables: struct {
         byte: Global.Index = .none,
         fc: Global.Index = .none,
+        fd: Global.Index = .none,
     } = .{},
-    byte_opcode_lookup: std.EnumSet(ByteOpcode) = .initEmpty(),
-    fc_prefix_opcode_lookup: std.EnumSet(opcodes.FCPrefixOpcode) = .initEmpty(),
+    byte_opcode_lookup: EnumSet(ByteOpcode) = .initEmpty(),
+    fc_prefix_opcode_lookup: EnumSet(opcodes.FCPrefixOpcode) = .initEmpty(),
+    fd_prefix_opcode_lookup: EnumSet(opcodes.FDPrefixOpcode) = .initEmpty(),
 
     out_of_fuel_handler: Function.Index = .none,
     skip_leb_idx: Function.Index = .none,
@@ -565,12 +567,12 @@ const Builder = struct {
 
                 break :handler func;
             },
-            opcodes.FCPrefixOpcode => {
+            opcodes.FCPrefixOpcode, opcodes.FDPrefixOpcode => {
+                const enum_type_name = @typeName(E);
                 const func = try b.addFunction(
-                    try b.strtabStringSymbolPrefixed(switch (E) {
-                        opcodes.FCPrefixOpcode => "invalidFCPrefixOpcode",
-                        else => comptime unreachable,
-                    }),
+                    try b.strtabStringSymbolPrefixed(
+                        "invalid" ++ enum_type_name[(enum_type_name.len - 14)..],
+                    ),
                     b.opcode_handler.type,
                     b.opcode_handler.call_conv,
                     .{ .linkage = .internal, .preemption = .dso_local },
@@ -594,6 +596,7 @@ const Builder = struct {
                         OpcodeHandlerParam.eip.arg(&wip),
                         try b.sizeIntValue(switch (E) {
                             opcodes.FCPrefixOpcode => 0xFC,
+                            opcodes.FDPrefixOpcode => 0xFD,
                             else => comptime unreachable,
                         }),
                     },
@@ -615,16 +618,18 @@ const Builder = struct {
         const table_global_idx: Global.Index = switch (E) {
             ByteOpcode => b.dispatch_tables.byte,
             opcodes.FCPrefixOpcode => b.dispatch_tables.fc,
-            else => @compileError(@typeName(E)),
+            opcodes.FDPrefixOpcode => b.dispatch_tables.fd,
+            else => @compileError("no dispatch table for " ++ @typeName(E)),
         };
 
         const table_global = table_global_idx.ptrConst(&b.module);
         const table_var = table_global.kind.variable;
         const len = table_global.type.aggregateLen(&b.module);
-        const set: *const std.EnumSet(E) = switch (E) {
+        const set: *const EnumSet(E) = switch (E) {
             ByteOpcode => &b.byte_opcode_lookup,
             opcodes.FCPrefixOpcode => &b.fc_prefix_opcode_lookup,
-            else => @compileError(@typeName(E)),
+            opcodes.FDPrefixOpcode => &b.fd_prefix_opcode_lookup,
+            else => @compileError("no lookup for " ++ @typeName(E)),
         };
 
         _ = b.scratch.reset(.retain_capacity);
@@ -671,9 +676,10 @@ const Builder = struct {
     fn opcodeHandler(b: *Builder, opcode: Opcode) Oom!OpcodeHandler {
         switch (opcode) {
             inline else => |value, kind| {
-                const set: *std.EnumSet(@TypeOf(value)) = switch (kind) {
+                const set: *EnumSet(@TypeOf(value)) = switch (kind) {
                     .byte => &b.byte_opcode_lookup,
                     .fc => &b.fc_prefix_opcode_lookup,
+                    .fd => &b.fd_prefix_opcode_lookup,
                 };
 
                 if (set.contains(value)) std.debug.panic("duplicate handler for {t}", .{value});
@@ -745,7 +751,7 @@ const Builder = struct {
 const Opcode = union(enum) {
     byte: ByteOpcode,
     fc: opcodes.FCPrefixOpcode,
-    // fd: opcodes.FDPrefixOpcode,
+    fd: opcodes.FDPrefixOpcode,
 
     fn init(comptime E: type, opcode: E) Opcode {
         return @unionInit(
@@ -753,8 +759,8 @@ const Opcode = union(enum) {
             switch (E) {
                 ByteOpcode => "byte",
                 opcodes.FCPrefixOpcode => "fc",
-                // opcodes.FDPrefixOpcode => "fd",
-                else => @compileError(@typeName(Type)),
+                opcodes.FDPrefixOpcode => "fd",
+                else => @compileError("no case for opcode " ++ @typeName(E)),
             },
             opcode,
         );
@@ -1608,6 +1614,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         },
         .{},
     );
+    b.dispatch_tables.fd = try b.addDispatchTable("fd_prefix_dispatch_table", 256, .{});
 
     {
         const trampoline = try b.addFunction(
@@ -2013,7 +2020,11 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     try buildReferenceOpcodeHandlers(b);
     try buildPrefixOpcodeHandlers(b);
 
-    inline for ([2]type{ ByteOpcode, opcodes.FCPrefixOpcode }) |OpcodeType| {
+    inline for ([3]type{
+        ByteOpcode,
+        opcodes.FCPrefixOpcode,
+        opcodes.FDPrefixOpcode,
+    }) |OpcodeType| {
         try b.setDispatchTableInitializer(OpcodeType);
     }
 }
@@ -2327,7 +2338,6 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         const wip = &br_table.wip;
         wip.cursor = .{ .block = try br_table.wip.block(0, "Entry") };
         const initial_vip = OpcodeHandlerParam.vip.arg(wip);
-        // TODO: label count is wrong, meaning umin could be OOB, check decodeUlebIdx impl!
         const decoded_label_count = try b.callDecodeUlebIdx(wip, initial_vip);
         const label_count = try wip.extractValue(decoded_label_count, &.{0}, "label_count");
         // No need to actually read label indices
@@ -5783,8 +5793,9 @@ fn buildPrefixOpcodeHandlers(b: *Builder) Oom!void {
     const continuation = try b.module.intValue(.i8, 0x80);
     const value_mask = try b.module.intValue(.i8, 0x7F);
 
-    for (&[1]struct { ByteOpcode, Global.Index }{
+    for (&[2]struct { ByteOpcode, Global.Index }{
         .{ .@"0xFC", b.dispatch_tables.fc },
+        .{ .@"0xFD", b.dispatch_tables.fd },
     }) |info| {
         var handler = try b.opcodeHandler(.{ .byte = info.@"0" });
         const wip = &handler.wip;
@@ -5933,6 +5944,7 @@ fn buildPrefixOpcodeHandlers(b: *Builder) Oom!void {
 }
 
 const std = @import("std");
+const EnumSet = @import("enum_set").EnumSet;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Oom = std.mem.Allocator.Error;
 const opcodes = @import("opcodes");

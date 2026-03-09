@@ -345,6 +345,10 @@ const Modules = struct {
             );
             root_module.addOptions("options", wasmstint_options);
 
+            const enum_set_module = b.createModule(.{
+                .root_source_file = b.path("src/Interpreter/codegen/enum_set.zig"),
+            });
+
             const err_no_pic_flag = "pass -Dpic or -Dpic=false to use ASM backend";
             if (interpreter_backend == .assembly and
                 options.target.result.cpu.arch == .x86_64)
@@ -397,6 +401,7 @@ const Modules = struct {
                     .max_rss = ByteSize.mib(168).bytes,
                 });
                 codegen_exe.root_module.addImport("opcodes", opcodes_module);
+                codegen_exe.root_module.addImport("enum_set", enum_set_module);
 
                 const run_codegen = b.addRunArtifact(codegen_exe);
                 run_codegen.step.max_rss = ByteSize.mib(3).bytes;
@@ -454,6 +459,7 @@ const Modules = struct {
                     .max_rss = ByteSize.mib(213).bytes, // arbitrary amount
                 });
                 codegen_exe.root_module.addImport("opcodes", opcodes_module);
+                codegen_exe.root_module.addImport("enum_set", enum_set_module);
 
                 const symbol_prefix = "wasmstint.interpreter.";
 
