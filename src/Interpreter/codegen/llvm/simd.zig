@@ -73,14 +73,19 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
 }
 
 fn buildBitwiseOpcodeHandlers(b: *Builder) Oom!void {
-    const all_ones_128 = try b.module.intValue(.i128, -1);
+    const all_ones_i128 = try b.module.intValue(.i128, -1);
+    const i8x16 = try b.module.vectorType(.normal, 16, .i8);
+    const all_ones_i8x16 = try b.module.vectorValue(
+        i8x16,
+        &@as([16]Constant, @splat(try b.module.intConst(.i8, -1))),
+    );
     {
         var op = try b.opcodeHandler(.{ .fd = .@"v128.not" });
         op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
         const un_op = try op.unOp(b, .i128);
         try un_op.writeResult(
             &op,
-            try op.wip.bin(.xor, un_op.c_1, all_ones_128, "not"),
+            try op.wip.bin(.xor, un_op.c_1, all_ones_i128, "not"),
         );
         try op.jmpToNextHandler(b, .{
             .vip = OpcodeHandlerParam.vip.arg(&op.wip),
@@ -91,7 +96,7 @@ fn buildBitwiseOpcodeHandlers(b: *Builder) Oom!void {
     for (&[3]WipFunction.Instruction.Tag{ .@"and", .@"or", .xor }) |instr| {
         var op = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, "v128", @tagName(instr));
         op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
-        const bin_op = try op.binOp(b, .i128);
+        const bin_op = try op.binOp(b, i8x16);
         try bin_op.writeResult(&op, try op.wip.bin(instr, bin_op.c_1, bin_op.c_2, ""));
         const new_vsp = try op.adjustVspBy(b, -1);
         try op.jmpToNextHandler(b, .{
@@ -105,20 +110,19 @@ fn buildBitwiseOpcodeHandlers(b: *Builder) Oom!void {
     // - ARM NEON has `bsl`
     // - PowerPC AltiVec has `xxsel`
     {
-        // TODO: Might want to use actual LLVM vector type here instead
         var sel = try b.opcodeHandler(.{ .fd = .@"v128.bitselect" });
         sel.wip.cursor = .{ .block = try sel.wip.block(0, "Entry") };
         const result_ptr = try sel.gepOperandAt(b, 2);
-        const op_a = try sel.wip.load(.normal, .i128, result_ptr, value_stack_alignment, "a");
-        const op_b = try sel.loadOperandAt(b, .i128, 1, "b");
-        const mask = try sel.loadOperandAt(b, .i128, 0, "mask");
+        const op_a = try sel.wip.load(.normal, i8x16, result_ptr, value_stack_alignment, "a");
+        const op_b = try sel.loadOperandAt(b, i8x16, 1, "b");
+        const mask = try sel.loadOperandAt(b, i8x16, 0, "mask");
         const result = try sel.wip.bin(
             .@"or",
             try sel.wip.bin(.@"and", op_a, mask, ""),
             try sel.wip.bin(
                 .@"and",
                 op_b,
-                try sel.wip.bin(.xor, all_ones_128, mask, "not_mask"),
+                try sel.wip.bin(.xor, all_ones_i8x16, mask, "not_mask"),
                 "",
             ),
             "result",
