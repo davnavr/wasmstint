@@ -106,6 +106,28 @@ fn buildBitwiseOpcodeHandlers(b: *Builder) Oom!void {
         try op.finish(b);
     }
 
+    {
+        var op = try b.opcodeHandler(.{ .fd = .@"v128.andnot" });
+        op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
+        const bin_op = try op.binOp(b, i8x16);
+        try bin_op.writeResult(
+            &op,
+            try op.wip.bin(
+                .@"and",
+                bin_op.c_1,
+                try op.wip.bin(.xor, bin_op.c_2, all_ones_i8x16, "not"),
+                "and",
+            ),
+        );
+
+        const new_vsp = try op.adjustVspBy(b, -1);
+        try op.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&op.wip),
+            .vsp = new_vsp,
+        });
+        try op.finish(b);
+    }
+
     // https://github.com/WebAssembly/relaxed-simd/issues/17
     // - ARM NEON has `bsl`
     // - PowerPC AltiVec has `xxsel`
