@@ -211,6 +211,23 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             try op.finish(b);
         }
     }
+
+    const i8x16 = try Interpretation.i8x16.vectorType(b);
+
+    {
+        var popcnt = try b.opcodeHandler(.{ .fd = .@"i8x16.popcnt" });
+        popcnt.wip.cursor = .{ .block = try popcnt.wip.block(0, "Entry") };
+        const un_op = try popcnt.unOp(b, i8x16);
+        try un_op.writeResult(
+            &popcnt,
+            try popcnt.wip.callIntrinsic(.normal, .none, .ctpop, &.{i8x16}, &.{un_op.c_1}, ""),
+        );
+        try popcnt.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&popcnt.wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(&popcnt.wip),
+        });
+        try popcnt.finish(b);
+    }
 }
 
 const std = @import("std");
