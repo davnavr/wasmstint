@@ -73,13 +73,14 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
 }
 
 fn buildBitwiseOpcodeHandlers(b: *Builder) Oom!void {
+    const all_ones_128 = try b.module.intValue(.i128, -1);
     {
         var op = try b.opcodeHandler(.{ .fd = .@"v128.not" });
         op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
         const un_op = try op.unOp(b, .i128);
         try un_op.writeResult(
             &op,
-            try op.wip.bin(.xor, un_op.c_1, try b.module.intValue(.i128, -1), "not"),
+            try op.wip.bin(.xor, un_op.c_1, all_ones_128, "not"),
         );
         try op.jmpToNextHandler(b, .{
             .vip = OpcodeHandlerParam.vip.arg(&op.wip),
@@ -98,6 +99,38 @@ fn buildBitwiseOpcodeHandlers(b: *Builder) Oom!void {
             .vsp = new_vsp,
         });
         try op.finish(b);
+    }
+
+    // https://github.com/WebAssembly/relaxed-simd/issues/17
+    // - ARM NEON has `bsl`
+    // - PowerPC AltiVec has `xxsel`
+    {
+        // TODO: Might want to use actual LLVM vector type here instead
+        var sel = try b.opcodeHandler(.{ .fd = .@"v128.bitselect" });
+        sel.wip.cursor = .{ .block = try sel.wip.block(0, "Entry") };
+        const result_ptr = try sel.gepOperandAt(b, 2);
+        const op_a = try sel.wip.load(.normal, .i128, result_ptr, value_stack_alignment, "a");
+        const op_b = try sel.loadOperandAt(b, .i128, 1, "b");
+        const mask = try sel.loadOperandAt(b, .i128, 0, "mask");
+        const result = try sel.wip.bin(
+            .@"or",
+            try sel.wip.bin(.@"and", op_a, mask, ""),
+            try sel.wip.bin(
+                .@"and",
+                op_b,
+                try sel.wip.bin(.xor, all_ones_128, mask, "not_mask"),
+                "",
+            ),
+            "result",
+        );
+        _ = try sel.wip.store(.normal, result, result_ptr, value_stack_alignment);
+
+        const new_vsp = try sel.adjustVspBy(b, -2);
+        try sel.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&sel.wip),
+            .vsp = new_vsp,
+        });
+        try sel.finish(b);
     }
 }
 
