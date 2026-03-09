@@ -179,6 +179,52 @@ fn buildBooleanOpcodeHandlers(b: *Builder) Oom!void {
         });
         try any_true.finish(b);
     }
+
+    for (&[_]FDPrefixOpcode{
+        .@"i8x16.all_true",
+        .@"i16x8.all_true",
+        .@"i32x4.all_true",
+    }) |opcode| {
+        const interp: Interpretation = std.meta.stringToEnum(
+            Interpretation,
+            @tagName(opcode)[0..5],
+        ) orelse unreachable;
+        const vec_ty = try interp.vectorType(b);
+
+        const splat_zero_lanes = try b.module.splatValue(
+            vec_ty,
+            try b.module.intConst(interp.laneType(), 0),
+        );
+
+        var all_true = try b.opcodeHandler(.{ .fd = opcode });
+        all_true.wip.cursor = .{ .block = try all_true.wip.block(0, "Entry") };
+        const un_op = try all_true.unOp(b, vec_ty);
+        const lane_is_zero = try all_true.wip.icmp(
+            .eq,
+            un_op.c_1,
+            splat_zero_lanes,
+            "lane_is_zero.0",
+        );
+        const cmp_ty = try b.module.intType(interp.laneCount());
+        const lane_is_zero_int = try all_true.wip.cast(
+            .bitcast,
+            lane_is_zero,
+            cmp_ty,
+            "lane_is_zero.1",
+        );
+        const non_zero = try all_true.wip.icmp(
+            .eq,
+            lane_is_zero_int,
+            try b.module.intValue(cmp_ty, 0),
+            "non_zero",
+        );
+        try un_op.writeResult(&all_true, try all_true.wip.cast(.zext, non_zero, .i32, "result"));
+        try all_true.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&all_true.wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(&all_true.wip),
+        });
+        try all_true.finish(b);
+    }
 }
 
 fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
