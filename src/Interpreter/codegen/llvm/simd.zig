@@ -2,6 +2,7 @@
 
 pub fn buildOpcodeHandlers(b: *Builder) Oom!void {
     try buildMemoryLoadOpcodeHandlers(b);
+    try buildBitwiseOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
 }
 
@@ -68,6 +69,35 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
             .vsp = OpcodeHandlerParam.vsp.arg(&load.wip),
         });
         try load.finish(b);
+    }
+}
+
+fn buildBitwiseOpcodeHandlers(b: *Builder) Oom!void {
+    {
+        var op = try b.opcodeHandler(.{ .fd = .@"v128.not" });
+        op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
+        const un_op = try op.unOp(b, .i128);
+        try un_op.writeResult(
+            &op,
+            try op.wip.bin(.xor, un_op.c_1, try b.module.intValue(.i128, -1), "not"),
+        );
+        try op.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&op.wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(&op.wip),
+        });
+        try op.finish(b);
+    }
+    for (&[3]WipFunction.Instruction.Tag{ .@"and", .@"or", .xor }) |instr| {
+        var op = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, "v128", @tagName(instr));
+        op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
+        const bin_op = try op.binOp(b, .i128);
+        try bin_op.writeResult(&op, try op.wip.bin(instr, bin_op.c_1, bin_op.c_2, ""));
+        const new_vsp = try op.adjustVspBy(b, -1);
+        try op.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&op.wip),
+            .vsp = new_vsp,
+        });
+        try op.finish(b);
     }
 }
 

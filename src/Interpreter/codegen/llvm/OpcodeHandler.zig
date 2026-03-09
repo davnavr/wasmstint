@@ -17,6 +17,7 @@ pub fn jmpToNextHandler(
         eip: Value = .none,
     },
 ) Oom!void {
+    // TODO: Add fuel checking
     const wip = &handler.wip;
     const next_opcode_byte = try wip.load(.normal, .i8, updates.vip, .default, "");
     const next_handler_offset = try wip.cast(.zext, next_opcode_byte, b.size_type, "");
