@@ -5,20 +5,6 @@ pub const OpcodeHandler = fn () callconv(.naked) Transition;
 
 const symbol_prefix = @import("options").symbol_prefix;
 
-const ffi_cc: CallingConvention = cc: {
-    // TODO: Critical! Possible ABI mismatch
-    // https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/X86/X86CallingConv.td#L27
-    if (builtin.cpu.arch == .x86_64 and
-        CallingConvention.c == .x86_64_sysv and
-        builtin.zig_backend == .stage2_llvm)
-    {
-        // TODO: regcall on x86-64 seems to emit code for saving XMM6-15 on Linux
-        break :cc .{ .x86_64_regcall_v3_sysv = .{} };
-    }
-
-    break :cc .c;
-};
-
 /// Sets up a stack frame for the assembly opcode handler, before invoking it.
 const opcodeHandlerTrampoline = @extern(
     *const fn (
@@ -31,7 +17,7 @@ const opcodeHandlerTrampoline = @extern(
         stp: Stp,
         eip: Eip,
         handler: *const OpcodeHandler,
-    ) callconv(ffi_cc) Transition,
+    ) callconv(.c) Transition,
     .{ .name = symbol_prefix ++ "opcodeHandlerTrampoline" },
 );
 
@@ -77,7 +63,7 @@ fn interruptOutOfFuel(
     sp: Sp,
     stp: Stp,
     ctx: *Interpreter,
-) callconv(ffi_cc) Transition {
+) callconv(.c) Transition {
     return Transition.interrupted(.init(vip, eip), sp, stp, ctx, .out_of_fuel);
 }
 
@@ -104,7 +90,7 @@ fn returnFromWasm(
     old_vsp: Sp,
     ctx: *Interpreter,
     old_eip_debug: Eip,
-) callconv(ffi_cc) ?*const Stack.Frame.Wasm {
+) callconv(.c) ?*const Stack.Frame.Wasm {
     const popped = ctx.stack.popFrame(old_vsp, .from_stack_top);
     if (builtin.mode == .Debug) {
         const expected_eip = @intFromPtr(popped.info.wasm.eip);
@@ -192,7 +178,7 @@ fn invokeWithinWasm(
     stp: Stp,
     eip: Eip,
     func_idx: u32,
-) callconv(ffi_cc) ?*const Stack.Frame.Wasm {
+) callconv(.c) ?*const Stack.Frame.Wasm {
     switch (@as(opcodes.ByteOpcode, @enumFromInt(call_ip[0]))) {
         .call => {},
         else => |bad| switch (builtin.mode) {
@@ -248,7 +234,7 @@ fn invokeWithinWasmIndirect(
     stp: Stp,
     eip: Eip,
     expected_signature: *const Module.FuncType,
-) callconv(ffi_cc) ?*const Stack.Frame.Wasm {
+) callconv(.c) ?*const Stack.Frame.Wasm {
     switch (@as(opcodes.ByteOpcode, @enumFromInt(call_ip[0]))) {
         .call_indirect => {},
         else => |bad| switch (builtin.mode) {
@@ -304,7 +290,7 @@ fn tailCallWithinWasm(
     stp: Stp,
     eip: Eip,
     func_idx: u32,
-) callconv(ffi_cc) ?*const Stack.Frame.Wasm {
+) callconv(.c) ?*const Stack.Frame.Wasm {
     switch (@as(opcodes.ByteOpcode, @enumFromInt(call_ip[0]))) {
         .return_call => {},
         else => |bad| switch (builtin.mode) {
@@ -355,7 +341,7 @@ fn tailCallWithinWasmIndirect(
     stp: Stp,
     eip: Eip,
     expected_signature: *const Module.FuncType,
-) callconv(ffi_cc) ?*const Stack.Frame.Wasm {
+) callconv(.c) ?*const Stack.Frame.Wasm {
     switch (@as(opcodes.ByteOpcode, @enumFromInt(call_ip[0]))) {
         .return_call_indirect => {},
         else => |bad| switch (builtin.mode) {
@@ -418,7 +404,7 @@ fn memoryGrowReallocate(
     mem: *runtime.MemInst,
     ctx: *Interpreter,
     stp: Stp,
-) callconv(ffi_cc) Transition {
+) callconv(.c) Transition {
     const result = &(vsp.ptr - 1)[0];
     std.debug.assert(result.i32 == -1);
     return Transition.interrupted(.init(vip, eip), vsp, stp, ctx, .{
@@ -440,7 +426,7 @@ fn tableGrowReallocate(
     stp: Stp,
     ctx: *Interpreter,
     table: *runtime.TableInst,
-) callconv(ffi_cc) Transition {
+) callconv(.c) Transition {
     return Transition.interrupted(.init(vip, eip), vsp, stp, ctx, .{
         .table_grow = .{
             .old_len = table.len,
@@ -466,7 +452,7 @@ fn tableInit(
     module: runtime.ModuleInst,
     table_idx_raw: u32,
     elem_idx_raw: u32,
-) callconv(ffi_cc) TableInitStatus {
+) callconv(.c) TableInitStatus {
     const table_idx: Module.TableIdx = @enumFromInt(table_idx_raw);
     const buffer_len = module.header().module.elementSegments()[elem_idx_raw].header.elem_max_stack;
     const buffer = vsp.ptr[0..buffer_len];
@@ -489,7 +475,7 @@ fn tableInit(
 fn constructFuncRef(
     func_index: i32,
     module: runtime.ModuleInst,
-) callconv(ffi_cc) runtime.FuncRef.Nullable {
+) callconv(.c) runtime.FuncRef.Nullable {
     return @as(
         runtime.FuncRef.Nullable,
         @bitCast(module.inner.funcRef(@enumFromInt(func_index))),
@@ -503,7 +489,7 @@ fn trapWithNumericCode(
     stp: Stp,
     ctx: *Interpreter,
     code: usize,
-) callconv(ffi_cc) Transition {
+) callconv(.c) Transition {
     @branchHint(.cold);
     const trap = switch (@as(Trap.Code, @enumFromInt(code))) {
         inline .unreachable_code_reached,
@@ -528,7 +514,7 @@ fn trapMemoryAccessOutOfBounds(
     address: usize,
     offset: usize,
     size: usize,
-) callconv(ffi_cc) Transition {
+) callconv(.c) Transition {
     @branchHint(.cold);
     const oob_info = Trap.MemoryAccessOutOfBounds.init(@enumFromInt(mem_idx), .access, .{
         .address = address + offset,
@@ -547,7 +533,7 @@ fn trapMemoryFillOutOfBounds(
     stp: Stp,
     mem_idx: usize,
     ctx: *Interpreter,
-) callconv(ffi_cc) Transition {
+) callconv(.c) Transition {
     @branchHint(.cold);
     return Transition.trap(
         vip,
@@ -568,7 +554,7 @@ fn trapMemoryInitOutOfBounds(
     ctx: *Interpreter,
     mem_idx: usize,
     data_idx: usize,
-) callconv(ffi_cc) Transition {
+) callconv(.c) Transition {
     @branchHint(.cold);
     _ = @as(Module.DataIdx, @enumFromInt(data_idx));
     return Transition.trap(
@@ -590,7 +576,7 @@ fn trapMemoryCopyOutOfBounds(
     interp: *Interpreter,
     src_mem: usize,
     dst_mem: usize,
-) callconv(ffi_cc) Transition {
+) callconv(.c) Transition {
     @branchHint(.cold);
     std.debug.assert(src_mem == dst_mem);
     return Transition.trap(
@@ -613,7 +599,7 @@ fn trapTableAccessOutOfBounds(
     table: *const runtime.TableInst,
     index: u32,
     info_bits: u8,
-) callconv(ffi_cc) Transition {
+) callconv(.c) Transition {
     @branchHint(.cold);
     const Info = packed struct(u8) {
         table: Module.TableIdx,
@@ -650,7 +636,7 @@ fn trapTableCopyOutOfBounds(
     ctx: *Interpreter,
     src_table_idx: u32,
     dst_table_idx: u32,
-) callconv(ffi_cc) Transition {
+) callconv(.c) Transition {
     @branchHint(.cold);
     _ = dst_table_idx;
     const info = Trap.init(
@@ -669,7 +655,7 @@ fn trapTableFillOutOfBounds(
     stp: Stp,
     ctx: *Interpreter,
     table_idx: u32,
-) callconv(ffi_cc) Transition {
+) callconv(.c) Transition {
     @branchHint(.cold);
     const oob_info = Trap.TableAccessOutOfBounds.init(@enumFromInt(table_idx), .@"table.fill");
     const info = Trap.init(.table_access_out_of_bounds, oob_info);
@@ -684,7 +670,7 @@ fn trapTableInitOutOfBounds(
     ctx: *Interpreter,
     table_idx: u32,
     data_idx: u32,
-) callconv(ffi_cc) Transition {
+) callconv(.c) Transition {
     @branchHint(.cold);
     _ = data_idx;
     const info = Trap.init(.table_access_out_of_bounds, .init(@enumFromInt(table_idx), .@"table.init"));
@@ -698,7 +684,7 @@ fn trapCallIndirectAccessOob(
     stp: Stp,
     table_idx: usize,
     ctx: *Interpreter,
-) callconv(ffi_cc) Transition {
+) callconv(.c) Transition {
     const oob_info = Trap.TableAccessOutOfBounds.init(@enumFromInt(table_idx), .call_indirect);
     const info = Interpreter.Trap.init(.table_access_out_of_bounds, oob_info);
     return Transition.trap(trap_ip, .none, eip, vsp, stp, ctx, info);
@@ -711,7 +697,7 @@ fn trapIndirectCallToNull(
     stp: Stp,
     elem_idx: usize,
     ctx: *Interpreter,
-) callconv(ffi_cc) Transition {
+) callconv(.c) Transition {
     const info = Interpreter.Trap.init(.indirect_call_to_null, .{ .index = @intCast(elem_idx) });
     return Transition.trap(trap_ip, .none, eip, vsp, stp, ctx, info);
 }
@@ -744,7 +730,7 @@ comptime {
     }
 }
 
-fn panicInvalidByteOpcode(ip: Ip, eip: Eip) callconv(ffi_cc) noreturn {
+fn panicInvalidByteOpcode(ip: Ip, eip: Eip) callconv(.c) noreturn {
     @branchHint(.cold);
     const bad_ip = ip - 1;
     const bad_opcode: u8 = bad_ip[0];
@@ -791,7 +777,7 @@ fn panicInvalidPrefixedOpcode(
     ip: Ip,
     eip: Eip,
     prefix: usize,
-) callconv(ffi_cc) noreturn {
+) callconv(.c) noreturn {
     @branchHint(.cold);
     const prefix_byte: u8 = @intCast(prefix);
     var decoded: u32 = 0;

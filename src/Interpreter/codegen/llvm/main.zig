@@ -127,7 +127,6 @@ const Builder = struct {
     scratch: *ArenaAllocator,
     module: llvm.Builder,
 
-    ffi_call_conv: CallConv,
     string_constants: struct {
         @"target-cpu": String = .none,
         @"target-features": String = .none,
@@ -198,10 +197,6 @@ const Builder = struct {
                 .target = config.target,
                 .triple = config.target_info.triple,
             }),
-            .ffi_call_conv = if (config.target.cpu.arch == .x86_64 and config.options.use_llvm)
-                .x86_regcallcc // Zig's x86 backend doesn't support regcall
-            else
-                .ccc,
             .opcode_handler = undefined,
         };
 
@@ -506,20 +501,6 @@ const Builder = struct {
         return func;
     }
 
-    fn addFfiFunction(
-        b: *Builder,
-        name: []const u8,
-        param_types: []const Type,
-        ret_type: Type,
-    ) Oom!Function.Index {
-        return try b.addFunction(
-            try b.strtabStringSymbolPrefixed(name),
-            try b.fnType(ret_type, param_types),
-            b.ffi_call_conv,
-            .{ .preemption = .dso_local },
-        );
-    }
-
     fn wipFunction(b: *Builder, func: Function.Index) Oom!WipFunction {
         return try .init(&b.module, .{ .function = func, .strip = b.options.strip });
     }
@@ -544,10 +525,11 @@ const Builder = struct {
             .none
         else handler: switch (E) {
             ByteOpcode => {
-                const panic = try b.addFfiFunction(
-                    "panicInvalidByteOpcode",
-                    &@as([2]Type, @splat(.ptr)),
-                    .void,
+                const panic = try b.addFunction(
+                    try b.strtabStringSymbolPrefixed("panicInvalidByteOpcode"),
+                    try b.fnType(.void, &@as([2]Type, @splat(.ptr))),
+                    .ccc,
+                    .{ .preemption = .dso_local },
                 );
                 {
                     var attrs = FunctionAttributes.Wip{};
@@ -571,7 +553,7 @@ const Builder = struct {
                 wip.cursor = .{ .block = try wip.block(0, "Entry") };
                 _ = try wip.call(
                     .tail,
-                    b.ffi_call_conv,
+                    .ccc,
                     .none,
                     panic.typeOf(&b.module),
                     panic.toValue(&b.module),
@@ -603,7 +585,7 @@ const Builder = struct {
                 wip.cursor = .{ .block = try wip.block(0, "Entry") };
                 _ = try wip.call(
                     .tail,
-                    b.ffi_call_conv,
+                    .ccc,
                     .none,
                     b.panic_invalid_prefixed_opcode.typeOf(&b.module),
                     b.panic_invalid_prefixed_opcode.toValue(&b.module),
@@ -1317,7 +1299,7 @@ const OpcodeHandler = struct {
         _ = try handler.wip.ret(
             try handler.wip.call(
                 .tail,
-                b.ffi_call_conv,
+                .ccc,
                 attrs: {
                     var attrs = try b.value_copy.attributes.toWip(&b.module);
                     try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .nounwind });
@@ -1421,7 +1403,7 @@ const OpcodeHandler = struct {
         _ = try wip.ret(
             try wip.call(
                 .tail,
-                b.ffi_call_conv,
+                .ccc,
                 .none,
                 b.trap_memory_access_oob.typeOf(&b.module),
                 b.trap_memory_access_oob.toValue(&b.module),
@@ -1628,9 +1610,9 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     );
 
     {
-        const trampoline = try b.addFfiFunction(
-            "opcodeHandlerTrampoline",
-            &[9]Type{
+        const trampoline = try b.addFunction(
+            try b.strtabStringSymbolPrefixed("opcodeHandlerTrampoline"),
+            try b.fnType(.i32, &[9]Type{
                 .ptr, // locals
                 .ptr, // vsp
                 .ptr, // module
@@ -1640,8 +1622,9 @@ fn buildLlvmModule(b: *Builder) Oom!void {
                 .ptr, // stp
                 .ptr, // eip
                 .ptr, // handler
-            },
-            .i32,
+            }),
+            .ccc,
+            .{ .preemption = .dso_local },
         );
         {
             var attributes = FunctionAttributes.Wip{};
@@ -1664,12 +1647,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         const memories = try wip.load(
             .normal,
             .ptr,
-            try wip.gepStruct(
-                b.module_inst,
-                wip.arg(2), // module
-                @intFromEnum(ModuleInstField.mems),
-                "",
-            ),
+            try wip.gepStruct(b.module_inst, wip.arg(2), @intFromEnum(ModuleInstField.mems), ""),
             .default,
             "memories",
         );
@@ -1715,7 +1693,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         const helper = try b.addFunction(
             try b.strtabStringSymbolPrefixed("interruptOutOfFuel"),
             try b.fnType(.i32, &@as([5]Type, @splat(.ptr))),
-            b.ffi_call_conv,
+            .ccc,
             .{ .linkage = .external, .preemption = .dso_local },
         );
         {
@@ -1735,7 +1713,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         };
         const result = try wip.call(
             .tail,
-            b.ffi_call_conv,
+            .ccc,
             .none,
             helper.typeOf(&b.module),
             helper.toValue(&b.module),
@@ -1904,7 +1882,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         b.trap_with_numeric_code = try b.addFunction(
             try b.strtabStringSymbolPrefixed("trapWithNumericCode"),
             try b.fnType(.i32, &.{ .ptr, .ptr, .ptr, .ptr, .ptr, b.size_type }),
-            b.ffi_call_conv,
+            .ccc,
             .{ .linkage = .external, .preemption = .dso_local },
         );
         var attrs = FunctionAttributes.Wip{};
@@ -1929,7 +1907,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
                     b.size_type,
                 },
             ),
-            b.ffi_call_conv,
+            .ccc,
             .{ .linkage = .external, .preemption = .dso_local },
         );
         var attrs = FunctionAttributes.Wip{};
@@ -1940,7 +1918,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         b.panic_invalid_prefixed_opcode = try b.addFunction(
             try b.strtabStringSymbolPrefixed("panicInvalidPrefixedOpcode"),
             try b.fnType(.void, &[3]Type{ .ptr, .ptr, b.size_type }),
-            b.ffi_call_conv,
+            .ccc,
             .{ .linkage = .external, .preemption = .dso_local },
         );
         var attrs = FunctionAttributes.Wip{};
@@ -2107,7 +2085,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         const helper = try b.addFunction(
             try b.strtabStringSymbolPrefixed("returnFromWasm"),
             try b.fnType(.ptr, &@as([4]Type, @splat(.ptr))),
-            b.ffi_call_conv,
+            .ccc,
             .{ .linkage = .external, .preemption = .dso_local },
         );
         {
@@ -2146,7 +2124,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
             }
             break :call try ret.wip.call(
                 .normal,
-                b.ffi_call_conv,
+                .ccc,
                 try attrs.finish(&b.module),
                 helper.typeOf(&b.module),
                 helper.toValue(&b.module),
@@ -2409,7 +2387,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         const helper = try b.addFunction(
             try b.strtabStringSymbolPrefixed(helper_name),
             try b.fnType(.ptr, helper_params),
-            b.ffi_call_conv,
+            .ccc,
             .{ .linkage = .external, .preemption = .dso_local },
         );
         helper.setAttributes(invoke_helper_attrs, &b.module);
@@ -2470,7 +2448,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
 
             break :call try call.wip.call(
                 .normal,
-                b.ffi_call_conv,
+                .ccc,
                 try attrs.finish(&b.module),
                 helper.typeOf(&b.module),
                 helper.toValue(&b.module),
@@ -2496,13 +2474,13 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
     const trap_call_indirect_access_oob = try b.addFunction(
         try b.strtabStringSymbolPrefixed("trapCallIndirectAccessOob"),
         trap_helper_type,
-        b.ffi_call_conv,
+        .ccc,
         .{ .linkage = .external, .preemption = .dso_local },
     );
     const trap_indirect_call_to_null = try b.addFunction(
         try b.strtabStringSymbolPrefixed("trapIndirectCallToNull"),
         trap_helper_type,
-        b.ffi_call_conv,
+        .ccc,
         .{ .linkage = .external, .preemption = .dso_local },
     );
 
@@ -2588,7 +2566,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
                     else => unreachable,
                 }),
                 try b.fnType(.ptr, &@as([9]Type, @splat(.ptr))),
-                b.ffi_call_conv,
+                .ccc,
                 .{ .linkage = .external, .preemption = .dso_local },
             );
             helper.setAttributes(invoke_helper_attrs, &b.module);
@@ -2616,7 +2594,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
 
             break :call try call.wip.call(
                 .normal,
-                b.ffi_call_conv,
+                .ccc,
                 try attrs.finish(&b.module),
                 helper.typeOf(&b.module),
                 helper.toValue(&b.module),
@@ -2639,7 +2617,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         _ = try call.wip.ret(
             try call.wip.call(
                 .tail,
-                b.ffi_call_conv,
+                .ccc,
                 trap_helper_attrs,
                 trap_helper_type,
                 trap_call_indirect_access_oob.toValue(&b.module),
@@ -2654,7 +2632,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         _ = try call.wip.ret(
             try call.wip.call(
                 .tail,
-                b.ffi_call_conv,
+                .ccc,
                 trap_helper_attrs,
                 trap_helper_type,
                 trap_indirect_call_to_null.toValue(&b.module),
@@ -3087,7 +3065,7 @@ fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
             const helper = try b.addFunction(
                 try b.strtabStringSymbolPrefixed("memoryGrowReallocate"),
                 try b.fnType(.i32, &([1]Type{b.size_type} ++ @as([6]Type, @splat(.ptr)))),
-                b.ffi_call_conv,
+                .ccc,
                 .{ .linkage = .external, .preemption = .dso_local },
             );
             {
@@ -3109,7 +3087,7 @@ fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
             _ = try wip.ret(
                 try wip.call(
                     .tail,
-                    b.ffi_call_conv,
+                    .ccc,
                     attrs: {
                         var attrs = FunctionAttributes.Wip{};
                         for (1..7) |i| {
@@ -3162,7 +3140,7 @@ fn buildTableAccessOpcodeHandlers(b: *Builder) Oom!void {
     const trap_oob_helper = try b.addFunction(
         try b.strtabStringSymbolPrefixed("trapTableAccessOutOfBounds"),
         trap_oob_helper_ty,
-        b.ffi_call_conv,
+        .ccc,
         .{ .linkage = .external, .preemption = .dso_local },
     );
     const trap_oob_helper_value = trap_oob_helper.toValue(&b.module);
@@ -3243,7 +3221,7 @@ fn buildTableAccessOpcodeHandlers(b: *Builder) Oom!void {
             _ = try wip.ret(
                 try wip.call(
                     .tail,
-                    b.ffi_call_conv,
+                    .ccc,
                     trap_oob_helper_attrs,
                     trap_oob_helper_ty,
                     trap_oob_helper_value,
@@ -3326,7 +3304,7 @@ fn buildTableAccessOpcodeHandlers(b: *Builder) Oom!void {
             _ = try wip.ret(
                 try wip.call(
                     .tail,
-                    b.ffi_call_conv,
+                    .ccc,
                     trap_oob_helper_attrs,
                     trap_oob_helper_ty,
                     trap_oob_helper_value,
@@ -3499,7 +3477,7 @@ fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
             const helper = try b.addFunction(
                 try b.strtabStringSymbolPrefixed("tableGrowReallocate"),
                 try b.fnType(.i32, &([1]Type{.i32} ++ @as([6]Type, @splat(.ptr)))),
-                b.ffi_call_conv,
+                .ccc,
                 .{ .linkage = .external, .preemption = .dso_local },
             );
             {
@@ -3522,7 +3500,7 @@ fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
             _ = try wip.ret(
                 try wip.call(
                     .tail,
-                    b.ffi_call_conv,
+                    .ccc,
                     attrs: {
                         var attrs = FunctionAttributes.Wip{};
                         for (1..7) |i| {
@@ -3648,7 +3626,7 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
             const helper = try b.addFunction(
                 try b.strtabStringSymbolPrefixed("trapMemoryFillOutOfBounds"),
                 try b.fnType(.i32, &[6]Type{ .ptr, .ptr, .ptr, .ptr, b.size_type, .ptr }),
-                b.ffi_call_conv,
+                .ccc,
                 .{ .linkage = .external, .preemption = .dso_local },
             );
             {
@@ -3660,7 +3638,7 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
             _ = try wip.ret(
                 try wip.call(
                     .tail,
-                    b.ffi_call_conv,
+                    .ccc,
                     attrs: {
                         var attrs = FunctionAttributes.Wip{};
                         for (0..6) |i| {
@@ -3807,7 +3785,7 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
                     .i32,
                     &[7]Type{ .ptr, .ptr, .ptr, .ptr, .ptr, b.size_type, b.size_type },
                 ),
-                b.ffi_call_conv,
+                .ccc,
                 .{ .linkage = .external, .preemption = .dso_local },
             );
             {
@@ -3819,7 +3797,7 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
             _ = try wip.ret(
                 try wip.call(
                     .tail,
-                    b.ffi_call_conv,
+                    .ccc,
                     attrs: {
                         var attrs = FunctionAttributes.Wip{};
                         for (0..5) |i| {
@@ -4025,7 +4003,7 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
                     .i32,
                     &[7]Type{ .ptr, .ptr, .ptr, .ptr, .ptr, b.size_type, b.size_type },
                 ),
-                b.ffi_call_conv,
+                .ccc,
                 .{ .linkage = .external, .preemption = .dso_local },
             );
             {
@@ -4037,7 +4015,7 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
             _ = try wip.ret(
                 try wip.call(
                     .tail,
-                    b.ffi_call_conv,
+                    .ccc,
                     attrs: {
                         var attrs = FunctionAttributes.Wip{};
                         for (0..5) |i| {
@@ -4114,7 +4092,7 @@ fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
                     b.size_type,
                     &[arg_count]Type{ .i32, .i32, .i32, .ptr, .ptr, .i32, .i32 },
                 ),
-                b.ffi_call_conv,
+                .ccc,
                 .{ .linkage = .external, .preemption = .dso_local },
             );
             {
@@ -4125,7 +4103,7 @@ fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
 
             break :status try wip.call(
                 .normal,
-                b.ffi_call_conv,
+                .ccc,
                 attrs: {
                     var attrs = FunctionAttributes.Wip{};
                     for (3..5) |i| {
@@ -4170,7 +4148,7 @@ fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
             const helper = try b.addFunction(
                 try b.strtabStringSymbolPrefixed("trapTableInitOutOfBounds"),
                 try b.fnType(.i32, &[7]Type{ .ptr, .ptr, .ptr, .ptr, .ptr, .i32, .i32 }),
-                b.ffi_call_conv,
+                .ccc,
                 .{ .linkage = .external, .preemption = .dso_local },
             );
             {
@@ -4182,7 +4160,7 @@ fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
             _ = try wip.ret(
                 try wip.call(
                     .tail,
-                    b.ffi_call_conv,
+                    .ccc,
                     attrs: {
                         var attrs = FunctionAttributes.Wip{};
                         for (0..5) |i| {
@@ -4342,7 +4320,7 @@ fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
                     .i32,
                     &[7]Type{ .ptr, .ptr, .ptr, .ptr, .ptr, .i32, .i32 },
                 ),
-                b.ffi_call_conv,
+                .ccc,
                 .{ .linkage = .external, .preemption = .dso_local },
             );
             {
@@ -4354,7 +4332,7 @@ fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
             _ = try wip.ret(
                 try wip.call(
                     .tail,
-                    b.ffi_call_conv,
+                    .ccc,
                     attrs: {
                         var attrs = FunctionAttributes.Wip{};
                         for (0..5) |i| {
@@ -4457,7 +4435,7 @@ fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
             const helper = try b.addFunction(
                 try b.strtabStringSymbolPrefixed("trapTableFillOutOfBounds"),
                 try b.fnType(.i32, &[6]Type{ .ptr, .ptr, .ptr, .ptr, .ptr, .i32 }),
-                b.ffi_call_conv,
+                .ccc,
                 .{ .linkage = .external, .preemption = .dso_local },
             );
             {
@@ -4469,7 +4447,7 @@ fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
             _ = try wip.ret(
                 try wip.call(
                     .tail,
-                    b.ffi_call_conv,
+                    .ccc,
                     attrs: {
                         var attrs = FunctionAttributes.Wip{};
                         for (0..5) |i| {
@@ -5762,7 +5740,7 @@ fn buildReferenceOpcodeHandlers(b: *Builder) Oom!void {
         const helper = try b.addFunction(
             try b.strtabStringSymbolPrefixed("constructFuncRef"),
             try b.fnType(b.size_type, &.{ .i32, .ptr }),
-            b.ffi_call_conv,
+            .ccc,
             .{ .linkage = .external, .preemption = .dso_local },
         );
         {
@@ -5773,7 +5751,7 @@ fn buildReferenceOpcodeHandlers(b: *Builder) Oom!void {
 
         const ref = try wip.call(
             .normal,
-            b.ffi_call_conv,
+            .ccc,
             attrs: {
                 var attrs = FunctionAttributes.Wip{};
                 for (&[3]Attribute{ .nonnull, .noundef, .readonly }) |a| {
