@@ -1,6 +1,7 @@
 //! Writes definitions for all 128-bit SIMD opcode handlers.
 
 pub fn buildOpcodeHandlers(b: *Builder) Oom!void {
+    try buildMemoryLoadOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
 }
 
@@ -36,6 +37,39 @@ const Interpretation = enum(u3) {
         return try b.module.vectorType(.normal, i.laneCount(), i.laneType());
     }
 };
+
+const byte_alignment = llvm.Builder.Alignment.fromByteUnits(1);
+
+fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
+    const i8x16 = try Interpretation.i8x16.vectorType(b);
+    {
+        var load = try b.opcodeHandler(.{ .fd = .@"v128.load" });
+
+        load.wip.cursor = .{ .block = try load.wip.block(0, "Entry") };
+        const perform_load = try load.wip.block(1, "Load");
+        const access = try load.linearMemoryAccess(b, 0, .@"16", perform_load);
+        const loaded_value = try load.wip.load(
+            .normal,
+            i8x16,
+            access.ptr,
+            byte_alignment,
+            "loaded_value",
+        );
+
+        _ = try load.wip.store(
+            .normal,
+            loaded_value,
+            try load.gepOperandAt(b, 0),
+            value_stack_alignment,
+        );
+
+        try load.jmpToNextHandler(b, .{
+            .vip = access.vip,
+            .vsp = OpcodeHandlerParam.vsp.arg(&load.wip),
+        });
+        try load.finish(b);
+    }
+}
 
 fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
     for (&[4]Interpretation{ .i8x16, .i16x8, .i32x4, .i64x2 }) |interp| {
