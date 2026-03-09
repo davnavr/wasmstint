@@ -3,6 +3,7 @@
 pub fn buildOpcodeHandlers(b: *Builder) Oom!void {
     try buildMemoryLoadOpcodeHandlers(b);
     try buildBitwiseOpcodeHandlers(b);
+    try buildBooleanOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
 }
 
@@ -157,6 +158,26 @@ fn buildBitwiseOpcodeHandlers(b: *Builder) Oom!void {
             .vsp = new_vsp,
         });
         try sel.finish(b);
+    }
+}
+
+fn buildBooleanOpcodeHandlers(b: *Builder) Oom!void {
+    {
+        var any_true = try b.opcodeHandler(.{ .fd = .@"v128.any_true" });
+        any_true.wip.cursor = .{ .block = try any_true.wip.block(0, "Entry") };
+        const un_op = try any_true.unOp(b, .i128);
+        const any_bit_set = try any_true.wip.icmp(
+            .ne,
+            un_op.c_1,
+            try b.module.intValue(.i128, 0),
+            "any_bit_set",
+        );
+        try un_op.writeResult(&any_true, try any_true.wip.cast(.zext, any_bit_set, .i32, "result"));
+        try any_true.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&any_true.wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(&any_true.wip),
+        });
+        try any_true.finish(b);
     }
 }
 
