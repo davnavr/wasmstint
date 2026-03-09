@@ -180,50 +180,85 @@ fn buildBooleanOpcodeHandlers(b: *Builder) Oom!void {
         try any_true.finish(b);
     }
 
-    for (&[_]FDPrefixOpcode{
-        .@"i8x16.all_true",
-        .@"i16x8.all_true",
-        .@"i32x4.all_true",
-    }) |opcode| {
-        const interp: Interpretation = std.meta.stringToEnum(
-            Interpretation,
-            @tagName(opcode)[0..5],
-        ) orelse unreachable;
+    for (&[4]Interpretation{ .i8x16, .i16x8, .i32x4, .i64x2 }) |interp| {
         const vec_ty = try interp.vectorType(b);
+        const int_ty = interp.laneType();
+        const lane_count_int = try b.module.intType(interp.laneCount());
+        {
+            const splat_zero_lanes = try b.module.splatValue(
+                vec_ty,
+                try b.module.intConst(int_ty, 0),
+            );
 
-        const splat_zero_lanes = try b.module.splatValue(
-            vec_ty,
-            try b.module.intConst(interp.laneType(), 0),
-        );
+            var all_true = try b.opcodeHandlerFromPrefixedName(
+                FDPrefixOpcode,
+                @tagName(interp),
+                "all_true",
+            );
+            all_true.wip.cursor = .{ .block = try all_true.wip.block(0, "Entry") };
+            const un_op = try all_true.unOp(b, vec_ty);
+            const lane_is_zero = try all_true.wip.icmp(
+                .eq,
+                un_op.c_1,
+                splat_zero_lanes,
+                "lane_is_zero.0",
+            );
+            const lane_is_zero_int = try all_true.wip.cast(
+                .bitcast,
+                lane_is_zero,
+                lane_count_int,
+                "lane_is_zero.1",
+            );
+            const non_zero = try all_true.wip.icmp(
+                .eq,
+                lane_is_zero_int,
+                try b.module.intValue(lane_count_int, 0),
+                "non_zero",
+            );
+            try un_op.writeResult(
+                &all_true,
+                try all_true.wip.cast(.zext, non_zero, .i32, "result"),
+            );
+            try all_true.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&all_true.wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(&all_true.wip),
+            });
+            try all_true.finish(b);
+        }
+        {
+            const splat_shift_lanes = try b.module.splatValue(
+                vec_ty,
+                try b.module.intConst(int_ty, int_ty.scalarBits(&b.module) - 1),
+            );
 
-        var all_true = try b.opcodeHandler(.{ .fd = opcode });
-        all_true.wip.cursor = .{ .block = try all_true.wip.block(0, "Entry") };
-        const un_op = try all_true.unOp(b, vec_ty);
-        const lane_is_zero = try all_true.wip.icmp(
-            .eq,
-            un_op.c_1,
-            splat_zero_lanes,
-            "lane_is_zero.0",
-        );
-        const cmp_ty = try b.module.intType(interp.laneCount());
-        const lane_is_zero_int = try all_true.wip.cast(
-            .bitcast,
-            lane_is_zero,
-            cmp_ty,
-            "lane_is_zero.1",
-        );
-        const non_zero = try all_true.wip.icmp(
-            .eq,
-            lane_is_zero_int,
-            try b.module.intValue(cmp_ty, 0),
-            "non_zero",
-        );
-        try un_op.writeResult(&all_true, try all_true.wip.cast(.zext, non_zero, .i32, "result"));
-        try all_true.jmpToNextHandler(b, .{
-            .vip = OpcodeHandlerParam.vip.arg(&all_true.wip),
-            .vsp = OpcodeHandlerParam.vsp.arg(&all_true.wip),
-        });
-        try all_true.finish(b);
+            var bitmask = try b.opcodeHandlerFromPrefixedName(
+                FDPrefixOpcode,
+                @tagName(interp),
+                "bitmask",
+            );
+            const wip = &bitmask.wip;
+            wip.cursor = .{ .block = try wip.block(0, "Entry") };
+            const un_op = try bitmask.unOp(b, vec_ty);
+            const shifted_high_bit = try wip.bin(
+                .lshr,
+                un_op.c_1,
+                splat_shift_lanes,
+                "shifted_high_bit",
+            );
+            const high_bit = try wip.cast(
+                .trunc,
+                shifted_high_bit,
+                try b.module.vectorType(.normal, interp.laneCount(), .i1),
+                "high_bit",
+            );
+            const high_bit_int = try wip.cast(.bitcast, high_bit, lane_count_int, "");
+            try un_op.writeResult(&bitmask, try wip.cast(.zext, high_bit_int, .i32, ""));
+            try bitmask.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(wip),
+            });
+            try bitmask.finish(b);
+        }
     }
 }
 
