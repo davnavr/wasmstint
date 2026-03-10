@@ -795,6 +795,25 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
             });
             try neg.finish(b);
         }
+
+        {
+            var abs = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), "abs");
+            abs.wip.cursor = .{ .block = try abs.wip.block(0, "Entry") };
+            const un_op = try abs.unOp(b, vector_ty);
+            try un_op.writeResult(&abs, try abs.wip.callIntrinsic(
+                .normal,
+                .none,
+                .abs,
+                &.{vector_ty},
+                &.{ un_op.c_1, .false },
+                "abs",
+            ));
+            try abs.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&abs.wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(&abs.wip),
+            });
+            try abs.finish(b);
+        }
     }
 
     for (&[3]Interpretation{ .i8x16, .i16x8, .i32x4 }) |interp| {
@@ -833,7 +852,6 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
     }
 
     // On x86+sse2, should compile to `pavgb`/`pavgw`
-    // - TODO(llvm): https://github.com/llvm/llvm-project/issues/122872
     for (&[2]FDPrefixOpcode{ .@"i8x16.avgr_u", .@"i16x8.avgr_u" }) |opcode| {
         const interp: Interpretation = std.meta.stringToEnum(
             Interpretation,
