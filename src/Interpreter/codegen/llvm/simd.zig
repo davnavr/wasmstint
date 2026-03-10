@@ -547,33 +547,49 @@ fn buildConversionOpcodeHandlers(b: *Builder) Oom!void {
 
 fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
     for (&[2]Interpretation{ .f32x4, .f64x2 }, try FloatInfo.init(&b.module)) |interp, float_info| {
-        const vector_ty = try interp.vectorType(b);
+        const float_vec = try interp.vectorType(b);
+        // const int_vec: Interpretation = @enumFromInt(@intFromEnum(float_vec) + 2);
+        // const sign_bits = try b.module.splatValue(int_vec, float_info.sign_bit.toConst().?);
         _ = float_info;
 
         // TODO: Don't use llvm.abs just like in scalar version?
 
-        // TODO: neg
-
+        {
+            var neg = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), "neg");
+            const wip = &neg.wip;
+            wip.cursor = .{ .block = try wip.block(0, "Entry") };
+            const un_op = try neg.unOp(b, float_vec);
+            try un_op.writeResult(&neg, try wip.un(.fneg, un_op.c_1, "neg"));
+            try neg.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(wip),
+            });
+            try neg.finish(b);
+        }
         {
             // On x86, should compile to `sqrtps`/`sqrtpd`
-            var op = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), "sqrt");
-            const wip = &op.wip;
+            var sqrt = try b.opcodeHandlerFromPrefixedName(
+                FDPrefixOpcode,
+                @tagName(interp),
+                "sqrt",
+            );
+            const wip = &sqrt.wip;
             wip.cursor = .{ .block = try wip.block(0, "Entry") };
-            const un_op = try op.unOp(b, vector_ty);
+            const un_op = try sqrt.unOp(b, float_vec);
             const result = try wip.callIntrinsic(
                 .normal,
                 .none,
                 .sqrt,
-                &.{vector_ty},
+                &.{float_vec},
                 &.{un_op.c_1},
                 "result",
             );
-            try un_op.writeResult(&op, result);
-            try op.jmpToNextHandler(b, .{
+            try un_op.writeResult(&sqrt, result);
+            try sqrt.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(wip),
                 .vsp = OpcodeHandlerParam.vsp.arg(wip),
             });
-            try op.finish(b);
+            try sqrt.finish(b);
         }
 
         for (&[4]Instruction.Tag{ .fadd, .fsub, .fmul, .fdiv }) |instr| {
@@ -584,7 +600,7 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             );
             const wip = &op.wip;
             op.wip.cursor = .{ .block = try wip.block(0, "Entry") };
-            const bin_op = try op.binOp(b, vector_ty);
+            const bin_op = try op.binOp(b, float_vec);
             try bin_op.writeResult(&op, try wip.bin(instr, bin_op.c_1, bin_op.c_2, ""));
             const new_vsp = try op.adjustVspBy(b, -1);
             try op.jmpToNextHandler(b, .{ .vip = OpcodeHandlerParam.vip.arg(wip), .vsp = new_vsp });
