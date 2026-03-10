@@ -569,6 +569,34 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try cmp.finish(b);
         }
 
+        // TODO: detect when LLVM emits a libc/compiler_rt call instead of inline instructions
+        for (&[4]llvm.Builder.Intrinsic{ .ceil, .floor, .trunc, .roundeven }) |intrin| {
+            var op = try b.opcodeHandlerFromPrefixedName(
+                FDPrefixOpcode,
+                @tagName(interp),
+                switch (intrin) {
+                    .roundeven => "nearest",
+                    else => @tagName(intrin),
+                },
+            );
+            const wip = &op.wip;
+            wip.cursor = .{ .block = try wip.block(0, "Entry") };
+            const un_op = try op.unOp(b, float_vec);
+            try un_op.writeResult(&op, try wip.callIntrinsic(
+                .normal,
+                .none,
+                intrin,
+                &.{float_vec},
+                &.{un_op.c_1},
+                "result",
+            ));
+            try op.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(wip),
+            });
+            try op.finish(b);
+        }
+
         {
             var abs = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), "abs");
             const wip = &abs.wip;
