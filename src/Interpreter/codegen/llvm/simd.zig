@@ -313,6 +313,77 @@ fn buildConstructionOpcodeHandlers(b: *Builder) Oom!void {
 }
 
 fn buildConversionOpcodeHandlers(b: *Builder) Oom!void {
+    var concat_mask_buf: [16]Constant = undefined;
+    // On x86+sse4_1, this should compile down to `packsswb`/`packssdw`/`packuswb`/`packusdw`
+    for (&[4]struct { FDPrefixOpcode, i17, i17 }{
+        .{ .@"i8x16.narrow_i16x8_s", std.math.minInt(i8), std.math.maxInt(i8) },
+        .{ .@"i8x16.narrow_i16x8_u", 0, std.math.maxInt(u8) },
+        .{ .@"i16x8.narrow_i32x4_s", std.math.minInt(i16), std.math.maxInt(i16) },
+        .{ .@"i16x8.narrow_i32x4_u", 0, std.math.maxInt(u16) },
+    }) |info| {
+        const opcode, const min_value, const max_value = info;
+        const opcode_name = @tagName(opcode);
+        const to_interp: Interpretation = std.meta.stringToEnum(
+            Interpretation,
+            opcode_name[0..5],
+        ) orelse unreachable;
+        const to_int = to_interp.laneType();
+        const to_vec = try to_interp.vectorType(b);
+
+        const from_interp: Interpretation = std.meta.stringToEnum(
+            Interpretation,
+            opcode_name[13..18],
+        ) orelse unreachable;
+        const from_int = from_interp.laneType();
+        const from_vec = try from_interp.vectorType(b);
+
+        var narrow = try b.opcodeHandler(.{ .fd = opcode });
+        const wip = &narrow.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const bin_op = try narrow.binOp(b, from_vec);
+
+        const concat_mask = concat_mask_buf[0..to_interp.laneCount()];
+        for (0.., concat_mask) |i, *c| {
+            c.* = try b.module.intConst(to_int, i);
+        }
+        const concatenated_inputs = try wip.shuffleVector(
+            bin_op.c_1,
+            bin_op.c_2,
+            try b.module.vectorValue(to_vec, concat_mask),
+            "concatenated_inputs",
+        );
+
+        const clamp_vec = try b.module.vectorType(.normal, to_interp.laneCount(), from_int);
+        const clamp_min = try wip.callIntrinsic(
+            .normal,
+            .none,
+            .smin,
+            &.{clamp_vec},
+            &.{
+                concatenated_inputs,
+                try b.module.splatValue(clamp_vec, try b.module.intConst(from_int, max_value)),
+            },
+            "clamp_min",
+        );
+        const clamp_max = try wip.callIntrinsic(
+            .normal,
+            .none,
+            .smax,
+            &.{clamp_vec},
+            &.{
+                clamp_min,
+                try b.module.splatValue(clamp_vec, try b.module.intConst(from_int, min_value)),
+            },
+            "clamp_max",
+        );
+        const truncated = try wip.cast(.trunc, clamp_max, to_vec, "truncated");
+
+        try bin_op.writeResult(&narrow, truncated);
+        const new_vsp = try narrow.adjustVspBy(b, -1);
+        try narrow.jmpToNextHandler(b, .{ .vip = OpcodeHandlerParam.vip.arg(wip), .vsp = new_vsp });
+        try narrow.finish(b);
+    }
+
     const i32x4_vec = try Interpretation.i32x4.vectorType(b);
     const f32x4_vec = try Interpretation.f32x4.vectorType(b);
     for ([2]struct { WipFunction.Instruction.Tag, []const u8 }{
