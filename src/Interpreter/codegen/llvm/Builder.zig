@@ -73,7 +73,12 @@ value_structs: struct {
 /// For `memset` of values.
 value_set: struct { attributes: FunctionAttributes, overload: [2]Type } = undefined,
 /// For `memcpy`/`memmove` of values.
-value_copy: struct { attributes: FunctionAttributes, overload: [3]Type } = undefined,
+value_copy: struct {
+    attributes: FunctionAttributes,
+    overload: [3]Type,
+    attributes_src_unaligned: FunctionAttributes,
+    attributes_dst_unaligned: FunctionAttributes,
+} = undefined,
 
 const Builder = @This();
 
@@ -309,16 +314,38 @@ pub fn init(
         },
         .overload = [2]Type{ .ptr, b.size_type },
     };
+    const value_copy_attrs_template = attrs: {
+        var attrs = FunctionAttributes.Wip{};
+        defer attrs.deinit(&b.module);
+        for (0..2) |i| {
+            for (&[3]Attribute{ .noundef, .nonnull, .{ .dereferenceable = 16 } }) |a| {
+                try attrs.addParamAttr(i, a, &b.module);
+            }
+        }
+        break :attrs try attrs.finish(&b.module);
+    };
+    const byte_alignment = llvm.Builder.Alignment.fromByteUnits(1);
     b.value_copy = .{
         .attributes = attrs: {
-            var attrs = FunctionAttributes.Wip{};
+            var attrs = try value_copy_attrs_template.toWip(&b.module);
             defer attrs.deinit(&b.module);
             for (0..2) |i| {
                 try attrs.addParamAttr(i, .{ .@"align" = value_stack_alignment }, &b.module);
-                try attrs.addParamAttr(i, .noundef, &b.module);
-                try attrs.addParamAttr(i, .nonnull, &b.module);
-                try attrs.addParamAttr(i, .{ .dereferenceable = 16 }, &b.module);
             }
+            break :attrs try attrs.finish(&b.module);
+        },
+        .attributes_src_unaligned = attrs: {
+            var attrs = try value_copy_attrs_template.toWip(&b.module);
+            defer attrs.deinit(&b.module);
+            try attrs.addParamAttr(0, .{ .@"align" = value_stack_alignment }, &b.module);
+            try attrs.addParamAttr(1, .{ .@"align" = byte_alignment }, &b.module);
+            break :attrs try attrs.finish(&b.module);
+        },
+        .attributes_dst_unaligned = attrs: {
+            var attrs = try value_copy_attrs_template.toWip(&b.module);
+            defer attrs.deinit(&b.module);
+            try attrs.addParamAttr(0, .{ .@"align" = byte_alignment }, &b.module);
+            try attrs.addParamAttr(1, .{ .@"align" = value_stack_alignment }, &b.module);
             break :attrs try attrs.finish(&b.module);
         },
         .overload = [3]Type{ .ptr, .ptr, b.size_type },

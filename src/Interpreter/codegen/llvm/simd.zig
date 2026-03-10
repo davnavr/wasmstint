@@ -2,6 +2,7 @@
 
 pub fn buildOpcodeHandlers(b: *Builder) Oom!void {
     try buildMemoryLoadOpcodeHandlers(b);
+    try buildMemoryStoreOpcodeHandlers(b);
     try buildBitwiseOpcodeHandlers(b);
     try buildBooleanOpcodeHandlers(b);
     try buildConstructionOpcodeHandlers(b);
@@ -73,6 +74,30 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
             .vsp = OpcodeHandlerParam.vsp.arg(&load.wip),
         });
         try load.finish(b);
+    }
+}
+
+fn buildMemoryStoreOpcodeHandlers(b: *Builder) Oom!void {
+    {
+        var store = try b.opcodeHandler(.{ .fd = .@"v128.store" });
+        const wip = &store.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const perform_store = try wip.block(1, "Store");
+        const access = try store.linearMemoryAccess(b, 1, .@"16", perform_store);
+
+        _ = try wip.callIntrinsic(
+            .normal,
+            b.value_copy.attributes_dst_unaligned,
+            .@"memcpy.inline",
+            &b.value_copy.overload,
+            &.{ access.ptr, try store.gepOperandAt(b, 0), try b.sizeIntValue(16), .false },
+            "",
+        );
+
+        const new_vsp = try store.adjustVspBy(b, -2);
+        try store.jmpToNextHandler(b, .{ .vip = access.vip, .vsp = new_vsp });
+        try store.finish(b);
     }
 }
 
@@ -282,24 +307,7 @@ fn buildConstructionOpcodeHandlers(b: *Builder) Oom!void {
         );
         _ = try wip.callIntrinsic(
             .normal,
-            attrs: {
-                var attrs = llvm.Builder.FunctionAttributes.Wip{};
-                defer attrs.deinit(&b.module);
-                for (
-                    0..2,
-                    [2]llvm.Builder.Alignment{ value_stack_alignment, byte_alignment },
-                ) |i, a| {
-                    for ([4]llvm.Builder.Attribute{
-                        .{ .@"align" = a },
-                        .noundef,
-                        .nonnull,
-                        .{ .dereferenceable = 16 },
-                    }) |attr| {
-                        try attrs.addParamAttr(i, attr, &b.module);
-                    }
-                }
-                break :attrs try attrs.finish(&b.module);
-            },
+            b.value_copy.attributes_src_unaligned,
             .@"memcpy.inline",
             &b.value_copy.overload,
             &.{ OpcodeHandlerParam.vsp.arg(wip), initial_vip, value_size_bytes, .false },
