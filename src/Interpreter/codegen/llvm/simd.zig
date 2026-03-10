@@ -326,8 +326,8 @@ fn buildConversionOpcodeHandlers(b: *Builder) Oom!void {
         const un_op = try conv.unOp(b, i32x4_vec);
         try un_op.writeResult(&conv, try conv.wip.cast(cast, un_op.c_1, f32x4_vec, "result"));
         try conv.jmpToNextHandler(b, .{
-            .vip = OpcodeHandlerParam.vip.arg(&conv.wip),
-            .vsp = OpcodeHandlerParam.vsp.arg(&conv.wip),
+            .vip = OpcodeHandlerParam.vip.arg(wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(wip),
         });
         try conv.finish(b);
     }
@@ -353,16 +353,46 @@ fn buildConversionOpcodeHandlers(b: *Builder) Oom!void {
         );
         try un_op.writeResult(&conv, try wip.cast(cast, low_i32x2, f64x2_vec, "floats"));
         try conv.jmpToNextHandler(b, .{
-            .vip = OpcodeHandlerParam.vip.arg(&conv.wip),
-            .vsp = OpcodeHandlerParam.vsp.arg(&conv.wip),
+            .vip = OpcodeHandlerParam.vip.arg(wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(wip),
         });
         try conv.finish(b);
     }
 
-    // demote
-
+    const f32x2_vec = try b.module.vectorType(.normal, 2, .float);
     {
-        const f32x2_vec = try b.module.vectorType(.normal, 2, .float);
+        var demote = try b.opcodeHandler(.{ .fd = .@"f32x4.demote_f64x2_zero" });
+        const wip = &demote.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const un_op = try demote.unOp(b, f64x2_vec);
+        const low_result = try wip.cast(.fptrunc, un_op.c_1, f32x2_vec, "low_result");
+        const result = try wip.shuffleVector(
+            low_result,
+            try wip.splatVector(
+                try b.module.vectorType(.normal, 2, .float),
+                try b.module.floatValue(0.0),
+                "zeroes",
+            ),
+            try b.module.vectorValue(
+                i32x4_vec,
+                &indices: {
+                    var indices: [4]Constant = undefined;
+                    for (&indices, &[4]u2{ 0, 1, 2, 2 }) |*i, lane| {
+                        i.* = try b.module.intConst(.i32, lane);
+                    }
+                    break :indices indices;
+                },
+            ),
+            "result",
+        );
+        try un_op.writeResult(&demote, result);
+        try demote.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(wip),
+        });
+        try demote.finish(b);
+    }
+    {
         var promote = try b.opcodeHandler(.{ .fd = .@"f64x2.promote_low_f32x4" });
         const wip = &promote.wip;
         wip.cursor = .{ .block = try wip.block(0, "Entry") };
@@ -377,8 +407,8 @@ fn buildConversionOpcodeHandlers(b: *Builder) Oom!void {
         );
         try un_op.writeResult(&promote, try wip.cast(.fpext, low_f32x2, f64x2_vec, "result"));
         try promote.jmpToNextHandler(b, .{
-            .vip = OpcodeHandlerParam.vip.arg(&promote.wip),
-            .vsp = OpcodeHandlerParam.vsp.arg(&promote.wip),
+            .vip = OpcodeHandlerParam.vip.arg(wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(wip),
         });
         try promote.finish(b);
     }
