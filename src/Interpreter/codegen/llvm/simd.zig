@@ -553,7 +553,25 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
         _ = float_info;
 
         // TODO: Don't use llvm.abs just like in scalar version?
-
+        {
+            var abs = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), "abs");
+            const wip = &abs.wip;
+            wip.cursor = .{ .block = try wip.block(0, "Entry") };
+            const un_op = try abs.unOp(b, float_vec);
+            try un_op.writeResult(&abs, try wip.callIntrinsic(
+                .normal,
+                .none,
+                .fabs,
+                &.{float_vec},
+                &.{un_op.c_1},
+                "result",
+            ));
+            try abs.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(wip),
+            });
+            try abs.finish(b);
+        }
         {
             var neg = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), "neg");
             const wip = &neg.wip;
