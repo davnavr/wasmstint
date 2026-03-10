@@ -567,6 +567,17 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
         }
     }
 
+    for (&[3]Interpretation{ .i16x8, .i32x4, .i64x2 }) |interp| {
+        var mul = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), "mul");
+        const wip = &mul.wip;
+        wip.cursor = .{ .block = try mul.wip.block(0, "Entry") };
+        const bin_op = try mul.binOp(b, try interp.vectorType(b));
+        try bin_op.writeResult(&mul, try wip.bin(.mul, bin_op.c_1, bin_op.c_2, ""));
+        const new_vsp = try mul.adjustVspBy(b, -1);
+        try mul.jmpToNextHandler(b, .{ .vip = OpcodeHandlerParam.vip.arg(wip), .vsp = new_vsp });
+        try mul.finish(b);
+    }
+
     const i8x16 = try Interpretation.i8x16.vectorType(b);
 
     {
