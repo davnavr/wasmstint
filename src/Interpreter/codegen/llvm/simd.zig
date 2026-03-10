@@ -547,12 +547,28 @@ fn buildConversionOpcodeHandlers(b: *Builder) Oom!void {
 
 fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
     for (&[2]Interpretation{ .f32x4, .f64x2 }, try FloatInfo.init(&b.module)) |interp, float_info| {
+        const int_interp: Interpretation = @enumFromInt(@intFromEnum(interp) - 2);
         const float_vec = try interp.vectorType(b);
-        // const int_vec: Interpretation = @enumFromInt(@intFromEnum(float_vec) + 2);
+        const int_vec = try int_interp.vectorType(b);
         // const sign_bits = try b.module.splatValue(int_vec, float_info.sign_bit.toConst().?);
         _ = float_info;
 
-        // TODO: Don't use llvm.abs just like in scalar version?
+        for (&[6]llvm.Builder.FloatCondition{ .oeq, .une, .olt, .ogt, .ole, .oge }) |cond| {
+            var cmp = try b.opcodeHandlerFromPrefixedName(
+                FDPrefixOpcode,
+                @tagName(interp),
+                @tagName(cond)[1..],
+            );
+            const wip = &cmp.wip;
+            wip.cursor = .{ .block = try wip.block(0, "Entry") };
+            const bin_op = try cmp.binOp(b, float_vec);
+            const result = try wip.fcmp(.normal, cond, bin_op.c_1, bin_op.c_2, "cmp");
+            try bin_op.writeResult(&cmp, try wip.cast(.sext, result, int_vec, "mask"));
+            const new_vsp = try cmp.adjustVspBy(b, -1);
+            try cmp.jmpToNextHandler(b, .{ .vip = OpcodeHandlerParam.vip.arg(wip), .vsp = new_vsp });
+            try cmp.finish(b);
+        }
+
         {
             var abs = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), "abs");
             const wip = &abs.wip;

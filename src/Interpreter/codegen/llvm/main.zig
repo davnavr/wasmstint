@@ -3928,16 +3928,8 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try c.finish(b);
         }
 
-        for (&[6]struct { llvm.Builder.FloatCondition, []const u8 }{
-            .{ .oeq, "eq" },
-            .{ .une, "ne" },
-            .{ .olt, "lt" },
-            .{ .ogt, "gt" },
-            .{ .ole, "le" },
-            .{ .oge, "ge" },
-        }) |info| {
-            const cond, const name = info;
-            var cmp = try b.opcodeHandlerFromPrefixedName(ByteOpcode, prefix, name);
+        for (&[6]llvm.Builder.FloatCondition{ .oeq, .une, .olt, .ogt, .ole, .oge }) |cond| {
+            var cmp = try b.opcodeHandlerFromPrefixedName(ByteOpcode, prefix, @tagName(cond)[1..]);
             cmp.wip.cursor = .{ .block = try cmp.wip.block(0, "Entry") };
             const bin_op = try cmp.binOp(b, float_ty);
             try bin_op.writeResult(
