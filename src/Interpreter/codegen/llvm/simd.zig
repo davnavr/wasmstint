@@ -797,6 +797,41 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
         }
     }
 
+    for (&[3]Interpretation{ .i8x16, .i16x8, .i32x4 }) |interp| {
+        const int_vec = try interp.vectorType(b);
+        for (&[4]Intrinsic{ .smin, .smax, .umin, .umax }) |intrin| {
+            var suffix_buf: [5]u8 = "MMM_S".*;
+            const intrin_name = @tagName(intrin);
+            suffix_buf[0..3].* = intrin_name[1..4].*;
+            suffix_buf[4] = intrin_name[0];
+
+            var op = try b.opcodeHandlerFromPrefixedName(
+                FDPrefixOpcode,
+                @tagName(interp),
+                &suffix_buf,
+            );
+            op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
+            const bin_op = try op.binOp(b, int_vec);
+            try bin_op.writeResult(
+                &op,
+                try op.wip.callIntrinsic(
+                    .normal,
+                    .none,
+                    intrin,
+                    &.{int_vec},
+                    &.{ bin_op.c_1, bin_op.c_2 },
+                    "",
+                ),
+            );
+            const new_vsp = try op.adjustVspBy(b, -1);
+            try op.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(&op.wip),
+                .vsp = new_vsp,
+            });
+            try op.finish(b);
+        }
+    }
+
     for (&[3]Interpretation{ .i16x8, .i32x4, .i64x2 }) |interp| {
         var mul = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), "mul");
         const wip = &mul.wip;
