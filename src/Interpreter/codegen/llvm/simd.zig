@@ -8,6 +8,7 @@ pub fn buildOpcodeHandlers(b: *Builder) Oom!void {
     try buildConstructionOpcodeHandlers(b);
     try buildConversionOpcodeHandlers(b);
 
+    try buildFloatOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
 }
 
@@ -544,6 +545,27 @@ fn buildConversionOpcodeHandlers(b: *Builder) Oom!void {
     }
 }
 
+fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
+    for (&[2]Interpretation{ .f32x4, .f64x2 }, try FloatInfo.init(&b.module)) |interp, float_info| {
+        const vector_ty = try interp.vectorType(b);
+        _ = float_info;
+        for (&[4]Instruction.Tag{ .fadd, .fsub, .fmul, .fdiv }) |instr| {
+            var op = try b.opcodeHandlerFromPrefixedName(
+                FDPrefixOpcode,
+                @tagName(interp),
+                @tagName(instr)[1..],
+            );
+            const wip = &op.wip;
+            op.wip.cursor = .{ .block = try wip.block(0, "Entry") };
+            const bin_op = try op.binOp(b, vector_ty);
+            try bin_op.writeResult(&op, try wip.bin(instr, bin_op.c_1, bin_op.c_2, ""));
+            const new_vsp = try op.adjustVspBy(b, -1);
+            try op.jmpToNextHandler(b, .{ .vip = OpcodeHandlerParam.vip.arg(wip), .vsp = new_vsp });
+            try op.finish(b);
+        }
+    }
+}
+
 fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
     for (&[4]Interpretation{ .i8x16, .i16x8, .i32x4, .i64x2 }) |interp| {
         const lane_ty = interp.laneType();
@@ -663,8 +685,10 @@ const OpcodeHandlerParam = @import("opcode_handler_param.zig").OpcodeHandlerPara
 
 const Builder = @import("Builder.zig");
 const value_stack_alignment = Builder.value_stack_alignment;
+const FloatInfo = @import("FloatInfo.zig");
 
 const Constant = llvm.Builder.Constant;
 const Type = llvm.Builder.Type;
 const Value = llvm.Builder.Value;
 const WipFunction = llvm.Builder.WipFunction;
+const Instruction = WipFunction.Instruction;
