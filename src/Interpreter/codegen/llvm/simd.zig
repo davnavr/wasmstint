@@ -5,6 +5,7 @@ pub fn buildOpcodeHandlers(b: *Builder) Oom!void {
     try buildBitwiseOpcodeHandlers(b);
     try buildBooleanOpcodeHandlers(b);
     try buildConstructionOpcodeHandlers(b);
+    try buildConversionOpcodeHandlers(b);
 
     try buildIntegerOpcodeHandlers(b);
 }
@@ -308,6 +309,54 @@ fn buildConstructionOpcodeHandlers(b: *Builder) Oom!void {
         const new_vsp = try op.adjustVspBy(b, 1);
         try op.jmpToNextHandler(b, .{ .vsp = new_vsp, .vip = vip_after_imm });
         try op.finish(b);
+    }
+}
+
+fn buildConversionOpcodeHandlers(b: *Builder) Oom!void {
+    const i32x4_vec = try Interpretation.i32x4.vectorType(b);
+    const f32x4_vec = try Interpretation.f32x4.vectorType(b);
+    for ([2]struct { WipFunction.Instruction.Tag, []const u8 }{
+        .{ .sitofp, "convert_i32x4_s" },
+        .{ .uitofp, "convert_i32x4_u" },
+    }) |info| {
+        const cast, const name = info;
+        var conv = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, "f32x4", name);
+        const wip = &conv.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const un_op = try conv.unOp(b, i32x4_vec);
+        try un_op.writeResult(&conv, try conv.wip.cast(cast, un_op.c_1, f32x4_vec, "result"));
+        try conv.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&conv.wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(&conv.wip),
+        });
+        try conv.finish(b);
+    }
+
+    const f64x2_vec = try Interpretation.f64x2.vectorType(b);
+    const i32x2_vec = try b.module.vectorType(.normal, 2, .i32);
+    for ([2]struct { WipFunction.Instruction.Tag, []const u8 }{
+        .{ .sitofp, "convert_low_i32x4_s" },
+        .{ .uitofp, "convert_low_i32x4_u" },
+    }) |info| {
+        const cast, const name = info;
+        var conv = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, "f64x2", name);
+        const wip = &conv.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const un_op = try conv.unOp(b, i32x4_vec);
+        const low_i32x2 = try wip.callIntrinsic(
+            .normal,
+            .none,
+            .@"vector.extract",
+            &.{ i32x2_vec, i32x4_vec },
+            &.{ un_op.c_1, try b.module.intValue(.i64, 0) },
+            "low_i32x2",
+        );
+        try un_op.writeResult(&conv, try wip.cast(cast, low_i32x2, f64x2_vec, "floats"));
+        try conv.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&conv.wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(&conv.wip),
+        });
+        try conv.finish(b);
     }
 }
 
