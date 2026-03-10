@@ -16,6 +16,7 @@ const Interpretation = enum(u3) {
     i16x8,
     i32x4,
     i64x2,
+
     f32x4,
     f64x2,
 
@@ -390,6 +391,56 @@ fn buildConversionOpcodeHandlers(b: *Builder) Oom!void {
         const new_vsp = try narrow.adjustVspBy(b, -1);
         try narrow.jmpToNextHandler(b, .{ .vip = OpcodeHandlerParam.vip.arg(wip), .vsp = new_vsp });
         try narrow.finish(b);
+    }
+
+    // On x86, should compile to pmovsx*
+    for (&[3]Interpretation{ .i16x8, .i32x4, .i64x2 }) |to_interp| {
+        const from_interp: Interpretation = @enumFromInt(@intFromEnum(to_interp) - 1);
+        const from_lane_count = from_interp.laneCount();
+        const to_lane_count = to_interp.laneCount();
+        const from_vec = try from_interp.vectorType(b);
+        const to_vec = try to_interp.vectorType(b);
+        for (
+            &[2][]const u8{ "low", "high" },
+            &[2]u5{ 0, @divExact(from_lane_count, 2) },
+        ) |lanes, src_offset| {
+            for (&[2]u7{ 's', 'u' }, &[2]WipFunction.Instruction.Tag{ .sext, .zext }) |sign, cast| {
+                var name_buf: [25]u8 = undefined;
+                var extend = try b.opcodeHandler(.fromName(
+                    FDPrefixOpcode,
+                    std.fmt.bufPrint(
+                        &name_buf,
+                        "{t}.extend_{s}_{t}_{c}",
+                        .{ to_interp, lanes, from_interp, sign },
+                    ) catch unreachable,
+                ));
+
+                const wip = &extend.wip;
+                wip.cursor = .{ .block = try wip.block(0, "Entry") };
+                const un_op = try extend.unOp(b, from_vec);
+
+                const chosen_lanes_type = try b.module.vectorType(
+                    .normal,
+                    to_lane_count,
+                    from_interp.laneType(),
+                );
+                const chosen_lanes = try wip.callIntrinsic(
+                    .normal,
+                    .none,
+                    .@"vector.extract",
+                    &.{ chosen_lanes_type, from_vec },
+                    &.{ un_op.c_1, try b.module.intValue(.i64, src_offset) },
+                    "chosen_lanes",
+                );
+                const result = try wip.cast(cast, chosen_lanes, to_vec, "result");
+                try un_op.writeResult(&extend, result);
+                try extend.jmpToNextHandler(b, .{
+                    .vip = OpcodeHandlerParam.vip.arg(wip),
+                    .vsp = OpcodeHandlerParam.vsp.arg(wip),
+                });
+                try extend.finish(b);
+            }
+        }
     }
 
     const i32x4_vec = try Interpretation.i32x4.vectorType(b);
