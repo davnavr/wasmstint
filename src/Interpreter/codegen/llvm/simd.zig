@@ -952,6 +952,71 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
         });
         try popcnt.finish(b);
     }
+
+    for (&[2]Interpretation{ .i16x8, .i32x4 }) |to_interp| {
+        const from_interp: Interpretation = @enumFromInt(@intFromEnum(to_interp) - 1);
+        const from_vec = try from_interp.vectorType(b);
+        const to_vec = try to_interp.vectorType(b);
+        const to_lane_count = to_interp.laneCount();
+
+        var lane_indices_buf: [8]Constant = undefined;
+        const lane_indices_vec = try b.module.vectorType(.normal, to_lane_count, .i32);
+        const even_lanes_indices = try b.module.vectorValue(lane_indices_vec, indices: {
+            for (0.., lane_indices_buf[0..to_lane_count]) |i, *idx| {
+                idx.* = try b.module.intConst(.i32, i * 2);
+            }
+            break :indices lane_indices_buf[0..to_lane_count];
+        });
+        const odd_lanes_indices = try b.module.vectorValue(lane_indices_vec, indices: {
+            for (0.., lane_indices_buf[0..to_lane_count]) |i, *idx| {
+                idx.* = try b.module.intConst(.i32, (i * 2) + 1);
+            }
+            break :indices lane_indices_buf[0..to_lane_count];
+        });
+        const from_vec_poison = try b.module.poisonValue(from_vec);
+
+        for (&[2]Instruction.Tag{ .sext, .zext }) |cast| {
+            const name_suffix: u7, const add: Instruction.Tag = switch (cast) {
+                .sext => .{ 's', .@"add nsw" },
+                .zext => .{ 'u', .@"add nuw" },
+                else => unreachable,
+            };
+
+            var name_buf: [29]u8 = undefined;
+            var name = std.ArrayList(u8).initBuffer(&name_buf);
+            name.appendSliceAssumeCapacity(@tagName(to_interp));
+            name.appendSliceAssumeCapacity(".extadd_pairwise_");
+            name.appendSliceAssumeCapacity(@tagName(from_interp));
+            name.appendAssumeCapacity('_');
+            name.appendAssumeCapacity(name_suffix);
+
+            var extadd = try b.opcodeHandler(.fromName(FDPrefixOpcode, name.items));
+            const wip = &extadd.wip;
+            wip.cursor = .{ .block = try wip.block(0, "Entry") };
+            const un_op = try extadd.unOp(b, from_vec);
+            const even_lanes = try wip.shuffleVector(
+                un_op.c_1,
+                from_vec_poison,
+                even_lanes_indices,
+                "even_lanes",
+            );
+            const odd_lanes = try wip.shuffleVector(
+                un_op.c_1,
+                from_vec_poison,
+                odd_lanes_indices,
+                "odd_lanes",
+            );
+
+            const even_lanes_ext = try wip.cast(cast, even_lanes, to_vec, "even_lanes_ext");
+            const odd_lanes_ext = try wip.cast(cast, odd_lanes, to_vec, "odd_lanes_ext");
+            try un_op.writeResult(&extadd, try wip.bin(add, even_lanes_ext, odd_lanes_ext, "sum"));
+            try extadd.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(wip),
+            });
+            try extadd.finish(b);
+        }
+    }
 }
 
 const std = @import("std");
