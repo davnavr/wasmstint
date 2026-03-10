@@ -549,6 +549,33 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
     for (&[2]Interpretation{ .f32x4, .f64x2 }, try FloatInfo.init(&b.module)) |interp, float_info| {
         const vector_ty = try interp.vectorType(b);
         _ = float_info;
+
+        // TODO: Don't use llvm.abs just like in scalar version?
+
+        // TODO: neg
+
+        {
+            // On x86, should compile to `sqrtps`/`sqrtpd`
+            var op = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), "sqrt");
+            const wip = &op.wip;
+            wip.cursor = .{ .block = try wip.block(0, "Entry") };
+            const un_op = try op.unOp(b, vector_ty);
+            const result = try wip.callIntrinsic(
+                .normal,
+                .none,
+                .sqrt,
+                &.{vector_ty},
+                &.{un_op.c_1},
+                "result",
+            );
+            try un_op.writeResult(&op, result);
+            try op.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(wip),
+                .vsp = OpcodeHandlerParam.vsp.arg(wip),
+            });
+            try op.finish(b);
+        }
+
         for (&[4]Instruction.Tag{ .fadd, .fsub, .fmul, .fdiv }) |instr| {
             var op = try b.opcodeHandlerFromPrefixedName(
                 FDPrefixOpcode,
