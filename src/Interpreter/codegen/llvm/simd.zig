@@ -4,6 +4,8 @@ pub fn buildOpcodeHandlers(b: *Builder) Oom!void {
     try buildMemoryLoadOpcodeHandlers(b);
     try buildBitwiseOpcodeHandlers(b);
     try buildBooleanOpcodeHandlers(b);
+    try buildConstructionOpcodeHandlers(b);
+
     try buildIntegerOpcodeHandlers(b);
 }
 
@@ -231,6 +233,7 @@ fn buildBooleanOpcodeHandlers(b: *Builder) Oom!void {
                 try b.module.intConst(int_ty, int_ty.scalarBits(&b.module) - 1),
             );
 
+            // On x86, should compile down to `pmovmskb`/`movmskps`/`movmskpd`.
             var bitmask = try b.opcodeHandlerFromPrefixedName(
                 FDPrefixOpcode,
                 @tagName(interp),
@@ -259,6 +262,52 @@ fn buildBooleanOpcodeHandlers(b: *Builder) Oom!void {
             });
             try bitmask.finish(b);
         }
+    }
+}
+
+fn buildConstructionOpcodeHandlers(b: *Builder) Oom!void {
+    {
+        var op = try b.opcodeHandler(.{ .fd = .@"v128.const" });
+        const wip = &op.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const initial_vip = OpcodeHandlerParam.vip.arg(&op.wip);
+        const value_size_bytes = try b.sizeIntValue(16);
+        const vip_after_imm = try wip.gep(
+            .inbounds,
+            .i8,
+            initial_vip,
+            &.{value_size_bytes},
+            "vip_after_imm",
+        );
+        _ = try wip.callIntrinsic(
+            .normal,
+            attrs: {
+                var attrs = llvm.Builder.FunctionAttributes.Wip{};
+                defer attrs.deinit(&b.module);
+                for (
+                    0..2,
+                    [2]llvm.Builder.Alignment{ value_stack_alignment, byte_alignment },
+                ) |i, a| {
+                    for ([4]llvm.Builder.Attribute{
+                        .{ .@"align" = a },
+                        .noundef,
+                        .nonnull,
+                        .{ .dereferenceable = 16 },
+                    }) |attr| {
+                        try attrs.addParamAttr(i, attr, &b.module);
+                    }
+                }
+                break :attrs try attrs.finish(&b.module);
+            },
+            .@"memcpy.inline",
+            &b.value_copy.overload,
+            &.{ OpcodeHandlerParam.vsp.arg(wip), initial_vip, value_size_bytes, .false },
+            "",
+        );
+
+        const new_vsp = try op.adjustVspBy(b, 1);
+        try op.jmpToNextHandler(b, .{ .vsp = new_vsp, .vip = vip_after_imm });
+        try op.finish(b);
     }
 }
 
