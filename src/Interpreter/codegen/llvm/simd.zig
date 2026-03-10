@@ -553,7 +553,7 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
         // const sign_bits = try b.module.splatValue(int_vec, float_info.sign_bit.toConst().?);
         _ = float_info;
 
-        for (&[6]llvm.Builder.FloatCondition{ .oeq, .une, .olt, .ogt, .ole, .oge }) |cond| {
+        for (&[6]FloatCondition{ .oeq, .une, .olt, .ogt, .ole, .oge }) |cond| {
             var cmp = try b.opcodeHandlerFromPrefixedName(
                 FDPrefixOpcode,
                 @tagName(interp),
@@ -636,6 +636,21 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             op.wip.cursor = .{ .block = try wip.block(0, "Entry") };
             const bin_op = try op.binOp(b, float_vec);
             try bin_op.writeResult(&op, try wip.bin(instr, bin_op.c_1, bin_op.c_2, ""));
+            const new_vsp = try op.adjustVspBy(b, -1);
+            try op.jmpToNextHandler(b, .{ .vip = OpcodeHandlerParam.vip.arg(wip), .vsp = new_vsp });
+            try op.finish(b);
+        }
+
+        // TODO: normal min/max
+
+        for (&[2][]const u8{ "pmin", "pmax" }, &[2]FloatCondition{ .olt, .ogt }) |name, cond| {
+            var op = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), name);
+            const wip = &op.wip;
+            op.wip.cursor = .{ .block = try wip.block(0, "Entry") };
+            const bin_op = try op.binOp(b, float_vec);
+            const condition = try wip.fcmp(.normal, cond, bin_op.c_2, bin_op.c_1, "cmp");
+            const selection = try wip.select(.normal, condition, bin_op.c_2, bin_op.c_1, "pick");
+            try bin_op.writeResult(&op, selection);
             const new_vsp = try op.adjustVspBy(b, -1);
             try op.jmpToNextHandler(b, .{ .vip = OpcodeHandlerParam.vip.arg(wip), .vsp = new_vsp });
             try op.finish(b);
@@ -765,6 +780,7 @@ const value_stack_alignment = Builder.value_stack_alignment;
 const FloatInfo = @import("FloatInfo.zig");
 
 const Constant = llvm.Builder.Constant;
+const FloatCondition = llvm.Builder.FloatCondition;
 const Type = llvm.Builder.Type;
 const Value = llvm.Builder.Value;
 const WipFunction = llvm.Builder.WipFunction;
