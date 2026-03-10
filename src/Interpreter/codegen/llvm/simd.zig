@@ -358,6 +358,30 @@ fn buildConversionOpcodeHandlers(b: *Builder) Oom!void {
         });
         try conv.finish(b);
     }
+
+    // demote
+
+    {
+        const f32x2_vec = try b.module.vectorType(.normal, 2, .float);
+        var promote = try b.opcodeHandler(.{ .fd = .@"f64x2.promote_low_f32x4" });
+        const wip = &promote.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const un_op = try promote.unOp(b, f32x4_vec);
+        const low_f32x2 = try wip.callIntrinsic(
+            .normal,
+            .none,
+            .@"vector.extract",
+            &.{ f32x2_vec, f32x4_vec },
+            &.{ un_op.c_1, try b.module.intValue(.i64, 0) },
+            "low_i32x2",
+        );
+        try un_op.writeResult(&promote, try wip.cast(.fpext, low_f32x2, f64x2_vec, "result"));
+        try promote.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(&promote.wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(&promote.wip),
+        });
+        try promote.finish(b);
+    }
 }
 
 fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
