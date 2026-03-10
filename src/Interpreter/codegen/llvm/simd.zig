@@ -720,6 +720,36 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
         const lane_ty = interp.laneType();
         const vector_ty = try interp.vectorType(b);
 
+        const integer_comparisons = [10]struct { llvm.Builder.IntegerCondition, []const u8 }{
+            .{ .eq, "eq" },
+            .{ .ne, "ne" },
+            .{ .slt, "lt_s" },
+            .{ .sgt, "gt_s" },
+            .{ .sle, "le_s" },
+            .{ .sge, "ge_s" },
+            // Unsigned comparisons not available for i64x2
+            .{ .ult, "lt_u" },
+            .{ .ugt, "gt_u" },
+            .{ .ule, "le_u" },
+            .{ .uge, "ge_u" },
+        };
+
+        for (integer_comparisons[0..if (interp == .i64x2) 6 else 10]) |info| {
+            const cond, const name = info;
+            var cmp = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), name);
+            const wip = &cmp.wip;
+            wip.cursor = .{ .block = try wip.block(0, "Entry") };
+            const bin_op = try cmp.binOp(b, vector_ty);
+            const result = try wip.icmp(cond, bin_op.c_1, bin_op.c_2, "cmp");
+            try bin_op.writeResult(&cmp, try wip.cast(.sext, result, vector_ty, "mask"));
+            const new_vsp = try cmp.adjustVspBy(b, -1);
+            try cmp.jmpToNextHandler(b, .{
+                .vip = OpcodeHandlerParam.vip.arg(wip),
+                .vsp = new_vsp,
+            });
+            try cmp.finish(b);
+        }
+
         const shift_mask = try b.module.intValue(.i32, lane_ty.scalarBits(&b.module) - 1);
         for (&[3]struct { WipFunction.Instruction.Tag, []const u8 }{
             .{ .shl, "shl" },
