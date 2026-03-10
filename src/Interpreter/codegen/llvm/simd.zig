@@ -551,7 +551,6 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
         const float_vec = try interp.vectorType(b);
         const int_vec = try int_interp.vectorType(b);
         // const sign_bits = try b.module.splatValue(int_vec, float_info.sign_bit.toConst().?);
-        _ = float_info;
 
         for (&[6]FloatCondition{ .oeq, .une, .olt, .ogt, .ole, .oge }) |cond| {
             var cmp = try b.opcodeHandlerFromPrefixedName(
@@ -570,7 +569,7 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
         }
 
         // TODO: detect when LLVM emits a libc/compiler_rt call instead of inline instructions
-        for (&[4]llvm.Builder.Intrinsic{ .ceil, .floor, .trunc, .roundeven }) |intrin| {
+        for (&[4]Intrinsic{ .ceil, .floor, .trunc, .roundeven }) |intrin| {
             var op = try b.opcodeHandlerFromPrefixedName(
                 FDPrefixOpcode,
                 @tagName(interp),
@@ -669,7 +668,37 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try op.finish(b);
         }
 
-        // TODO: normal min/max
+        const canonical_nan_floats = try b.module.splatValue(
+            float_vec,
+            float_info.canonical_nan.toConst().?,
+        );
+
+        for (&[2]Intrinsic{ .minimum, .maximum }) |intrin| {
+            var op = try b.opcodeHandlerFromPrefixedName(
+                FDPrefixOpcode,
+                @tagName(interp),
+                @tagName(intrin)[0..3],
+            );
+            const wip = &op.wip;
+            op.wip.cursor = .{ .block = try wip.block(0, "Entry") };
+            const bin_op = try op.binOp(b, float_vec);
+            const chosen = try wip.callIntrinsic(
+                .normal,
+                .none,
+                intrin,
+                &.{float_vec},
+                &.{ bin_op.c_1, bin_op.c_2 },
+                "",
+            );
+            const is_nan = try wip.fcmp(.normal, .uno, chosen, chosen, "is_nan");
+            try bin_op.writeResult(
+                &op,
+                try wip.select(.normal, is_nan, canonical_nan_floats, chosen, "canonicalize_nans"),
+            );
+            const new_vsp = try op.adjustVspBy(b, -1);
+            try op.jmpToNextHandler(b, .{ .vip = OpcodeHandlerParam.vip.arg(wip), .vsp = new_vsp });
+            try op.finish(b);
+        }
 
         for (&[2][]const u8{ "pmin", "pmax" }, &[2]FloatCondition{ .olt, .ogt }) |name, cond| {
             var op = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), name);
@@ -813,3 +842,4 @@ const Type = llvm.Builder.Type;
 const Value = llvm.Builder.Value;
 const WipFunction = llvm.Builder.WipFunction;
 const Instruction = WipFunction.Instruction;
+const Intrinsic = llvm.Builder.Intrinsic;
