@@ -832,6 +832,51 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
         }
     }
 
+    // On x86+sse2, should compile to `pavgb`/`pavgw`
+    // - TODO(llvm): https://github.com/llvm/llvm-project/issues/122872
+    for (&[2]FDPrefixOpcode{ .@"i8x16.avgr_u", .@"i16x8.avgr_u" }) |opcode| {
+        const interp: Interpretation = std.meta.stringToEnum(
+            Interpretation,
+            @tagName(opcode)[0..5],
+        ) orelse unreachable;
+        const vec = try interp.vectorType(b);
+
+        const overflow_int = try b.module.intType(interp.laneType().scalarBits(&b.module) + 1);
+        const overflow_vec = try b.module.vectorType(.normal, interp.laneCount(), overflow_int);
+
+        var avgr = try b.opcodeHandler(.{ .fd = opcode });
+        const wip = &avgr.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const bin_op = try avgr.binOp(b, vec);
+        try bin_op.writeResult(&avgr, result: {
+            const sum = try wip.bin(
+                .@"add nuw",
+                try wip.cast(.zext, bin_op.c_1, overflow_vec, "a"),
+                try wip.cast(.zext, bin_op.c_2, overflow_vec, "b"),
+                "",
+            );
+
+            const numerator = try wip.bin(
+                .@"add nuw",
+                sum,
+                try b.module.splatValue(overflow_vec, try b.module.intConst(overflow_int, 1)),
+                "numerator",
+            );
+
+            const result = try wip.bin(
+                .udiv,
+                numerator,
+                try b.module.splatValue(overflow_vec, try b.module.intConst(overflow_int, 2)),
+                "avgr",
+            );
+
+            break :result try wip.cast(.trunc, result, vec, "result");
+        });
+        const new_vsp = try avgr.adjustVspBy(b, -1);
+        try avgr.jmpToNextHandler(b, .{ .vip = OpcodeHandlerParam.vip.arg(wip), .vsp = new_vsp });
+        try avgr.finish(b);
+    }
+
     for (&[3]Interpretation{ .i16x8, .i32x4, .i64x2 }) |interp| {
         var mul = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), "mul");
         const wip = &mul.wip;
