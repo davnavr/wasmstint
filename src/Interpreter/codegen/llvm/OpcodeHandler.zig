@@ -17,58 +17,102 @@ pub fn jmpToNextHandler(
         eip: Value = .none,
     },
 ) Oom!void {
-    // TODO: Add fuel checking
     const wip = &handler.wip;
-    const next_opcode_byte = try wip.load(.normal, .i8, updates.vip, .default, "");
-    const next_handler_offset = try wip.cast(.zext, next_opcode_byte, b.size_type, "");
-    const next_handler = try wip.load(
-        .normal,
-        .ptr,
-        try wip.gep(
-            .inbounds,
-            .ptr,
-            OpcodeHandlerParam.disp.arg(wip),
-            &.{next_handler_offset},
-            "",
-        ),
-        .fromByteUnits(b.ptr_size_bytes),
-        "",
-    );
     const after_next_ip_byte = try wip.gep(
         .inbounds,
         .i8,
         updates.vip,
         &.{try b.sizeIntValue(1)},
-        "",
+        "after_next_ip_byte",
     );
 
-    var args: [10]Value = undefined;
-    for (&args, std.enums.values(OpcodeHandlerParam)) |*a, param| {
-        a.* = arg: {
-            switch (param) {
-                .vsp => break :arg updates.vsp,
-                .vip => break :arg after_next_ip_byte,
-                inline .stp,
-                .locals,
-                .module,
-                .memories,
-                .eip,
-                => |tag| if (@field(updates, @tagName(tag)) != .none) {
-                    break :arg @field(updates, @tagName(tag));
-                },
-                else => {},
-            }
+    const args = args: {
+        var args: [10]Value = undefined;
+        for (&args, std.enums.values(OpcodeHandlerParam)) |*a, param| {
+            a.* = arg: {
+                switch (param) {
+                    .vsp => break :arg updates.vsp,
+                    .vip => break :arg after_next_ip_byte,
+                    inline .stp,
+                    .locals,
+                    .module,
+                    .memories,
+                    .eip,
+                    => |tag| if (@field(updates, @tagName(tag)) != .none) {
+                        break :arg @field(updates, @tagName(tag));
+                    },
+                    else => {},
+                }
 
-            break :arg param.arg(wip);
-        };
+                break :arg param.arg(wip);
+            };
+        }
+
+        break :args args;
+    };
+
+    const fuel_ptr = OpcodeHandlerParam.fuel.arg(wip);
+    const current_fuel = try wip.load(.normal, .i64, fuel_ptr, .default, "current_fuel");
+    const next_opcode = try wip.block(1, "NextOpcode");
+    const out_of_fuel = try wip.block(1, "OutOfFuel");
+    _ = try wip.brCond(
+        try wip.icmp(.ugt, current_fuel, try b.module.intValue(.i64, 0), "has_fuel"),
+        next_opcode,
+        out_of_fuel,
+        .then_likely,
+    );
+
+    {
+        wip.cursor = .{ .block = next_opcode };
+        const new_fuel = try wip.bin(
+            .@"sub nuw",
+            current_fuel,
+            try b.module.intValue(.i64, 1),
+            "new_fuel",
+        );
+        _ = try wip.store(.normal, new_fuel, fuel_ptr, .default);
+
+        const next_opcode_byte = try wip.load(.normal, .i8, updates.vip, .default, "");
+        const next_handler_offset = try wip.cast(.zext, next_opcode_byte, b.size_type, "");
+        const next_handler = try wip.load(
+            .normal,
+            .ptr,
+            try wip.gep(
+                .inbounds,
+                .ptr,
+                OpcodeHandlerParam.disp.arg(wip),
+                &.{next_handler_offset},
+                "",
+            ),
+            .fromByteUnits(b.ptr_size_bytes),
+            "",
+        );
+        _ = try wip.ret(
+            try wip.call(
+                .musttail,
+                b.opcode_handler.call_conv,
+                b.opcode_handler.invoke_attrs,
+                b.opcode_handler.type,
+                next_handler,
+                &args,
+                "",
+            ),
+        );
     }
+
+    wip.cursor = .{ .block = out_of_fuel };
+    _ = try wip.callIntrinsicAssumeCold();
     _ = try wip.ret(
         try wip.call(
             .musttail,
             b.opcode_handler.call_conv,
-            b.opcode_handler.invoke_attrs,
+            attrs: {
+                var attrs = try b.opcode_handler.invoke_attrs.toWip(&b.module);
+                try attrs.addFnAttr(.@"noinline", &b.module);
+                break :attrs try attrs.finish(&b.module);
+            },
             b.opcode_handler.type,
-            next_handler,
+            b.out_of_fuel_handler.toValue(&b.module),
             &args,
             "",
         ),
