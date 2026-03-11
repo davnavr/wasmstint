@@ -796,6 +796,29 @@ fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
         try swizzle.finish(b);
     }
 
+    // On x86+avx2, compiles down to `vpbroadcast`
+    for (&[6]Interpretation{ .i8x16, .i16x8, .i32x4, .i64x2, .f32x4, .f64x2 }) |interp| {
+        var splat = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), "splat");
+        const wip = &splat.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const lane_ty = interp.laneType();
+        const un_op = try splat.unOp(b, switch (interp) {
+            .i8x16, .i16x8 => .i32,
+            .i32x4, .i64x2, .f32x4, .f64x2 => lane_ty,
+        });
+        const elem = switch (interp) {
+            .i8x16, .i16x8 => try wip.cast(.trunc, un_op.c_1, lane_ty, ""),
+            .i32x4, .i64x2, .f32x4, .f64x2 => un_op.c_1,
+        };
+
+        try un_op.writeResult(&splat, try wip.splatVector(try interp.vectorType(b), elem, "splat"));
+        try splat.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(wip),
+        });
+        try splat.finish(b);
+    }
+
     for (&[2]Interpretation{ .i8x16, .i16x8 }) |interp| {
         for (&[2]Instruction.Tag{ .sext, .zext }, &[2]u7{ 's', 'u' }) |cast, name_suffix| {
             var suffix_buf: [14]u8 = "extract_lane_?".*;
