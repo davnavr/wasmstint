@@ -41,7 +41,7 @@ const Interpretation = enum(u3) {
         };
     }
 
-    fn laneWidthInt(i: Interpretation, b: *Builder) Oom!Type {
+    fn laneWidthIntType(i: Interpretation, b: *Builder) Oom!Type {
         return try b.module.intType(@ctz(i.laneCount()) + 1);
     }
 
@@ -76,7 +76,7 @@ const Interpretation = enum(u3) {
         return .{
             .imm = try wip.load(
                 .normal,
-                try i.laneWidthInt(b),
+                try i.laneWidthIntType(b),
                 start_vip,
                 .default,
                 "lane_imm",
@@ -125,6 +125,37 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
             .vip = access.vip,
             .vsp = OpcodeHandlerParam.vsp.arg(&load.wip),
         });
+        try load.finish(b);
+    }
+
+    for (
+        &[4]Interpretation{ .i8x16, .i16x8, .i32x4, .i64x2 },
+        &[4]FDPrefixOpcode{
+            .@"v128.load8_lane",
+            .@"v128.load16_lane",
+            .@"v128.load32_lane",
+            .@"v128.load64_lane",
+        },
+        &[4]std.mem.Alignment{ .@"1", .@"2", .@"4", .@"8" },
+    ) |interp, opcode, access_size| {
+        var load = try b.opcodeHandler(.{ .fd = opcode });
+        const wip = &load.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+
+        const perform_load = try wip.block(1, "Load");
+        const access = try load.linearMemoryAccess(b, 1, access_size, perform_load);
+
+        const src_vec = try load.loadOperandAt(b, try interp.vectorType(b), 0, "src_vec");
+        const lane = try interp.readLaneIdx(wip, b, access.vip);
+
+        const lane_ty = interp.laneType();
+        const elem = try wip.load(.normal, lane_ty, access.ptr, byte_alignment, "elem");
+
+        const new_vec = try wip.insertElement(src_vec, elem, lane.imm, "new_vec");
+        _ = try wip.store(.normal, new_vec, try load.gepOperandAt(b, 1), .default);
+
+        const new_vsp = try load.adjustVspBy(b, -1);
+        try load.jmpToNextHandler(b, .{ .vip = lane.vip, .vsp = new_vsp });
         try load.finish(b);
     }
 }
