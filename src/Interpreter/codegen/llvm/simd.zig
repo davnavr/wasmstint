@@ -45,6 +45,52 @@ const Interpretation = enum(u3) {
         return try b.module.intType(@ctz(i.laneCount()) + 1);
     }
 
+    const LaneIdx = struct {
+        imm: Value,
+        /// Value of `vip` after the lane index byte.
+        vip: Value,
+
+        fn gepToTarget(
+            idx: LaneIdx,
+            interp: Interpretation,
+            wip: *WipFunction,
+            b: *Builder,
+            base: Value,
+        ) Oom!Value {
+            return try wip.gep(
+                .inbounds,
+                interp.laneType(),
+                base,
+                &.{try wip.cast(.zext, idx.imm, b.size_type, "target_idx")},
+                "target_ptr",
+            );
+        }
+    };
+
+    fn readLaneIdx(
+        i: Interpretation,
+        wip: *WipFunction,
+        b: *Builder,
+        start_vip: Value,
+    ) Oom!LaneIdx {
+        return .{
+            .imm = try wip.load(
+                .normal,
+                try i.laneWidthInt(b),
+                start_vip,
+                .default,
+                "lane_imm",
+            ),
+            .vip = try wip.gep(
+                .inbounds,
+                .i8,
+                start_vip,
+                &.{try b.sizeIntValue(1)},
+                "vip_after_lane_imm",
+            ),
+        };
+    }
+
     fn vectorType(i: Interpretation, b: *Builder) Oom!Type {
         return try b.module.vectorType(.normal, i.laneCount(), i.laneType());
     }
@@ -631,36 +677,15 @@ fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
             const wip = &extract.wip;
             wip.cursor = .{ .block = try wip.block(0, "Entry") };
             const result_ptr = try extract.gepOperandAt(b, 0);
-            const start_vip = OpcodeHandlerParam.vip.arg(wip);
-            const lane_imm = try wip.load(
-                .normal,
-                try interp.laneWidthInt(b),
-                start_vip,
-                .default,
-                "lane_imm",
-            );
-            const vip_after_lane_imm = try wip.gep(
-                .inbounds,
-                .i8,
-                start_vip,
-                &.{try b.sizeIntValue(1)},
-                "vip_after_lane_imm",
-            );
+            const lane = try interp.readLaneIdx(wip, b, OpcodeHandlerParam.vip.arg(wip));
 
-            const lane_ty = interp.laneType();
-            const target_ptr = try wip.gep(
-                .inbounds,
-                lane_ty,
-                result_ptr,
-                &.{try wip.cast(.zext, lane_imm, b.size_type, "target_idx")},
-                "target_ptr",
-            );
-            const target = try wip.load(.normal, lane_ty, target_ptr, .default, "target");
+            const target_ptr = try lane.gepToTarget(interp, wip, b, result_ptr);
+            const target = try wip.load(.normal, interp.laneType(), target_ptr, .default, "target");
 
             const result = try wip.cast(cast, target, .i32, "result");
             _ = try wip.store(.normal, result, result_ptr, value_stack_alignment);
             try extract.jmpToNextHandler(b, .{
-                .vip = vip_after_lane_imm,
+                .vip = lane.vip,
                 .vsp = OpcodeHandlerParam.vsp.arg(wip),
             });
             try extract.finish(b);
@@ -676,38 +701,50 @@ fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
         const wip = &extract.wip;
         wip.cursor = .{ .block = try wip.block(0, "Entry") };
         const result_ptr = try extract.gepOperandAt(b, 0);
-        const start_vip = OpcodeHandlerParam.vip.arg(wip);
-        const lane_imm = try wip.load(
-            .normal,
-            try interp.laneWidthInt(b),
-            start_vip,
-            .default,
-            "lane_imm",
-        );
-        const vip_after_lane_imm = try wip.gep(
-            .inbounds,
-            .i8,
-            start_vip,
-            &.{try b.sizeIntValue(1)},
-            "vip_after_lane_imm",
-        );
+        const lane = try interp.readLaneIdx(wip, b, OpcodeHandlerParam.vip.arg(wip));
 
-        const lane_ty = interp.laneType();
-        const target_ptr = try wip.gep(
-            .inbounds,
-            lane_ty,
-            result_ptr,
-            &.{try wip.cast(.zext, lane_imm, b.size_type, "target_idx")},
-            "target_ptr",
-        );
-        const target = try wip.load(.normal, lane_ty, target_ptr, .default, "target");
+        const target_ptr = try lane.gepToTarget(interp, wip, b, result_ptr);
+        const target = try wip.load(.normal, interp.laneType(), target_ptr, .default, "target");
 
         _ = try wip.store(.normal, target, result_ptr, value_stack_alignment);
         try extract.jmpToNextHandler(b, .{
-            .vip = vip_after_lane_imm,
+            .vip = lane.vip,
             .vsp = OpcodeHandlerParam.vsp.arg(wip),
         });
         try extract.finish(b);
+    }
+
+    for (&[6]Interpretation{ .i8x16, .i16x8, .i32x4, .i64x2, .f32x4, .f64x2 }) |interp| {
+        var replace = try b.opcodeHandlerFromPrefixedName(
+            FDPrefixOpcode,
+            @tagName(interp),
+            "replace_lane",
+        );
+        const wip = &replace.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const lane_ty = interp.laneType();
+        const replacement_arg = try replace.loadOperandAt(
+            b,
+            switch (interp) {
+                .i8x16, .i16x8 => .i32,
+                .i32x4, .i64x2, .f32x4, .f64x2 => lane_ty,
+            },
+            0,
+            "replacement",
+        );
+        const replacement = switch (interp) {
+            .i8x16, .i16x8 => try wip.cast(.trunc, replacement_arg, lane_ty, "replacement.trunc"),
+            .i32x4, .i64x2, .f32x4, .f64x2 => replacement_arg,
+        };
+        const result_ptr = try replace.gepOperandAt(b, 1);
+
+        const lane = try interp.readLaneIdx(wip, b, OpcodeHandlerParam.vip.arg(wip));
+        const target_ptr = try lane.gepToTarget(interp, wip, b, result_ptr);
+        _ = try wip.store(.normal, replacement, target_ptr, .default);
+
+        const new_vsp = try replace.adjustVspBy(b, -1);
+        try replace.jmpToNextHandler(b, .{ .vip = lane.vip, .vsp = new_vsp });
+        try replace.finish(b);
     }
 }
 
