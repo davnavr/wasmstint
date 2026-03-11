@@ -953,6 +953,72 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
         try popcnt.finish(b);
     }
 
+    for (&[3]Interpretation{ .i16x8, .i32x4, .i64x2 }) |to_interp| {
+        const to_vec = try to_interp.vectorType(b);
+        const from_interp: Interpretation = @enumFromInt(@intFromEnum(to_interp) - 1);
+        const from_vec = try from_interp.vectorType(b);
+        const from_lane_count = from_interp.laneCount();
+        const from_half_vec = try b.module.vectorType(
+            .normal,
+            @divExact(from_lane_count, 2),
+            from_interp.laneType(),
+        );
+
+        for (
+            &[2][]const u8{ "low", "high" },
+            &[2]u5{ 0, @divExact(from_lane_count, 2) },
+        ) |lanes, src_offset| {
+            const src_offset_value = try b.module.intValue(.i64, src_offset);
+            for (&[2]Instruction.Tag{ .sext, .zext }) |cast| {
+                const suffix: u7, const mul_instr: Instruction.Tag = switch (cast) {
+                    .sext => .{ 's', .@"mul nsw" },
+                    .zext => .{ 'u', .@"mul nuw" },
+                    else => unreachable,
+                };
+
+                var name_buf: [25]u8 = undefined;
+                var name = std.ArrayList(u8).initBuffer(&name_buf);
+                name.appendSliceAssumeCapacity(@tagName(to_interp));
+                name.appendSliceAssumeCapacity(".extmul_");
+                name.appendSliceAssumeCapacity(lanes);
+                name.appendAssumeCapacity('_');
+                name.appendSliceAssumeCapacity(@tagName(from_interp));
+                name.appendAssumeCapacity('_');
+                name.appendAssumeCapacity(suffix);
+
+                var mul = try b.opcodeHandler(.fromName(FDPrefixOpcode, name.items));
+                const wip = &mul.wip;
+                wip.cursor = .{ .block = try mul.wip.block(0, "Entry") };
+                const bin_op = try mul.binOp(b, from_vec);
+
+                const c_1 = try wip.callIntrinsic(
+                    .normal,
+                    .none,
+                    .@"vector.extract",
+                    &.{ from_half_vec, from_vec },
+                    &.{ bin_op.c_1, src_offset_value },
+                    "c1.half",
+                );
+                const c_2 = try wip.callIntrinsic(
+                    .normal,
+                    .none,
+                    .@"vector.extract",
+                    &.{ from_half_vec, from_vec },
+                    &.{ bin_op.c_2, src_offset_value },
+                    "c2.half",
+                );
+
+                const c1_ext = try wip.cast(cast, c_1, to_vec, "c1.ext");
+                const c2_ext = try wip.cast(cast, c_2, to_vec, "c2.ext");
+
+                try bin_op.writeResult(&mul, try wip.bin(mul_instr, c1_ext, c2_ext, "mul"));
+                const new_vsp = try mul.adjustVspBy(b, -1);
+                try mul.jmpToNextHandler(b, .{ .vip = OpcodeHandlerParam.vip.arg(wip), .vsp = new_vsp });
+                try mul.finish(b);
+            }
+        }
+    }
+
     for (&[2]Interpretation{ .i16x8, .i32x4 }) |to_interp| {
         const from_interp: Interpretation = @enumFromInt(@intFromEnum(to_interp) - 1);
         const from_vec = try from_interp.vectorType(b);
