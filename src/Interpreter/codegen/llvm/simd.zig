@@ -675,35 +675,72 @@ fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
         const indices_ptr = try swizzle.gepOperandAt(b, 0);
         const indices = try wip.load(.normal, i8x16, indices_ptr, byte_alignment, "indices");
         const result_ptr = try swizzle.gepOperandAt(b, 1);
-
         const source = try wip.load(.normal, i8x16, result_ptr, value_stack_alignment, "source");
-        const max_valid_index = try b.module.intValue(.i8, 15);
-        for (0..16) |i| {
-            const i_value = try b.sizeIntValue(@intCast(i));
-            const index_unsafe = try wip.extractElement(indices, i_value, "");
-            const index_clamped = try wip.callIntrinsic(
+
+        if (b.hasX86Feature(.ssse3)) {
+            const intrin_ty = try b.fnType(i8x16, &.{ i8x16, i8x16 });
+            const paddusb = try b.module.addFunction(
+                intrin_ty,
+                try b.module.strtabString("llvm.x86.sse2.paddus.b"),
+                .default,
+            );
+            // Ensures OOB lane indices are set to `0x80`, so `pshufb` sets those lanes to zero.
+            const clamped_indices = try wip.call(
                 .normal,
+                .default,
                 .none,
-                .umin,
-                &.{.i8},
-                &.{ index_unsafe, max_valid_index },
-                "",
+                intrin_ty,
+                paddusb.toValue(&b.module),
+                &.{ indices, try b.module.splatValue(i8x16, try b.module.intConst(.i8, 0x70)) },
+                "clamped_indices",
             );
-            const to_store = try wip.select(
+
+            const pshufb = try b.module.addFunction(
+                intrin_ty,
+                try b.module.strtabString("llvm.x86.ssse3.pshuf.b.128"),
+                .default,
+            );
+
+            const result = try wip.call(
                 .normal,
-                try wip.icmp(.ule, index_unsafe, max_valid_index, ""),
-                // Can't allow OOB memory access
-                try wip.extractElement(source, index_clamped, ""),
-                zero_byte,
-                "",
+                .default,
+                .none,
+                intrin_ty,
+                pshufb.toValue(&b.module),
+                &.{ source, clamped_indices },
+                "result",
             );
 
-            const dst_ptr = if (i == 0)
-                result_ptr
-            else
-                try wip.gep(.inbounds, .i8, result_ptr, &.{i_value}, "");
+            _ = try wip.store(.normal, result, result_ptr, value_stack_alignment);
+        } else {
+            const max_valid_index = try b.module.intValue(.i8, 15);
+            for (0..16) |i| {
+                const i_value = try b.sizeIntValue(@intCast(i));
+                const index_unsafe = try wip.extractElement(indices, i_value, "");
+                const index_clamped = try wip.callIntrinsic(
+                    .normal,
+                    .none,
+                    .umin,
+                    &.{.i8},
+                    &.{ index_unsafe, max_valid_index },
+                    "",
+                );
+                const to_store = try wip.select(
+                    .normal,
+                    try wip.icmp(.ule, index_unsafe, max_valid_index, ""),
+                    // Can't allow OOB memory access
+                    try wip.extractElement(source, index_clamped, ""),
+                    zero_byte,
+                    "",
+                );
 
-            _ = try wip.store(.normal, to_store, dst_ptr, .default);
+                const dst_ptr = if (i == 0)
+                    result_ptr
+                else
+                    try wip.gep(.inbounds, .i8, result_ptr, &.{i_value}, "");
+
+                _ = try wip.store(.normal, to_store, dst_ptr, .default);
+            }
         }
 
         try swizzle.jmpToNextHandler(b, .{
