@@ -1019,6 +1019,54 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
         }
     }
 
+    // On x86+ssse3, should compile down to `pmulhrsw` with overflow detection
+    // On aarch64, this apparently follows the semantics of `sqrdmulh`
+    // See also: https://github.com/WebAssembly/relaxed-simd/issues/40
+    {
+        const i16x8 = try Interpretation.i16x8.vectorType(b);
+        const i32x8 = try b.module.vectorType(.normal, 8, .i32);
+
+        var mul = try b.opcodeHandler(.{ .fd = .@"i16x8.q15mulr_sat_s" });
+        const wip = &mul.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const bin_op = try mul.binOp(b, i16x8);
+
+        const c1 = try wip.cast(.sext, bin_op.c_1, i32x8, "c1.ext");
+        const c2 = try wip.cast(.sext, bin_op.c_2, i32x8, "c2.ext");
+        const product = try wip.bin(.@"mul nuw", c1, c2, "product");
+        const to_shift = try wip.bin(
+            .@"add nuw",
+            product,
+            try b.module.splatValue(i32x8, try b.module.intConst(.i32, 0x4000)),
+            "to_shift",
+        );
+
+        const shift_amt = try b.module.splatValue(i32x8, try b.module.intConst(.i32, 15));
+        const shifted = try wip.bin(.lshr, to_shift, shift_amt, "shifted");
+        const result = try wip.cast(.trunc, shifted, i16x8, "result");
+
+        const overflow_bounds = try b.module.splatValue(
+            i16x8,
+            try b.module.intConst(.i16, std.math.minInt(i16)),
+        );
+        const saturated = try b.module.splatValue(
+            i16x8,
+            try b.module.intConst(.i16, std.math.maxInt(i16)),
+        );
+
+        const overflowed = try wip.bin(
+            .@"and",
+            try wip.icmp(.eq, bin_op.c_1, overflow_bounds, "c1.is_min"),
+            try wip.icmp(.eq, bin_op.c_2, overflow_bounds, "c2.is_min"),
+            "overflowed",
+        );
+        const chosen = try wip.select(.normal, overflowed, saturated, result, "chosen");
+        try bin_op.writeResult(&mul, chosen);
+        const new_vsp = try mul.adjustVspBy(b, -1);
+        try mul.jmpToNextHandler(b, .{ .vip = OpcodeHandlerParam.vip.arg(wip), .vsp = new_vsp });
+        try mul.finish(b);
+    }
+
     for (&[2]Interpretation{ .i16x8, .i32x4 }) |to_interp| {
         const from_interp: Interpretation = @enumFromInt(@intFromEnum(to_interp) - 1);
         const from_vec = try from_interp.vectorType(b);
