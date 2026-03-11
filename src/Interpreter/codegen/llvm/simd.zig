@@ -169,33 +169,57 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
 
     for (
         &[4]Interpretation{ .i8x16, .i16x8, .i32x4, .i64x2 },
-        &[4]FDPrefixOpcode{
-            .@"v128.load8_lane",
-            .@"v128.load16_lane",
-            .@"v128.load32_lane",
-            .@"v128.load64_lane",
-        },
         &[4]std.mem.Alignment{ .@"1", .@"2", .@"4", .@"8" },
-    ) |interp, opcode, access_size| {
-        var load = try b.opcodeHandler(.{ .fd = opcode });
-        const wip = &load.wip;
-        wip.cursor = .{ .block = try wip.block(0, "Entry") };
-
-        const perform_load = try wip.block(1, "Load");
-        const access = try load.linearMemoryAccess(b, 1, access_size, perform_load);
-
-        const src_vec = try load.loadOperandAt(b, try interp.vectorType(b), 0, "src_vec");
-        const lane = try interp.readLaneIdx(wip, b, access.vip);
-
+    ) |interp, access_size| {
         const lane_ty = interp.laneType();
-        const elem = try wip.load(.normal, lane_ty, access.ptr, byte_alignment, "elem");
+        const lane_width = interp.laneType().scalarBits(&b.module);
+        var name_buf: [17]u8 = undefined;
 
-        const new_vec = try wip.insertElement(src_vec, elem, lane.imm, "new_vec");
-        _ = try wip.store(.normal, new_vec, try load.gepOperandAt(b, 1), .default);
+        {
+            var load = try b.opcodeHandler(.fromName(
+                FDPrefixOpcode,
+                std.fmt.bufPrint(&name_buf, "v128.load{}_splat", .{lane_width}) catch unreachable,
+            ));
+            const wip = &load.wip;
+            wip.cursor = .{ .block = try wip.block(0, "Entry") };
 
-        const new_vsp = try load.adjustVspBy(b, -1);
-        try load.jmpToNextHandler(b, .{ .vip = lane.vip, .vsp = new_vsp });
-        try load.finish(b);
+            const perform_load = try wip.block(1, "Load");
+            const access = try load.linearMemoryAccess(b, 0, access_size, perform_load);
+
+            const elem = try wip.load(.normal, lane_ty, access.ptr, byte_alignment, "elem");
+            const splat = try wip.splatVector(try interp.vectorType(b), elem, "splat");
+            _ = try wip.store(.normal, splat, try load.gepOperandAt(b, 0), value_stack_alignment);
+
+            try load.jmpToNextHandler(b, .{
+                .vip = access.vip,
+                .vsp = OpcodeHandlerParam.vsp.arg(wip),
+            });
+            try load.finish(b);
+        }
+
+        {
+            var load = try b.opcodeHandler(.fromName(
+                FDPrefixOpcode,
+                std.fmt.bufPrint(&name_buf, "v128.load{}_lane", .{lane_width}) catch unreachable,
+            ));
+            const wip = &load.wip;
+            wip.cursor = .{ .block = try wip.block(0, "Entry") };
+
+            const perform_load = try wip.block(1, "Load");
+            const access = try load.linearMemoryAccess(b, 1, access_size, perform_load);
+
+            const src_vec = try load.loadOperandAt(b, try interp.vectorType(b), 0, "src_vec");
+            const lane = try interp.readLaneIdx(wip, b, access.vip);
+
+            const elem = try wip.load(.normal, lane_ty, access.ptr, byte_alignment, "elem");
+
+            const new_vec = try wip.insertElement(src_vec, elem, lane.imm, "new_vec");
+            _ = try wip.store(.normal, new_vec, try load.gepOperandAt(b, 1), value_stack_alignment);
+
+            const new_vsp = try load.adjustVspBy(b, -1);
+            try load.jmpToNextHandler(b, .{ .vip = lane.vip, .vsp = new_vsp });
+            try load.finish(b);
+        }
     }
 }
 
@@ -767,6 +791,8 @@ fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
             "concat_vecs",
         );
 
+        // Panics due to insufficient capacity
+        try b.module.type_extra.ensureUnusedCapacity(b.module.gpa, 128);
         var result = try b.module.poisonValue(i8x16);
         for (0..16) |i| {
             const i_value = try b.sizeIntValue(@intCast(i));
