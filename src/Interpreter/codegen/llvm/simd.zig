@@ -963,6 +963,50 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
         try mul.finish(b);
     }
 
+    // On x86+sse2, should compile down to `pmaddwd`
+    {
+        const i16x8 = try Interpretation.i16x8.vectorType(b);
+        const i32x4 = try Interpretation.i32x4.vectorType(b);
+        const i32x8 = try b.module.vectorType(.normal, 8, .i32);
+        var dot = try b.opcodeHandler(.{ .fd = .@"i32x4.dot_i16x8_s" });
+        const wip = &dot.wip;
+        wip.cursor = .{ .block = try dot.wip.block(0, "Entry") };
+        const bin_op = try dot.binOp(b, i16x8);
+        const a_ext = try wip.cast(.sext, bin_op.c_1, i32x8, "a");
+        const b_ext = try wip.cast(.sext, bin_op.c_2, i32x8, "b");
+        const product = try wip.bin(.@"mul nuw", a_ext, b_ext, "product");
+        const i32x8_poison = try b.module.poisonValue(i32x8);
+
+        var indices_buf: [4]Constant = undefined;
+        const even_lanes = try wip.shuffleVector(
+            product,
+            i32x8_poison,
+            try b.module.vectorValue(i32x4, indices: {
+                for (0..4, &indices_buf) |i, *idx| {
+                    idx.* = try b.module.intConst(.i32, i * 2);
+                }
+                break :indices &indices_buf;
+            }),
+            "even_lanes",
+        );
+        const odd_lanes = try wip.shuffleVector(
+            product,
+            i32x8_poison,
+            try b.module.vectorValue(i32x4, indices: {
+                for (0..4, &indices_buf) |i, *idx| {
+                    idx.* = try b.module.intConst(.i32, (i * 2) + 1);
+                }
+                break :indices &indices_buf;
+            }),
+            "odd_lanes",
+        );
+
+        try bin_op.writeResult(&dot, try wip.bin(.add, even_lanes, odd_lanes, "result"));
+        const new_vsp = try dot.adjustVspBy(b, -1);
+        try dot.jmpToNextHandler(b, .{ .vip = OpcodeHandlerParam.vip.arg(wip), .vsp = new_vsp });
+        try dot.finish(b);
+    }
+
     const i8x16 = try Interpretation.i8x16.vectorType(b);
 
     {
