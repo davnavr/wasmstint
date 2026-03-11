@@ -797,21 +797,48 @@ fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
     }
 
     // On x86+avx2, compiles down to `vpbroadcast`
-    for (&[6]Interpretation{ .i8x16, .i16x8, .i32x4, .i64x2, .f32x4, .f64x2 }) |interp| {
+    for (&[4]Interpretation{ .i8x16, .i16x8, .i32x4, .f32x4 }) |interp| {
         var splat = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), "splat");
         const wip = &splat.wip;
         wip.cursor = .{ .block = try wip.block(0, "Entry") };
         const lane_ty = interp.laneType();
         const un_op = try splat.unOp(b, switch (interp) {
             .i8x16, .i16x8 => .i32,
-            .i32x4, .i64x2, .f32x4, .f64x2 => lane_ty,
+            .i32x4, .f32x4 => lane_ty,
+            else => unreachable,
         });
         const elem = switch (interp) {
             .i8x16, .i16x8 => try wip.cast(.trunc, un_op.c_1, lane_ty, ""),
-            .i32x4, .i64x2, .f32x4, .f64x2 => un_op.c_1,
+            .i32x4, .f32x4 => un_op.c_1,
+            else => unreachable,
         };
 
         try un_op.writeResult(&splat, try wip.splatVector(try interp.vectorType(b), elem, "splat"));
+        try splat.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(wip),
+        });
+        try splat.finish(b);
+    }
+
+    for (&[2]Interpretation{ .i64x2, .f64x2 }) |interp| {
+        var splat = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, @tagName(interp), "splat");
+        const wip = &splat.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const lane_ty = interp.laneType();
+        const result_ptr = try splat.gepOperandAt(b, 0);
+        const elem = try wip.load(.normal, lane_ty, result_ptr, value_stack_alignment, "elem");
+
+        const dst_ptr = try wip.gep(
+            .inbounds,
+            lane_ty,
+            result_ptr,
+            &.{try b.sizeIntValue(1)},
+            "dst_ptr",
+        );
+
+        _ = try wip.store(.normal, elem, dst_ptr, .default);
+
         try splat.jmpToNextHandler(b, .{
             .vip = OpcodeHandlerParam.vip.arg(wip),
             .vsp = OpcodeHandlerParam.vsp.arg(wip),
