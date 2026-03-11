@@ -791,6 +791,7 @@ fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
             _ = try wip.store(.normal, result, result_ptr, value_stack_alignment);
         } else {
             const max_valid_index = try b.module.intValue(.i8, 15);
+            var result = try b.module.poisonValue(i8x16);
             for (0..16) |i| {
                 const i_value = try b.sizeIntValue(@intCast(i));
                 const index_unsafe = try wip.extractElement(indices, i_value, "");
@@ -811,13 +812,10 @@ fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
                     "",
                 );
 
-                const dst_ptr = if (i == 0)
-                    result_ptr
-                else
-                    try wip.gep(.inbounds, .i8, result_ptr, &.{i_value}, "");
-
-                _ = try wip.store(.normal, to_store, dst_ptr, .default);
+                result = try wip.insertElement(result, to_store, i_value, "");
             }
+
+            _ = try wip.store(.normal, result, result_ptr, value_stack_alignment);
         }
 
         try swizzle.jmpToNextHandler(b, .{
