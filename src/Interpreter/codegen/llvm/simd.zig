@@ -315,6 +315,37 @@ fn buildMemoryStoreOpcodeHandlers(b: *Builder) Oom!void {
         try store.jmpToNextHandler(b, .{ .vip = access.vip, .vsp = new_vsp });
         try store.finish(b);
     }
+
+    for (
+        &[4]FDPrefixOpcode{
+            .@"v128.store8_lane",
+            .@"v128.store16_lane",
+            .@"v128.store32_lane",
+            .@"v128.store64_lane",
+        },
+        &[4]std.mem.Alignment{ .@"1", .@"2", .@"4", .@"8" },
+        &[4]Interpretation{ .i8x16, .i16x8, .i32x4, .i64x2 },
+    ) |opcode, access_size, interp| {
+        var store = try b.opcodeHandler(.{ .fd = opcode });
+        const wip = &store.wip;
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const perform_store = try wip.block(1, "Store");
+        const access = try store.linearMemoryAccess(b, 1, .@"16", perform_store);
+
+        const lane = try interp.readLaneIdx(wip, b, access.vip);
+
+        const src_vec_ptr = try store.gepOperandAt(b, 0);
+        const elem_ptr = try lane.gepToTarget(interp, wip, b, src_vec_ptr);
+        const elem_align = llvm.Builder.Alignment.fromByteUnits(access_size.toByteUnits());
+        const elem = try wip.load(.normal, interp.laneType(), elem_ptr, elem_align, "elem");
+
+        _ = try wip.store(.normal, elem, access.ptr, byte_alignment);
+
+        const new_vsp = try store.adjustVspBy(b, -2);
+        try store.jmpToNextHandler(b, .{ .vip = lane.vip, .vsp = new_vsp });
+        try store.finish(b);
+    }
 }
 
 fn buildBitwiseOpcodeHandlers(b: *Builder) Oom!void {
