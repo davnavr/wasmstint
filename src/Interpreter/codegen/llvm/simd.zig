@@ -7,7 +7,7 @@ pub fn buildOpcodeHandlers(b: *Builder) Oom!void {
     try buildBooleanOpcodeHandlers(b);
     try buildConstructionOpcodeHandlers(b);
     try buildConversionOpcodeHandlers(b);
-
+    try buildLaneAccessOpcodeHandlers(b);
     try buildFloatOpcodeHandlers(b);
     try buildIntegerOpcodeHandlers(b);
 }
@@ -39,6 +39,10 @@ const Interpretation = enum(u3) {
             .i32x4, .f32x4 => 4,
             .i64x2, .f64x2 => 2,
         };
+    }
+
+    fn laneWidthInt(i: Interpretation, b: *Builder) Oom!Type {
+        return try b.module.intType(@ctz(i.laneCount()) + 1);
     }
 
     fn vectorType(i: Interpretation, b: *Builder) Oom!Type {
@@ -611,6 +615,99 @@ fn buildConversionOpcodeHandlers(b: *Builder) Oom!void {
             .vsp = OpcodeHandlerParam.vsp.arg(wip),
         });
         try promote.finish(b);
+    }
+}
+
+fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
+    for (&[2]Interpretation{ .i8x16, .i16x8 }) |interp| {
+        for (&[2]Instruction.Tag{ .sext, .zext }, &[2]u7{ 's', 'u' }) |cast, name_suffix| {
+            var suffix_buf: [14]u8 = "extract_lane_?".*;
+            suffix_buf[suffix_buf.len - 1] = name_suffix;
+            var extract = try b.opcodeHandlerFromPrefixedName(
+                FDPrefixOpcode,
+                @tagName(interp),
+                &suffix_buf,
+            );
+            const wip = &extract.wip;
+            wip.cursor = .{ .block = try wip.block(0, "Entry") };
+            const result_ptr = try extract.gepOperandAt(b, 0);
+            const start_vip = OpcodeHandlerParam.vip.arg(wip);
+            const lane_imm = try wip.load(
+                .normal,
+                try interp.laneWidthInt(b),
+                start_vip,
+                .default,
+                "lane_imm",
+            );
+            const vip_after_lane_imm = try wip.gep(
+                .inbounds,
+                .i8,
+                start_vip,
+                &.{try b.sizeIntValue(1)},
+                "vip_after_lane_imm",
+            );
+
+            const lane_ty = interp.laneType();
+            const target_ptr = try wip.gep(
+                .inbounds,
+                lane_ty,
+                result_ptr,
+                &.{try wip.cast(.zext, lane_imm, b.size_type, "target_idx")},
+                "target_ptr",
+            );
+            const target = try wip.load(.normal, lane_ty, target_ptr, .default, "target");
+
+            const result = try wip.cast(cast, target, .i32, "result");
+            _ = try wip.store(.normal, result, result_ptr, value_stack_alignment);
+            try extract.jmpToNextHandler(b, .{
+                .vip = vip_after_lane_imm,
+                .vsp = OpcodeHandlerParam.vsp.arg(wip),
+            });
+            try extract.finish(b);
+        }
+    }
+
+    for (&[4]Interpretation{ .i32x4, .i64x2, .f32x4, .f64x2 }) |interp| {
+        var extract = try b.opcodeHandlerFromPrefixedName(
+            FDPrefixOpcode,
+            @tagName(interp),
+            "extract_lane",
+        );
+        const wip = &extract.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const result_ptr = try extract.gepOperandAt(b, 0);
+        const start_vip = OpcodeHandlerParam.vip.arg(wip);
+        const lane_imm = try wip.load(
+            .normal,
+            try interp.laneWidthInt(b),
+            start_vip,
+            .default,
+            "lane_imm",
+        );
+        const vip_after_lane_imm = try wip.gep(
+            .inbounds,
+            .i8,
+            start_vip,
+            &.{try b.sizeIntValue(1)},
+            "vip_after_lane_imm",
+        );
+
+        const lane_ty = interp.laneType();
+        const target_ptr = try wip.gep(
+            .inbounds,
+            lane_ty,
+            result_ptr,
+            &.{try wip.cast(.zext, lane_imm, b.size_type, "target_idx")},
+            "target_ptr",
+        );
+        const target = try wip.load(.normal, lane_ty, target_ptr, .default, "target");
+
+        _ = try wip.store(.normal, target, result_ptr, value_stack_alignment);
+        try extract.jmpToNextHandler(b, .{
+            .vip = vip_after_lane_imm,
+            .vsp = OpcodeHandlerParam.vsp.arg(wip),
+        });
+        try extract.finish(b);
     }
 }
 
