@@ -846,6 +846,33 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
         }
     }
 
+    for (&[2]Interpretation{ .i8x16, .i16x8 }) |interp| {
+        const vec = try interp.vectorType(b);
+        for (&[4]Intrinsic{ .@"uadd.sat", .@"sadd.sat", .@"usub.sat", .@"ssub.sat" }) |intrin| {
+            const intrin_name = @tagName(intrin);
+            var name_suffix: [9]u8 = "XXX_sat_X".*;
+            name_suffix[0..3].* = intrin_name[1..4].*;
+            name_suffix[8] = intrin_name[0];
+
+            var op = try b.opcodeHandlerFromPrefixedName(
+                FDPrefixOpcode,
+                @tagName(interp),
+                &name_suffix,
+            );
+            const wip = &op.wip;
+            wip.cursor = .{ .block = try wip.block(0, "Entry") };
+            const bin_op = try op.binOp(b, vec);
+            const args = .{ bin_op.c_1, bin_op.c_2 };
+            try bin_op.writeResult(
+                &op,
+                try wip.callIntrinsic(.normal, .none, intrin, &.{vec}, &args, "result"),
+            );
+            const new_vsp = try op.adjustVspBy(b, -1);
+            try op.jmpToNextHandler(b, .{ .vip = OpcodeHandlerParam.vip.arg(wip), .vsp = new_vsp });
+            try op.finish(b);
+        }
+    }
+
     for (&[3]Interpretation{ .i8x16, .i16x8, .i32x4 }) |interp| {
         const int_vec = try interp.vectorType(b);
         for (&[4]Intrinsic{ .smin, .smax, .umin, .umax }) |intrin| {
