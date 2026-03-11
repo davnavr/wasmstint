@@ -42,7 +42,7 @@ const Interpretation = enum(u3) {
     }
 
     fn laneWidthIntType(i: Interpretation, b: *Builder) Oom!Type {
-        return try b.module.intType(@ctz(i.laneCount()) + 1);
+        return try b.module.intType(@ctz(i.laneType().scalarBits(&b.module)) + 1);
     }
 
     const LaneIdx = struct {
