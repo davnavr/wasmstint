@@ -684,7 +684,6 @@ fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
             "vip_after_imm",
         );
 
-        // TODO: seems to produce wrong results when compiling for Debug mode?
         const concat_vecs = try wip.shuffleVector(
             bin_op.c_1,
             bin_op.c_2,
@@ -698,20 +697,15 @@ fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
             "concat_vecs",
         );
 
+        var result = try b.module.poisonValue(i8x16);
         for (0..16) |i| {
             const i_value = try b.sizeIntValue(@intCast(i));
             const index = try wip.extractElement(indices, i_value, "");
             const chosen = try wip.extractElement(concat_vecs, index, "");
-
-            const dst_ptr = if (i == 0)
-                bin_op.result
-            else
-                try wip.gep(.inbounds, .i8, bin_op.result, &.{i_value}, "");
-
-            _ = try wip.store(.normal, chosen, dst_ptr, .default);
+            result = try wip.insertElement(result, chosen, i_value, "");
         }
 
-        // try bin_op.writeResult(&shuffle, result);
+        try bin_op.writeResult(&shuffle, result);
 
         const new_vsp = try shuffle.adjustVspBy(b, -1);
         try shuffle.jmpToNextHandler(b, .{ .vip = vip_after_imm, .vsp = new_vsp });
