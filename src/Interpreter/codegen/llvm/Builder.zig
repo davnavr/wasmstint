@@ -366,6 +366,11 @@ pub fn fnType(b: *Builder, ret_type: Type, param_types: []const Type) Oom!Type {
     return try b.module.fnType(ret_type, param_types, .normal);
 }
 
+pub fn hasX86Feature(b: *Builder, feature: std.Target.x86.Feature) bool {
+    return b.target.cpu.arch.isX86() and
+        std.Target.x86.featureSetHas(b.target.cpu.features, feature);
+}
+
 const FunctionOptions = struct {
     linkage: llvm.Builder.Linkage = .external,
     preemption: llvm.Builder.Preemption = .dso_preemptable,
