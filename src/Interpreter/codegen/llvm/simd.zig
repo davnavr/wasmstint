@@ -213,8 +213,17 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
 
             const elem = try wip.load(.normal, lane_ty, access.ptr, byte_alignment, "elem");
 
-            const new_vec = try wip.insertElement(src_vec, elem, lane.imm, "new_vec");
-            _ = try wip.store(.normal, new_vec, try load.gepOperandAt(b, 1), value_stack_alignment);
+            // Copy the source vec over first, avoids storing a copy of it on the stack on x86-64
+            const result_ptr = try load.gepOperandAt(b, 1);
+            _ = try wip.store(.normal, src_vec, result_ptr, value_stack_alignment);
+            const dst_ptr = try wip.gep(
+                .inbounds,
+                lane_ty,
+                result_ptr,
+                &.{try wip.cast(.zext, lane.imm, b.size_type, "lane")},
+                "dst_ptr",
+            );
+            _ = try wip.store(.normal, elem, dst_ptr, .fromByteUnits(access_size.toByteUnits()));
 
             const new_vsp = try load.adjustVspBy(b, -1);
             try load.jmpToNextHandler(b, .{ .vip = lane.vip, .vsp = new_vsp });
