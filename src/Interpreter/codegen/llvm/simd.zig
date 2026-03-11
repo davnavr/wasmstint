@@ -128,6 +128,45 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
         try load.finish(b);
     }
 
+    for (&[3]Interpretation{ .i16x8, .i32x4, .i64x2 }) |interp| {
+        const src_int_width = @divExact(interp.laneType().scalarBits(&b.module), 2);
+        const dst_lane_count = interp.laneCount();
+        const src_vec = try b.module.vectorType(
+            .normal,
+            dst_lane_count,
+            try b.module.intType(src_int_width),
+        );
+
+        for (&[2]Instruction.Tag{ .sext, .zext }, &[2]u7{ 's', 'u' }) |cast, name_suffix| {
+            var name_buf: [15]u8 = undefined;
+            var load = try b.opcodeHandler(
+                .fromName(
+                    FDPrefixOpcode,
+                    std.fmt.bufPrint(&name_buf, "v128.load{d}x{d}_{c}", .{
+                        src_int_width,
+                        dst_lane_count,
+                        name_suffix,
+                    }) catch unreachable,
+                ),
+            );
+            const wip = &load.wip;
+            wip.cursor = .{ .block = try wip.block(0, "Entry") };
+
+            const perform_load = try wip.block(1, "Load");
+            const access = try load.linearMemoryAccess(b, 0, .@"8", perform_load);
+
+            const src = try wip.load(.normal, src_vec, access.ptr, byte_alignment, "src");
+            const ext = try wip.cast(cast, src, try interp.vectorType(b), "ext");
+            _ = try wip.store(.normal, ext, try load.gepOperandAt(b, 0), value_stack_alignment);
+
+            try load.jmpToNextHandler(b, .{
+                .vip = access.vip,
+                .vsp = OpcodeHandlerParam.vsp.arg(wip),
+            });
+            try load.finish(b);
+        }
+    }
+
     for (
         &[4]Interpretation{ .i8x16, .i16x8, .i32x4, .i64x2 },
         &[4]FDPrefixOpcode{
