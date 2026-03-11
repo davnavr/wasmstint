@@ -446,12 +446,46 @@ fn buildConversionOpcodeHandlers(b: *Builder) Oom!void {
 
     const i32x4_vec = try Interpretation.i32x4.vectorType(b);
     const f32x4_vec = try Interpretation.f32x4.vectorType(b);
-    for ([2]struct { WipFunction.Instruction.Tag, []const u8 }{
-        .{ .sitofp, "convert_i32x4_s" },
-        .{ .uitofp, "convert_i32x4_u" },
+
+    for ([2]struct { []const u8, FDPrefixOpcode }{
+        .{ "llvm.fptosi.sat", .@"i32x4.trunc_sat_f32x4_s" },
+        .{ "llvm.fptoui.sat", .@"i32x4.trunc_sat_f32x4_u" },
     }) |info| {
-        const cast, const name = info;
-        var conv = try b.opcodeHandlerFromPrefixedName(FDPrefixOpcode, "f32x4", name);
+        const intrin_name, const opcode = info;
+        var trunc = try b.opcodeHandler(.{ .fd = opcode });
+        const wip = &trunc.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const un_op = try trunc.unOp(b, f32x4_vec);
+
+        const intrin_ty = try b.fnType(i32x4_vec, &.{f32x4_vec});
+        const intrin = try b.module.addFunction(
+            intrin_ty,
+            try b.module.strtabString(intrin_name),
+            .default,
+        );
+
+        try un_op.writeResult(&trunc, try wip.call(
+            .normal,
+            .default,
+            .none,
+            intrin_ty,
+            intrin.toValue(&b.module),
+            &.{un_op.c_1},
+            "result",
+        ));
+        try trunc.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(wip),
+        });
+        try trunc.finish(b);
+    }
+
+    for ([2]struct { WipFunction.Instruction.Tag, FDPrefixOpcode }{
+        .{ .sitofp, .@"f32x4.convert_i32x4_s" },
+        .{ .uitofp, .@"f32x4.convert_i32x4_u" },
+    }) |info| {
+        const cast, const opcode = info;
+        var conv = try b.opcodeHandler(.{ .fd = opcode });
         const wip = &conv.wip;
         wip.cursor = .{ .block = try wip.block(0, "Entry") };
         const un_op = try conv.unOp(b, i32x4_vec);
