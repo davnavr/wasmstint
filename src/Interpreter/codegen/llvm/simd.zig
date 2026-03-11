@@ -221,6 +221,76 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
             try load.finish(b);
         }
     }
+
+    {
+        var load = try b.opcodeHandler(.{ .fd = .@"v128.load32_zero" });
+        const wip = &load.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+
+        const perform_load = try wip.block(1, "Load");
+        const access = try load.linearMemoryAccess(b, 0, .@"4", perform_load);
+
+        const elem = try wip.load(.normal, .i32, access.ptr, byte_alignment, "elem");
+
+        const result_ptr = try load.gepOperandAt(b, 0);
+        _ = try wip.callIntrinsic(
+            .normal,
+            attrs: {
+                var attrs = llvm.Builder.FunctionAttributes.Wip{};
+                for (&[4]llvm.Builder.Attribute{
+                    .nonnull,
+                    .noundef,
+                    .{ .@"align" = value_stack_alignment },
+                    .{ .dereferenceable = 16 },
+                }) |a| {
+                    try attrs.addParamAttr(0, a, &b.module);
+                }
+                break :attrs try attrs.finish(&b.module);
+            },
+            .@"memset.inline",
+            &.{ .ptr, b.size_type },
+            &.{ result_ptr, try b.module.intValue(.i8, 0), try b.sizeIntValue(16), .false },
+            "zero",
+        );
+        _ = try wip.store(.normal, elem, result_ptr, value_stack_alignment);
+
+        try load.jmpToNextHandler(b, .{
+            .vip = access.vip,
+            .vsp = OpcodeHandlerParam.vsp.arg(wip),
+        });
+        try load.finish(b);
+    }
+    {
+        var load = try b.opcodeHandler(.{ .fd = .@"v128.load64_zero" });
+        const wip = &load.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+
+        const perform_load = try wip.block(1, "Load");
+        const access = try load.linearMemoryAccess(b, 0, .@"8", perform_load);
+
+        const elem = try wip.load(.normal, .i64, access.ptr, byte_alignment, "elem");
+
+        const result_ptr = try load.gepOperandAt(b, 0);
+        _ = try wip.store(.normal, elem, result_ptr, value_stack_alignment);
+        _ = try wip.store(
+            .normal,
+            try b.module.intValue(.i64, 0),
+            try wip.gep(
+                .inbounds,
+                .i64,
+                result_ptr,
+                &.{try b.sizeIntValue(1)},
+                "result_high",
+            ),
+            .fromByteUnits(8),
+        );
+
+        try load.jmpToNextHandler(b, .{
+            .vip = access.vip,
+            .vsp = OpcodeHandlerParam.vsp.arg(wip),
+        });
+        try load.finish(b);
+    }
 }
 
 fn buildMemoryStoreOpcodeHandlers(b: *Builder) Oom!void {

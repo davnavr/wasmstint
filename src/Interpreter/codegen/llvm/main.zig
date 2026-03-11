@@ -263,7 +263,8 @@ fn buildLlvmModule(b: *Builder) Oom!void {
             enumFieldCount(opcodes.FCPrefixOpcode) +
             enumFieldCount(opcodes.FDPrefixOpcode),
     );
-    try b.module.globals.ensureUnusedCapacity(b.module.gpa, 4);
+    try b.module.globals.ensureTotalCapacity(b.module.gpa, 6);
+    try b.module.type_extra.ensureTotalCapacity(b.module.gpa, 1024);
 
     b.dispatch_tables.byte = try b.addDispatchTable("byte_dispatch_table", 256, .{
         .linkage = .external,
