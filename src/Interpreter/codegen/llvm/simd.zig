@@ -665,6 +665,54 @@ fn buildConversionOpcodeHandlers(b: *Builder) Oom!void {
 }
 
 fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
+    const i8x16 = try Interpretation.i8x16.vectorType(b);
+    const zero_byte = try b.module.intValue(.i8, 0);
+    // On x86+ssse3, can be compiled down to `paddusb`+`pshufb`
+    {
+        var swizzle = try b.opcodeHandler(.{ .fd = .@"i8x16.swizzle" });
+        const wip = &swizzle.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const indices_ptr = try swizzle.gepOperandAt(b, 0);
+        const indices = try wip.load(.normal, i8x16, indices_ptr, byte_alignment, "indices");
+        const result_ptr = try swizzle.gepOperandAt(b, 1);
+
+        const source = try wip.load(.normal, i8x16, result_ptr, value_stack_alignment, "source");
+        const max_valid_index = try b.module.intValue(.i8, 15);
+        for (0..16) |i| {
+            const i_value = try b.sizeIntValue(@intCast(i));
+            const index_unsafe = try wip.extractElement(indices, i_value, "");
+            const index_clamped = try wip.callIntrinsic(
+                .normal,
+                .none,
+                .umin,
+                &.{.i8},
+                &.{ index_unsafe, max_valid_index },
+                "",
+            );
+            const to_store = try wip.select(
+                .normal,
+                try wip.icmp(.ule, index_unsafe, max_valid_index, ""),
+                // Can't allow OOB memory access
+                try wip.extractElement(source, index_clamped, ""),
+                zero_byte,
+                "",
+            );
+
+            const dst_ptr = if (i == 0)
+                result_ptr
+            else
+                try wip.gep(.inbounds, .i8, result_ptr, &.{i_value}, "");
+
+            _ = try wip.store(.normal, to_store, dst_ptr, .default);
+        }
+
+        try swizzle.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(wip),
+            .vsp = indices_ptr,
+        });
+        try swizzle.finish(b);
+    }
+
     for (&[2]Interpretation{ .i8x16, .i16x8 }) |interp| {
         for (&[2]Instruction.Tag{ .sext, .zext }, &[2]u7{ 's', 'u' }) |cast, name_suffix| {
             var suffix_buf: [14]u8 = "extract_lane_?".*;
