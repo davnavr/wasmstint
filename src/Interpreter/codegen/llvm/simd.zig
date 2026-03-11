@@ -524,6 +524,50 @@ fn buildConversionOpcodeHandlers(b: *Builder) Oom!void {
         try conv.finish(b);
     }
 
+    const i32x2_zero = try b.module.splatValue(i32x2_vec, try b.module.intConst(.i32, 0));
+    const i32x4_indices_0_to_3 = try b.module.vectorValue(i32x4_vec, &indices: {
+        var indices: [4]Constant = undefined;
+        for (&indices, 0..4) |*i, n| {
+            i.* = try b.module.intConst(.i32, n);
+        }
+        break :indices indices;
+    });
+    for ([2]struct { []const u8, FDPrefixOpcode }{
+        .{ "llvm.fptosi.sat", .@"i32x4.trunc_sat_f64x2_s_zero" },
+        .{ "llvm.fptoui.sat", .@"i32x4.trunc_sat_f64x2_u_zero" },
+    }) |info| {
+        const intrin_name, const opcode = info;
+        var trunc = try b.opcodeHandler(.{ .fd = opcode });
+        const wip = &trunc.wip;
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const un_op = try trunc.unOp(b, f64x2_vec);
+        const intrin_ty = try b.fnType(i32x2_vec, &.{f64x2_vec});
+        const intrin = try b.module.addFunction(
+            intrin_ty,
+            try b.module.strtabString(intrin_name),
+            .default,
+        );
+        const converted = try wip.call(
+            .normal,
+            .default,
+            .none,
+            intrin_ty,
+            intrin.toValue(&b.module),
+            &.{un_op.c_1},
+            "converted",
+        );
+
+        try un_op.writeResult(
+            &trunc,
+            try wip.shuffleVector(converted, i32x2_zero, i32x4_indices_0_to_3, "result"),
+        );
+        try trunc.jmpToNextHandler(b, .{
+            .vip = OpcodeHandlerParam.vip.arg(wip),
+            .vsp = OpcodeHandlerParam.vsp.arg(wip),
+        });
+        try trunc.finish(b);
+    }
+
     const f32x2_vec = try b.module.vectorType(.normal, 2, .float);
     {
         var demote = try b.opcodeHandler(.{ .fd = .@"f32x4.demote_f64x2_zero" });
@@ -538,16 +582,7 @@ fn buildConversionOpcodeHandlers(b: *Builder) Oom!void {
                 try b.module.floatValue(0.0),
                 "zeroes",
             ),
-            try b.module.vectorValue(
-                i32x4_vec,
-                &indices: {
-                    var indices: [4]Constant = undefined;
-                    for (&indices, &[4]u2{ 0, 1, 2, 2 }) |*i, lane| {
-                        i.* = try b.module.intConst(.i32, lane);
-                    }
-                    break :indices indices;
-                },
-            ),
+            i32x4_indices_0_to_3,
             "result",
         );
         try un_op.writeResult(&demote, result);
