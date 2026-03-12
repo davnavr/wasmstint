@@ -27,6 +27,10 @@ const Arguments = cli_args.CliArgs(.{
             },
             "PATH",
         ),
+        cli_args.Flag.boolean(.{
+            .long = "skip-bad-input",
+            .description = "Don't fail if error.BadInput is returned",
+        }),
     },
 });
 
@@ -192,7 +196,14 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
 
     defer if (arguments.@"replace-module" != null) replaced_module.deinit(allocator.allocator());
 
-    try target.testOne(wasm, &input, &scratch, allocator.allocator());
+    target.testOne(wasm, &input, &scratch, allocator.allocator()) catch |e| err: {
+        switch (@as(anyerror, e)) {
+            error.BadInput => if (arguments.@"skip-bad-input") break :err,
+            else => {},
+        }
+
+        return e;
+    };
     return 0;
 }
 
