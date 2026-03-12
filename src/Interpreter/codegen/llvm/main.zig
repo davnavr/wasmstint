@@ -3575,112 +3575,74 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
     const leb_value_bits = try b.module.intValue(.i8, 0x7F);
     for (
         &[2]Type{ .i32, .i64 },
-        &[2]u7{ 32, 64 },
         &[2]u8{ 5, 10 },
-    ) |int_ty, bit_width, max_leb_size| {
+    ) |int_ty, max_leb_size| {
         const zero = try b.module.intValue(int_ty, 0);
         {
-            const max_shift = try b.module.intValue(int_ty, (max_leb_size - 1) * 7);
             var op = try b.opcodeHandlerFromPrefixedName(ByteOpcode, @tagName(int_ty), "const");
-            const entry_blk = try op.wip.block(0, "Entry");
-            op.wip.cursor = .{ .block = entry_blk };
+            const wip = &op.wip;
 
-            const loop_body = try op.wip.block(2, "LoopBody");
-            _ = try op.wip.br(loop_body);
-
-            op.wip.cursor = .{ .block = loop_body };
-            const current_vip = try op.wip.phi(.ptr, "VIP");
-            const current_acc = try op.wip.phi(int_ty, "");
-            const current_shift = try op.wip.phi(int_ty, "shift");
-            _ = try op.wip.callIntrinsic(.normal, .none, .assume, &.{}, &.{
-                try op.wip.icmp(.ule, current_shift.toValue(), max_shift, ""),
-            }, "");
-
-            const loaded_byte = try op.wip.load(
-                .normal,
-                .i8,
-                current_vip.toValue(),
-                .default,
-                "byte",
-            );
-            const new_bits = try op.wip.bin(.@"and", loaded_byte, leb_value_bits, "");
-            const acc_with_current_byte = try op.wip.bin(
-                .@"or",
-                current_acc.toValue(),
-                try op.wip.bin(
-                    .shl,
-                    try op.wip.cast(.zext, new_bits, int_ty, ""),
-                    current_shift.toValue(),
-                    "",
-                ),
-                "",
-            );
-
-            const has_more = try op.wip.icmp(
-                .eq,
-                try op.wip.bin(.@"and", loaded_byte, leb_continue_bit, ""),
-                leb_continue_bit,
-                "",
-            );
-            const new_vip = try op.wip.gep(.inbounds, .i8, current_vip.toValue(), &.{size_1}, "");
-            current_vip.finish(
-                &.{ OpcodeHandlerParam.vip.arg(&op.wip), new_vip },
-                &.{ entry_blk, loop_body },
-                &op.wip,
-            );
-            const new_shift = try op.wip.bin(
-                .@"add nsw",
-                current_shift.toValue(),
-                try b.module.intValue(int_ty, 7),
-                "",
-            );
-            current_shift.finish(&.{ zero, new_shift }, &.{ entry_blk, loop_body }, &op.wip);
-            current_acc.finish(
-                &.{ zero, acc_with_current_byte },
-                &.{ entry_blk, loop_body },
-                &op.wip,
-            );
-
-            const decoded = try op.wip.block(1, "ConstDecoded");
-            _ = try op.wip.brCond(has_more, loop_body, decoded, .else_likely);
-
-            const done = try op.wip.block(2, "Done");
-            op.wip.cursor = .{ .block = decoded };
-            const sign_ext = try op.wip.block(1, "SignExtend");
-            const needs_sign_extension = try op.wip.icmp(.ult, new_shift, max_shift, "");
-            _ = try op.wip.brCond(needs_sign_extension, sign_ext, done, .none);
-
-            op.wip.cursor = .{ .block = sign_ext };
-            const ext_shift_amt = try op.wip.bin(
-                .@"sub nuw",
-                try b.module.intValue(int_ty, bit_width),
-                new_shift,
-                "",
-            );
-            const acc_sign_extended = try op.wip.bin(
-                .@"ashr exact",
-                try op.wip.bin(.@"shl nuw", acc_with_current_byte, ext_shift_amt, ""),
-                ext_shift_amt,
-                "",
-            );
-            _ = try op.wip.br(done);
-
-            op.wip.cursor = .{ .block = done };
-            const result = try op.wip.phi(int_ty, "c");
-            result.finish(
-                &.{ acc_with_current_byte, acc_sign_extended },
-                &.{ decoded, sign_ext },
-                &op.wip,
-            );
-
-            _ = try op.wip.store(
-                .normal,
-                result.toValue(),
-                OpcodeHandlerParam.vsp.arg(&op.wip),
-                value_stack_alignment,
-            );
+            const entry_blk = try wip.block(0, "Entry");
+            wip.cursor = .{ .block = entry_blk };
             const new_vsp = try op.adjustVspBy(b, 1);
-            try op.jmpToNextHandler(b, .{ .vip = new_vip, .vsp = new_vsp });
+
+            const result_ptr = OpcodeHandlerParam.vsp.arg(wip);
+            var current_vip = OpcodeHandlerParam.vip.arg(wip);
+            var prev_byte: Value = .none;
+            var decoded: Value = zero;
+            for (1..(max_leb_size + 1)) |len| {
+                const shift_amt = try b.module.intValue(int_ty, (len - 1) * 7);
+
+                const current_byte = try wip.load(.normal, .i8, current_vip, .default, "");
+                defer prev_byte = current_byte;
+                const has_more = try wip.icmp(.uge, current_byte, leb_continue_bit, "");
+                const current_value_bits = try wip.bin(.@"and", current_byte, leb_value_bits, "");
+
+                const vip_after_current_byte = try wip.gep(
+                    .inbounds,
+                    .i8,
+                    current_vip,
+                    &.{size_1},
+                    "",
+                );
+                defer current_vip = vip_after_current_byte;
+
+                const n_char: [1]u8 = .{'0' + @as(u8, @intCast(len))};
+                const finished = try wip.block(1, &("FinishedLen".* ++ n_char));
+                const cont = try wip.block(1, &("ContinueLen".* ++ n_char));
+
+                _ = try wip.brCond(has_more, cont, finished, .none);
+
+                wip.cursor = .{ .block = finished };
+                const shift_one = try b.module.intValue(.i8, 1);
+                const to_insert = int: {
+                    const bits_shl = try wip.bin(.@"shl nuw", current_value_bits, shift_one, "");
+                    const bits_ashr = try wip.bin(.@"ashr exact", bits_shl, shift_one, "");
+                    break :int try wip.cast(.sext, bits_ashr, int_ty, "");
+                };
+
+                const result = if (len == 1)
+                    to_insert
+                else
+                    try wip.bin(.@"or", try wip.bin(.shl, to_insert, shift_amt, ""), decoded, "");
+                _ = try wip.store(.normal, result, result_ptr, value_stack_alignment);
+                // TODO: If ReleaseSafe doesn't, manually generate only a single out-of-fuel block
+                try op.jmpToNextHandler(b, .{ .vip = vip_after_current_byte, .vsp = new_vsp });
+
+                wip.cursor = .{ .block = cont };
+                if (len == max_leb_size) {
+                    _ = try wip.@"unreachable"();
+                } else {
+                    const new_bits = try wip.bin(
+                        .@"shl nuw",
+                        try wip.cast(.zext, current_value_bits, int_ty, ""),
+                        shift_amt,
+                        "",
+                    );
+                    decoded = try wip.bin(.@"or", new_bits, decoded, "");
+                }
+            }
+
             try op.finish(b);
         }
 
