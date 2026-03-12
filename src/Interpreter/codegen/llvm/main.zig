@@ -308,6 +308,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
                     try attributes.addParamAttr(i, attr, &b.module);
                 }
             }
+
             try b.setFnAttributes(trampoline, &attributes);
         }
         var wip = try b.wipFunction(trampoline);
@@ -912,7 +913,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
                 try end.wip.call(
                     .musttail,
                     b.opcode_handler.call_conv,
-                    .none,
+                    b.opcode_handler.invoke_attrs,
                     b.opcode_handler.type,
                     return_handler.toValue(&b.module),
                     &ret_args,

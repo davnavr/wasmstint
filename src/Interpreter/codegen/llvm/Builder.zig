@@ -200,9 +200,19 @@ pub fn init(
         }
         break :attrs try attrs.finish(&b.module);
     };
+
     b.opcode_handler = .{
         .call_conv = switch (config.target.cpu.arch) {
-            .x86_64, .aarch64, .riscv64 => .ghccc,
+            // When invoking `afl-clang-lto`, `lld` fails with `error: Interference usage of base
+            // pointer/frame pointer.` when `ghccc` is used.
+            //
+            // This seems to be caused by the GHC calling convention using the `rbp` register,
+            // conflicting with register spilling code. The `alignstack` function attribute also
+            // doesn't fix the problem. To avoid this problem, `preserve_none` is used instead.
+            //
+            // For more information, see https://gitlab.haskell.org/ghc/ghc/-/issues/26595
+            .x86_64, .aarch64 => @enumFromInt(21), // not available in Zig
+            // .riscv64 => .ghccc,
             else => .tailcc,
         },
         .type = try b.fnType(.i32, &@as([10]Type, @splat(Type.ptr))),
