@@ -665,6 +665,172 @@ fn buildLlvmModule(b: *Builder) Oom!void {
 
         try wip.finish();
     }
+    {
+        // Equivalent to `llvm.memmove`, but optimizes for the case of copying 0-4 elements
+        b.move_values_for_branch = try b.addFunction(
+            try b.strtabStringSymbolPrefixed("moveValuesForBranch"),
+            try b.fnType(.void, &.{ .ptr, .ptr, .i8 }),
+            .fastcc,
+            .{ .linkage = .internal, .preemption = .dso_local },
+        );
+        {
+            var attrs = FunctionAttributes.Wip{};
+            try b.commonFnAttributes(&attrs);
+            try b.fnAttributes(&attrs, &.{ .mustprogress, .norecurse, .willreturn, .nocallback });
+
+            if (b.options.optimize != .Debug) {
+                try attrs.addFnAttr(.alwaysinline, &b.module);
+            }
+
+            for (&[4]Attribute{
+                .noundef,
+                .nonnull,
+                .nofree,
+                .{ .@"align" = value_stack_alignment },
+            }) |a| {
+                for (0..2) |i| {
+                    try attrs.addParamAttr(i, a, &b.module);
+                }
+            }
+            try attrs.addParamAttr(0, .writeonly, &b.module);
+            try attrs.addParamAttr(1, .readonly, &b.module);
+            try b.setFnAttributes(b.move_values_for_branch, &attrs);
+        }
+
+        var wip = try b.wipFunction(b.move_values_for_branch);
+        defer wip.deinit();
+
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+        const dst_ptr = wip.arg(0);
+        const src_ptr = wip.arg(1);
+        const len = wip.arg(2);
+
+        const slow_path = try wip.block(1, "SlowPath");
+        var sw = try wip.@"switch"(len, slow_path, 3, .none);
+
+        {
+            const copy_none = try wip.block(1, "CopyNone");
+            wip.cursor = .{ .block = copy_none };
+            try sw.addCase(try b.module.intConst(.i8, 0), copy_none, &wip);
+            _ = try wip.retVoid();
+        }
+        {
+            const copy_one = try wip.block(1, "CopyOne");
+            wip.cursor = .{ .block = copy_one };
+            try sw.addCase(try b.module.intConst(.i8, 1), copy_one, &wip);
+            const elem = try wip.load(
+                .normal,
+                b.value_structs.i64,
+                src_ptr,
+                value_stack_alignment,
+                "elem",
+            );
+            _ = try wip.store(.normal, elem, dst_ptr, value_stack_alignment);
+            _ = try wip.retVoid();
+        }
+        {
+            const copy_two = try wip.block(1, "CopyTwo");
+            wip.cursor = .{ .block = copy_two };
+            try sw.addCase(try b.module.intConst(.i8, 2), copy_two, &wip);
+            const value_struct = try b.module.vectorType(.normal, 2 * 2, .i64);
+            const elem = try wip.load(
+                .normal,
+                value_struct,
+                src_ptr,
+                value_stack_alignment,
+                "elem",
+            );
+            _ = try wip.store(.normal, elem, dst_ptr, value_stack_alignment);
+            _ = try wip.retVoid();
+        }
+
+        {
+            const helper_cc: llvm.Builder.CallConv = switch (b.target.cpu.arch) {
+                .x86_64, .aarch64 => .preserve_allcc,
+                .riscv64 => .preserve_mostcc,
+                else => .fastcc,
+            };
+
+            const helper = try b.addFunction(
+                try b.strtabStringSymbolPrefixed("moveValuesForBranchSlowPath"),
+                try b.fnType(.void, &.{ .ptr, .ptr, .i8 }),
+                helper_cc,
+                .{ .linkage = .internal, .preemption = .dso_local },
+            );
+            {
+                var attrs = FunctionAttributes.Wip{};
+                try b.commonFnAttributes(&attrs);
+                try b.fnAttributes(&attrs, &.{
+                    .mustprogress,
+                    .norecurse,
+                    .willreturn,
+                    .nocallback,
+                    .@"noinline",
+                    .cold,
+                });
+
+                for (&[5]Attribute{
+                    .noundef,
+                    .nonnull,
+                    .nofree,
+                    .{ .@"align" = value_stack_alignment },
+                    .{ .dereferenceable = 2 * 16 },
+                }) |a| {
+                    for (0..2) |i| {
+                        try attrs.addParamAttr(i, a, &b.module);
+                    }
+                }
+                try attrs.addParamAttr(0, .writeonly, &b.module);
+                try attrs.addParamAttr(1, .readonly, &b.module);
+                try b.setFnAttributes(helper, &attrs);
+            }
+
+            wip.cursor = .{ .block = slow_path };
+            _ = try wip.callIntrinsicAssumeCold();
+            _ = try wip.call(
+                .tail,
+                helper_cc,
+                .none,
+                helper.typeOf(&b.module),
+                helper.toValue(&b.module),
+                &.{ dst_ptr, src_ptr, len },
+                "",
+            );
+            _ = try wip.retVoid();
+
+            var helper_wip = try b.wipFunction(helper);
+            defer helper_wip.deinit();
+
+            helper_wip.cursor = .{ .block = try helper_wip.block(0, "Entry") };
+            const len_in_values = try helper_wip.cast(
+                .zext,
+                helper_wip.arg(2),
+                b.size_type,
+                "len_in_values",
+            );
+            const len_in_bytes = try helper_wip.bin(
+                .@"shl nsw",
+                len_in_values,
+                try b.sizeIntValue(4),
+                "len_in_bytes",
+            );
+
+            _ = try helper_wip.callIntrinsic(
+                .normal,
+                .none,
+                .memmove,
+                &.{ .ptr, .ptr, b.size_type },
+                &.{ helper_wip.arg(0), helper_wip.arg(1), len_in_bytes, .false },
+                "",
+            );
+            _ = try helper_wip.retVoid();
+
+            try helper_wip.finish();
+        }
+
+        sw.finish(&wip);
+        try wip.finish();
+    }
 
     try buildNopOpcodeHandlers(b);
     try buildControlOpcodeHandlers(b);

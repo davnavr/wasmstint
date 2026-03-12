@@ -58,6 +58,7 @@ trap_with_numeric_code: Function.Index = .none,
 trap_memory_access_oob: Function.Index = .none,
 panic_invalid_prefixed_opcode: Function.Index = .none,
 fill_table_elements: Function.Index = .none,
+move_values_for_branch: Function.Index = .none,
 
 opcode_handler_writing_lock: std.debug.SafetyLock = .{},
 func_type: Type = .none,

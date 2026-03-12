@@ -588,6 +588,8 @@ const TakeBranch = struct {
     stp: Value,
 };
 
+/// Callers can assume that `handler.wip` will still refer to the same basic block as it was
+/// before `takeBranch()` was called.
 pub fn takeBranch(handler: *OpcodeHandler, b: *Builder, info: struct {
     branch_ip: Value,
     vsp: Value,
@@ -597,11 +599,12 @@ pub fn takeBranch(handler: *OpcodeHandler, b: *Builder, info: struct {
     const stp = if (info.stp == .none) OpcodeHandlerParam.stp.arg(wip) else info.stp;
 
     const delta_ip = try SideTableEntryField.delta_ip.load(handler, b, stp);
-    const copy_count_in_values = try wip.cast(
+    const copy_count_in_values = try SideTableEntryField.copy_count.load(handler, b, stp);
+    const copy_count_in_values_ext = try wip.cast(
         .zext,
-        try SideTableEntryField.copy_count.load(handler, b, stp),
+        copy_count_in_values,
         b.size_type,
-        "copy_count",
+        "copy_count_ext",
     );
     const pop_count_in_values = try wip.cast(
         .zext,
@@ -616,43 +619,39 @@ pub fn takeBranch(handler: *OpcodeHandler, b: *Builder, info: struct {
     const new_stp = try wip.gep(.inbounds, b.side_table_entry, stp, &.{delta_stp}, "");
 
     const size_0 = try b.sizeIntValue(0);
-    const dst_vsp = try wip.gep(.inbounds, b.value_structs.i64, info.vsp, &.{
-        try wip.bin(.@"sub nsw", size_0, pop_count_in_values, "negate"),
-    }, "");
-    const src_vsp = try wip.gep(.inbounds, b.value_structs.i64, info.vsp, &.{
-        try wip.bin(.@"sub nsw", size_0, copy_count_in_values, "negate"),
-    }, "");
+    const dst_vsp = try wip.gep(
+        .inbounds,
+        b.value_structs.i64,
+        info.vsp,
+        &.{try wip.bin(.@"sub nsw", size_0, pop_count_in_values, "negate")},
+        "dst_vsp",
+    );
+    const src_vsp = try wip.gep(
+        .inbounds,
+        b.value_structs.i64,
+        info.vsp,
+        &.{try wip.bin(.@"sub nsw", size_0, copy_count_in_values_ext, "negate")},
+        "src_vsp",
+    );
 
     const new_vsp = try wip.gep(
         .inbounds,
         b.value_structs.i64,
         dst_vsp,
-        &.{copy_count_in_values},
+        &.{copy_count_in_values_ext},
         "",
     );
 
     {
-        const copy_count_in_bytes = try wip.bin(
-            .@"shl nsw",
-            copy_count_in_values,
-            try b.sizeIntValue(4),
-            "",
-        );
-
-        // TODO: Want fast path to be copying <= 1 values, use loop instead of memmove call
-        _ = try wip.callIntrinsic(
+        // Too much of a hassle to create a new branch, as callers already assume that the
+        // current basic block remains the same (for PHI nodes).
+        _ = try wip.call(
             .normal,
-            attrs: {
-                var attrs = try b.value_copy.attributes.toWip(&b.module);
-                defer attrs.deinit(&b.module);
-                for (0..2) |i| {
-                    _ = try attrs.removeParamAttr(i, .dereferenceable);
-                }
-                break :attrs try attrs.finish(&b.module);
-            },
-            .memmove,
-            &b.value_copy.overload,
-            &.{ dst_vsp, src_vsp, copy_count_in_bytes, .false },
+            b.move_values_for_branch.ptrConst(&b.module).call_conv,
+            .none,
+            b.move_values_for_branch.typeOf(&b.module),
+            b.move_values_for_branch.toValue(&b.module),
+            &.{ dst_vsp, src_vsp, copy_count_in_values },
             "",
         );
     }
