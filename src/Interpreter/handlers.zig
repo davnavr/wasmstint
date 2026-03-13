@@ -157,11 +157,19 @@ pub fn updateWasmFrameState(
     const code = frame.function.expanded().wasm.code().inner;
     frame.wasm.ip = instr.next;
     frame.wasm.stp = stp;
+    const instr_next = @intFromPtr(instr.next);
     if (builtin.mode == .Debug) {
-        std.debug.assert(@intFromPtr(code.instructions_start) <= @intFromPtr(instr.next));
+        std.debug.assert(@intFromPtr(code.instructions_start) <= instr_next);
         std.debug.assert(@intFromPtr(code.instructions_end) == @intFromPtr(frame.wasm.eip));
     }
-    std.debug.assert(@intFromPtr(instr.next) <= @intFromPtr(instr.end));
+    const instr_end = @intFromPtr(instr.end);
+    if (instr_next > instr_end) {
+        if (builtin.mode == .Debug) {
+            std.debug.panic("VIP=0x{X} > EIP=0x{X}", .{ instr_next, instr_end });
+        } else {
+            unreachable;
+        }
+    }
     std.debug.assert(@intFromPtr(frame.wasm.eip) == @intFromPtr(instr.end));
     return .wrote_ip_and_stp_to_the_current_stack_frame;
 }

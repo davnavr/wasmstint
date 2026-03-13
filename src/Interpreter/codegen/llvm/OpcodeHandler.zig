@@ -26,7 +26,7 @@ pub fn jmpToNextHandler(
         "after_next_ip_byte",
     );
 
-    const args = args: {
+    const next_handler_args = args: {
         var args: [10]Value = undefined;
         for (&args, std.enums.values(OpcodeHandlerParam)) |*a, param| {
             a.* = arg: {
@@ -94,7 +94,7 @@ pub fn jmpToNextHandler(
                 b.opcode_handler.invoke_attrs,
                 b.opcode_handler.type,
                 next_handler,
-                &args,
+                &next_handler_args,
                 "",
             ),
         );
@@ -113,7 +113,11 @@ pub fn jmpToNextHandler(
             },
             b.opcode_handler.type,
             b.out_of_fuel_handler.toValue(&b.module),
-            &args,
+            &args: {
+                var args = next_handler_args;
+                args[@intFromEnum(OpcodeHandlerParam.vip)] = updates.vip;
+                break :args args;
+            },
             "",
         ),
     );

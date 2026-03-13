@@ -144,6 +144,8 @@ fn finishInvokeWithinWasm(
 ) ?*Stack.Frame.Wasm {
     switch (callee.expanded()) {
         .wasm => |wasm| {
+            const wasm_frame = &new_frame.frame.wasm;
+            std.debug.assert(@intFromPtr(wasm_frame.ip) <= @intFromPtr(wasm_frame.eip));
             output.* = .{
                 .to_wasm = .{
                     .locals = .{ .ptr = new_frame.frame.localValues(&ctx.stack).ptr },
@@ -151,7 +153,7 @@ fn finishInvokeWithinWasm(
                     .module = wasm.module,
                 },
             };
-            return &new_frame.frame.wasm;
+            return wasm_frame;
         },
         .host => |host| {
             output.* = .{
