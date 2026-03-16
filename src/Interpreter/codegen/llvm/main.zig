@@ -256,7 +256,6 @@ fn enumFieldCount(comptime E: type) comptime_int {
 }
 
 fn buildLlvmModule(b: *Builder) Oom!void {
-    b.module.data_layout = try b.module.string(b.target_info.data_layout);
     try b.module.functions.ensureUnusedCapacity(
         b.module.gpa,
         enumFieldCount(ByteOpcode) +

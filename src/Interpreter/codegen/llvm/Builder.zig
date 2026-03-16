@@ -2,7 +2,6 @@ pub const Options = struct {
     optimize: std.builtin.OptimizeMode,
     symbol_prefix: []const u8,
     strip: bool,
-    use_llvm: bool,
     target: struct {
         triple: []const u8,
         cpu_features: []const u8,
@@ -12,6 +11,7 @@ pub const Options = struct {
 pub const TargetInfo = struct {
     data_layout: []const u8,
     triple: []const u8,
+    cpu_features: []const u8,
 };
 
 options: Options,
@@ -122,35 +122,11 @@ pub fn init(
     if (b.target.cpu.model.llvm_name) |name| {
         b.target_cpu = try b.module.string(name);
     }
-
-    var target_features = try std.ArrayList(u8).initCapacity(
-        scratch.allocator(),
-        b.options.target.cpu_features.len,
-    );
-
-    const all_features = b.target.cpu.arch.allFeaturesList();
-    for (all_features) |feat| {
-        const idx: std.Target.Cpu.Feature.Set.Index = feat.index;
-        const feat_name = feat.llvm_name orelse continue;
-        const prefix: u8 = if (b.target.cpu.features.isEnabled(idx))
-            '+'
-        else
-            '-';
-
-        const not_first = target_features.items.len > 0;
-        try target_features.ensureUnusedCapacity(
-            scratch.allocator(),
-            @as(usize, @intFromBool(not_first)) + 1 + feat_name.len,
-        );
-
-        if (not_first) {
-            try target_features.append(scratch.allocator(), ',');
-        }
-        target_features.appendAssumeCapacity(prefix);
-        target_features.appendSliceAssumeCapacity(feat_name);
+    b.module.data_layout = try b.module.string(config.target_info.data_layout);
+    if (config.target_info.cpu_features.len > 0) {
+        b.target_features = try b.module.string(config.target_info.cpu_features);
     }
 
-    b.target_features = try b.module.string(target_features.items);
     b.size_type = try b.module.intType(ptr_bit_size);
     const opcode_handler_param_attrs = attrs: {
         var attrs = FunctionAttributes.Wip{};
@@ -412,10 +388,7 @@ pub fn commonFnAttributes(b: *Builder, wip: *FunctionAttributes.Wip) Oom!void {
     if (b.target_cpu != .none) {
         try b.fnAttributes(wip, &.{
             .{
-                .string = .{
-                    .kind = b.string_constants.@"target-cpu",
-                    .value = b.target_cpu,
-                },
+                .string = .{ .kind = b.string_constants.@"target-cpu", .value = b.target_cpu },
             },
         });
     }

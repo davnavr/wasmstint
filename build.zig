@@ -419,10 +419,12 @@ const Modules = struct {
                     run_codegen.step.dependOn(&b.addFail(err_no_pic_flag).step);
                 }
             } else if (interpreter_backend == .@"llvm-ir") {
-                const empty_ll = b.addLibrary(.{
-                    .name = "empty",
+                const target_info_ll = b.addLibrary(.{
+                    .name = "target_info",
                     .root_module = b.createModule(.{
-                        .root_source_file = b.path("src/Interpreter/codegen/llvm/empty.zig"),
+                        .root_source_file = b.path(
+                            "src/Interpreter/codegen/llvm/target_info_source.zig",
+                        ),
                         .target = options.target,
                         .optimize = .ReleaseFast,
                         .strip = true,
@@ -433,7 +435,9 @@ const Modules = struct {
                 const extract_target_info_exe = b.addExecutable(.{
                     .name = "wasmstint-codegen-llvm-extract-target-info",
                     .root_module = b.createModule(.{
-                        .root_source_file = b.path("src/Interpreter/codegen/llvm/extract_target_info.zig"),
+                        .root_source_file = b.path(
+                            "src/Interpreter/codegen/llvm/extract_target_info.zig",
+                        ),
                         .target = b.graph.host,
                         .optimize = .Debug,
                         .single_threaded = true,
@@ -443,7 +447,7 @@ const Modules = struct {
                 });
 
                 const extract_target_info = b.addRunArtifact(extract_target_info_exe);
-                extract_target_info.addFileArg(empty_ll.getEmittedLlvmIr());
+                extract_target_info.addFileArg(target_info_ll.getEmittedLlvmIr());
                 extract_target_info.step.max_rss = ByteSize.mib(1).bytes;
 
                 const codegen_exe = b.addExecutable(.{
@@ -467,7 +471,6 @@ const Modules = struct {
                     optimize: std.builtin.OptimizeMode,
                     symbol_prefix: []const u8,
                     strip: bool,
-                    use_llvm: bool,
                     target: struct {
                         triple: []const u8,
                         cpu_features: []const u8,
@@ -480,7 +483,6 @@ const Modules = struct {
                         .optimize = options.optimize_interpreter,
                         .symbol_prefix = symbol_prefix,
                         .strip = false,
-                        .use_llvm = options.use_llvm.interpreter,
                         .target = .{
                             .triple = options.target.query.zigTriple(b.allocator) catch
                                 @panic("oom"),

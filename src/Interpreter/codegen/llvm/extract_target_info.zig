@@ -37,6 +37,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
             std.mem.cut(u8, ll_file, "target triple = \"").?.@"1",
             '\"',
         ).?.@"0",
+        .cpu_features = std.mem.cutScalar(
+            u8,
+            std.mem.cut(u8, ll_file, "\"target-features\"=\"").?.@"1",
+            '\"',
+        ).?.@"0",
     }, .{ .whitespace = false }, &stdout.interface);
 
     try stdout.flush();
