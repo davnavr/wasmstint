@@ -1156,6 +1156,11 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try cmp.finish(b);
         }
 
+        const canonical_nan_floats = try b.module.splatValue(
+            float_vec,
+            float_info.canonical_nan.toConst().?,
+        );
+
         // TODO: detect when LLVM emits a libc/compiler_rt call instead of inline instructions
         for (&[4]Intrinsic{ .ceil, .floor, .trunc, .roundeven }) |intrin| {
             var op = try b.opcodeHandlerFromPrefixedName(
@@ -1198,11 +1203,11 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
                         helper.typeOf(&b.module),
                         helper.toValue(&b.module),
                         &.{un_op.c_1},
-                        "",
+                        "result",
                     );
                 }
 
-                break :rounded try wip.callIntrinsic(
+                const result = try wip.callIntrinsic(
                     .normal,
                     .none,
                     intrin,
@@ -1210,6 +1215,8 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
                     &.{un_op.c_1},
                     "result",
                 );
+                const is_nan = try wip.fcmp(.normal, .uno, un_op.c_1, un_op.c_1, "is_nan");
+                break :rounded try wip.select(.normal, is_nan, canonical_nan_floats, result, "");
             };
             try un_op.writeResult(&op, rounded);
             try op.jmpToNextHandler(b, .{
@@ -1290,11 +1297,6 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             try op.jmpToNextHandler(b, .{ .vip = OpcodeHandlerParam.vip.arg(wip), .vsp = new_vsp });
             try op.finish(b);
         }
-
-        const canonical_nan_floats = try b.module.splatValue(
-            float_vec,
-            float_info.canonical_nan.toConst().?,
-        );
 
         for (&[2]Intrinsic{ .minimum, .maximum }) |intrin| {
             var op = try b.opcodeHandlerFromPrefixedName(
