@@ -476,6 +476,9 @@ const Modules = struct {
                     break :bc sample_intrinsics.addOutputFileArg("sample_intrinsics.bc");
                 };
 
+                const target_triple = options.target.query.zigTriple(b.allocator) catch
+                    @panic("oom");
+
                 // TODO(Zig): LLVM IR can't be used https://github.com/ziglang/zig/issues/25004
                 // - Workaround is to use zig cc (clang)
                 const sample_intrinsics_asm = cc: {
@@ -489,8 +492,11 @@ const Modules = struct {
                         "-fno-sanitize-trap",
                         // Zig passes `-c`, which is unused
                         "-Wno-unused-command-line-argument",
+                        "-target",
                     });
                     cc.step.max_rss = ByteSize.mib(39).bytes;
+
+                    cc.addArg(target_triple);
 
                     if (options.target.result.cpu.arch.isX86()) {
                         cc.addArg("-masm=intel");
@@ -562,8 +568,7 @@ const Modules = struct {
                         .symbol_prefix = symbol_prefix,
                         .strip = false,
                         .target = .{
-                            .triple = options.target.query.zigTriple(b.allocator) catch
-                                @panic("oom"),
+                            .triple = target_triple,
                             .cpu_features = options.target.query
                                 .serializeCpuAlloc(b.allocator) catch @panic("oom"),
                         },
