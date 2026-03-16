@@ -48,6 +48,32 @@ pub fn main(init: std.process.Init.Minimal) Oom!void {
             else => |err| return err,
         };
     };
+    const detected_intrinsics = info: {
+        const path = cli_args.next().?;
+        _ = scratch.reset(.retain_capacity);
+        const contents = cwd.readFileAllocOptions(
+            io,
+            path,
+            scratch.allocator(),
+            .limited(4096),
+            .@"16",
+            0,
+        ) catch |e| std.debug.panic("cannot open {s}: {t}", .{ path, e });
+
+        break :info std.zon.parse.fromSliceAlloc(
+            Builder.DetectedIntrinsics,
+            arena.allocator(),
+            contents,
+            null,
+            .{ .free_on_error = false },
+        ) catch |e| switch (e) {
+            error.ParseZon => std.debug.panic(
+                "error parsing detected intrinsics:\n{s}\n",
+                .{contents},
+            ),
+            else => |err| return err,
+        };
+    };
 
     const bc_file = file: {
         const path = cli_args.next().?;
@@ -82,6 +108,7 @@ pub fn main(init: std.process.Init.Minimal) Oom!void {
         .options = options,
         .target_info = target_info,
         .target = &target,
+        .detected_intrinsics = detected_intrinsics,
     });
     try buildLlvmModule(&builder);
 

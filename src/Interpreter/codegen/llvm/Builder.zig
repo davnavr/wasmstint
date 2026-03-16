@@ -14,6 +14,11 @@ pub const TargetInfo = struct {
     cpu_features: []const u8,
 };
 
+pub const DetectedIntrinsics = packed struct {
+    roundeven: bool,
+    roundevenf: bool,
+};
+
 options: Options,
 target: *const std.Target,
 /// In bytes.
@@ -23,6 +28,7 @@ ptr_size_bytes: u16,
 /// `usize`.
 size_type: Type = .none,
 target_info: TargetInfo,
+detected_intrinsics: DetectedIntrinsics,
 float_info: [2]FloatInfo = undefined,
 
 scratch: *ArenaAllocator,
@@ -93,6 +99,7 @@ pub fn init(
         options: Options,
         target: *const std.Target,
         target_info: TargetInfo,
+        detected_intrinsics: DetectedIntrinsics,
     },
 ) Oom!void {
     const ptr_bit_size = config.target.ptrBitWidth();
@@ -102,6 +109,7 @@ pub fn init(
         .cache_line_size = std.atomic.cacheLineForCpu(config.target.cpu),
         .ptr_size_bytes = @divExact(ptr_bit_size, 8),
         .target_info = config.target_info,
+        .detected_intrinsics = config.detected_intrinsics,
         .scratch = scratch,
         .module = try llvm.Builder.init(.{
             .allocator = gpa,

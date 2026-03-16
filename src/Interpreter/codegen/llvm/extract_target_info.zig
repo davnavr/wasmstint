@@ -24,7 +24,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
     std.debug.assert(cli_args.next() == null);
 
-    var stdout_buf: [512]u8 align(16) = undefined;
+    var stdout_buf: [4096]u8 align(16) = undefined;
     var stdout = std.Io.File.stdout().writerStreaming(io, &stdout_buf);
     try std.zon.stringify.serialize(.{
         .data_layout = std.mem.cutScalar(

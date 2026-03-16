@@ -419,7 +419,7 @@ const Modules = struct {
                     run_codegen.step.dependOn(&b.addFail(err_no_pic_flag).step);
                 }
             } else if (interpreter_backend == .@"llvm-ir") {
-                const target_info_ll = b.addLibrary(.{
+                const target_info_bc = b.addLibrary(.{
                     .name = "target_info",
                     .root_module = b.createModule(.{
                         .root_source_file = b.path(
@@ -430,25 +430,100 @@ const Modules = struct {
                         .strip = true,
                     }),
                     .max_rss = ByteSize.mib(88).bytes,
-                });
+                }).getEmittedLlvmIr();
 
-                const extract_target_info_exe = b.addExecutable(.{
-                    .name = "wasmstint-codegen-llvm-extract-target-info",
-                    .root_module = b.createModule(.{
-                        .root_source_file = b.path(
-                            "src/Interpreter/codegen/llvm/extract_target_info.zig",
-                        ),
-                        .target = b.graph.host,
-                        .optimize = .Debug,
-                        .single_threaded = true,
-                        .pic = false,
-                    }),
-                    .max_rss = ByteSize.mib(124).bytes,
-                });
+                const target_info = info: {
+                    const extract_target_info_exe = b.addExecutable(.{
+                        .name = "wasmstint-codegen-llvm-extract-target-info",
+                        .root_module = b.createModule(.{
+                            .root_source_file = b.path(
+                                "src/Interpreter/codegen/llvm/extract_target_info.zig",
+                            ),
+                            .target = b.graph.host,
+                            .optimize = .Debug,
+                            .single_threaded = true,
+                            .pic = false,
+                        }),
+                        .max_rss = ByteSize.mib(124).bytes,
+                    });
 
-                const extract_target_info = b.addRunArtifact(extract_target_info_exe);
-                extract_target_info.addFileArg(target_info_ll.getEmittedLlvmIr());
-                extract_target_info.step.max_rss = ByteSize.mib(1).bytes;
+                    const extract_target_info = b.addRunArtifact(extract_target_info_exe);
+                    extract_target_info.addFileArg(target_info_bc);
+                    extract_target_info.step.max_rss = ByteSize.mib(1).bytes;
+                    break :info extract_target_info.captureStdOut(.{
+                        .basename = "target_info.zon",
+                    });
+                };
+
+                const sample_intrinsics_bc = bc: {
+                    const sample_intrinsics_exe = b.addExecutable(.{
+                        .name = "wasmstint-codegen-llvm-sample-intrinsics",
+                        .root_module = b.createModule(.{
+                            .root_source_file = b.path(
+                                "src/Interpreter/codegen/llvm/sample_intrinsics.zig",
+                            ),
+                            .target = b.graph.host,
+                            .optimize = .Debug,
+                            .single_threaded = true,
+                            .pic = false,
+                        }),
+                        .max_rss = ByteSize.mib(151).bytes,
+                    });
+
+                    const sample_intrinsics = b.addRunArtifact(sample_intrinsics_exe);
+                    sample_intrinsics.step.max_rss = ByteSize.mib(1).bytes;
+                    sample_intrinsics.addFileArg(target_info);
+                    break :bc sample_intrinsics.addOutputFileArg("sample_intrinsics.bc");
+                };
+
+                // TODO(Zig): LLVM IR can't be used https://github.com/ziglang/zig/issues/25004
+                // - Workaround is to use zig cc (clang)
+                const sample_intrinsics_asm = cc: {
+                    const cc = b.addSystemCommand(&.{
+                        b.graph.zig_exe,
+                        "cc",
+                        "-S",
+                        "-nostdlib",
+                        // Zig enables sanitizer flags when compiling C
+                        "-fno-sanitize=undefined",
+                        "-fno-sanitize-trap",
+                        // Zig passes `-c`, which is unused
+                        "-Wno-unused-command-line-argument",
+                    });
+                    cc.step.max_rss = ByteSize.mib(39).bytes;
+
+                    if (options.target.result.cpu.arch.isX86()) {
+                        cc.addArg("-masm=intel");
+                    }
+
+                    cc.addFileArg(sample_intrinsics_bc);
+
+                    cc.addArg("-o");
+                    break :cc cc.addOutputFileArg("sample_intrinsics.s");
+                };
+
+                const detected_intrinsics = info: {
+                    const intrinsic_detection_exe = b.addExecutable(.{
+                        .name = "wasmstint-codegen-llvm-intrinsic-detection",
+                        .root_module = b.createModule(.{
+                            .root_source_file = b.path(
+                                "src/Interpreter/codegen/llvm/intrinsic_detection.zig",
+                            ),
+                            .target = b.graph.host,
+                            .optimize = .Debug,
+                            .single_threaded = true,
+                            .pic = false,
+                        }),
+                        .max_rss = ByteSize.mib(119).bytes,
+                    });
+
+                    const intrinsic_detection = b.addRunArtifact(intrinsic_detection_exe);
+                    intrinsic_detection.step.max_rss = ByteSize.mib(1).bytes;
+                    intrinsic_detection.addFileArg(sample_intrinsics_asm);
+                    break :info intrinsic_detection.captureStdOut(.{
+                        .basename = "detected_intrinsics.zon",
+                    });
+                };
 
                 const codegen_exe = b.addExecutable(.{
                     .name = "wasmstint-codegen-llvm",
@@ -497,9 +572,8 @@ const Modules = struct {
                 const run_codegen = b.addRunArtifact(codegen_exe);
                 run_codegen.step.max_rss = ByteSize.mib(3).bytes; // arbitrary
                 run_codegen.addArg(options_writer.written());
-                run_codegen.addFileArg(
-                    extract_target_info.captureStdOut(.{ .basename = "target_info" }),
-                );
+                run_codegen.addFileArg(target_info);
+                run_codegen.addFileArg(detected_intrinsics);
                 root_module.addObjectFile(
                     run_codegen.addOutputFileArg("wasmstint-interpreter.bc"),
                 );
