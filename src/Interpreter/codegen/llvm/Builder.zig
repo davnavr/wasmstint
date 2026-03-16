@@ -57,6 +57,7 @@ byte_opcode_lookup: EnumSet(opcodes.ByteOpcode) = .initEmpty(),
 fc_prefix_opcode_lookup: EnumSet(opcodes.FCPrefixOpcode) = .initEmpty(),
 fd_prefix_opcode_lookup: EnumSet(opcodes.FDPrefixOpcode) = .initEmpty(),
 
+round_even_attrs: FunctionAttributes = .none,
 out_of_fuel_handler: Function.Index = .none,
 skip_leb_idx: Function.Index = .none,
 decode_uleb_idx: Function.Index = .none,
@@ -182,6 +183,23 @@ pub fn init(
                 },
                 else => {},
             }
+        }
+        break :attrs try attrs.finish(&b.module);
+    };
+
+    b.round_even_attrs = attrs: {
+        var attrs = FunctionAttributes.Wip{};
+        defer attrs.deinit(&b.module);
+        for (&[_]Attribute{
+            .nocallback,
+            .nofree,
+            .nosync,
+            .nounwind,
+            .speculatable,
+            .willreturn,
+            .{ .memory = .{} },
+        }) |a| {
+            try attrs.addFnAttr(a, &b.module);
         }
         break :attrs try attrs.finish(&b.module);
     };

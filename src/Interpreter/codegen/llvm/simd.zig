@@ -1169,14 +1169,49 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             const wip = &op.wip;
             wip.cursor = .{ .block = try wip.block(0, "Entry") };
             const un_op = try op.unOp(b, float_vec);
-            try un_op.writeResult(&op, try wip.callIntrinsic(
-                .normal,
-                .none,
-                intrin,
-                &.{float_vec},
-                &.{un_op.c_1},
-                "result",
-            ));
+            const rounded = rounded: {
+                if (intrin == .roundeven) intrin: {
+                    const name = switch (interp) {
+                        .f32x4 => if (!b.detected_intrinsics.roundevenf)
+                            break :intrin
+                        else
+                            "roundeven.f32x4",
+                        .f64x2 => if (!b.detected_intrinsics.roundeven)
+                            break :intrin
+                        else
+                            "roundeven.f64x2",
+                        else => unreachable,
+                    };
+
+                    const helper = try b.addFunction(
+                        try b.strtabStringSymbolPrefixed(name),
+                        try b.fnType(float_vec, &.{float_vec}),
+                        .ccc,
+                        .{ .linkage = .external, .preemption = .dso_local },
+                    );
+                    helper.setAttributes(b.round_even_attrs, &b.module);
+
+                    break :rounded try op.wip.call(
+                        .normal,
+                        .ccc,
+                        .none,
+                        helper.typeOf(&b.module),
+                        helper.toValue(&b.module),
+                        &.{un_op.c_1},
+                        "",
+                    );
+                }
+
+                break :rounded try wip.callIntrinsic(
+                    .normal,
+                    .none,
+                    intrin,
+                    &.{float_vec},
+                    &.{un_op.c_1},
+                    "result",
+                );
+            };
+            try un_op.writeResult(&op, rounded);
             try op.jmpToNextHandler(b, .{
                 .vip = OpcodeHandlerParam.vip.arg(wip),
                 .vsp = OpcodeHandlerParam.vsp.arg(wip),

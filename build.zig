@@ -524,6 +524,9 @@ const Modules = struct {
                         .basename = "detected_intrinsics.zon",
                     });
                 };
+                root_module.addAnonymousImport("detected_intrinsics", .{
+                    .root_source_file = detected_intrinsics,
+                });
 
                 const codegen_exe = b.addExecutable(.{
                     .name = "wasmstint-codegen-llvm",

@@ -732,6 +732,38 @@ comptime {
     }
 }
 
+fn @"roundeven.f32"(z: f32) callconv(.c) f32 {
+    return round.operations(f32).nearest(z);
+}
+
+fn @"roundeven.f64"(z: f64) callconv(.c) f64 {
+    return round.operations(f64).nearest(z);
+}
+
+fn @"roundeven.f32x4"(z: @Vector(4, f32)) callconv(.c) @Vector(4, f32) {
+    return round.operations(@Vector(4, f32)).nearest(z);
+}
+
+fn @"roundeven.f64x2"(z: @Vector(2, f64)) callconv(.c) @Vector(2, f64) {
+    return round.operations(@Vector(2, f64)).nearest(z);
+}
+
+comptime {
+    if (detected_intrinsics.roundevenf) {
+        for (&[2][]const u8{ "", "x4" }) |suffix| {
+            const name = "roundeven.f32" ++ suffix;
+            @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
+        }
+    }
+
+    if (detected_intrinsics.roundeven) {
+        for (&[2][]const u8{ "", "x2" }) |suffix| {
+            const name = "roundeven.f64" ++ suffix;
+            @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
+        }
+    }
+}
+
 fn panicInvalidByteOpcode(ip: Ip, eip: Eip) callconv(.c) noreturn {
     @branchHint(.cold);
     const bad_ip = ip - 1;
@@ -831,11 +863,13 @@ const CallingConvention = std.builtin.CallingConvention;
 const builtin = @import("builtin");
 
 const opcodes = @import("opcodes");
+const detected_intrinsics = @import("detected_intrinsics");
 const Module = @import("../../Module.zig");
 
 const Interpreter = @import("../../Interpreter.zig");
 const Trap = Interpreter.Trap;
 const runtime = @import("../../runtime.zig");
+const round = @import("../../round.zig");
 
 const Instr = @import("../Instr.zig");
 const Stack = @import("../Stack.zig");

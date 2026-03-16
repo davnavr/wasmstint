@@ -4177,14 +4177,48 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             );
             op.wip.cursor = .{ .block = try op.wip.block(0, "Entry") };
             const un_op = try op.unOp(b, float_ty);
-            const rounded = try op.wip.callIntrinsic(
-                .normal,
-                .none,
-                intrin,
-                &.{float_ty},
-                &.{un_op.c_1},
-                "",
-            );
+            const rounded = rounded: {
+                if (intrin == .roundeven) intrin: {
+                    const name = switch (float_ty) {
+                        .float => if (!b.detected_intrinsics.roundevenf)
+                            break :intrin
+                        else
+                            "roundeven.f32",
+                        .double => if (!b.detected_intrinsics.roundeven)
+                            break :intrin
+                        else
+                            "roundeven.f64",
+                        else => unreachable,
+                    };
+
+                    const helper = try b.addFunction(
+                        try b.strtabStringSymbolPrefixed(name),
+                        try b.fnType(float_ty, &.{float_ty}),
+                        .ccc,
+                        .{ .linkage = .external, .preemption = .dso_local },
+                    );
+                    helper.setAttributes(b.round_even_attrs, &b.module);
+
+                    break :rounded try op.wip.call(
+                        .normal,
+                        .ccc,
+                        .none,
+                        helper.typeOf(&b.module),
+                        helper.toValue(&b.module),
+                        &.{un_op.c_1},
+                        "",
+                    );
+                }
+
+                break :rounded try op.wip.callIntrinsic(
+                    .normal,
+                    .none,
+                    intrin,
+                    &.{float_ty},
+                    &.{un_op.c_1},
+                    "",
+                );
+            };
             const is_nan = try op.wip.fcmp(.normal, .uno, rounded, rounded, "");
             try un_op.writeResult(
                 &op,
