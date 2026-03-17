@@ -361,7 +361,7 @@ pub const ExternVal = union(enum) {
     }
 };
 
-pub const ExternAddr = packed union {
+pub const ExternAddr = extern union {
     ptr: ?*anyopaque,
     nat: Nat,
 

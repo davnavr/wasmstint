@@ -1,6 +1,8 @@
 //! Checks whether assembly produced from an LLVM bitcode file contains calls to certain
 //! `compiler_rt` functions.
 
+pub const std_options: std.Options = .{ .networking = false };
+
 const Results = struct {
     // Introduced in C23, yet LLVM happily emits calls to it when some CPU features (e.g. SSE4.1)
     // aren't enabled. Zig's `compiler_rt` also currently doesn't provide an implementation.
@@ -13,7 +15,7 @@ const Results = struct {
 
 pub fn main(init: std.process.Init.Minimal) !void {
     var io_impl = std.Io.Threaded.init_single_threaded;
-    const io = io_impl.ioBasic();
+    const io = io_impl.io();
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 

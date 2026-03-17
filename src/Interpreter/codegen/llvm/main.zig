@@ -1,8 +1,10 @@
 //! Generates an LLVM IR bitcode (`.bc`) file implementing wasmstint's opcode handlers.
 
+pub const std_options: std.Options = .{ .networking = false };
+
 pub fn main(init: std.process.Init.Minimal) Oom!void {
     var io_impl = std.Io.Threaded.init_single_threaded;
-    const io = io_impl.ioBasic();
+    const io = io_impl.io();
 
     var scratch = ArenaAllocator.init(std.heap.page_allocator);
 
@@ -327,7 +329,11 @@ fn buildLlvmModule(b: *Builder) Oom!void {
             try b.commonFnAttributes(&attributes);
             try attributes.addFnAttr(.norecurse, &b.module);
             for (0..2) |i| {
-                try attributes.addParamAttr(i, .{ .@"align" = value_stack_alignment }, &b.module);
+                try attributes.addParamAttr(
+                    i,
+                    .{ .@"align" = .wrap(value_stack_alignment) },
+                    &b.module,
+                );
             }
             for (0..9) |i| {
                 for (&[3]Attribute{ .nonnull, .nofree, .noundef }) |attr| {
@@ -642,7 +648,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
                 .nonnull,
                 .nofree,
                 .writeonly,
-                .{ .@"align" = size_alignment },
+                .{ .@"align" = .wrap(size_alignment) },
             }) |a| {
                 try attrs.addParamAttr(0, a, &b.module);
             }
@@ -712,7 +718,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
                 .noundef,
                 .nonnull,
                 .nofree,
-                .{ .@"align" = value_stack_alignment },
+                .{ .@"align" = .wrap(value_stack_alignment) },
             }) |a| {
                 for (0..2) |i| {
                     try attrs.addParamAttr(i, a, &b.module);
@@ -799,7 +805,7 @@ fn buildLlvmModule(b: *Builder) Oom!void {
                     .noundef,
                     .nonnull,
                     .nofree,
-                    .{ .@"align" = value_stack_alignment },
+                    .{ .@"align" = .wrap(value_stack_alignment) },
                     .{ .dereferenceable = 2 * 16 },
                 }) |a| {
                     for (0..2) |i| {
@@ -3145,7 +3151,7 @@ fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
                 attrs: {
                     var attrs = FunctionAttributes.Wip{};
                     for (&[3]Attribute{
-                        .{ .@"align" = llvm.Builder.Alignment.fromByteUnits(b.ptr_size_bytes) },
+                        .{ .@"align" = .wrap(.fromByteUnits(b.ptr_size_bytes)) },
                         .nonnull,
                         .noundef,
                     }) |a| {

@@ -1,6 +1,8 @@
+pub const std_options: std.Options = .{ .networking = false };
+
 pub fn main(init: std.process.Init.Minimal) !void {
     var io_impl = std.Io.Threaded.init_single_threaded;
-    const io = io_impl.ioBasic();
+    const io = io_impl.io();
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 

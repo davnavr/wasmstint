@@ -342,12 +342,10 @@ fn logger(
         return;
     }
 
-    var io = std.Io.Threaded.init_single_threaded;
     var buffer: [1024]u8 align(16) = undefined;
     var log_file_writer: std.Io.File.Writer = undefined;
     var writer: *Io.Writer = if (log_file) |f| writer: {
-        // TODO(zig): https://github.com/ziglang/zig/issues/25738
-        log_file_writer = f.writerStreaming(io.ioBasic(), &buffer);
+        log_file_writer = f.writerStreaming(std.Options.debug_io, &buffer);
         break :writer &log_file_writer.interface;
     } else &std.debug.lockStderr(&buffer).file_writer.interface;
 
@@ -419,7 +417,7 @@ fn realMain(init: std.process.Init.Minimal) Error!i32 {
     }
 
     var io_threaded = Io.Threaded.init_single_threaded;
-    const io = io_threaded.ioBasic();
+    const io = io_threaded.io();
     const cwd = Io.Dir.cwd();
 
     log_level = arguments.@"log-level";

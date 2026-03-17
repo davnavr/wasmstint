@@ -21,6 +21,14 @@ pub const InterruptedError = error{
     Interrupted,
 };
 
+pub fn close(handle: Handle) void {
+    if (is_windows) {
+        std.os.windows.CloseHandle(handle);
+    } else {
+        std.debug.assert(std.posix.system.close(handle) == 0);
+    }
+}
+
 const std = @import("std");
 const builtin = @import("builtin");
 

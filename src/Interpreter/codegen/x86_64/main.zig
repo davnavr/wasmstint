@@ -1,9 +1,11 @@
 //! Generates an assembly `.s` file and a `.zig` file containing `extern fn` definitions
 //! to individual opcode handlers.
 
+pub const std_options: std.Options = .{ .networking = false };
+
 pub fn main(init: std.process.Init.Minimal) noreturn {
     var io_impl = std.Io.Threaded.init_single_threaded;
-    const io = io_impl.ioBasic();
+    const io = io_impl.io();
 
     var arena = ArenaAllocator.init(std.heap.page_allocator); // never reset
     var scratch = ArenaAllocator.init(std.heap.page_allocator);

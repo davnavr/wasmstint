@@ -1,6 +1,8 @@
+pub const std_options: std.Options = .{ .networking = false };
+
 pub fn main() !void {
     var threaded_io = std.Io.Threaded.init_single_threaded;
-    const io = threaded_io.ioBasic();
+    const io = threaded_io.io();
 
     var stdout_buf: [4096]u8 align(16) = undefined;
     var stdout_writer = std.Io.File.stdout().writerStreaming(io, &stdout_buf);

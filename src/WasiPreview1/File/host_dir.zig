@@ -1035,7 +1035,7 @@ fn pathFileStatGet(
     device_hash_seed: types.Device.HashSeed,
     inode_hash_seed: types.INode.HashSeed,
 ) Error!types.FileStat {
-    defer std.posix.close(new_fd);
+    defer sys.close(new_fd);
     _ = scratch;
     const stat: types.FileStat = try host_os.fileStat(new_fd, device_hash_seed, inode_hash_seed);
     log.debug("path_filestat_get {f} -> {f}", .{ path, stat });
@@ -1092,7 +1092,7 @@ fn pathOpenFlags(
     if (builtin.os.tag == .windows) {
         if (fd_flags.dsync or fd_flags.rsync or fd_flags.sync) {
             log.err("unsupported fdflags {f} on windows", .{fd_flags});
-            return Error.NotSupported; // `Errno.notsup` for unsupported flags
+            return error.NotSupported; // `Errno.notsup` for unsupported flags
         }
 
         const can_write = rights.canWrite();
@@ -1168,7 +1168,7 @@ fn pathOpen(
     rights: types.Rights.Valid,
     fd_flags: types.FdFlags.Valid,
 ) Error!File.OpenedPath {
-    errdefer std.posix.close(new_fd);
+    errdefer sys.close(new_fd);
     _ = scratch;
     const opened_msg = "successfully opened file {f}";
     if (builtin.os.tag == .windows) {

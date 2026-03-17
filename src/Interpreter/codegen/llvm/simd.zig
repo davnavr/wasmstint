@@ -249,7 +249,7 @@ fn buildMemoryLoadOpcodeHandlers(b: *Builder) Oom!void {
                 for (&[4]llvm.Builder.Attribute{
                     .nonnull,
                     .noundef,
-                    .{ .@"align" = value_stack_alignment },
+                    .{ .@"align" = .wrap(value_stack_alignment) },
                     .{ .dereferenceable = 16 },
                 }) |a| {
                     try attrs.addParamAttr(0, a, &b.module);

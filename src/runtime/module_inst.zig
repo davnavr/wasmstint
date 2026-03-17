@@ -2,7 +2,9 @@
 ///
 /// To obtain a `ModuleInst`, a `Module` must first be passed to `ModuleAlloc.allocate`, which is
 /// then passed to `Interpreter.instantiateModule`.
-pub const ModuleInst = packed struct(usize) {
+///
+/// Marked `extern`, as it is intended to have the same ABI as a pointer.
+pub const ModuleInst = extern struct {
     // Packed struct to workaround a codegen bug in Zig 0.15.1
     // ^ ModuleInst parameter's lower 16-bits get cloberred in `i32/64.const` handler
 
@@ -261,7 +263,10 @@ pub const ModuleInst = packed struct(usize) {
         }
     };
 
-    inner: *align(std.atomic.cache_line) const Header,
+    /// Internal API.
+    pub const Inner = *align(std.atomic.cache_line) const Header;
+
+    inner: Inner,
 
     /// Internal API used to obtain the functions, tables, memories, globals, etc.
     /// that are defined or imported by the module.

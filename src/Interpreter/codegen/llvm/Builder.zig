@@ -156,7 +156,7 @@ pub fn init(
             };
 
             if (alignment) |a| {
-                try attrs.addParamAttr(idx, .{ .@"align" = .fromByteUnits(a) }, &b.module);
+                try attrs.addParamAttr(idx, .{ .@"align" = .wrap(.fromByteUnits(a)) }, &b.module);
             }
 
             switch (param) {
@@ -322,7 +322,7 @@ pub fn init(
         .attributes = attrs: {
             var attrs = FunctionAttributes.Wip{};
             defer attrs.deinit(&b.module);
-            try attrs.addParamAttr(0, .{ .@"align" = value_stack_alignment }, &b.module);
+            try attrs.addParamAttr(0, .{ .@"align" = .wrap(value_stack_alignment) }, &b.module);
             break :attrs try attrs.finish(&b.module);
         },
         .overload = [2]Type{ .ptr, b.size_type },
@@ -343,22 +343,22 @@ pub fn init(
             var attrs = try value_copy_attrs_template.toWip(&b.module);
             defer attrs.deinit(&b.module);
             for (0..2) |i| {
-                try attrs.addParamAttr(i, .{ .@"align" = value_stack_alignment }, &b.module);
+                try attrs.addParamAttr(i, .{ .@"align" = .wrap(value_stack_alignment) }, &b.module);
             }
             break :attrs try attrs.finish(&b.module);
         },
         .attributes_src_unaligned = attrs: {
             var attrs = try value_copy_attrs_template.toWip(&b.module);
             defer attrs.deinit(&b.module);
-            try attrs.addParamAttr(0, .{ .@"align" = value_stack_alignment }, &b.module);
-            try attrs.addParamAttr(1, .{ .@"align" = byte_alignment }, &b.module);
+            try attrs.addParamAttr(0, .{ .@"align" = .wrap(value_stack_alignment) }, &b.module);
+            try attrs.addParamAttr(1, .{ .@"align" = .wrap(byte_alignment) }, &b.module);
             break :attrs try attrs.finish(&b.module);
         },
         .attributes_dst_unaligned = attrs: {
             var attrs = try value_copy_attrs_template.toWip(&b.module);
             defer attrs.deinit(&b.module);
-            try attrs.addParamAttr(0, .{ .@"align" = byte_alignment }, &b.module);
-            try attrs.addParamAttr(1, .{ .@"align" = value_stack_alignment }, &b.module);
+            try attrs.addParamAttr(0, .{ .@"align" = .wrap(byte_alignment) }, &b.module);
+            try attrs.addParamAttr(1, .{ .@"align" = .wrap(value_stack_alignment) }, &b.module);
             break :attrs try attrs.finish(&b.module);
         },
         .overload = [3]Type{ .ptr, .ptr, b.size_type },

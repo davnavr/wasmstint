@@ -419,7 +419,7 @@ pub const Iterator = struct {
 };
 
 pub fn close(dir: Dir) void {
-    std.posix.close(dir.handle);
+    sys.close(dir.handle);
 }
 
 const std = @import("std");

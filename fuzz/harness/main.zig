@@ -1,5 +1,6 @@
 pub const std_options = std.Options{
     .log_level = .debug,
+    .networking = false,
 };
 
 const Arguments = cli_args.CliArgs(.{
@@ -117,7 +118,7 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
     }
 
     var io_threaded = std.Io.Threaded.init_single_threaded;
-    const io = io_threaded.ioBasic();
+    const io = io_threaded.io();
 
     const cwd = std.Io.Dir.cwd();
     var input_src = InputSource.read(

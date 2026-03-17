@@ -25,7 +25,7 @@ pub const TableInst = extern struct {
         );
     }
 
-    pub const Base = packed union {
+    pub const Base = extern union {
         func_ref: [*]FuncRef.Nullable,
         extern_ref: [*]ExternAddr,
         ptr: [*]?*anyopaque,

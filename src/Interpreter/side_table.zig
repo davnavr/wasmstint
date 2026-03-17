@@ -1,5 +1,6 @@
-/// `packed struct` to allow use in functions using the C calling convention.
-pub const SideTable = packed struct(usize) {
+/// Marked `extern` to allow use in functions using the C calling convention. It is intended
+/// to have the same ABI as a pointer.
+pub const SideTable = extern struct {
     pub const Ptr = [*]const Module.Code.SideTableEntry;
 
     next: Ptr,

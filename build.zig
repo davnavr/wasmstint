@@ -398,7 +398,7 @@ const Modules = struct {
                         .pic = false,
                         // .code_model = .small, // Forces usage of LLVM backend
                     }),
-                    .max_rss = ByteSize.mib(168).bytes,
+                    .max_rss = ByteSize.mib(182).bytes,
                 });
                 codegen_exe.root_module.addImport("opcodes", opcodes_module);
                 codegen_exe.root_module.addImport("enum_set", enum_set_module);
@@ -444,7 +444,7 @@ const Modules = struct {
                             .single_threaded = true,
                             .pic = false,
                         }),
-                        .max_rss = ByteSize.mib(124).bytes,
+                        .max_rss = ByteSize.mib(127).bytes,
                     });
 
                     const extract_target_info = b.addRunArtifact(extract_target_info_exe);
@@ -467,7 +467,7 @@ const Modules = struct {
                             .single_threaded = true,
                             .pic = false,
                         }),
-                        .max_rss = ByteSize.mib(151).bytes,
+                        .max_rss = ByteSize.mib(170).bytes,
                     });
 
                     const sample_intrinsics = b.addRunArtifact(sample_intrinsics_exe);

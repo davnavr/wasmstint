@@ -7,9 +7,11 @@ pub const TargetInfo = struct {
     cpu_features: []const u8,
 };
 
+pub const std_options: std.Options = .{ .networking = false };
+
 pub fn main(init: std.process.Init.Minimal) std.mem.Allocator.Error!void {
     var io_impl = std.Io.Threaded.init_single_threaded;
-    const io = io_impl.ioBasic();
+    const io = io_impl.io();
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 

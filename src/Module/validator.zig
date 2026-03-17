@@ -377,7 +377,7 @@ const ValStack = struct {
         // TODO: check that current frame is reachable instead.
         // if (val != .unknown) {
         val_stack.max = @max(val_stack.max, std.math.cast(u16, val_stack.buf.items.len) orelse
-            return Error.WasmImplementationLimit);
+            return error.WasmImplementationLimit);
         // }
     }
 
@@ -639,7 +639,7 @@ const Label = struct {
         target_frame_height: u16,
     ) Module.LimitError!u8 {
         return std.math.cast(u8, current_height - target_frame_height) orelse
-            Error.WasmImplementationLimit;
+            error.WasmImplementationLimit;
     }
 
     fn init(
@@ -946,7 +946,7 @@ const SideTableBuilder = struct {
 
         if (known_target) |target| {
             const delta_ip = std.math.negateCast(origin - target.instr_offset) catch
-                return Error.WasmImplementationLimit;
+                return error.WasmImplementationLimit;
 
             entry.inner.delta_ip = .{ .done = delta_ip };
             if (Code.side_table_safety_checks) {
@@ -954,10 +954,10 @@ const SideTableBuilder = struct {
             }
 
             const delta_stp = std.math.negateCast(idx - target.side_table_idx) catch
-                return Error.WasmImplementationLimit;
+                return error.WasmImplementationLimit;
 
             entry.inner.delta_stp = std.math.cast(i16, delta_stp) orelse
-                return Error.WasmImplementationLimit;
+                return error.WasmImplementationLimit;
         } else {
             // std.debug.print(
             //     " PLACED FIXUP #{} originating from 0x{X} corresponding to block 0x{X} (copy={}, pop={})\n",

@@ -1,3 +1,5 @@
+pub const std_options: std.Options = .{ .networking = false };
+
 fn printColor(out: std.Io.Terminal, color: std.Io.Terminal.Color) !void {
     try out.setColor(color);
     try out.writer.print("{t}\n", .{color});
@@ -5,7 +7,7 @@ fn printColor(out: std.Io.Terminal, color: std.Io.Terminal.Color) !void {
 
 pub fn main() !void {
     var io_threaded = std.Io.Threaded.init_single_threaded;
-    const io = io_threaded.ioBasic();
+    const io = io_threaded.io();
 
     const stdout = std.Io.File.stdout();
     var out_buf: [512]u8 align(16) = undefined;

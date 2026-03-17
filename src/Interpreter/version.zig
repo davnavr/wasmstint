@@ -1,5 +1,5 @@
 /// Ensures that `State` structs operate on the correct `Interpreter`.
-pub const Version = packed struct {
+pub const Version = packed struct(u32) {
     pub const enabled = true; // Zero-sized types might break Zig codegen.
 
     number: if (enabled) u32 else u0 = 0,

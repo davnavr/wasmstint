@@ -24,7 +24,8 @@ pub const outOfFuelHandler = implementation.outOfFuelHandler;
 pub const byte_dispatch_table = implementation.byte_dispatch_table;
 pub const callOpcodeHandler = implementation.callOpcodeHandler;
 
-pub const Locals = packed struct(usize) {
+/// Marked `extern` as it is intended to have the same ABI as a pointer.
+pub const Locals = extern struct {
     ptr: [*]align(@sizeOf(Value)) Value,
 
     pub fn get(locals: Locals, stack: *Stack, idx: u32) *align(@sizeOf(Value)) Value {

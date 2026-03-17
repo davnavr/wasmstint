@@ -47,6 +47,8 @@ const Arguments = cli_args.CliArgs(.{
     },
 });
 
+pub const std_options: std.Options = .{ .networking = false };
+
 pub fn main(init: std.process.Init.Minimal) u8 {
     var scratch = ArenaAllocator.init(std.heap.page_allocator);
     defer if (builtin.mode == .Debug) scratch.deinit();
@@ -62,7 +64,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     _ = scratch.reset(.retain_capacity);
 
     var io_threaded = Io.Threaded.init_single_threaded;
-    const io = io_threaded.ioBasic();
+    const io = io_threaded.io();
 
     if (arguments.@"wait-for-debugger") {
         wasmstint.waitForDebugger(io);

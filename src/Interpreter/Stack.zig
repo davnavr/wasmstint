@@ -99,7 +99,7 @@ fn ChangePointee(
     comptime Pointee: type,
 ) type {
     std.debug.assert(@typeInfo(Self).pointer.size == .one);
-    std.debug.assert(@typeInfo(Self).pointer.alignment >= alignment);
+    std.debug.assert(std.meta.alignment(Self) >= alignment);
     return @Pointer(
         size,
         .{
@@ -115,9 +115,8 @@ pub fn currentFrame(stack: *const Stack) ?*const Frame {
     return stack.frameAt(stack.current_frame);
 }
 
-/// This is a `packed struct` to allow passing in a single register to opcode handlers, even when
-/// using the C calling convention.
-pub const Top = packed struct(usize) {
+/// Marked `extern` as it is intended to have the same ABI as a pointer.
+pub const Top = extern struct {
     /// Points to the "top" of the value stack, which is just past the last valid value.
     ptr: [*]align(@sizeOf(Value)) Value,
 };
