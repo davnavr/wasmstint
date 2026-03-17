@@ -92,8 +92,11 @@ pub const Mapped = extern struct {
 
             // This is similar to windows commit behavior
             if (!single_syscall and capacity > 0) {
-                virtual_memory.mman.protect(pages[0..capacity], .{ .WRITE = true }) catch
-                    return Oom.OutOfMemory;
+                virtual_memory.mman.protect(pages[0..capacity], .{
+                    // Makes syscalls fail with EFAULT on AArch64 when this is not set
+                    .READ = true,
+                    .WRITE = true,
+                }) catch return Oom.OutOfMemory;
             }
 
             break :posix pages;

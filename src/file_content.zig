@@ -134,7 +134,6 @@ pub fn readFile(io: Io, dir: Io.Dir, sub_path: BytePath) ReadFileError!VirtualMe
 
     std.debug.assert(allocated_size >= indicated_size);
     std.debug.assert(allocated_size % page_size == 0);
-    std.log.debug("allocated={d}, indicated={d} reading {s}", .{ allocated_size, indicated_size, sub_path });
 
     const allocated: []align(page_size_min) u8 = if (builtin.os.tag == .windows) win: {
         var region_size: windows.SIZE_T = allocated_size;
@@ -150,7 +149,7 @@ pub fn readFile(io: Io, dir: Io.Dir, sub_path: BytePath) ReadFileError!VirtualMe
 
         break :win base[0..allocated_size];
     } else try virtual_memory.mman.map_anonymous(allocated_size, .{
-        // Fails with EFAULT on AArch64
+        // Makes syscalls fail with EFAULT on AArch64 when this is not set
         .READ = true,
         .WRITE = true,
     });
