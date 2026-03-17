@@ -36,7 +36,10 @@ pub fn readFilePortable(
     }
 }
 
-pub const ReadFileError = Oom || Io.File.OpenError || Io.File.Reader.Error || Io.File.StatError;
+pub const ReadFileError = Oom ||
+    Io.File.OpenError ||
+    Io.File.ReadStreamingError ||
+    Io.File.StatError;
 
 pub const VirtualMemory = struct {
     allocation: []align(page_size_min) const u8,
@@ -131,6 +134,7 @@ pub fn readFile(io: Io, dir: Io.Dir, sub_path: BytePath) ReadFileError!VirtualMe
 
     std.debug.assert(allocated_size >= indicated_size);
     std.debug.assert(allocated_size % page_size == 0);
+    std.log.debug("allocated={d}, indicated={d} reading {s}", .{ allocated_size, indicated_size, sub_path });
 
     const allocated: []align(page_size_min) u8 = if (builtin.os.tag == .windows) win: {
         var region_size: windows.SIZE_T = allocated_size;
@@ -145,22 +149,19 @@ pub fn readFile(io: Io, dir: Io.Dir, sub_path: BytePath) ReadFileError!VirtualMe
         };
 
         break :win base[0..allocated_size];
-    } else try virtual_memory.mman.map_anonymous(allocated_size, .{ .WRITE = true });
+    } else try virtual_memory.mman.map_anonymous(allocated_size, .{
+        // Fails with EFAULT on AArch64
+        .READ = true,
+        .WRITE = true,
+    });
 
     errdefer if (builtin.os.tag == .windows) {
         var region_size: windows.SIZE_T = allocated.len;
         virtual_memory.nt.free(allocated.ptr, &region_size, .{ .DECOMMIT = true }) catch {};
     } else posix.munmap(allocated);
 
-    const actual_size = read: {
-        var reader = file.readerStreaming(io, allocated);
-        reader.interface.fill(allocated.len) catch |e| switch (e) {
-            error.EndOfStream => {},
-            error.ReadFailed => return reader.err.?,
-        };
-
-        break :read reader.interface.bufferedLen();
-    };
+    // Stack buffer works here?
+    const actual_size = try file.readStreaming(io, &.{allocated});
     const pages = VirtualMemory.calculateAllocationSizes(page_size, allocated, actual_size);
 
     if (pages.unused.len > 0) {
