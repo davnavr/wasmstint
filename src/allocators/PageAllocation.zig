@@ -195,7 +195,7 @@ pub fn allocator(ctx: *PageAllocation) Allocator {
 pub fn grow(ctx: *PageAllocation, new_capacity: usize) Oom!void {
     ctx.checkInvariants();
 
-    const page_size = pageSize();
+    const page_size: Len = @intCast(pageSize());
     const new_allocated = try tryAlignForward(new_capacity, page_size);
     if (new_allocated <= ctx.allocated) {
         @branchHint(.likely);
@@ -334,7 +334,7 @@ pub fn deinit(ctx: *PageAllocation) void {
 
     const page_size = pageSize();
     const pages: []align(page_size_min) u8 = if (ctx.info.has_guard_pages)
-        (ctx.current.ptr - page_size)[0 .. ctx.info.maximum + (page_size * 2)]
+        @alignCast((ctx.current.ptr - page_size)[0 .. ctx.info.maximum + (page_size * 2)])
     else
         ctx.current.ptr[0..ctx.info.maximum];
 
