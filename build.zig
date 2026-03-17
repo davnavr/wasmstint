@@ -307,8 +307,9 @@ const Modules = struct {
         const name = "wasmstint";
 
         const InterpreterBackend = enum {
-            portable,
+            zig,
             assembly,
+            @"llvm-ir",
         };
 
         fn build(
@@ -331,39 +332,28 @@ const Modules = struct {
             });
             root_module.addImport("opcodes", opcodes_module);
 
-            const use_assembly_interpreter = b.option(
+            const interpreter_backend = b.option(
                 InterpreterBackend,
                 "interpreter-backend",
                 "Set the interpreter implementation to use",
-            ) orelse InterpreterBackend.portable;
+            ) orelse InterpreterBackend.zig;
             const wasmstint_options = b.addOptions();
             wasmstint_options.addOption(
-                bool,
-                "use_assembly_interpreter",
-                use_assembly_interpreter == .assembly,
+                InterpreterBackend,
+                "interpreter_backend",
+                interpreter_backend,
             );
             root_module.addOptions("options", wasmstint_options);
 
-            const codegen_x64_sysv_exe = b.addExecutable(.{
-                .name = "wasmstint-codegen-x86_64_sysv",
-                .root_module = b.createModule(.{
-                    .root_source_file = b.path("src/Interpreter/codegen/x86_64/main.zig"),
-                    .target = b.graph.host,
-                    .optimize = .Debug,
-                    .single_threaded = true,
-                    .pic = false,
-                    // .code_model = .small, // Forces usage of LLVM backend
-                }),
-                .max_rss = ByteSize.mib(165).bytes,
+            const enum_set_module = b.createModule(.{
+                .root_source_file = b.path("src/Interpreter/codegen/enum_set.zig"),
             });
-            codegen_x64_sysv_exe.root_module.addImport("opcodes", opcodes_module);
 
-            const x64_asm_interp_symbol_prefix = "wasmstint.x86_64_sysv.";
             const err_no_pic_flag = "pass -Dpic or -Dpic=false to use ASM backend";
-
-            if (use_assembly_interpreter == .assembly and
+            if (interpreter_backend == .assembly and
                 options.target.result.cpu.arch == .x86_64)
             {
+                const symbol_prefix = "wasmstint.x86_64_sysv.";
                 const Options = struct {
                     optimize: std.builtin.OptimizeMode,
                     symbol_prefix: []const u8,
@@ -389,7 +379,7 @@ const Modules = struct {
                 std.zon.stringify.serialize(
                     Options{
                         .optimize = options.optimize_interpreter,
-                        .symbol_prefix = x64_asm_interp_symbol_prefix,
+                        .symbol_prefix = symbol_prefix,
                         .pic = options.pic orelse true,
                         // .target_triple = options.target.query.zigTriple(b.allocator) catch @panic("oom"),
                         .features = cpu_features.items,
@@ -398,7 +388,22 @@ const Modules = struct {
                     &options_writer.writer,
                 ) catch @panic("oom");
 
-                const run_codegen = b.addRunArtifact(codegen_x64_sysv_exe);
+                const codegen_exe = b.addExecutable(.{
+                    .name = "wasmstint-codegen-x86_64_sysv",
+                    .root_module = b.createModule(.{
+                        .root_source_file = b.path("src/Interpreter/codegen/x86_64/main.zig"),
+                        .target = b.graph.host,
+                        .optimize = .Debug,
+                        .single_threaded = true,
+                        .pic = false,
+                        // .code_model = .small, // Forces usage of LLVM backend
+                    }),
+                    .max_rss = ByteSize.mib(168).bytes,
+                });
+                codegen_exe.root_module.addImport("opcodes", opcodes_module);
+                codegen_exe.root_module.addImport("enum_set", enum_set_module);
+
+                const run_codegen = b.addRunArtifact(codegen_exe);
                 run_codegen.step.max_rss = ByteSize.mib(3).bytes;
                 run_codegen.addArg(options_writer.written());
                 root_module.addAssemblyFile(run_codegen.addOutputFileArg("x86_64_sysv.s"));
@@ -407,11 +412,181 @@ const Modules = struct {
                 //     .target = options.target,
                 //     .optimize = options.optimize_interpreter,
                 // });
-                wasmstint_options.addOption([]const u8, "symbol_prefix", x64_asm_interp_symbol_prefix);
+
+                wasmstint_options.addOption([]const u8, "symbol_prefix", symbol_prefix);
 
                 if (options.pic == null) {
                     run_codegen.step.dependOn(&b.addFail(err_no_pic_flag).step);
                 }
+            } else if (interpreter_backend == .@"llvm-ir") {
+                const target_info_bc = b.addLibrary(.{
+                    .name = "target_info",
+                    .root_module = b.createModule(.{
+                        .root_source_file = b.path(
+                            "src/Interpreter/codegen/llvm/target_info_source.zig",
+                        ),
+                        .target = options.target,
+                        .optimize = .ReleaseFast,
+                        .strip = true,
+                    }),
+                    .max_rss = ByteSize.mib(88).bytes,
+                }).getEmittedLlvmIr();
+
+                const target_info = info: {
+                    const extract_target_info_exe = b.addExecutable(.{
+                        .name = "wasmstint-codegen-llvm-extract-target-info",
+                        .root_module = b.createModule(.{
+                            .root_source_file = b.path(
+                                "src/Interpreter/codegen/llvm/extract_target_info.zig",
+                            ),
+                            .target = b.graph.host,
+                            .optimize = .Debug,
+                            .single_threaded = true,
+                            .pic = false,
+                        }),
+                        .max_rss = ByteSize.mib(124).bytes,
+                    });
+
+                    const extract_target_info = b.addRunArtifact(extract_target_info_exe);
+                    extract_target_info.addFileArg(target_info_bc);
+                    extract_target_info.step.max_rss = ByteSize.mib(1).bytes;
+                    break :info extract_target_info.captureStdOut(.{
+                        .basename = "target_info.zon",
+                    });
+                };
+
+                const sample_intrinsics_bc = bc: {
+                    const sample_intrinsics_exe = b.addExecutable(.{
+                        .name = "wasmstint-codegen-llvm-sample-intrinsics",
+                        .root_module = b.createModule(.{
+                            .root_source_file = b.path(
+                                "src/Interpreter/codegen/llvm/sample_intrinsics.zig",
+                            ),
+                            .target = b.graph.host,
+                            .optimize = .Debug,
+                            .single_threaded = true,
+                            .pic = false,
+                        }),
+                        .max_rss = ByteSize.mib(151).bytes,
+                    });
+
+                    const sample_intrinsics = b.addRunArtifact(sample_intrinsics_exe);
+                    sample_intrinsics.step.max_rss = ByteSize.mib(1).bytes;
+                    sample_intrinsics.addFileArg(target_info);
+                    break :bc sample_intrinsics.addOutputFileArg("sample_intrinsics.bc");
+                };
+
+                const target_triple = options.target.query.zigTriple(b.allocator) catch
+                    @panic("oom");
+
+                // TODO(Zig): LLVM IR can't be used https://github.com/ziglang/zig/issues/25004
+                // - Workaround is to use zig cc (clang)
+                const sample_intrinsics_asm = cc: {
+                    const cc = b.addSystemCommand(&.{
+                        b.graph.zig_exe,
+                        "cc",
+                        "-S",
+                        "-nostdlib",
+                        // Zig enables sanitizer flags when compiling C
+                        "-fno-sanitize=undefined",
+                        "-fno-sanitize-trap",
+                        // Zig passes `-c`, which is unused
+                        "-Wno-unused-command-line-argument",
+                        "-target",
+                    });
+                    cc.step.max_rss = ByteSize.mib(39).bytes;
+
+                    cc.addArg(target_triple);
+
+                    if (options.target.result.cpu.arch.isX86()) {
+                        cc.addArg("-masm=intel");
+                    }
+
+                    cc.addFileArg(sample_intrinsics_bc);
+
+                    cc.addArg("-o");
+                    break :cc cc.addOutputFileArg("sample_intrinsics.s");
+                };
+
+                const detected_intrinsics = info: {
+                    const intrinsic_detection_exe = b.addExecutable(.{
+                        .name = "wasmstint-codegen-llvm-intrinsic-detection",
+                        .root_module = b.createModule(.{
+                            .root_source_file = b.path(
+                                "src/Interpreter/codegen/llvm/intrinsic_detection.zig",
+                            ),
+                            .target = b.graph.host,
+                            .optimize = .Debug,
+                            .single_threaded = true,
+                            .pic = false,
+                        }),
+                        .max_rss = ByteSize.mib(119).bytes,
+                    });
+
+                    const intrinsic_detection = b.addRunArtifact(intrinsic_detection_exe);
+                    intrinsic_detection.step.max_rss = ByteSize.mib(1).bytes;
+                    intrinsic_detection.addFileArg(sample_intrinsics_asm);
+                    break :info intrinsic_detection.captureStdOut(.{
+                        .basename = "detected_intrinsics.zon",
+                    });
+                };
+                root_module.addAnonymousImport("detected_intrinsics", .{
+                    .root_source_file = detected_intrinsics,
+                });
+
+                const codegen_exe = b.addExecutable(.{
+                    .name = "wasmstint-codegen-llvm",
+                    .root_module = b.createModule(.{
+                        .root_source_file = b.path("src/Interpreter/codegen/llvm/main.zig"),
+                        .target = b.graph.host,
+                        .optimize = .Debug,
+                        .single_threaded = true,
+                        .pic = false,
+                        // .code_model = .small, // Forces usage of LLVM backend
+                    }),
+                    .max_rss = ByteSize.mib(213).bytes, // arbitrary amount
+                });
+                codegen_exe.root_module.addImport("opcodes", opcodes_module);
+                codegen_exe.root_module.addImport("enum_set", enum_set_module);
+
+                const symbol_prefix = "wasmstint.interpreter.";
+
+                const Options = struct {
+                    optimize: std.builtin.OptimizeMode,
+                    symbol_prefix: []const u8,
+                    strip: bool,
+                    target: struct {
+                        triple: []const u8,
+                        cpu_features: []const u8,
+                    },
+                };
+
+                var options_writer = std.Io.Writer.Allocating.init(b.allocator);
+                std.zon.stringify.serialize(
+                    Options{
+                        .optimize = options.optimize_interpreter,
+                        .symbol_prefix = symbol_prefix,
+                        .strip = false,
+                        .target = .{
+                            .triple = target_triple,
+                            .cpu_features = options.target.query
+                                .serializeCpuAlloc(b.allocator) catch @panic("oom"),
+                        },
+                    },
+                    .{ .whitespace = false },
+                    &options_writer.writer,
+                ) catch @panic("oom");
+
+                const run_codegen = b.addRunArtifact(codegen_exe);
+                run_codegen.step.max_rss = ByteSize.mib(3).bytes; // arbitrary
+                run_codegen.addArg(options_writer.written());
+                run_codegen.addFileArg(target_info);
+                run_codegen.addFileArg(detected_intrinsics);
+                root_module.addObjectFile(
+                    run_codegen.addOutputFileArg("wasmstint-interpreter.bc"),
+                );
+
+                wasmstint_options.addOption([]const u8, "symbol_prefix", symbol_prefix);
             }
 
             const tests = b.addTest(.{
@@ -763,7 +938,7 @@ fn buildSpecificationTests(
             "test-spec-regression",
             "Run WAST test cases to check bug fixes",
         );
-        const regression_test_names = [_][]const u8{"x86_64_sysv.wast"};
+        const regression_test_names = [_][]const u8{ "x86_64_sysv.wast", "sleb128.wast" };
         const regression_test_dir = b.path("tests/regression");
         for (regression_test_names) |name| {
             test_regression_step.dependOn(

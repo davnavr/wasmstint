@@ -1,10 +1,9 @@
 const portable = @import("handlers/portable.zig");
 const x86_64_sysv = @import("handlers/x86_64_sysv.zig");
+const llvm_ir = @import("handlers/llvm_ir.zig");
 
-const use_assembly: bool = @import("options").use_assembly_interpreter;
-
-const implementation = if (use_assembly)
-    switch (builtin.cpu.arch) {
+const implementation = switch (@import("options").interpreter_backend) {
+    .assembly => switch (builtin.cpu.arch) {
         .x86_64 => if (!std.Target.x86.featureSetHas(builtin.cpu.features, .sse2))
             @compileError("SSE2 is required to use the x86-64 assembly interpreter")
         else if (builtin.os.tag == .linux)
@@ -14,9 +13,10 @@ const implementation = if (use_assembly)
                 @tagName(builtin.os.tag)),
         else => |bad| @compileError("no assembly interpreter implementation for " ++
             @tagName(bad)),
-    }
-else
-    portable;
+    },
+    .@"llvm-ir" => llvm_ir,
+    .zig => portable,
+};
 
 /// Use `callOpcodeHandler()`
 pub const OpcodeHandler = implementation.OpcodeHandler;
@@ -157,11 +157,19 @@ pub fn updateWasmFrameState(
     const code = frame.function.expanded().wasm.code().inner;
     frame.wasm.ip = instr.next;
     frame.wasm.stp = stp;
+    const instr_next = @intFromPtr(instr.next);
     if (builtin.mode == .Debug) {
-        std.debug.assert(@intFromPtr(code.instructions_start) <= @intFromPtr(instr.next));
+        std.debug.assert(@intFromPtr(code.instructions_start) <= instr_next);
         std.debug.assert(@intFromPtr(code.instructions_end) == @intFromPtr(frame.wasm.eip));
     }
-    std.debug.assert(@intFromPtr(instr.next) <= @intFromPtr(instr.end));
+    const instr_end = @intFromPtr(instr.end);
+    if (instr_next > instr_end) {
+        if (builtin.mode == .Debug) {
+            std.debug.panic("VIP=0x{X} > EIP=0x{X}", .{ instr_next, instr_end });
+        } else {
+            unreachable;
+        }
+    }
     std.debug.assert(@intFromPtr(frame.wasm.eip) == @intFromPtr(instr.end));
     return .wrote_ip_and_stp_to_the_current_stack_frame;
 }
@@ -175,6 +183,74 @@ const DispatchNextOpcode = fn (
     runtime.ModuleInst,
     *Interpreter,
 ) callconv(.@"inline") Transition;
+
+const NewPushedStackFrame = struct {
+    pushed: Stack.PushedFrame,
+    update_token: Transition.UpdateWasmFrameToken,
+
+    fn instr(info: *const NewPushedStackFrame) Instr {
+        return Instr.init(info.pushed.frame.wasm.ip, info.pushed.frame.wasm.eip);
+    }
+
+    pub fn locals(info: *const NewPushedStackFrame, interp: *const Interpreter) Locals {
+        return Locals{ .ptr = info.pushed.frame.localValues(&interp.stack).ptr };
+    }
+};
+
+/// See `invokeWithinWasm()`.
+pub inline fn pushNewStackFrame(
+    old_instr: Instr,
+    saved_sp: Stack.Saved,
+    old_stp: Stp,
+    interp: *Interpreter,
+    callee: runtime.FuncInst,
+) Oom!NewPushedStackFrame {
+    const signature = callee.signature();
+
+    // Overlap trick to avoid copying arguments.
+    const args: []align(@sizeOf(Value)) Value = @constCast(
+        saved_sp.poppedValues()[0..signature.param_count],
+    );
+    const current_frame = interp.stack.frameAt(interp.stack.current_frame).?;
+
+    const saved_token = updateWasmFrameState(current_frame, old_instr, old_stp);
+    // std.debug.print(
+    //     "WASM {f} WANTS TO CALL {f} (call_depth = {}, args @ {*}, fuel = {})\n",
+    //     .{ current_frame.function, callee, interp.stack.call_depth, args, fuel.remaining },
+    // );
+
+    const args_top = Stack.Top{ .ptr = args.ptr + args.len };
+    const new_frame = interp.stack.pushFrameWithinCapacity(
+        args_top,
+        &interp.dummy_instantiate_flag,
+        .preallocated,
+        callee,
+    ) catch |e| switch (e) {
+        error.OutOfMemory => |oom| {
+            // std.debug.print(
+            //     "WASM CALL EXHAUSTED STACK (depth = {}, ver = {})\n",
+            //     .{ interp.call_depth, interp.version.number },
+            // );
+            return oom;
+        },
+        error.ValidationNeeded => @panic("TODO: awaiting_validation"),
+    };
+
+    // std.log.debug(
+    //     "CALLING {f} @ {*} called by {f}",
+    //     .{ callee, new_frame.frame, current_frame.function },
+    // );
+
+    std.debug.assert(@intFromPtr(current_frame) != @intFromPtr(new_frame.frame));
+    std.debug.assert(interp.stack.current_frame == new_frame.offset);
+    std.debug.assert(@intFromPtr(old_instr.end) == @intFromPtr(current_frame.wasm.eip));
+
+    const new_locals: []align(@sizeOf(Value)) Value = new_frame.frame.localValues(&interp.stack);
+    std.debug.assert(@intFromPtr(new_locals.ptr) == @intFromPtr(args.ptr));
+    std.debug.assert(args.len <= new_locals.len);
+
+    return .{ .pushed = new_frame, .update_token = saved_token };
+}
 
 /// Attempts to allocate a stack frame for the `target_function`, with arguments expected to be on
 /// top of the value stack, and then resumes execution.
@@ -202,69 +278,35 @@ pub inline fn invokeWithinWasm(
     var coz_begin = coz.begin("wasmstint.Interpreter.invokeWithinWasm");
     defer coz_begin.end();
 
-    const signature = callee.signature();
-
-    // Overlap trick to avoid copying arguments.
-    const args: []align(@sizeOf(Value)) Value = @constCast(
-        saved_sp.poppedValues()[0..signature.param_count],
-    );
-    const current_frame = interp.stack.frameAt(interp.stack.current_frame).?;
-
-    const saved_token = updateWasmFrameState(current_frame, old_instr, old_stp);
-    // std.debug.print(
-    //     "WASM {f} WANTS TO CALL {f} (call_depth = {}, args @ {*}, fuel = {})\n",
-    //     .{ current_frame.function, callee, interp.stack.call_depth, args, fuel.remaining },
-    // );
-
-    const args_top = Stack.Top{ .ptr = args.ptr + args.len };
-    const new_frame = interp.stack.pushFrameWithinCapacity(
-        args_top,
-        &interp.dummy_instantiate_flag,
-        .preallocated,
+    const new_frame = pushNewStackFrame(
+        old_instr,
+        saved_sp,
+        old_stp,
+        interp,
         callee,
     ) catch |e| switch (e) {
-        error.OutOfMemory => {
-            // std.debug.print(
-            //     "WASM CALL EXHAUSTED STACK (depth = {}, ver = {})\n",
-            //     .{ interp.call_depth, interp.version.number },
-            // );
-            return Transition.callStackExhaustion(
-                call_ip,
-                old_instr.end,
-                saved_sp,
-                old_stp,
-                interp,
-                callee,
-            );
-        },
-        error.ValidationNeeded => @panic("TODO: awaiting_validation"),
+        error.OutOfMemory => return Transition.callStackExhaustion(
+            call_ip,
+            old_instr.end,
+            saved_sp,
+            old_stp,
+            interp,
+            callee,
+        ),
     };
-
-    // std.log.debug(
-    //     "CALLING {f} @ {*} called by {f}",
-    //     .{ callee, new_frame.frame, current_frame.function },
-    // );
-
-    std.debug.assert(@intFromPtr(current_frame) != @intFromPtr(new_frame.frame));
-    std.debug.assert(interp.stack.current_frame == new_frame.offset);
-    std.debug.assert(@intFromPtr(old_instr.end) == @intFromPtr(current_frame.wasm.eip));
-
-    const new_locals: []align(@sizeOf(Value)) Value = new_frame.frame.localValues(&interp.stack);
-    std.debug.assert(@intFromPtr(new_locals.ptr) == @intFromPtr(args.ptr));
-    std.debug.assert(args.len <= new_locals.len);
 
     switch (callee.expanded()) {
         .wasm => |wasm| {
             // std.debug.print(
             //     "AFTER CALL args={*}, sp={*}\n",
-            //     .{ args.ptr, new_frame.top().ptr },
+            //     .{ args.ptr, new_frame.pushed.top().ptr },
             // );
             return dispatchNextOpcode(
-                Instr.init(new_frame.frame.wasm.ip, new_frame.frame.wasm.eip),
-                new_frame.top(),
+                new_frame.instr(),
+                new_frame.pushed.top(),
                 fuel,
-                new_frame.frame.wasm.stp,
-                Locals{ .ptr = new_locals.ptr },
+                new_frame.pushed.frame.wasm.stp,
+                new_frame.locals(interp),
                 wasm.module,
                 interp,
             );
@@ -272,18 +314,53 @@ pub inline fn invokeWithinWasm(
         .host => |host| {
             // std.debug.print("GOING TO AWAIT HOST TRANSITION\n", .{});
             // std.log.debug(
-            //     "new_frame.top() = {*}, args = {*}",
-            //     .{ new_frame.top().ptr, args.ptr },
+            //     "new_frame.pushed.top() = {*}, args = {*}",
+            //     .{ new_frame.pushed.top().ptr, args.ptr },
             // );
             return Transition.awaitingHost(
-                new_frame.top(),
+                new_frame.pushed.top(),
                 interp,
                 &host.signature,
                 .calling_host,
-                saved_token,
+                new_frame.update_token,
             );
         },
     }
+}
+
+/// See `performTailCall()`.
+pub inline fn replaceTopStackFrame(
+    saved_sp: Stack.Saved,
+    pop: u1,
+    interp: *Interpreter,
+    callee: runtime.FuncInst,
+) Oom!Stack.PushedFrame {
+    const signature = callee.signature();
+    if (builtin.mode == .Debug) {
+        std.debug.assert( // validation should prevent result mismatch
+            interp.stack.currentFrame().?.signature.result_count == signature.result_count,
+        );
+    }
+
+    const new_frame = interp.stack.replaceFrameWithinCapacity(
+        Stack.Top{ .ptr = saved_sp.saved_top.ptr - pop },
+        callee,
+    ) catch |e| switch (e) {
+        error.OutOfMemory => |oom| return oom,
+        error.ValidationNeeded => @panic("TODO: awaiting_validation"),
+    };
+
+    if (builtin.mode == .Debug) {
+        const args_dst: [*]align(@sizeOf(Value)) const Value =
+            interp.stack.currentFrame().?.localValues(&interp.stack).ptr;
+        const new_frame_locals: []align(@sizeOf(Value)) Value =
+            new_frame.frame.localValues(&interp.stack);
+
+        std.debug.assert(@intFromPtr(args_dst) == @intFromPtr(new_frame_locals.ptr));
+        std.debug.assert(signature.param_count <= new_frame_locals.len);
+    }
+
+    return new_frame;
 }
 
 /// Entrypoint for performing a tail call within a WebAssembly function.
@@ -311,66 +388,38 @@ pub inline fn performTailCall(
     var coz_begin = coz.begin("wasmstint.Interpreter.performTailCall");
     defer coz_begin.end();
 
-    const signature = callee.signature();
-    if (builtin.mode == .Debug) {
-        std.debug.assert( // validation should prevent result mismatch
-            interp.stack.currentFrame().?.signature.result_count == signature.result_count,
-        );
-    }
-
-    const args_dst: [*]align(@sizeOf(Value)) const Value =
-        interp.stack.currentFrame().?.localValues(&interp.stack).ptr;
-
-    const new_frame = interp.stack.replaceFrameWithinCapacity(
-        Stack.Top{ .ptr = saved_sp.saved_top.ptr - pop },
-        callee,
-    ) catch |e| switch (e) {
-        error.OutOfMemory => {
-            // Not enough room for new stack frame
-            return Transition.callStackExhaustion(
-                call_ip,
-                old_instr.end,
-                saved_sp,
-                old_stp,
-                interp,
-                callee,
-            );
-        },
-        error.ValidationNeeded => @panic("TODO: awaiting_validation"),
+    const new_frame = replaceTopStackFrame(saved_sp, pop, interp, callee) catch |e| switch (e) {
+        // Not enough room for new stack frame
+        error.OutOfMemory => return Transition.callStackExhaustion(
+            call_ip,
+            old_instr.end,
+            saved_sp,
+            old_stp,
+            interp,
+            callee,
+        ),
     };
 
-    const new_frame_locals: []align(@sizeOf(Value)) Value =
-        new_frame.frame.localValues(&interp.stack);
-
-    if (builtin.mode == .Debug) {
-        std.debug.assert(@intFromPtr(args_dst) == @intFromPtr(new_frame_locals.ptr));
-        std.debug.assert(signature.param_count <= new_frame_locals.len);
-    }
-
-    // Duplicate code from `invokeWithimWasm()`
-    switch (callee.expanded()) {
-        .wasm => |wasm| {
-            return dispatchNextOpcode(
-                Instr.init(new_frame.frame.wasm.ip, new_frame.frame.wasm.eip),
-                new_frame.top(),
-                fuel,
-                new_frame.frame.wasm.stp,
-                Locals{ .ptr = new_frame_locals.ptr },
-                wasm.module,
-                interp,
-            );
-        },
-        .host => |host| {
-            return Transition.awaitingHost(
-                new_frame.top(),
-                interp,
-                &host.signature,
-                .calling_host,
-                // Frame was replaced, so IP and STP don't need saving
-                .wrote_ip_and_stp_to_the_current_stack_frame,
-            );
-        },
-    }
+    // Duplicate code from `invokeWithinWasm()`
+    return switch (callee.expanded()) {
+        .wasm => |wasm| dispatchNextOpcode(
+            Instr.init(new_frame.frame.wasm.ip, new_frame.frame.wasm.eip),
+            new_frame.top(),
+            fuel,
+            new_frame.frame.wasm.stp,
+            Locals{ .ptr = new_frame.frame.localValues(&interp.stack).ptr },
+            wasm.module,
+            interp,
+        ),
+        .host => |host| Transition.awaitingHost(
+            new_frame.top(),
+            interp,
+            &host.signature,
+            .calling_host,
+            // Frame was replaced, so IP and STP don't need saving
+            .wrote_ip_and_stp_to_the_current_stack_frame,
+        ),
+    };
 }
 
 /// Is a `packed struct` to work around https://github.com/ziglang/zig/issues/18189
@@ -478,6 +527,7 @@ pub const Transition = packed struct(u32) {
 };
 
 const std = @import("std");
+const Oom = std.mem.Allocator.Error;
 const builtin = @import("builtin");
 const coz = @import("coz");
 

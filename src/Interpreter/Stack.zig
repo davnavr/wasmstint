@@ -802,7 +802,8 @@ pub const FrameSize = packed struct(u64) {
 /// |==============  top  ==============|
 /// ```
 pub const Frame = extern struct {
-    const has_checksum = builtin.mode == .Debug and !@import("options").use_assembly_interpreter;
+    // TODO: enable checksums on inline assembly and LLVM IR backends.
+    const has_checksum = builtin.mode == .Debug and @import("options").interpreter_backend == .zig;
 
     /// For every WASM stack frame, a checksum of the previous stack frame's data (its contents
     /// on the value stack and the `StackFrame` structure itself) is calculated. This is
@@ -837,13 +838,15 @@ pub const Frame = extern struct {
     ///
     /// Could move back to variable-length `Frame`, but the resulting headache is only worth 16-bytes
     /// in savings per frame.
-    wasm: extern struct {
-        ip: Module.Code.Ip,
+    wasm: Wasm,
 
-        /// Pointer to the last `end` instruction which denotes an implicit return from the function.
+    pub const Wasm = extern struct {
+        ip: Module.Code.Ip,
+        /// Pointer to the last `end` instruction which denotes an implicit return from the
+        /// function.
         eip: *const Module.Code.End,
         stp: SideTable.Ptr,
-    },
+    };
 
     const Offset = enum(u32) {
         none = std.math.maxInt(u32),
@@ -968,7 +971,7 @@ pub fn frameAt(stack: Stack, offset: Frame.Offset) ?*Frame {
 /// values have not been modified.
 pub const Saved = struct {
     pub const has_checksum = builtin.mode == .Debug and
-        !@import("options").use_assembly_interpreter;
+        @import("options").interpreter_backend == .zig;
 
     saved_top: Top,
     /// Tracks how many values are being restored.

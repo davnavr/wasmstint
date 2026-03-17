@@ -23,6 +23,9 @@ struct Arguments {
     /// String to search for in output of target executable
     #[arg(long)]
     predicate: Option<String>,
+    /// Additional arguments to pass to the target executable
+    #[arg(trailing_var_arg = true)]
+    arguments: Vec<std::ffi::OsString>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -35,7 +38,7 @@ fn main() -> anyhow::Result<()> {
     let initial_module = run_on_initial_input(&args)?;
 
     let mut output = std::fs::File::create(output_path)
-        .with_context(|| format!("could not open output file {:?}", output_path))?;
+        .with_context(|| format!("could not open output file {output_path:?}"))?;
 
     let args_ref = &args;
     let shrink = wasm_shrink::WasmShrink::default()
@@ -49,7 +52,7 @@ fn main() -> anyhow::Result<()> {
     );
     output.write_all(shrink.output.as_slice())?;
 
-    return Ok(());
+    Ok(())
 }
 
 fn run_on_initial_input(args: &Arguments) -> anyhow::Result<Vec<u8>> {
@@ -61,11 +64,12 @@ fn run_on_initial_input(args: &Arguments) -> anyhow::Result<Vec<u8>> {
             "--save-module".as_ref(),
             "-".as_ref(),
         ])
+        .args(&args.arguments)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
         .output()
-        .with_context(|| format!("could not spawn {:?}", target_path))?;
+        .with_context(|| format!("could not spawn {target_path:?}"))?;
 
     if initial_output.status.success() {
         anyhow::bail!("initial run unexpectedly succeeded");
@@ -77,7 +81,7 @@ fn run_on_initial_input(args: &Arguments) -> anyhow::Result<Vec<u8>> {
 
     // No need to check predicate here, since `wasm-smith` will do it for us
 
-    return Ok(initial_output.stdout);
+    Ok(initial_output.stdout)
 }
 
 fn run(args: &Arguments, wasm: &[u8]) -> anyhow::Result<bool> {
@@ -89,11 +93,12 @@ fn run(args: &Arguments, wasm: &[u8]) -> anyhow::Result<bool> {
             "--replace-module".as_ref(),
             "-".as_ref(),
         ])
+        .args(&args.arguments)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .with_context(|| format!("could not spawn {:?}", target_path))?;
+        .with_context(|| format!("could not spawn {target_path:?}"))?;
 
     std::io::Write::write_all(&mut spawned.stdin.take().unwrap(), wasm)?;
 
