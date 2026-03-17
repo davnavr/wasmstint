@@ -91,14 +91,18 @@ targeting at least Windows 10 version 1607 or higher.
 zig build run-wasip1 -Dtarget=x86_64-windows.win10_rs1
 ```
 
+Note that WASIp1 support is currently only known to compile and run for `x86_64-linux` and
+`x86_64-windows`.
+
 # Building
 
 Run `zig build --help` for more information.
 
-`wasmstint` is currently only known to build and run its tests successfully for the `x86_64-linux`
-and `x86_64-windows` targets. Building for 32-bit targets is likely to result in compile errors.
-Due to the use of tail calls in `wasmstint`, building for non-`x86_64` targets also currently
-requires the LLVM backend, set with the `-Duse-llvm=always` build option.
+`wasmstint` is currently only known to build and run its tests successfully for `x86_64-linux`,
+`aarch64-linux` (tested via `qemu-user`) and `x86_64-windows` targets. Building for 32-bit targets
+is likely to result in compile errors. Due to the use of tail calls in `wasmstint`, building for
+non-`x86_64` targets also currently requires the LLVM backend, set with the `-Duse-llvm=always`
+build option.
 
 Additionally, big-endian targets are not supported at all.
 
