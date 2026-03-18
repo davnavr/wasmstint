@@ -72,10 +72,6 @@ pub fn build(b: *Build) void {
 
     const check_step = b.step("check", "Check executables for compile errors");
     const unit_tests_step = b.step("test-unit", "Run unit tests");
-    {
-        const test_all_step = b.step("test-all", "Run all tests");
-        test_all_step.dependOn(unit_tests_step);
-    }
 
     const sys_module = b.createModule(.{
         .root_source_file = b.path("src/sys.zig"),
