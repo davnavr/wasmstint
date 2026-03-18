@@ -31,6 +31,18 @@ const InterpreterBackend = enum {
     @"llvm-ir",
 };
 
+const FuzzTarget = enum {
+    validation,
+    execution,
+    wasmi_diff,
+};
+
+const FuzzRunner = enum {
+    /// Requires `afl-fuzz` from AFL++.
+    afl,
+    standalone,
+};
+
 const byte_size = struct {
     fn kib(amt: usize) usize {
         return amt * 1024;
@@ -90,7 +102,7 @@ pub fn build(b: *Build) void {
         const tests = &b.addRunArtifact(b.addTest(.{
             .name = "allocators",
             .root_module = allocators_module,
-            .max_rss = byte_size.mib(254),
+            .max_rss = byte_size.mib(365),
             .use_llvm = use_llvm.ifPreferred(),
         })).step;
         tests.max_rss = byte_size.mib(16);
@@ -316,7 +328,7 @@ pub fn build(b: *Build) void {
                         .single_threaded = true,
                         .pic = false,
                     }),
-                    .max_rss = byte_size.mib(119),
+                    .max_rss = byte_size.mib(128),
                 });
 
                 const intrinsic_detection = b.addRunArtifact(intrinsic_detection_exe);
@@ -587,7 +599,7 @@ pub fn build(b: *Build) void {
                     .target = target,
                     .optimize = optimize,
                 }),
-                .max_rss = byte_size.mib(278),
+                .max_rss = byte_size.mib(399),
                 .use_llvm = use_llvm.ifPreferred(),
             });
             invoke_test.root_module.addOptions("test_paths", test_options);
@@ -734,6 +746,185 @@ pub fn build(b: *Build) void {
             }
 
             test_spec_all_step.dependOn(test_regression_step);
+        }
+    }
+    {
+        {
+            const ffi_test = b.addTest(.{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("fuzz/ffi/src/ffi.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                }),
+                .max_rss = byte_size.mib(253),
+                .use_llvm = use_llvm.ifPreferred(),
+            });
+            const ffi_tests_run = &b.addRunArtifact(ffi_test).step;
+            ffi_tests_run.max_rss = byte_size.mib(11); // arbitrary amount
+            unit_tests_step.dependOn(ffi_tests_run);
+        }
+
+        const fuzz_step = b.step("fuzz", "Run a fuzz test (requires Rust)");
+
+        var rust_include_paths_buf: [2]Build.LazyPath = undefined;
+        var rust_include_paths = std.ArrayList(Build.LazyPath).initBuffer(&rust_include_paths_buf);
+
+        // Currently, this does not invoke `cargo build release`
+        const rust_target_dir = b.path("fuzz/ffi/target");
+        const native_target = b.graph.host.result;
+        const chosen_target = target.result;
+        if (native_target.cpu.arch == chosen_target.cpu.arch and
+            native_target.os.tag == chosen_target.os.tag and
+            native_target.abi == chosen_target.abi)
+        {
+            rust_include_paths.appendAssumeCapacity(rust_target_dir.path(b, "release"));
+        }
+
+        // TODO: translate `chosen_target` to Rust target triple
+        //rust_include_paths.appendAssumeCapacity();
+
+        const fail_no_rust_include = if (rust_include_paths.items.len == 0)
+            &b.addFail(
+                "could not determine include path for FFI wrapper (run cargo build in ./fuzz/ffi)",
+            ).step
+        else
+            null;
+
+        const chosen_fuzz_target = b.option(
+            FuzzTarget,
+            "fuzz-target",
+            "Which fuzz target to run",
+        ) orelse {
+            fuzz_step.dependOn(&b.addFail("Specify fuzz target with -Dfuzz-target").step);
+            return;
+        };
+
+        const chosen_fuzz_runner = b.option(
+            FuzzRunner,
+            "fuzz-runner",
+            "Specifies how a fuzz target is run",
+        ) orelse FuzzRunner.standalone;
+
+        const ffi_module = b.createModule(.{
+            .root_source_file = b.path("fuzz/ffi/src/ffi.zig"),
+            .link_libc = true,
+            .target = target,
+            .optimize = optimize,
+        });
+
+        for (rust_include_paths.items) |include_path| {
+            ffi_module.addLibraryPath(include_path);
+        }
+
+        ffi_module.linkSystemLibrary(
+            "wasmstint_fuzz_ffi",
+            .{ .preferred_link_mode = .dynamic, .search_strategy = .paths_first },
+        );
+
+        for (std.enums.values(FuzzTarget)) |fuzz_target| {
+            const fuzz_target_name: []const u8 = b.fmt("fuzz-{t}", .{fuzz_target});
+            const target_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("fuzz/targets/{t}.zig", .{fuzz_target})),
+                .target = target,
+                .optimize = optimize,
+            });
+            target_module.addImport("wasmstint", wasmstint_module);
+            target_module.addImport("ffi", ffi_module);
+
+            const libfuzzer_harness_lib = b.addLibrary(.{
+                .name = b.fmt("{s}-libfuzzer", .{fuzz_target_name}),
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("fuzz/harness/libfuzzer.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .pic = true, // afl-clang-lto seems to require PIC
+                }),
+                .max_rss = byte_size.mib(319),
+                .use_llvm = true,
+                // .use_lld = options.project.use_llvm.interpreter,
+            });
+            libfuzzer_harness_lib.sanitize_coverage_trace_pc_guard = true; // required for AFL++
+            libfuzzer_harness_lib.lto = .full;
+            libfuzzer_harness_lib.bundle_compiler_rt = true;
+            libfuzzer_harness_lib.root_module.addImport("target", target_module);
+            libfuzzer_harness_lib.root_module.addImport("ffi", ffi_module);
+
+            // TODO(zig): limit parallelism of afl-clang-lto https://github.com/ziglang/zig/issues/12101
+            const afl_clang_lto = b.addSystemCommand(
+                &.{ "afl-clang-lto", "-g", "-Wall", "-fsanitize=fuzzer", "-lwasmstint_fuzz_ffi", "-v" },
+            );
+            afl_clang_lto.disable_zig_progress = true;
+
+            if (fail_no_rust_include) |fail| {
+                afl_clang_lto.step.dependOn(fail);
+            }
+
+            if (pic != true) {
+                afl_clang_lto.step.dependOn(&b.addFail("AFL fuzz harness requires -Dpic=true").step);
+            }
+
+            { // Unfortunately, filtering by file seems to be broken
+                afl_clang_lto.addFileInput(b.path("fuzz/denylist.txt"));
+                afl_clang_lto.setEnvironmentVariable(
+                    "AFL_LLVM_DENYLIST",
+                    // TODO(zig): allow environment variable of lazy path
+                    // At least paths seem to be relative to the build script
+                    "./fuzz/denylist.txt",
+                );
+            }
+
+            afl_clang_lto.step.max_rss = byte_size.mib(268); // arbitrary amount
+
+            afl_clang_lto.addArg("-o");
+            const afl_output_exe: []const u8 = b.fmt("{s}-afl", .{fuzz_target_name});
+            const afl_exe = afl_clang_lto.addOutputFileArg(afl_output_exe);
+
+            afl_clang_lto.addArtifactArg(libfuzzer_harness_lib);
+
+            for (rust_include_paths.items) |include_path| {
+                afl_clang_lto.addArg("-L");
+                afl_clang_lto.addDirectoryArg(include_path);
+            }
+
+            const standalone_exe = b.addExecutable(.{
+                .name = b.fmt("{s}-standalone", .{fuzz_target_name}),
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("fuzz/harness/main.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .pic = pic,
+                }),
+                .max_rss = byte_size.mib(373),
+                .use_llvm = use_llvm.ifPreferred(),
+            });
+            if (fail_no_rust_include) |fail| {
+                standalone_exe.step.dependOn(fail);
+            }
+            for (&[4]struct { []const u8, *Build.Module }{
+                .{ "target", target_module },
+                .{ "ffi", ffi_module },
+                .{ "file_content", file_content_module },
+                .{ "cli_args", cli_args_module },
+            }) |info| {
+                standalone_exe.root_module.addImport(info.@"0", info.@"1");
+            }
+
+            if (fuzz_target == chosen_fuzz_target) {
+                const runner_step: *Step.Run = switch (chosen_fuzz_runner) {
+                    .afl => afl: {
+                        const run_afl = Step.Run.create(b, afl_output_exe);
+                        run_afl.addFileArg(afl_exe);
+                        break :afl run_afl;
+                    },
+                    .standalone => b.addRunArtifact(standalone_exe),
+                };
+
+                if (b.args) |args| {
+                    runner_step.addArgs(args);
+                }
+
+                fuzz_step.dependOn(&runner_step.step);
+            }
         }
     }
 }
