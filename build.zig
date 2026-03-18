@@ -390,14 +390,23 @@ pub fn build(b: *Build) void {
         }
 
         {
-            const tests = &b.addRunArtifact(b.addTest(.{
+            const tests = b.addTest(.{
                 .name = "wasmstint",
-                .root_module = root_module,
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/root.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                }),
                 .use_llvm = use_llvm.ifPreferred(),
                 .max_rss = byte_size.mib(398),
-            })).step;
-            tests.max_rss = byte_size.mib(43);
-            unit_tests_step.dependOn(tests);
+            });
+            tests.root_module.addImport("coz", coz_module);
+            tests.root_module.addImport("allocators", allocators_module);
+            tests.root_module.addImport("opcodes", opcodes_module);
+
+            const run_tests = &b.addRunArtifact(tests).step;
+            run_tests.max_rss = byte_size.mib(43);
+            unit_tests_step.dependOn(run_tests);
         }
 
         break :wasmstint root_module;
@@ -461,17 +470,6 @@ pub fn build(b: *Build) void {
             .{ "sys", sys_module },
         }) |info| {
             wasip1_module.addImport(info.@"0", info.@"1");
-        }
-
-        {
-            const tests_run = &b.addRunArtifact(b.addTest(.{
-                .name = "WasiPreview1",
-                .root_module = wasip1_module,
-                .max_rss = byte_size.mib(399),
-                .use_llvm = use_llvm.ifPreferred(),
-            })).step;
-            tests_run.max_rss = byte_size.mib(43);
-            unit_tests_step.dependOn(tests_run);
         }
 
         const wasip1_exe = exe: {

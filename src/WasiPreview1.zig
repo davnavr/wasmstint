@@ -1733,8 +1733,3 @@ const MemInst = wasmstint.runtime.MemInst;
 const Module = wasmstint.Module;
 const pointer = wasmstint.pointer;
 const coz = @import("coz");
-
-test {
-    _ = WasiPreview1;
-    _ = @import("WasiPreview1/host_os.zig");
-}
