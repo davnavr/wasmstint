@@ -597,10 +597,10 @@ pub fn build(b: *Build) void {
                 .root_module = b.createModule(.{
                     .root_source_file = sample_exe.root_module.root_source_file,
                     .target = target,
-                    .optimize = optimize,
+                    .optimize = .Debug,
                 }),
                 .max_rss = byte_size.mib(399),
-                .use_llvm = use_llvm.ifPreferred(),
+                .use_llvm = if (use_llvm == .never) false else null,
             });
             invoke_test.root_module.addOptions("test_paths", test_options);
             invoke_test.root_module.addImport("subprocess", subprocess_module);
@@ -756,7 +756,7 @@ pub fn build(b: *Build) void {
                     .target = target,
                     .optimize = optimize,
                 }),
-                .max_rss = byte_size.mib(253),
+                .max_rss = byte_size.mib(376),
                 .use_llvm = use_llvm.ifPreferred(),
             });
             const ffi_tests_run = &b.addRunArtifact(ffi_test).step;
