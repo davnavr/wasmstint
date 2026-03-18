@@ -2203,6 +2203,12 @@ pub fn finishCodeValidation(
     diag: ParseDiagnostics,
 ) validator.Error!bool {
     var all_validated = true;
+    var initialized: u32 = 0;
+    errdefer {
+        for (module.inner.code[0..initialized]) |*entry| {
+            entry.deinit(allocator);
+        }
+    }
     for (module.inner.code[0..module.inner.code_count]) |*code_entry| {
         _ = scratch.reset(.retain_capacity);
         all_validated = all_validated and try code_entry.validate(
@@ -2211,6 +2217,7 @@ pub fn finishCodeValidation(
             scratch,
             diag,
         );
+        initialized += 1;
     }
 
     // unreachable; // allows print debugging in validation code when interpreter also has print statements

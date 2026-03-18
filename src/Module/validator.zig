@@ -129,6 +129,14 @@ pub const Code = extern struct {
 
     // pub fn waitForValidation(state: *State, futex_timeout: std.Thread.Futex.Deadline) error{Timeout}!void {
 
+    /// Frees an individual code entry. Must only be used when deinitializing a `Module`.
+    pub fn deinit(code: *Code, allocator: Allocator) void {
+        if (code.isValidationFinished()) {
+            allocator.free(code.inner.side_table_ptr[0..code.inner.side_table_len]);
+        }
+        code.* = undefined;
+    }
+
     /// Returns `true` if validation succeeded, `false` if the current thread would block, or an
     /// error if validation failed.
     ///
