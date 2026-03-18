@@ -1,875 +1,757 @@
-const std = @import("std");
-const builtin = @import("builtin");
-const Build = std.Build;
-const Step = Build.Step;
+const UseLlvm = enum {
+    /// Only use Zig's other compilation backends. Likely to fail or cause miscompilations.
+    never,
+    /// Let Zig decide.
+    default,
+    /// Use the Zig LLVM backend for produced executables, libraries, tests, etc.
+    prefer,
+    /// Only use the Zig LLVM backend.
+    always,
 
-const ProjectOptions = struct {
-    target: Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    optimize_interpreter: std.builtin.OptimizeMode,
-    use_llvm: packed struct(u2) {
-        interpreter: bool,
-        other: bool,
-    },
-    /// Should never be `false`, that would imply `libc` is *prohibited*.
-    link_libc: ?bool,
-    /// Implies `link_libc`.
-    enable_coz: bool,
-    pic: ?bool,
+    fn ifPreferred(use: UseLlvm) ?bool {
+        return switch (use) {
+            .never => false,
+            .default => null,
+            .prefer, .always => true,
+        };
+    }
 
-    fn init(b: *Build) ProjectOptions {
-        const optimize = b.standardOptimizeOption(.{});
-
-        const enable_coz = b.option(
-            bool,
-            "coz",
-            "Enable coz profiling counters. Implies -Dlink-libc",
-        ) orelse false;
-
-        const link_libc = b.option(
-            bool,
-            "link-libc",
-            "Require linking to the C standard library",
-        ) orelse false;
-
-        const Llvm = enum { never, interpreter, always };
-
-        const llvm = b.option(
-            Llvm,
-            "use-llvm",
-            "Specifies when the LLVM backend is used",
-        ) orelse if (optimize == .Debug) Llvm.never else .interpreter;
-
-        return .{
-            .target = b.standardTargetOptions(.{}),
-            .optimize = optimize,
-            .optimize_interpreter = b.option(
-                std.builtin.OptimizeMode,
-                "optimize-interpreter",
-                "Override optimization level for interpreter",
-            ) orelse optimize,
-            .link_libc = if (enable_coz or link_libc) true else null,
-            .use_llvm = .{
-                .interpreter = llvm != .never,
-                .other = llvm == .always,
-            },
-            .enable_coz = enable_coz,
-            .pic = b.option(
-                bool,
-                "pic",
-                "Require generating Position Independent Code",
-            ),
+    fn ifAlways(use: UseLlvm) ?bool {
+        return switch (use) {
+            .never, .prefer => false,
+            .default => null,
+            .always => true,
         };
     }
 };
 
-const TopLevelSteps = struct {
-    check: *Step,
-    @"test": *Step,
-    @"test-unit": *Step,
+const InterpreterBackend = enum {
+    zig,
+    assembly,
+    @"llvm-ir",
 };
 
-const top_level_steps: []const struct { std.meta.FieldEnum(TopLevelSteps), [:0]const u8 } = &.{
-    .{ .check, "Check for compilation errors" },
-    .{ .@"test", "Run all tests" },
-    .{ .@"test-unit", "Run only unit tests" },
+const byte_size = struct {
+    fn kib(amt: usize) usize {
+        return amt * 1024;
+    }
+
+    fn mib(amt: usize) usize {
+        return kib(amt * 1024);
+    }
 };
+
+fn stringifyZon(b: *Build, object: anytype, capacity: usize) []const u8 {
+    var alloc = std.Io.Writer.Allocating.initCapacity(b.allocator, capacity) catch @panic("oom");
+    std.zon.stringify.serialize(object, .{ .whitespace = false }, &alloc.writer) catch
+        @panic("oom");
+    return alloc.written();
+}
 
 pub fn build(b: *Build) void {
-    const project_options = ProjectOptions.init(b);
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
 
-    const steps = steps: {
-        var init: TopLevelSteps = undefined;
-        inline for (top_level_steps) |step| {
-            const name = @tagName(step[0]);
-            @field(init, name) = b.step(name, step[1]);
-        }
-        break :steps init;
-    };
-    steps.@"test".dependOn(steps.@"test-unit");
+    const enable_coz = false; // Untested
+    // const enable_coz = b.option(
+    //     bool,
+    //     "coz",
+    //     "Enable coz profiling counters. Implies -Dlink-libc",
+    // ) orelse false;
 
-    var modules = Modules{
-        .coz = .build(b, &project_options),
-        .sys = .build(b, &project_options),
-        .allocators = undefined,
-        .file_content = undefined,
-        .wasmstint = undefined,
-        .cli_args = Modules.CliArgs.build(b, &steps, &project_options),
-        .wasip1 = undefined,
-        .subprocess = .build(b, &project_options),
-    };
-    modules.allocators = .build(b, &steps, &project_options, .{ .sys = modules.sys });
-    modules.file_content = .build(b, &project_options, .{
-        .allocators = modules.allocators,
-        .sys = modules.sys,
-    });
-    modules.wasmstint = .build(
-        b,
-        &steps,
-        &project_options,
-        .{ .coz = modules.coz, .allocators = modules.allocators },
-    );
-    modules.wasip1 = Modules.Wasip1.build(
-        b,
-        &steps,
-        &project_options,
-        .{
-            .wasmstint = modules.wasmstint,
-            .coz = modules.coz,
-            .allocators = modules.allocators,
-            .sys = modules.sys,
-        },
-    );
+    // const link_libc = b.option(
+    //     bool,
+    //     "link-libc",
+    //     "Require linking to the C standard library (Windows & Linux only)",
+    // ) orelse false;
 
-    const spectest_exe = SpectestInterp.build(
-        b,
-        &steps,
-        &project_options,
-        .{
-            .wasmstint = modules.wasmstint,
-            .file_content = modules.file_content,
-            .cli_args = modules.cli_args,
-            .coz = modules.coz,
-            .allocators = modules.allocators,
-        },
-    );
+    const use_llvm = b.option(UseLlvm, "use-llvm", "Specifies when the LLVM backend is used") orelse
+        UseLlvm.default;
 
-    const wasip1_exe = Wasip1Interp.build(
-        b,
-        &steps,
-        &project_options,
-        .{
-            .wasmstint = modules.wasmstint,
-            .file_content = modules.file_content,
-            .cli_args = modules.cli_args,
-            .wasip1 = modules.wasip1,
-            .coz = modules.coz,
-            .allocators = modules.allocators,
-            .sys = modules.sys,
-        },
-    );
+    const pic = b.option(bool, "pic", "Require generating Position Independent Code");
 
-    buildSpecificationTests(b, spectest_exe, &steps);
-
-    // const wasip1_test_runner = Wasip1TestRunner.build(
-    //     b,
-    //     &steps,
-    //     .{ .project = &project_options },
-    //     .{
-    //         .cli_args = modules.cli_args,
-    //         .file_content = modules.file_content,
-    //         .interpreter = wasip1_exe,
-    //     },
-    // );
-
-    buildFuzzers(b, &steps, .{ .project = &project_options }, .{
-        .wasmstint = modules.wasmstint,
-        .file_content = modules.file_content,
-        .cli_args = modules.cli_args,
-    });
-
-    buildWasiSamplePrograms(b, &steps, .{ .project = &project_options }, .{
-        .interpreter = wasip1_exe,
-        .subprocess = modules.subprocess,
-    });
-}
-
-const ByteSize = packed struct(usize) {
-    bytes: usize,
-
-    fn kib(amt: usize) ByteSize {
-        return .{ .bytes = amt * 1024 };
+    const check_step = b.step("check", "Check executables for compile errors");
+    const unit_tests_step = b.step("test-unit", "Run unit tests");
+    {
+        const test_all_step = b.step("test-all", "Run all tests");
+        test_all_step.dependOn(unit_tests_step);
     }
 
-    fn mib(amt: usize) ByteSize {
-        return .kib(amt * 1024);
-    }
-};
-
-fn addCheck(
-    b: *Build,
-    steps: *const TopLevelSteps,
-    comptime kind: enum { @"test", exe },
-    module: *Build.Module,
-    name: []const u8,
-    options: struct { max_rss: ByteSize, use_llvm: bool },
-) void {
-    const Args = switch (kind) {
-        .@"test" => Build.TestOptions,
-        .exe => Build.ExecutableOptions,
-    };
-
-    const args = Args{
-        .name = b.fmt("check-{s}", .{name}),
-        .root_module = module,
-        .max_rss = options.max_rss.bytes,
-        .use_llvm = options.use_llvm,
-    };
-
-    steps.check.dependOn(switch (kind) {
-        .@"test" => &b.addTest(args).step,
-        .exe => &b.addExecutable(args).step,
+    const sys_module = b.createModule(.{
+        .root_source_file = b.path("src/sys.zig"),
+        .target = target,
+        .optimize = optimize,
     });
-}
 
-const Modules = struct {
-    allocators: Allocators,
-    sys: Sys,
-    file_content: FileContent,
-    wasmstint: Wasmstint,
-    cli_args: CliArgs,
-    wasip1: Wasip1,
-    subprocess: Subprocess,
-    coz: Coz,
+    const allocators_module = b.createModule(.{
+        .root_source_file = b.path("src/allocators.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    {
+        allocators_module.addImport("sys", sys_module);
 
-    fn addAsImportTo(comptime T: type, from: T, to: *Build.Module) void {
-        to.addImport(T.name, from.module);
+        const tests = &b.addRunArtifact(b.addTest(.{
+            .name = "allocators",
+            .root_module = allocators_module,
+            .max_rss = byte_size.mib(254),
+            .use_llvm = use_llvm.ifPreferred(),
+        })).step;
+        tests.max_rss = byte_size.mib(16);
+        unit_tests_step.dependOn(tests);
     }
 
-    const Allocators = struct {
-        module: *Build.Module,
+    const file_content_module = b.createModule(.{
+        .root_source_file = b.path("src/file_content.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    {
+        file_content_module.addImport("sys", sys_module);
+        file_content_module.addImport("allocators", allocators_module);
+    }
 
-        const name = "allocators";
+    const coz_module = b.createModule(.{
+        .root_source_file = b.path("src/coz.zig"),
+        .target = target,
+        .optimize = optimize,
+        // .link_libc = link_libc,
+    });
+    {
+        const coz_options = b.addOptions();
+        coz_options.addOption(bool, "enabled", enable_coz);
+        coz_module.addOptions("options", coz_options);
+    }
 
-        fn build(
-            b: *Build,
-            steps: *const TopLevelSteps,
-            options: *const ProjectOptions,
-            imports: struct { sys: Sys },
-        ) Allocators {
-            const module = b.createModule(.{
-                .root_source_file = b.path("src/allocators.zig"),
-                .target = options.target,
-                .optimize = options.optimize,
-            });
-            addAsImportTo(Sys, imports.sys, module);
+    const cli_args_module = b.createModule(.{
+        .root_source_file = b.path("src/cli_args.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    {
+        const tests = &b.addRunArtifact(b.addTest(.{
+            .name = "cli_args",
+            .root_module = cli_args_module,
+            .use_llvm = use_llvm.ifPreferred(),
+            .max_rss = byte_size.mib(255),
+        })).step;
+        tests.max_rss = byte_size.mib(16);
+        unit_tests_step.dependOn(tests);
+    }
 
-            const tests = b.addTest(.{
-                .name = name,
-                .root_module = module,
-                .max_rss = ByteSize.mib(254).bytes,
-                .use_llvm = options.use_llvm.other,
-            });
+    const wasmstint_module = wasmstint: {
+        const root_module = b.addModule("wasmstint", .{
+            .root_source_file = b.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            // .link_libc = link_libc,
+        });
+        root_module.addImport("coz", coz_module);
+        root_module.addImport("allocators", allocators_module);
 
-            const tests_run = &b.addRunArtifact(tests).step;
-            tests_run.max_rss = ByteSize.mib(16).bytes;
-            steps.@"test-unit".dependOn(tests_run);
+        const opcodes_module = b.createModule(.{ .root_source_file = b.path("src/opcodes.zig") });
+        root_module.addImport("opcodes", opcodes_module);
 
-            addCheck(b, steps, .@"test", module, name, .{
-                .max_rss = .mib(110),
-                .use_llvm = options.use_llvm.other,
-            });
-            return .{ .module = module };
-        }
-    };
+        const module_options = b.addOptions();
+        root_module.addOptions("options", module_options);
 
-    const Sys = struct {
-        module: *Build.Module,
+        const interpreter_backend = b.option(
+            InterpreterBackend,
+            "interpreter-backend",
+            "Set the interpreter implementation to use",
+        ) orelse InterpreterBackend.zig;
+        module_options.addOption(InterpreterBackend, "interpreter_backend", interpreter_backend);
 
-        const name = "sys";
+        const enum_set_module = b.createModule(.{
+            .root_source_file = b.path("src/Interpreter/codegen/enum_set.zig"),
+        });
 
-        fn build(b: *Build, options: *const ProjectOptions) Sys {
-            return Sys{
-                .module = b.createModule(.{
-                    .root_source_file = b.path("src/sys.zig"),
-                    .target = options.target,
-                    .optimize = options.optimize,
-                }),
+        if (interpreter_backend == .assembly and target.result.cpu.arch == .x86_64) {
+            const symbol_prefix = "wasmstint.x86_64_sysv.";
+            const Options = struct {
+                optimize: std.builtin.OptimizeMode,
+                symbol_prefix: []const u8,
+                pic: bool,
+                features: []const std.Target.x86.Feature,
             };
-        }
-    };
 
-    const FileContent = struct {
-        module: *Build.Module,
+            const cpu_feature_set = target.result.cpu.features;
+            var cpu_features = std.ArrayList(std.Target.x86.Feature)
+                .initCapacity(b.allocator, cpu_feature_set.count()) catch @panic("oom");
 
-        const name = "file_content";
-
-        fn build(
-            b: *Build,
-            options: *const ProjectOptions,
-            imports: struct { allocators: Allocators, sys: Sys },
-        ) FileContent {
-            const module = b.createModule(.{
-                .root_source_file = b.path("src/file_content.zig"),
-                .target = options.target,
-                .optimize = options.optimize,
-            });
-            addAsImportTo(Allocators, imports.allocators, module);
-            addAsImportTo(Sys, imports.sys, module);
-
-            return .{ .module = module };
-        }
-    };
-
-    const Wasmstint = struct {
-        module: *Build.Module,
-
-        const name = "wasmstint";
-
-        const InterpreterBackend = enum {
-            zig,
-            assembly,
-            @"llvm-ir",
-        };
-
-        fn build(
-            b: *Build,
-            steps: *const TopLevelSteps,
-            options: *const ProjectOptions,
-            imports: struct { coz: Coz, allocators: Allocators },
-        ) Wasmstint {
-            const root_module = b.addModule(name, .{
-                .root_source_file = b.path("src/root.zig"),
-                .target = options.target,
-                .optimize = options.optimize_interpreter,
-                .link_libc = options.link_libc,
-            });
-            addAsImportTo(Coz, imports.coz, root_module);
-            addAsImportTo(Allocators, imports.allocators, root_module);
-
-            const opcodes_module = b.createModule(.{
-                .root_source_file = b.path("src/opcodes.zig"),
-            });
-            root_module.addImport("opcodes", opcodes_module);
-
-            const interpreter_backend = b.option(
-                InterpreterBackend,
-                "interpreter-backend",
-                "Set the interpreter implementation to use",
-            ) orelse InterpreterBackend.zig;
-            const wasmstint_options = b.addOptions();
-            wasmstint_options.addOption(
-                InterpreterBackend,
-                "interpreter_backend",
-                interpreter_backend,
-            );
-            root_module.addOptions("options", wasmstint_options);
-
-            const enum_set_module = b.createModule(.{
-                .root_source_file = b.path("src/Interpreter/codegen/enum_set.zig"),
-            });
-
-            const err_no_pic_flag = "pass -Dpic or -Dpic=false to use ASM backend";
-            if (interpreter_backend == .assembly and
-                options.target.result.cpu.arch == .x86_64)
-            {
-                const symbol_prefix = "wasmstint.x86_64_sysv.";
-                const Options = struct {
-                    optimize: std.builtin.OptimizeMode,
-                    symbol_prefix: []const u8,
-                    pic: bool,
-                    features: []const std.Target.x86.Feature,
-                };
-
-                const cpu_feature_set = options.target.result.cpu.features;
-                var cpu_features = std.ArrayList(std.Target.x86.Feature).initCapacity(
-                    b.allocator,
-                    cpu_feature_set.count(),
-                ) catch @panic("oom");
-
-                for (std.enums.values(std.Target.x86.Feature)) |feat| {
-                    if (std.Target.x86.featureSetHas(cpu_feature_set, feat)) {
-                        cpu_features.appendAssumeCapacity(feat);
-                    } else if (cpu_features.items.len == cpu_features.capacity) {
-                        break;
-                    }
+            for (std.enums.values(std.Target.x86.Feature)) |feat| {
+                if (std.Target.x86.featureSetHas(cpu_feature_set, feat)) {
+                    cpu_features.appendAssumeCapacity(feat);
+                } else if (cpu_features.items.len == cpu_features.capacity) {
+                    break;
                 }
-
-                var options_writer = std.Io.Writer.Allocating.init(b.allocator);
-                std.zon.stringify.serialize(
-                    Options{
-                        .optimize = options.optimize_interpreter,
-                        .symbol_prefix = symbol_prefix,
-                        .pic = options.pic orelse true,
-                        // .target_triple = options.target.query.zigTriple(b.allocator) catch @panic("oom"),
-                        .features = cpu_features.items,
-                    },
-                    .{ .whitespace = false },
-                    &options_writer.writer,
-                ) catch @panic("oom");
-
-                const codegen_exe = b.addExecutable(.{
-                    .name = "wasmstint-codegen-x86_64_sysv",
-                    .root_module = b.createModule(.{
-                        .root_source_file = b.path("src/Interpreter/codegen/x86_64/main.zig"),
-                        .target = b.graph.host,
-                        .optimize = .Debug,
-                        .single_threaded = true,
-                        .pic = false,
-                        // .code_model = .small, // Forces usage of LLVM backend
-                    }),
-                    .max_rss = ByteSize.mib(182).bytes,
-                });
-                codegen_exe.root_module.addImport("opcodes", opcodes_module);
-                codegen_exe.root_module.addImport("enum_set", enum_set_module);
-
-                const run_codegen = b.addRunArtifact(codegen_exe);
-                run_codegen.step.max_rss = ByteSize.mib(3).bytes;
-                run_codegen.addArg(options_writer.written());
-                root_module.addAssemblyFile(run_codegen.addOutputFileArg("x86_64_sysv.s"));
-                // root_module.addAnonymousImport("asm_generated", .{
-                //     .root_source_file = run_codegen.addOutputFileArg("x86_64_sys_decls.zig"),
-                //     .target = options.target,
-                //     .optimize = options.optimize_interpreter,
-                // });
-
-                wasmstint_options.addOption([]const u8, "symbol_prefix", symbol_prefix);
-
-                if (options.pic == null) {
-                    run_codegen.step.dependOn(&b.addFail(err_no_pic_flag).step);
-                }
-            } else if (interpreter_backend == .@"llvm-ir") {
-                const target_info_bc = b.addLibrary(.{
-                    .name = "target_info",
-                    .root_module = b.createModule(.{
-                        .root_source_file = b.path(
-                            "src/Interpreter/codegen/llvm/target_info_source.zig",
-                        ),
-                        .target = options.target,
-                        .optimize = .ReleaseFast,
-                        .strip = true,
-                    }),
-                    .max_rss = ByteSize.mib(88).bytes,
-                }).getEmittedLlvmIr();
-
-                const target_info = info: {
-                    const extract_target_info_exe = b.addExecutable(.{
-                        .name = "wasmstint-codegen-llvm-extract-target-info",
-                        .root_module = b.createModule(.{
-                            .root_source_file = b.path(
-                                "src/Interpreter/codegen/llvm/extract_target_info.zig",
-                            ),
-                            .target = b.graph.host,
-                            .optimize = .Debug,
-                            .single_threaded = true,
-                            .pic = false,
-                        }),
-                        .max_rss = ByteSize.mib(127).bytes,
-                    });
-
-                    const extract_target_info = b.addRunArtifact(extract_target_info_exe);
-                    extract_target_info.addFileArg(target_info_bc);
-                    extract_target_info.step.max_rss = ByteSize.mib(1).bytes;
-                    break :info extract_target_info.captureStdOut(.{
-                        .basename = "target_info.zon",
-                    });
-                };
-
-                const sample_intrinsics_bc = bc: {
-                    const sample_intrinsics_exe = b.addExecutable(.{
-                        .name = "wasmstint-codegen-llvm-sample-intrinsics",
-                        .root_module = b.createModule(.{
-                            .root_source_file = b.path(
-                                "src/Interpreter/codegen/llvm/sample_intrinsics.zig",
-                            ),
-                            .target = b.graph.host,
-                            .optimize = .Debug,
-                            .single_threaded = true,
-                            .pic = false,
-                        }),
-                        .max_rss = ByteSize.mib(170).bytes,
-                    });
-
-                    const sample_intrinsics = b.addRunArtifact(sample_intrinsics_exe);
-                    sample_intrinsics.step.max_rss = ByteSize.mib(1).bytes;
-                    sample_intrinsics.addFileArg(target_info);
-                    break :bc sample_intrinsics.addOutputFileArg("sample_intrinsics.bc");
-                };
-
-                const target_triple = options.target.query.zigTriple(b.allocator) catch
-                    @panic("oom");
-
-                // TODO(Zig): LLVM IR can't be used https://github.com/ziglang/zig/issues/25004
-                // - Workaround is to use zig cc (clang)
-                const sample_intrinsics_asm = cc: {
-                    const cc = b.addSystemCommand(&.{
-                        b.graph.zig_exe,
-                        "cc",
-                        "-S",
-                        "-nostdlib",
-                        // Zig enables sanitizer flags when compiling C
-                        "-fno-sanitize=undefined",
-                        "-fno-sanitize-trap",
-                        // Zig passes `-c`, which is unused
-                        "-Wno-unused-command-line-argument",
-                        "-target",
-                    });
-                    cc.step.max_rss = ByteSize.mib(39).bytes;
-
-                    cc.addArg(target_triple);
-
-                    if (options.target.result.cpu.arch.isX86()) {
-                        cc.addArg("-masm=intel");
-                    }
-
-                    cc.addFileArg(sample_intrinsics_bc);
-
-                    cc.addArg("-o");
-                    break :cc cc.addOutputFileArg("sample_intrinsics.s");
-                };
-
-                const detected_intrinsics = info: {
-                    const intrinsic_detection_exe = b.addExecutable(.{
-                        .name = "wasmstint-codegen-llvm-intrinsic-detection",
-                        .root_module = b.createModule(.{
-                            .root_source_file = b.path(
-                                "src/Interpreter/codegen/llvm/intrinsic_detection.zig",
-                            ),
-                            .target = b.graph.host,
-                            .optimize = .Debug,
-                            .single_threaded = true,
-                            .pic = false,
-                        }),
-                        .max_rss = ByteSize.mib(119).bytes,
-                    });
-
-                    const intrinsic_detection = b.addRunArtifact(intrinsic_detection_exe);
-                    intrinsic_detection.step.max_rss = ByteSize.mib(1).bytes;
-                    intrinsic_detection.addFileArg(sample_intrinsics_asm);
-                    break :info intrinsic_detection.captureStdOut(.{
-                        .basename = "detected_intrinsics.zon",
-                    });
-                };
-                root_module.addAnonymousImport("detected_intrinsics", .{
-                    .root_source_file = detected_intrinsics,
-                });
-
-                const codegen_exe = b.addExecutable(.{
-                    .name = "wasmstint-codegen-llvm",
-                    .root_module = b.createModule(.{
-                        .root_source_file = b.path("src/Interpreter/codegen/llvm/main.zig"),
-                        .target = b.graph.host,
-                        .optimize = .Debug,
-                        .single_threaded = true,
-                        .pic = false,
-                        // .code_model = .small, // Forces usage of LLVM backend
-                    }),
-                    .max_rss = ByteSize.mib(213).bytes, // arbitrary amount
-                });
-                codegen_exe.root_module.addImport("opcodes", opcodes_module);
-                codegen_exe.root_module.addImport("enum_set", enum_set_module);
-
-                const symbol_prefix = "wasmstint.interpreter.";
-
-                const Options = struct {
-                    optimize: std.builtin.OptimizeMode,
-                    symbol_prefix: []const u8,
-                    strip: bool,
-                    target: struct {
-                        triple: []const u8,
-                        cpu_features: []const u8,
-                    },
-                };
-
-                var options_writer = std.Io.Writer.Allocating.init(b.allocator);
-                std.zon.stringify.serialize(
-                    Options{
-                        .optimize = options.optimize_interpreter,
-                        .symbol_prefix = symbol_prefix,
-                        .strip = false,
-                        .target = .{
-                            .triple = target_triple,
-                            .cpu_features = options.target.query
-                                .serializeCpuAlloc(b.allocator) catch @panic("oom"),
-                        },
-                    },
-                    .{ .whitespace = false },
-                    &options_writer.writer,
-                ) catch @panic("oom");
-
-                const run_codegen = b.addRunArtifact(codegen_exe);
-                run_codegen.step.max_rss = ByteSize.mib(3).bytes; // arbitrary
-                run_codegen.addArg(options_writer.written());
-                run_codegen.addFileArg(target_info);
-                run_codegen.addFileArg(detected_intrinsics);
-                root_module.addObjectFile(
-                    run_codegen.addOutputFileArg("wasmstint-interpreter.bc"),
-                );
-
-                wasmstint_options.addOption([]const u8, "symbol_prefix", symbol_prefix);
             }
 
-            const tests = b.addTest(.{
-                .name = name,
-                .root_module = root_module,
-                // TODO(zig): https://github.com/ziglang/zig/issues/23423
-                .use_llvm = true,
-                .max_rss = ByteSize.mib(398).bytes,
+            const options = Options{
+                .optimize = optimize,
+                .symbol_prefix = symbol_prefix,
+                .pic = pic orelse true, // Assume PIC if unspecified
+                // .target_triple = options.target.query.zigTriple(b.allocator) catch @panic("oom"),
+                .features = cpu_features.items,
+            };
+
+            const codegen_exe = b.addExecutable(.{
+                .name = "wasmstint-codegen-x86_64_sysv",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/Interpreter/codegen/x86_64/main.zig"),
+                    .target = b.graph.host,
+                    .optimize = .Debug,
+                    .single_threaded = true,
+                    .pic = false,
+                    // .code_model = .small, // Forces usage of LLVM backend
+                }),
+                .max_rss = byte_size.mib(182),
+            });
+            codegen_exe.root_module.addImport("opcodes", opcodes_module);
+            codegen_exe.root_module.addImport("enum_set", enum_set_module);
+
+            const run_codegen = b.addRunArtifact(codegen_exe);
+            run_codegen.step.max_rss = byte_size.mib(3);
+            run_codegen.addArg(stringifyZon(b, options, 512));
+            root_module.addAssemblyFile(run_codegen.addOutputFileArg("x86_64_sysv.s"));
+            // root_module.addAnonymousImport("asm_generated", .{
+            //     .root_source_file = run_codegen.addOutputFileArg("x86_64_sys_decls.zig"),
+            //     .target = options.target,
+            //     .optimize = options.optimize_interpreter,
+            // });
+
+            module_options.addOption([]const u8, "symbol_prefix", symbol_prefix);
+        } else if (interpreter_backend == .@"llvm-ir") {
+            const target_info_bc = b.addLibrary(.{
+                .name = "target_info",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path(
+                        "src/Interpreter/codegen/llvm/target_info_source.zig",
+                    ),
+                    .target = target,
+                    .optimize = .ReleaseFast,
+                    .strip = true,
+                }),
+                .max_rss = byte_size.mib(88),
+            }).getEmittedLlvmIr();
+
+            const target_info = info: {
+                const extract_target_info_exe = b.addExecutable(.{
+                    .name = "wasmstint-codegen-llvm-extract-target-info",
+                    .root_module = b.createModule(.{
+                        .root_source_file = b.path(
+                            "src/Interpreter/codegen/llvm/extract_target_info.zig",
+                        ),
+                        .target = b.graph.host,
+                        .optimize = .Debug,
+                        .single_threaded = true,
+                        .pic = false,
+                    }),
+                    .max_rss = byte_size.mib(127),
+                });
+
+                const extract_target_info = b.addRunArtifact(extract_target_info_exe);
+                extract_target_info.addFileArg(target_info_bc);
+                extract_target_info.step.max_rss = byte_size.mib(1);
+                break :info extract_target_info.captureStdOut(.{ .basename = "target_info.zon" });
+            };
+
+            const sample_intrinsics_bc = bc: {
+                const sample_intrinsics_exe = b.addExecutable(.{
+                    .name = "wasmstint-codegen-llvm-sample-intrinsics",
+                    .root_module = b.createModule(.{
+                        .root_source_file = b.path(
+                            "src/Interpreter/codegen/llvm/sample_intrinsics.zig",
+                        ),
+                        .target = b.graph.host,
+                        .optimize = .Debug,
+                        .single_threaded = true,
+                        .pic = false,
+                    }),
+                    .max_rss = byte_size.mib(170),
+                });
+
+                const sample_intrinsics = b.addRunArtifact(sample_intrinsics_exe);
+                sample_intrinsics.step.max_rss = byte_size.mib(1);
+                sample_intrinsics.addFileArg(target_info);
+                break :bc sample_intrinsics.addOutputFileArg("sample_intrinsics.bc");
+            };
+
+            const target_triple = target.query.zigTriple(b.allocator) catch @panic("oom");
+
+            // TODO(Zig): LLVM IR can't be used https://github.com/ziglang/zig/issues/25004
+            // - Workaround is to use zig cc (clang)
+            const sample_intrinsics_asm = cc: {
+                const cc = b.addSystemCommand(&.{
+                    b.graph.zig_exe,
+                    "cc",
+                    "-S",
+                    "-nostdlib",
+                    // Zig enables sanitizer flags when compiling C
+                    "-fno-sanitize=undefined",
+                    "-fno-sanitize-trap",
+                    // Zig passes `-c`, which is unused
+                    "-Wno-unused-command-line-argument",
+                    "-target",
+                });
+                cc.step.max_rss = byte_size.mib(39);
+
+                cc.addArg(target_triple);
+
+                if (target.result.cpu.arch.isX86()) {
+                    cc.addArg("-masm=intel");
+                }
+
+                cc.addFileArg(sample_intrinsics_bc);
+
+                cc.addArg("-o");
+                break :cc cc.addOutputFileArg("sample_intrinsics.s");
+            };
+
+            const detected_intrinsics = info: {
+                const intrinsic_detection_exe = b.addExecutable(.{
+                    .name = "wasmstint-codegen-llvm-intrinsic-detection",
+                    .root_module = b.createModule(.{
+                        .root_source_file = b.path(
+                            "src/Interpreter/codegen/llvm/intrinsic_detection.zig",
+                        ),
+                        .target = b.graph.host,
+                        .optimize = .Debug,
+                        .single_threaded = true,
+                        .pic = false,
+                    }),
+                    .max_rss = byte_size.mib(119),
+                });
+
+                const intrinsic_detection = b.addRunArtifact(intrinsic_detection_exe);
+                intrinsic_detection.step.max_rss = byte_size.mib(1);
+                intrinsic_detection.addFileArg(sample_intrinsics_asm);
+                break :info intrinsic_detection.captureStdOut(.{
+                    .basename = "detected_intrinsics.zon",
+                });
+            };
+            root_module.addAnonymousImport("detected_intrinsics", .{
+                .root_source_file = detected_intrinsics,
             });
 
-            const tests_run = &b.addRunArtifact(tests).step;
-            tests_run.max_rss = ByteSize.mib(43).bytes;
-            steps.@"test-unit".dependOn(tests_run);
-            addCheck(b, steps, .@"test", root_module, name, .{
-                .max_rss = .mib(126),
-                .use_llvm = options.use_llvm.interpreter,
+            const codegen_exe = b.addExecutable(.{
+                .name = "wasmstint-codegen-llvm",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/Interpreter/codegen/llvm/main.zig"),
+                    .target = b.graph.host,
+                    .optimize = .Debug,
+                    .single_threaded = true,
+                    .pic = false,
+                    // .code_model = .small, // Forces usage of LLVM backend
+                }),
+                .max_rss = byte_size.mib(213), // arbitrary amount
             });
-            return .{ .module = root_module };
+            codegen_exe.root_module.addImport("opcodes", opcodes_module);
+            codegen_exe.root_module.addImport("enum_set", enum_set_module);
+
+            const symbol_prefix = "wasmstint.interpreter.";
+
+            const Options = struct {
+                optimize: std.builtin.OptimizeMode,
+                symbol_prefix: []const u8,
+                strip: bool,
+                target: struct {
+                    triple: []const u8,
+                    cpu_features: []const u8,
+                },
+            };
+
+            const options = Options{
+                .optimize = optimize,
+                .symbol_prefix = symbol_prefix,
+                .strip = false,
+                .target = .{
+                    .triple = target_triple,
+                    .cpu_features = target.query.serializeCpuAlloc(b.allocator) catch @panic("oom"),
+                },
+            };
+
+            const run_codegen = b.addRunArtifact(codegen_exe);
+            run_codegen.step.max_rss = byte_size.mib(3); // arbitrary
+            run_codegen.addArg(stringifyZon(b, options, 1024));
+            run_codegen.addFileArg(target_info);
+            run_codegen.addFileArg(detected_intrinsics);
+            root_module.addObjectFile(run_codegen.addOutputFileArg("wasmstint-interpreter.bc"));
+
+            module_options.addOption([]const u8, "symbol_prefix", symbol_prefix);
         }
-    };
-
-    const CliArgs = struct {
-        module: *Build.Module,
-
-        const name = "cli_args";
-
-        fn build(
-            b: *Build,
-            steps: *const TopLevelSteps,
-            options: *const ProjectOptions,
-        ) CliArgs {
-            const module = b.createModule(.{
-                .root_source_file = b.path("src/cli_args.zig"),
-                .target = options.target,
-                .optimize = options.optimize,
-            });
-
-            const tests = b.addTest(.{
-                .name = name,
-                .root_module = module,
-                .use_llvm = options.use_llvm.other,
-                .max_rss = ByteSize.mib(255).bytes,
-            });
-
-            const tests_run = &b.addRunArtifact(tests).step;
-            tests_run.max_rss = ByteSize.mib(16).bytes;
-            steps.@"test-unit".dependOn(tests_run);
-
-            addCheck(b, steps, .@"test", module, name, .{
-                .max_rss = ByteSize.mib(109),
-                .use_llvm = options.use_llvm.other,
-            });
-            return .{ .module = module };
-        }
-    };
-
-    const Wasip1 = struct {
-        module: *Build.Module,
-
-        const name = "WasiPreview1";
-
-        fn build(
-            b: *Build,
-            steps: *const TopLevelSteps,
-            options: *const ProjectOptions,
-            imports: struct { wasmstint: Wasmstint, coz: Coz, allocators: Allocators, sys: Sys },
-        ) Wasip1 {
-            const module = b.addModule(name, .{
-                .root_source_file = b.path("src/WasiPreview1.zig"),
-                .target = options.target,
-                .optimize = options.optimize,
-                .link_libc = options.link_libc,
-            });
-            addAsImportTo(Wasmstint, imports.wasmstint, module);
-            addAsImportTo(Coz, imports.coz, module);
-            addAsImportTo(Allocators, imports.allocators, module);
-            addAsImportTo(Sys, imports.sys, module);
-
-            const tests = b.addTest(.{
-                .name = name,
-                .root_module = module,
-                .max_rss = ByteSize.mib(399).bytes,
-                .use_llvm = options.use_llvm.interpreter,
-            });
-
-            const tests_run = &b.addRunArtifact(tests).step;
-            tests_run.max_rss = ByteSize.mib(43).bytes;
-            steps.@"test-unit".dependOn(tests_run);
-
-            addCheck(b, steps, .@"test", module, name, .{
-                .max_rss = .mib(106),
-                .use_llvm = options.use_llvm.other,
-            });
-            return .{ .module = module };
-        }
-    };
-
-    const Subprocess = struct {
-        module: *Build.Module,
-
-        const name = "subprocess";
-
-        fn build(b: *Build, options: *const ProjectOptions) Subprocess {
-            const module = b.createModule(.{
-                .root_source_file = b.path("src/subprocess.zig"),
-                .target = options.target,
-                .optimize = options.optimize,
-            });
-
-            return .{ .module = module };
-        }
-    };
-
-    const Coz = struct {
-        module: *Build.Module,
-
-        const name = "coz";
-
-        fn build(b: *Build, options: *const ProjectOptions) Coz {
-            const module = b.createModule(.{
-                .root_source_file = b.path("src/coz.zig"),
-                .target = options.target,
-                .optimize = options.optimize,
-                .link_libc = options.link_libc,
-            });
-
-            const coz_options = b.addOptions();
-            coz_options.addOption(bool, "enabled", options.enable_coz);
-            module.addOptions("options", coz_options);
-
-            return .{ .module = module };
-        }
-    };
-};
-
-const SpectestInterp = struct {
-    exe: *Step.Compile,
-
-    fn build(
-        b: *Build,
-        steps: *const TopLevelSteps,
-        proj_opts: *const ProjectOptions,
-        imports: struct {
-            file_content: Modules.FileContent,
-            wasmstint: Modules.Wasmstint,
-            cli_args: Modules.CliArgs,
-            coz: Modules.Coz,
-            allocators: Modules.Allocators,
-        },
-    ) SpectestInterp {
-        const module = b.createModule(.{
-            .root_source_file = b.path("src/spectest/main.zig"),
-            .target = proj_opts.target,
-            .optimize = proj_opts.optimize,
-            .pic = proj_opts.pic,
-        });
-        Modules.addAsImportTo(Modules.FileContent, imports.file_content, module);
-        Modules.addAsImportTo(Modules.Wasmstint, imports.wasmstint, module);
-        Modules.addAsImportTo(Modules.CliArgs, imports.cli_args, module);
-        Modules.addAsImportTo(Modules.Coz, imports.coz, module);
-        Modules.addAsImportTo(Modules.Allocators, imports.allocators, module);
-
-        const exe = b.addExecutable(.{
-            .name = "wasmstint-spectest",
-            .root_module = module,
-            .use_llvm = proj_opts.use_llvm.interpreter,
-            .max_rss = ByteSize.mib(733).bytes,
-        });
-
-        b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{}).step);
 
         {
-            const run = b.addRunArtifact(exe);
+            const tests = &b.addRunArtifact(b.addTest(.{
+                .name = "wasmstint",
+                .root_module = root_module,
+                .use_llvm = use_llvm.ifPreferred(),
+                .max_rss = byte_size.mib(398),
+            })).step;
+            tests.max_rss = byte_size.mib(43);
+            unit_tests_step.dependOn(tests);
+        }
+
+        break :wasmstint root_module;
+    };
+
+    const spectest_exe = runner: {
+        var executables: [2]*Step.Compile = undefined;
+        for (&executables) |*e| {
+            const module = b.createModule(.{
+                .root_source_file = b.path("src/spectest/main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .pic = pic,
+            });
+            for (&[5]struct { []const u8, *Build.Module }{
+                .{ "file_content", file_content_module },
+                .{ "wasmstint", wasmstint_module },
+                .{ "cli_args", cli_args_module },
+                .{ "coz", coz_module },
+                .{ "allocators", allocators_module },
+            }) |info| {
+                module.addImport(info.@"0", info.@"1");
+            }
+
+            e.* = b.addExecutable(.{
+                .name = "wasmstint-spectest",
+                .root_module = module,
+                .max_rss = byte_size.mib(733),
+            });
+        }
+
+        const runner_exe, const check = executables;
+        runner_exe.use_llvm = use_llvm.ifPreferred();
+
+        b.getInstallStep().dependOn(&b.addInstallArtifact(runner_exe, .{}).step);
+        check_step.dependOn(&check.step);
+
+        {
+            const run = b.addRunArtifact(runner_exe);
             if (b.args) |args| {
                 run.addArgs(args);
             }
 
-            b.step("run-wast", "Run the specification test interpreter").dependOn(&run.step);
+            b.step("run-wast", "Run the specification JSON test interpreter").dependOn(&run.step);
         }
 
-        addCheck(b, steps, .exe, module, exe.name, .{
-            .max_rss = ByteSize.mib(160),
-            .use_llvm = proj_opts.use_llvm.interpreter,
-        });
-
-        return .{ .exe = exe };
-    }
-};
-
-const WabtTools = struct {
-    wast2json: *Step.Compile,
-};
-
-fn buildWabtTools(b: *Build, wabt_dep: *Build.Dependency) WabtTools {
-    const host_os = b.graph.host.result.os;
-    const unix_like = @intFromBool(host_os.tag != .windows);
-    const config_header = b.addConfigHeader(
-        .{
-            .style = .{ .cmake = wabt_dep.path("src/config.h.in") },
-            .include_path = "wabt/config.h",
-        },
-        .{
-            .WABT_VERSION_STRING = "1.0.39",
-            .WABT_DEBUG = null,
-            .HAVE_ALLOCA_H = unix_like,
-            .HAVE_UNISTD_H = unix_like,
-            .HAVE_SNPRINTF = 1,
-            .HAVE_SSIZE_T = unix_like,
-            .HAVE_STRCASECMP = unix_like,
-            .HAVE_WIN32_VT100 = @intFromBool(host_os.isAtLeast(.windows, .win10) == true),
-            .WABT_BIG_ENDIAN = builtin.target.cpu.arch.endian() == .big,
-            .COMPILER_IS_CLANG = 1,
-            .WITH_EXCEPTIONS = 0,
-            .SIZEOF_SIZE_T = @sizeOf(usize),
-        },
-    );
-    const flags = &.{
-        "-Wall",
-        "-Wextra",
-        "-Wno-unused-parameter",
-        "-Wpointer-arith",
-        "-Wuninitialized",
-        "-Wimplicit-fallthrough",
-        "-fno-exceptions",
+        break :runner runner_exe;
     };
 
-    const wabt_lib = b.addLibrary(.{
-        .name = "wabt",
-        .root_module = b.createModule(.{
-            .target = b.graph.host,
-            .optimize = .ReleaseSmall,
-        }),
-        .use_llvm = true,
-        .max_rss = ByteSize.mib(500).bytes, // arbitrary value
-    });
-    wabt_lib.root_module.addConfigHeader(config_header);
-    wabt_lib.root_module.addIncludePath(wabt_dep.path("include"));
-    wabt_lib.root_module.addCSourceFiles(.{
-        .root = wabt_dep.path("."),
-        .files = &@import("tools/wabt.zon").src,
-        .flags = flags,
-    });
-    wabt_lib.root_module.link_libcpp = true;
-
-    const wast2json_exe = b.addExecutable(.{
-        .name = "wast2json",
-        .root_module = b.createModule(.{
-            .target = b.graph.host,
-            .optimize = .ReleaseSmall,
-        }),
-        .use_llvm = true,
-        .max_rss = ByteSize.mib(500).bytes, // arbitrary value
-    });
-    wast2json_exe.root_module.addConfigHeader(config_header);
-    wast2json_exe.root_module.addIncludePath(wabt_dep.path("include"));
-    wast2json_exe.root_module.addCSourceFile(.{
-        .file = wabt_dep.path("src/tools/wast2json.cc"),
-        .flags = flags,
-    });
-    wast2json_exe.root_module.linkLibrary(wabt_lib);
-    wast2json_exe.root_module.link_libcpp = true;
-
     {
-        const run = b.addRunArtifact(wast2json_exe);
-        if (b.args) |args| {
-            run.addArgs(args);
+        const wasip1_module = b.createModule(.{
+            .root_source_file = b.path("src/WasiPreview1.zig"),
+            .target = target,
+            .optimize = optimize,
+            // .link_libc = link_libc,
+        });
+        for (&[4]struct { []const u8, *Build.Module }{
+            .{ "wasmstint", wasmstint_module },
+            .{ "coz", coz_module },
+            .{ "allocators", allocators_module },
+            .{ "sys", sys_module },
+        }) |info| {
+            wasip1_module.addImport(info.@"0", info.@"1");
         }
-        b.step("run-wast2json", "Run WABT wast2json executable").dependOn(&run.step);
+
+        {
+            const tests_run = &b.addRunArtifact(b.addTest(.{
+                .name = "WasiPreview1",
+                .root_module = wasip1_module,
+                .max_rss = byte_size.mib(399),
+                .use_llvm = use_llvm.ifPreferred(),
+            })).step;
+            tests_run.max_rss = byte_size.mib(43);
+            unit_tests_step.dependOn(tests_run);
+        }
+
+        const wasip1_exe = exe: {
+            var executables: [2]*Step.Compile = undefined;
+            for (&executables) |*e| {
+                const module = b.createModule(.{
+                    .root_source_file = b.path("src/WasiPreview1/main.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .pic = pic,
+                });
+                for (&[7]struct { []const u8, *Build.Module }{
+                    .{ "file_content", file_content_module },
+                    .{ "wasmstint", wasmstint_module },
+                    .{ "cli_args", cli_args_module },
+                    .{ "WasiPreview1", wasip1_module },
+                    .{ "coz", coz_module },
+                    .{ "allocators", allocators_module },
+                    .{ "sys", sys_module },
+                }) |info| {
+                    module.addImport(info.@"0", info.@"1");
+                }
+
+                e.* = b.addExecutable(.{
+                    .name = "wasmstint-wasip1",
+                    .root_module = module,
+                    .max_rss = byte_size.mib(755),
+                });
+            }
+
+            const runner_exe, const check = executables;
+            runner_exe.use_llvm = use_llvm.ifPreferred();
+
+            b.getInstallStep().dependOn(&b.addInstallArtifact(runner_exe, .{}).step);
+            check_step.dependOn(&check.step);
+
+            {
+                const run = b.addRunArtifact(runner_exe);
+                if (b.args) |args| {
+                    run.addArgs(args);
+                }
+
+                b.step("run-wasip1", "Run the WASI (preview 1) application interpreter")
+                    .dependOn(&run.step);
+            }
+
+            break :exe runner_exe;
+        };
+
+        const wasm_target = b.resolveTargetQuery(.{
+            .cpu_arch = .wasm32,
+            .os_tag = .wasi,
+            .cpu_features_add = std.Target.wasm.featureSet(&.{
+                .simd128,
+                .bulk_memory,
+                .tail_call,
+                .multivalue,
+                .extended_const,
+                .mutable_globals,
+                .nontrapping_fptoint,
+            }),
+        });
+
+        const tests_dir = b.path("tests/wasip1/zig");
+        const tests_dir_handle = b.build_root.handle.openDir(
+            b.graph.io,
+            tests_dir.src_path.sub_path,
+            .{ .iterate = true },
+        ) catch @panic("could not open tests directory");
+
+        const install_step = b.step("install-wasip1-samples", "Build sample WASI 0.1 programs");
+        const test_step = b.step("test-wasip1-samples", "Test sample WASI 0.1 programs");
+
+        const subprocess_module = b.createModule(.{
+            .root_source_file = b.path("src/subprocess.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+
+        var tests_iter = tests_dir_handle.iterateAssumeFirstIteration();
+        const bad_test_entry = "bad entry in tests directory";
+        while (tests_iter.next(b.graph.io) catch @panic(bad_test_entry)) |tests_entry| {
+            if (tests_entry.kind != .file or
+                !std.mem.eql(u8, ".zig", std.fs.path.extension(tests_entry.name)))
+            {
+                continue;
+            }
+
+            const exe_name = b.dupe(tests_entry.name[0 .. tests_entry.name.len - 4]);
+            const root_source_file = tests_dir.path(b, tests_entry.name);
+
+            var executables: [2]*Step.Compile = undefined;
+            for (&executables) |*e| {
+                e.* = b.addExecutable(.{
+                    .name = exe_name,
+                    .root_module = b.createModule(.{
+                        .root_source_file = root_source_file,
+                        .target = wasm_target,
+                        .optimize = optimize,
+                    }),
+                    .max_rss = byte_size.mib(242),
+                });
+            }
+
+            const sample_exe, const check = executables;
+            sample_exe.use_llvm = use_llvm.ifPreferred();
+            check_step.dependOn(&check.step);
+
+            install_step.dependOn(&b.addInstallArtifact(
+                sample_exe,
+                .{ .dest_dir = .{ .override = .{ .custom = "samples/zig" } } },
+            ).step);
+
+            const test_options = b.addOptions();
+            test_options.addOptionPath("wasm", sample_exe.getEmittedBin());
+            test_options.addOptionPath("interpreter", wasip1_exe.getEmittedBin());
+
+            // TODO: To support running under QEMU, don't use subprocesses, maybe make a custom runner exe instead
+            // - accepts both expected outputs and wasm to run
+            // - unfortunately requires spearate WASIp1 runner
+            const invoke_test = b.addTest(.{
+                .name = sample_exe.name,
+                .root_module = b.createModule(.{
+                    .root_source_file = sample_exe.root_module.root_source_file,
+                    .target = target,
+                    .optimize = optimize,
+                }),
+                .max_rss = byte_size.mib(278),
+                .use_llvm = use_llvm.ifPreferred(),
+            });
+            invoke_test.root_module.addOptions("test_paths", test_options);
+            invoke_test.root_module.addImport("subprocess", subprocess_module);
+
+            // Can't add to "check" step, since it would require building the WASM.
+            const run_test = b.addRunArtifact(invoke_test);
+            run_test.step.max_rss = byte_size.mib(44);
+            test_step.dependOn(&run_test.step);
+        }
     }
 
-    return WabtTools{ .wast2json = wast2json_exe };
+    wabt: {
+        const wabt_dep = b.lazyDependency("wabt", .{}) orelse break :wabt;
+        const spectest_dep = b.lazyDependency("spectest", .{}) orelse break :wabt;
+        const wast2json = tools: {
+            const host_os = b.graph.host.result.os;
+            const unix_like = @intFromBool(host_os.tag != .windows);
+            const config_header = b.addConfigHeader(
+                .{
+                    .style = .{ .cmake = wabt_dep.path("src/config.h.in") },
+                    .include_path = "wabt/config.h",
+                },
+                .{
+                    .WABT_VERSION_STRING = "1.0.39",
+                    .WABT_DEBUG = null,
+                    .HAVE_ALLOCA_H = unix_like,
+                    .HAVE_UNISTD_H = unix_like,
+                    .HAVE_SNPRINTF = 1,
+                    .HAVE_SSIZE_T = unix_like,
+                    .HAVE_STRCASECMP = unix_like,
+                    .HAVE_WIN32_VT100 = @intFromBool(host_os.isAtLeast(.windows, .win10) == true),
+                    .WABT_BIG_ENDIAN = builtin.target.cpu.arch.endian() == .big,
+                    .COMPILER_IS_CLANG = 1,
+                    .WITH_EXCEPTIONS = 0,
+                    .SIZEOF_SIZE_T = @sizeOf(usize),
+                },
+            );
+            const flags = &.{
+                "-Wall",
+                "-Wextra",
+                "-Wno-unused-parameter",
+                "-Wpointer-arith",
+                "-Wuninitialized",
+                "-Wimplicit-fallthrough",
+                "-fno-exceptions",
+                "-O1",
+            };
+
+            const wabt_lib = b.addLibrary(.{
+                .name = "wabt",
+                .root_module = b.createModule(.{
+                    .target = b.graph.host,
+                    .optimize = .ReleaseFast,
+                }),
+                .use_llvm = true,
+                .max_rss = byte_size.mib(500), // arbitrary value
+            });
+            wabt_lib.root_module.addConfigHeader(config_header);
+            wabt_lib.root_module.addIncludePath(wabt_dep.path("include"));
+            wabt_lib.root_module.addCSourceFiles(.{
+                .root = wabt_dep.path("."),
+                .files = &@import("tools/wabt.zon").src,
+                .flags = flags,
+            });
+            wabt_lib.root_module.link_libcpp = true;
+
+            const wast2json = b.addExecutable(.{
+                .name = "wast2json",
+                .root_module = b.createModule(.{
+                    .target = b.graph.host,
+                    .optimize = .ReleaseFast,
+                }),
+                .use_llvm = true,
+                .max_rss = byte_size.mib(500),
+            });
+            wast2json.root_module.addConfigHeader(config_header);
+            wast2json.root_module.addIncludePath(wabt_dep.path("include"));
+            wast2json.root_module.addCSourceFile(.{
+                .file = wabt_dep.path("src/tools/wast2json.cc"),
+                .flags = flags,
+            });
+            wast2json.root_module.linkLibrary(wabt_lib);
+            wast2json.root_module.link_libcpp = true;
+
+            {
+                const run = b.addRunArtifact(wast2json);
+                if (b.args) |args| {
+                    run.addArgs(args);
+                }
+                b.step("run-wast2json", "Run WABT wast2json executable").dependOn(&run.step);
+            }
+
+            break :tools wast2json;
+        };
+
+        const test_groups = @import("tests/testsuite.zon");
+        const test_group_names = comptime std.meta.fieldNames(@TypeOf(test_groups));
+
+        const test_spec_all_step = b.step("test-spec", "Run all specification tests");
+
+        inline for (test_group_names) |group_name| {
+            const group: []const []const u8 = &@field(test_groups, group_name);
+            const test_spec_group_step = b.step(
+                "test-spec-" ++ group_name,
+                "Run " ++ group_name ++ " specification tests",
+            );
+
+            for (group) |name| {
+                const wast_name = b.fmt("{s}.wast", .{name});
+                const path = spectest_dep.path(wast_name);
+                test_spec_group_step.dependOn(
+                    buildWastTest(b, spectest_exe, path, wast2json, wast_name),
+                );
+            }
+
+            test_spec_all_step.dependOn(test_spec_group_step);
+        }
+        {
+            const test_fuzzed_step = b.step(
+                "test-fuzzed",
+                "Run WAST test cases discovered by fuzzing",
+            );
+            const fuzzed_test_dir = b.path("tests/fuzzed");
+            for (&[_][]const u8{ "validation.wast", "wasmi_diff.wast", "execution.wast" }) |name| {
+                const path = fuzzed_test_dir.path(b, name);
+                test_fuzzed_step.dependOn(buildWastTest(b, spectest_exe, path, wast2json, name));
+            }
+
+            test_spec_all_step.dependOn(test_fuzzed_step);
+        }
+        {
+            const test_regression_step = b.step(
+                "test-spec-regression",
+                "Run WAST test cases to check bug fixes",
+            );
+            const regression_test_names = [_][]const u8{ "x86_64_sysv.wast", "sleb128.wast" };
+            const regression_test_dir = b.path("tests/regression");
+            for (regression_test_names) |name| {
+                const path = regression_test_dir.path(b, name);
+                test_regression_step.dependOn(
+                    buildWastTest(b, spectest_exe, path, wast2json, name),
+                );
+            }
+
+            test_spec_all_step.dependOn(test_regression_step);
+        }
+    }
 }
 
 fn buildWastTest(
     b: *Build,
-    interpreter: SpectestInterp,
+    runner: *Step.Compile,
     wast_path: Build.LazyPath,
-    wabt: WabtTools,
+    wast2json_exe: *Step.Compile,
     name: []const u8,
 ) *Step {
     std.debug.assert(std.mem.endsWith(u8, name, ".wast"));
-    var wast2json = b.addRunArtifact(wabt.wast2json);
-    wast2json.step.max_rss = ByteSize.mib(19).bytes;
+    var wast2json = b.addRunArtifact(wast2json_exe);
+    wast2json.step.max_rss = byte_size.mib(19);
     wast2json.addFileArg(wast_path);
     wast2json.addArgs(&.{
         "--enable-extended-const",
@@ -879,9 +761,9 @@ fn buildWastTest(
     });
     const output_json = wast2json.addOutputFileArg(b.fmt("{s}.json", .{name[0 .. name.len - 5]}));
 
-    const run_test = b.addRunArtifact(interpreter.exe);
+    const run_test = b.addRunArtifact(runner);
     run_test.stdio_limit = .limited(15 * 1024 * 1024);
-    run_test.step.max_rss = ByteSize.mib(45).bytes;
+    run_test.step.max_rss = byte_size.mib(45);
     run_test.setName(name);
     run_test.addArg("--run");
     run_test.addFileArg(output_json);
@@ -889,406 +771,7 @@ fn buildWastTest(
     return &run_test.step;
 }
 
-fn buildSpecificationTests(
-    b: *Build,
-    interpreter: SpectestInterp,
-    top_steps: *const TopLevelSteps,
-) void {
-    const wabt_dep = b.lazyDependency("wabt", .{}) orelse return;
-    const spectest_dep = b.lazyDependency("spectest", .{}) orelse return;
-    const wabt = buildWabtTools(b, wabt_dep);
-
-    const test_groups = @import("tests/testsuite.zon");
-    const test_group_names = comptime std.meta.fieldNames(@TypeOf(test_groups));
-
-    const test_spec_all_step = b.step("test-spec", "Run all specification tests");
-
-    inline for (test_group_names) |group_name| {
-        const group: []const []const u8 = &@field(test_groups, group_name);
-        const test_spec_group_step = b.step(
-            "test-spec-" ++ group_name,
-            "Run " ++ group_name ++ " specification tests",
-        );
-
-        for (group) |name| {
-            const wast_name = b.fmt("{s}.wast", .{name});
-            test_spec_group_step.dependOn(
-                buildWastTest(b, interpreter, spectest_dep.path(wast_name), wabt, wast_name),
-            );
-        }
-
-        test_spec_all_step.dependOn(test_spec_group_step);
-    }
-
-    top_steps.@"test".dependOn(test_spec_all_step);
-
-    {
-        const test_fuzzed_step = b.step("test-fuzzed", "Run WAST test cases discovered by fuzzing");
-        const fuzzed_test_dir = b.path("tests/fuzzed");
-        for (&[_][]const u8{ "validation.wast", "wasmi_diff.wast", "execution.wast" }) |name| {
-            test_fuzzed_step.dependOn(
-                buildWastTest(b, interpreter, fuzzed_test_dir.path(b, name), wabt, name),
-            );
-        }
-
-        top_steps.@"test".dependOn(test_fuzzed_step);
-    }
-    {
-        const test_regression_step = b.step(
-            "test-spec-regression",
-            "Run WAST test cases to check bug fixes",
-        );
-        const regression_test_names = [_][]const u8{ "x86_64_sysv.wast", "sleb128.wast" };
-        const regression_test_dir = b.path("tests/regression");
-        for (regression_test_names) |name| {
-            test_regression_step.dependOn(
-                buildWastTest(b, interpreter, regression_test_dir.path(b, name), wabt, name),
-            );
-        }
-
-        top_steps.@"test".dependOn(test_regression_step);
-    }
-}
-
-const Wasip1Interp = struct {
-    exe: *Step.Compile,
-
-    fn build(
-        b: *Build,
-        steps: *const TopLevelSteps,
-        proj_opts: *const ProjectOptions,
-        imports: struct {
-            file_content: Modules.FileContent,
-            wasmstint: Modules.Wasmstint,
-            cli_args: Modules.CliArgs,
-            wasip1: Modules.Wasip1,
-            coz: Modules.Coz,
-            allocators: Modules.Allocators,
-            sys: Modules.Sys,
-        },
-    ) Wasip1Interp {
-        const module = b.createModule(.{
-            .root_source_file = b.path("src/WasiPreview1/main.zig"),
-            .target = proj_opts.target,
-            .optimize = proj_opts.optimize,
-            .pic = proj_opts.pic,
-        });
-        Modules.addAsImportTo(Modules.FileContent, imports.file_content, module);
-        Modules.addAsImportTo(Modules.Wasmstint, imports.wasmstint, module);
-        Modules.addAsImportTo(Modules.CliArgs, imports.cli_args, module);
-        Modules.addAsImportTo(Modules.Wasip1, imports.wasip1, module);
-        Modules.addAsImportTo(Modules.Coz, imports.coz, module);
-        Modules.addAsImportTo(Modules.Allocators, imports.allocators, module);
-        Modules.addAsImportTo(Modules.Sys, imports.sys, module);
-
-        const exe = b.addExecutable(.{
-            .name = "wasmstint-wasip1",
-            .root_module = module,
-            .use_llvm = proj_opts.use_llvm.interpreter,
-            .max_rss = ByteSize.mib(755).bytes,
-        });
-
-        addCheck(b, steps, .exe, module, exe.name, .{
-            .max_rss = .mib(175),
-            .use_llvm = proj_opts.use_llvm.interpreter,
-        });
-
-        {
-            const run = b.addRunArtifact(exe);
-            if (b.args) |args| {
-                run.addArgs(args);
-            }
-            b.step("run-wasip1", "Run the WASI (preview 1) application interpreter")
-                .dependOn(&run.step);
-        }
-
-        b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{}).step);
-
-        return .{ .exe = exe };
-    }
-};
-
-fn buildFuzzers(
-    b: *Build,
-    steps: *const TopLevelSteps,
-    options: struct { project: *const ProjectOptions },
-    modules: struct {
-        wasmstint: Modules.Wasmstint,
-        file_content: Modules.FileContent,
-        cli_args: Modules.CliArgs,
-    },
-) void {
-    // const fuzz_zig_step = b.step("fuzz-zig", "Run integrated fuzz tests");
-    // fuzz_zig_step.dependOn(
-    //     &b.addFail(
-    //         "TODO(zig): fix crash in test runner: https://github.com/ziglang/zig/issues/25919",
-    //     ).step,
-    // );
-
-    {
-        const ffi_test = b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("fuzz/ffi/src/ffi.zig"),
-                .target = options.project.target,
-                .optimize = options.project.optimize,
-            }),
-            .max_rss = ByteSize.mib(253).bytes,
-            .use_llvm = options.project.use_llvm.other,
-        });
-        const ffi_tests_run = &b.addRunArtifact(ffi_test).step;
-        ffi_tests_run.max_rss = ByteSize.mib(11).bytes; // arbitrary amount
-        steps.@"test-unit".dependOn(ffi_tests_run);
-    }
-
-    const fuzz_step = b.step("fuzz", "Run a fuzz test");
-
-    var rust_include_paths_buf: [2]Build.LazyPath = undefined;
-    var rust_include_paths = std.ArrayList(Build.LazyPath).initBuffer(&rust_include_paths_buf);
-
-    // Currently, this does not invoke `cargo build release`
-    const rust_target_dir = b.path("fuzz/ffi/target");
-    const native_target = b.graph.host.result;
-    const chosen_target = options.project.target.result;
-    if (native_target.cpu.arch == chosen_target.cpu.arch and
-        native_target.os.tag == chosen_target.os.tag and
-        native_target.abi == chosen_target.abi)
-    {
-        rust_include_paths.appendAssumeCapacity(rust_target_dir.path(b, "release"));
-    }
-
-    // TODO: translate `chosen_target` to Rust target triple
-    //rust_include_paths.appendAssumeCapacity();
-
-    const fail_no_rust_include = if (rust_include_paths.items.len == 0)
-        &b.addFail("could not determine include path for FFI wrapper").step
-    else
-        null;
-
-    const FuzzTarget = enum {
-        validation,
-        execution,
-        wasmi_diff,
-
-        const all = std.enums.values(@This());
-    };
-
-    const FuzzRunner = enum { afl, standalone };
-
-    const chosen_fuzz_target = b.option(
-        FuzzTarget,
-        "fuzz-target",
-        "Which fuzz target to run",
-    ) orelse {
-        fuzz_step.dependOn(&b.addFail("Specify fuzz target with -Dfuzz-target").step);
-        return;
-    };
-
-    const chosen_fuzz_runner = b.option(
-        FuzzRunner,
-        "fuzz-runner",
-        "Specifies how a fuzz target is run",
-    ) orelse FuzzRunner.standalone;
-
-    const ffi_module = b.createModule(.{
-        .root_source_file = b.path("fuzz/ffi/src/ffi.zig"),
-        .link_libc = true,
-        .target = options.project.target,
-        .optimize = options.project.optimize,
-    });
-
-    for (rust_include_paths.items) |include_path| {
-        ffi_module.addLibraryPath(include_path);
-    }
-
-    ffi_module.linkSystemLibrary(
-        "wasmstint_fuzz_ffi",
-        .{ .preferred_link_mode = .dynamic, .search_strategy = .paths_first },
-    );
-
-    for (FuzzTarget.all) |fuzz_target| {
-        const fuzz_target_name: []const u8 = b.fmt("fuzz-{t}", .{fuzz_target});
-        const target_module = b.createModule(.{
-            .root_source_file = b.path(b.fmt("fuzz/targets/{t}.zig", .{fuzz_target})),
-            .target = options.project.target,
-            .optimize = options.project.optimize,
-        });
-        Modules.addAsImportTo(Modules.Wasmstint, modules.wasmstint, target_module);
-        target_module.addImport("ffi", ffi_module);
-
-        const libfuzzer_harness_lib = b.addLibrary(.{
-            .name = b.fmt("{s}-libfuzzer", .{fuzz_target_name}),
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("fuzz/harness/libfuzzer.zig"),
-                .target = options.project.target,
-                .optimize = options.project.optimize,
-                .pic = true, // afl-clang-lto seems to require PIC
-            }),
-            .max_rss = ByteSize.mib(319).bytes,
-            .use_llvm = true,
-            // .use_lld = options.project.use_llvm.interpreter,
-        });
-        libfuzzer_harness_lib.sanitize_coverage_trace_pc_guard = true; // required for AFL++
-        libfuzzer_harness_lib.lto = .full;
-        libfuzzer_harness_lib.bundle_compiler_rt = true;
-        libfuzzer_harness_lib.root_module.addImport("target", target_module);
-        libfuzzer_harness_lib.root_module.addImport("ffi", ffi_module);
-
-        // TODO(zig): limit parallelism of afl-clang-lto https://github.com/ziglang/zig/issues/12101
-        const afl_clang_lto = b.addSystemCommand(
-            &.{ "afl-clang-lto", "-g", "-Wall", "-fsanitize=fuzzer", "-lwasmstint_fuzz_ffi", "-v" },
-        );
-        afl_clang_lto.disable_zig_progress = true;
-
-        if (fail_no_rust_include) |fail| {
-            afl_clang_lto.step.dependOn(fail);
-        }
-
-        if (options.project.pic != true) {
-            afl_clang_lto.step.dependOn(&b.addFail("AFL fuzz harness requires -Dpic=true").step);
-        }
-
-        { // Unfortunately, filtering by file seems to be broken
-            afl_clang_lto.addFileInput(b.path("fuzz/denylist.txt"));
-            afl_clang_lto.setEnvironmentVariable(
-                "AFL_LLVM_DENYLIST",
-                // TODO(zig): allow environment variable of lazy path
-                // At least paths seem to be relative to the build script
-                "./fuzz/denylist.txt",
-            );
-        }
-
-        afl_clang_lto.step.max_rss = ByteSize.mib(268).bytes; // arbitrary amount
-
-        afl_clang_lto.addArg("-o");
-        const afl_output_exe: []const u8 = b.fmt("{s}-afl", .{fuzz_target_name});
-        const afl_exe = afl_clang_lto.addOutputFileArg(afl_output_exe);
-
-        afl_clang_lto.addArtifactArg(libfuzzer_harness_lib);
-
-        for (rust_include_paths.items) |include_path| {
-            afl_clang_lto.addArg("-L");
-            afl_clang_lto.addDirectoryArg(include_path);
-        }
-
-        const standalone_exe = b.addExecutable(.{
-            .name = b.fmt("{s}-standalone", .{fuzz_target_name}),
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("fuzz/harness/main.zig"),
-                .target = options.project.target,
-                .optimize = options.project.optimize,
-                .pic = options.project.pic,
-            }),
-            .max_rss = ByteSize.mib(373).bytes,
-            .use_llvm = options.project.use_llvm.interpreter,
-        });
-        if (fail_no_rust_include) |fail| {
-            standalone_exe.step.dependOn(fail);
-        }
-        standalone_exe.root_module.addImport("target", target_module);
-        standalone_exe.root_module.addImport("ffi", ffi_module);
-        Modules.addAsImportTo(
-            Modules.FileContent,
-            modules.file_content,
-            standalone_exe.root_module,
-        );
-        Modules.addAsImportTo(Modules.CliArgs, modules.cli_args, standalone_exe.root_module);
-
-        if (fuzz_target == chosen_fuzz_target) {
-            const runner_step: *Step.Run = switch (chosen_fuzz_runner) {
-                .afl => afl: {
-                    const run_afl = Step.Run.create(b, afl_output_exe);
-                    run_afl.addFileArg(afl_exe);
-                    break :afl run_afl;
-                },
-                .standalone => b.addRunArtifact(standalone_exe),
-            };
-
-            if (b.args) |args| {
-                runner_step.addArgs(args);
-            }
-
-            fuzz_step.dependOn(&runner_step.step);
-        }
-    }
-}
-
-fn buildWasiSamplePrograms(
-    b: *Build,
-    steps: *const TopLevelSteps,
-    options: struct { project: *const ProjectOptions },
-    modules: struct {
-        interpreter: Wasip1Interp,
-        subprocess: Modules.Subprocess,
-    },
-) void {
-    const wasm_target = b.resolveTargetQuery(.{
-        .cpu_arch = .wasm32,
-        .os_tag = .wasi,
-        .cpu_features_add = std.Target.wasm.featureSet(&.{ .simd128, .bulk_memory }),
-    });
-
-    const tests_dir = b.path("tests/wasip1/zig");
-    const tests_dir_handle = b.build_root.handle.openDir(
-        b.graph.io,
-        tests_dir.src_path.sub_path,
-        .{ .iterate = true },
-    ) catch @panic("could not open tests directory");
-
-    const compile_step = b.step("install-wasip1-samples", "Build sample WASI 0.1 programs");
-    const test_step = b.step("test-wasip1-samples", "Test sample WASI 0.1 programs");
-    steps.@"test".dependOn(test_step);
-
-    var tests_iter = tests_dir_handle.iterateAssumeFirstIteration();
-    while (tests_iter.next(b.graph.io) catch @panic("bad entry in tests directory")) |tests_entry| {
-        if (tests_entry.kind != .file or
-            !std.mem.eql(u8, ".zig", std.fs.path.extension(tests_entry.name)))
-        {
-            continue;
-        }
-
-        const exe_max_rss = ByteSize.mib(242);
-        const sample_exe = b.addExecutable(.{
-            .name = b.dupe(tests_entry.name[0 .. tests_entry.name.len - 4]),
-            .root_module = b.createModule(.{
-                .root_source_file = tests_dir.path(b, tests_entry.name),
-                .target = wasm_target,
-                .optimize = options.project.optimize,
-            }),
-            .max_rss = exe_max_rss.bytes,
-        });
-
-        addCheck(b, steps, .exe, sample_exe.root_module, sample_exe.name, .{
-            .max_rss = exe_max_rss,
-            .use_llvm = options.project.use_llvm.other,
-        });
-
-        const install_sample = b.addInstallArtifact(
-            sample_exe,
-            .{ .dest_dir = .{ .override = .{ .custom = "samples/zig" } } },
-        );
-
-        compile_step.dependOn(&install_sample.step);
-
-        const test_options = b.addOptions();
-        test_options.addOptionPath("wasm", sample_exe.getEmittedBin());
-        test_options.addOptionPath("interpreter", modules.interpreter.exe.getEmittedBin());
-
-        const invoke_test = b.addTest(.{
-            .name = sample_exe.name,
-            .root_module = b.createModule(.{
-                .root_source_file = sample_exe.root_module.root_source_file,
-                .target = options.project.target,
-                .optimize = options.project.optimize,
-            }),
-            .max_rss = ByteSize.mib(278).bytes,
-            .use_llvm = options.project.use_llvm.other,
-        });
-        invoke_test.root_module.addOptions("test_paths", test_options);
-        Modules.addAsImportTo(Modules.Subprocess, modules.subprocess, invoke_test.root_module);
-
-        // Can't add to "check" step, since it would require building the WASM.
-        const run_test = b.addRunArtifact(invoke_test);
-        run_test.step.max_rss = ByteSize.mib(44).bytes;
-        test_step.dependOn(&run_test.step);
-    }
-}
+const std = @import("std");
+const builtin = @import("builtin");
+const Build = std.Build;
+const Step = Build.Step;
