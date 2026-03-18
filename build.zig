@@ -425,7 +425,7 @@ pub fn build(b: *Build) void {
             e.* = b.addExecutable(.{
                 .name = "wasmstint-spectest",
                 .root_module = module,
-                .max_rss = byte_size.mib(733),
+                .max_rss = byte_size.mib(793),
             });
         }
 
@@ -760,7 +760,7 @@ pub fn build(b: *Build) void {
                 .use_llvm = use_llvm.ifPreferred(),
             });
             const ffi_tests_run = &b.addRunArtifact(ffi_test).step;
-            ffi_tests_run.max_rss = byte_size.mib(11); // arbitrary amount
+            ffi_tests_run.max_rss = byte_size.mib(12);
             unit_tests_step.dependOn(ffi_tests_run);
         }
 
