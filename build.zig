@@ -105,7 +105,7 @@ pub fn build(b: *Build) void {
             .max_rss = byte_size.mib(365),
             .use_llvm = use_llvm.ifPreferred(),
         })).step;
-        tests.max_rss = byte_size.mib(16);
+        tests.max_rss = byte_size.mib(19);
         unit_tests_step.dependOn(tests);
     }
 
@@ -143,7 +143,7 @@ pub fn build(b: *Build) void {
             .use_llvm = use_llvm.ifPreferred(),
             .max_rss = byte_size.mib(255),
         })).step;
-        tests.max_rss = byte_size.mib(16);
+        tests.max_rss = byte_size.mib(19);
         unit_tests_step.dependOn(tests);
     }
 
