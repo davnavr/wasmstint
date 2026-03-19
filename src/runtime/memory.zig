@@ -91,6 +91,7 @@ pub const MemInst = extern struct {
     }
 
     pub const Mapped = @import("memory/mapped.zig").Mapped;
+    pub const Allocated = @import("memory/Allocated.zig");
 
     /// A linear memory of size `0`, that cannot grow.
     pub const empty = MemInst{
