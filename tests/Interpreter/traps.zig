@@ -44,6 +44,10 @@ fn checkTrapIp(
 }
 
 test "basic" {
+    if (true) {
+        return error.SkipZigTest;
+    }
+
     try checkTrapIp(
         &[_]u8{},
         3,

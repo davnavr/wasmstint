@@ -147,6 +147,26 @@ pub fn build(b: *Build) void {
         unit_tests_step.dependOn(tests);
     }
 
+    const opcodes_module = b.createModule(.{ .root_source_file = b.path("src/opcodes.zig") });
+
+    const wasm_builder_module = b.addModule("WasmBuilder", .{
+        .root_source_file = b.path("src/WasmBuilder.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    {
+        wasm_builder_module.addImport("opcodes", opcodes_module);
+
+        const tests = &b.addRunArtifact(b.addTest(.{
+            .name = "WasmBuilder",
+            .root_module = wasm_builder_module,
+            .use_llvm = use_llvm.ifPreferred(),
+            .max_rss = byte_size.mib(200), // arbitrary
+        })).step;
+        tests.max_rss = byte_size.mib(20); // arbitrary
+        unit_tests_step.dependOn(tests);
+    }
+
     const wasmstint_module = wasmstint: {
         const root_module = b.addModule("wasmstint", .{
             .root_source_file = b.path("src/root.zig"),
@@ -154,11 +174,13 @@ pub fn build(b: *Build) void {
             .optimize = optimize,
             // .link_libc = link_libc,
         });
-        root_module.addImport("coz", coz_module);
-        root_module.addImport("allocators", allocators_module);
-
-        const opcodes_module = b.createModule(.{ .root_source_file = b.path("src/opcodes.zig") });
-        root_module.addImport("opcodes", opcodes_module);
+        for (&[3]struct { []const u8, *Build.Module }{
+            .{ "coz", coz_module },
+            .{ "allocators", allocators_module },
+            .{ "opcodes", opcodes_module },
+        }) |info| {
+            root_module.addImport(info.@"0", info.@"1");
+        }
 
         const module_options = b.addOptions();
         root_module.addOptions("options", module_options);
@@ -424,9 +446,10 @@ pub fn build(b: *Build) void {
                 .optimize = optimize,
             }),
             .use_llvm = use_llvm.ifPreferred(),
-            .max_rss = byte_size.mib(128), // arbitrary amount
+            .max_rss = byte_size.mib(155),
         });
         tests.root_module.addImport("wasmstint", wasmstint_module);
+        tests.root_module.addImport("WasmBuilder", wasm_builder_module);
 
         const run_tests = &b.addRunArtifact(tests).step;
         run_tests.max_rss = byte_size.mib(50); // arbitrary amount
