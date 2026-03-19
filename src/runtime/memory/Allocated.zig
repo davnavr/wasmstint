@@ -81,7 +81,7 @@ fn grow(mem: *MemInst, new_size: usize) Oom!void {
     if (inst.allocator.resize(old_alloc, new_size)) {
         // successful resize in place
     } else if (inst.allocator.remap(old_alloc, new_size)) |new_alloc| {
-        mem.base = new_alloc;
+        mem.base = new_alloc.ptr;
         @memset(new_alloc[mem.capacity..], 0);
     } else {
         const new_alloc = try inst.allocator.alignedAlloc(
@@ -92,6 +92,7 @@ fn grow(mem: *MemInst, new_size: usize) Oom!void {
         @memcpy(new_alloc[0..mem.size], old_alloc[0..mem.size]);
         @memset(new_alloc[mem.size..], 0);
         inst.allocator.free(old_alloc);
+        mem.base = new_alloc.ptr;
     }
 
     mem.size = new_size;

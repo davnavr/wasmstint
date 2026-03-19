@@ -134,24 +134,23 @@ pub fn resolveTyped(
     return Error.ImportFailure;
 }
 
-pub const no_imports = struct {
-    fn resolve(
-        ctx: *anyopaque,
-        module: std.unicode.Utf8View,
-        name: std.unicode.Utf8View,
-        desc: Desc,
-    ) ?ExternVal {
-        _ = ctx;
-        _ = module;
-        _ = name;
-        _ = desc;
-        return null;
-    }
+fn resolveNone(
+    ctx: *anyopaque,
+    module: Module.Name,
+    name: Module.Name,
+    desc: Desc,
+) anyerror!?ExternVal {
+    _ = ctx;
+    _ = module;
+    _ = name;
+    _ = desc;
+    return null;
+}
 
-    pub const provider = ImportProvider{
-        .ctx = undefined,
-        .resolve = resolve,
-    };
+/// Always returns `null` indicating that an imported value cannot be provided.
+pub const none = ImportProvider{
+    .ctx = undefined,
+    .resolve = resolveNone,
 };
 
 const std = @import("std");

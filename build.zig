@@ -141,7 +141,7 @@ pub fn build(b: *Build) void {
             .name = "cli_args",
             .root_module = cli_args_module,
             .use_llvm = use_llvm.ifPreferred(),
-            .max_rss = byte_size.mib(255),
+            .max_rss = byte_size.mib(339),
         })).step;
         tests.max_rss = byte_size.mib(19);
         unit_tests_step.dependOn(tests);
@@ -400,9 +400,13 @@ pub fn build(b: *Build) void {
                 .use_llvm = use_llvm.ifPreferred(),
                 .max_rss = byte_size.mib(398),
             });
-            tests.root_module.addImport("coz", coz_module);
-            tests.root_module.addImport("allocators", allocators_module);
-            tests.root_module.addImport("opcodes", opcodes_module);
+            for (&[3]struct { []const u8, *Build.Module }{
+                .{ "coz", coz_module },
+                .{ "allocators", allocators_module },
+                .{ "opcodes", opcodes_module },
+            }) |info| {
+                tests.root_module.addImport(info.@"0", info.@"1");
+            }
 
             const run_tests = &b.addRunArtifact(tests).step;
             run_tests.max_rss = byte_size.mib(43);
@@ -411,6 +415,23 @@ pub fn build(b: *Build) void {
 
         break :wasmstint root_module;
     };
+    {
+        const tests = b.addTest(.{
+            .name = "Interpreter",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/Interpreter/root.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .use_llvm = use_llvm.ifPreferred(),
+            .max_rss = byte_size.mib(128), // arbitrary amount
+        });
+        tests.root_module.addImport("wasmstint", wasmstint_module);
+
+        const run_tests = &b.addRunArtifact(tests).step;
+        run_tests.max_rss = byte_size.mib(50); // arbitrary amount
+        unit_tests_step.dependOn(run_tests);
+    }
 
     const spectest_exe = runner: {
         var executables: [2]*Step.Compile = undefined;

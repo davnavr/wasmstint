@@ -760,7 +760,7 @@ pub const CustomSection = struct {
     }
 };
 
-const wasm_preamble = "\x00asm\x01\x00\x00\x00";
+pub const wasm_preamble = "\x00asm\x01\x00\x00\x00";
 
 const ImportExportDesc = enum(u8) {
     func = 0,
@@ -2227,7 +2227,7 @@ pub fn finishCodeValidation(
 pub fn deinitLeakCodeEntries(module: Module, gpa: Allocator) void {
     (ArenaAllocator{
         .child_allocator = gpa,
-        .state = module.inner.arena,
+        .state = module.inner.parent().arena,
     }).deinit();
 }
 

@@ -33,13 +33,12 @@ pub const Definitions = struct {
     }
 };
 
-/// On successful allocation, the ownership of each value in the `AllocatedDefinitions` is passed to
+/// On successful allocation, the ownership of each value in the `Definitions` is passed to
 /// the `ModuleInst`.
 ///
-/// On error, the `AllocatedDefinitions` are not deinitialized.
+/// On error, values in the `Definitions` are **not** deinitialized.
 ///
-/// Asserts that the types and number of `AllocatedDefinitions` exactly match those listed in the
-/// `Module`.
+/// Asserts that the types and number of `Definitions` exactly match those listed in the `Module`.
 pub fn allocateWithDefinitions(
     module: Module,
     /// Used to allocate the `ModuleInst` itself.
@@ -47,6 +46,7 @@ pub fn allocateWithDefinitions(
     import_provider: ImportProvider,
     /// Optional pointer where diagnostics are written on `ImportProvider.Error`.
     import_failure: ?*ImportProvider.FailedRequest,
+    /// The provided slices only need to last for the duration of this function call.
     definitions: Definitions,
 ) AllocationError!ModuleAlloc {
     const defined_table_types = module.tableDefinedTypes();
