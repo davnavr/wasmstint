@@ -36,6 +36,13 @@ pub const ValType = enum(u8) {
             return b.val_types.items[@intFromEnum(idx)..][0..len];
         }
     };
+
+    pub fn isRefType(ty: ValType) bool {
+        return switch (ty) {
+            .funcref, .externref => true,
+            else => false,
+        };
+    }
 };
 
 pub const TypeIdx = enum(u32) {
@@ -74,7 +81,7 @@ pub const FuncIdx = enum(u32) {
         f: FuncIdx,
         b: *WasmBuilder,
         allocator: Allocator,
-        options: struct { uleb_min_len: Writer.UlebLen = .smallest },
+        options: struct { uleb_min_len: Writer.LebLen = .smallest },
     ) CodeWriter {
         return CodeWriter{
             .builder = b,
@@ -92,6 +99,14 @@ pub const FuncIdx = enum(u32) {
     }
 };
 
+pub const TableIdx = enum(u32) {
+    _,
+
+    pub fn tableType(t: TableIdx, b: *const WasmBuilder) *const TableType {
+        return b.table_types.items[@intFromEnum(t)];
+    }
+};
+
 const Code = struct {
     body_size: u32,
     /// Allocated in the arena.
@@ -105,6 +120,7 @@ const Code = struct {
 
 const ExportOrImportKind = enum(u8) {
     func = 0x00,
+    // table = 0x01,
 };
 
 pub const Import = struct {
@@ -113,12 +129,14 @@ pub const Import = struct {
     value: Desc,
 
     pub const Desc = union(ExportOrImportKind) {
-        func: TypeIdx,
+        func: FuncIdx,
+        // table: TableType,
     };
 };
 
 pub const ExportDesc = union(ExportOrImportKind) {
     func: FuncIdx,
+    // table: TableIdx,
 
     const LookupContext = struct {
         b: *const WasmBuilder,
@@ -133,6 +151,28 @@ pub const ExportDesc = union(ExportOrImportKind) {
     };
 };
 
+pub const TableType = struct {
+    /// Must be a reference type.
+    elem_type: ValType,
+    minimum: u32,
+    maximum: ?u32,
+
+    pub fn init(elem_type: ValType, limits: struct {
+        minimum: u32 = 0,
+        maximum: ?u32 = null,
+    }) TableType {
+        assert(elem_type.isRefType());
+        if (limits.maximum) |max| {
+            assert(limits.minimum <= max);
+        }
+        return TableType{
+            .elem_type = elem_type,
+            .minimum = limits.minimum,
+            .maximum = limits.maximum,
+        };
+    }
+};
+
 gpa: Allocator,
 /// Allocated with `gpa`.
 arena_state: ArenaAllocator.State,
@@ -142,11 +182,14 @@ string_payloads: std.ArrayList(String.Payload),
 
 val_types: std.ArrayList(ValType),
 type_section: std.ArrayList(TypeIdx.FuncType),
-/// The types of all imported then defined functions.
+/// Contains the types of all imported then defined functions.
 func_types: std.ArrayList(TypeIdx),
+/// Contains the types of all imported then defined tables.
+table_types: std.ArrayList(TableType),
 
 // imports: std.MultiArrayList(Import),
 func_import_count: u32,
+table_import_count: u32,
 
 exports: std.ArrayHashMapUnmanaged(String, ExportDesc, ExportDesc.LookupContext, true),
 
@@ -165,8 +208,10 @@ pub fn init(gpa: Allocator) WasmBuilder {
         .val_types = .empty,
         .type_section = .empty,
         .func_types = .empty,
+        .table_types = .empty,
 
         .func_import_count = 0,
+        .table_import_count = 0,
 
         .exports = .empty,
 
@@ -232,11 +277,17 @@ pub fn funcType(
 
 pub fn function(b: *WasmBuilder, signature: TypeIdx) Oom!FuncIdx {
     const idx = b.func_types.items.len;
-    std.debug.assert(idx == b.func_import_count + b.code.len);
+    assert(idx == b.func_import_count + b.code.len);
     try b.func_types.ensureUnusedCapacity(b.gpa, 1);
     try b.code.ensureUnusedCapacity(b.gpa, 1);
     b.func_types.appendAssumeCapacity(signature);
     _ = b.code.addOneAssumeCapacity();
+    return @enumFromInt(idx);
+}
+
+pub fn table(b: *WasmBuilder, table_type: TableType) Oom!TableIdx {
+    const idx = b.table_types.items.len;
+    try b.table_types.append(b.gpa, table_type);
     return @enumFromInt(idx);
 }
 
@@ -271,7 +322,7 @@ pub const CodeWriter = struct {
     locals: std.ArrayList(ValType),
     val_stack: std.ArrayList(ValType),
     // ctrl_stack: std.ArrayList,
-    uleb_min_len: Writer.UlebLen,
+    uleb_min_len: Writer.LebLen,
 
     fn PrefixedOpcode(comptime opcode: opcodes.ByteOpcode) type {
         return switch (opcode) {
@@ -423,17 +474,20 @@ pub fn toBinary(
     allocator: Allocator,
     scratch: *ArenaAllocator,
     options: struct {
-        uleb_min_len: Writer.UlebLen = .smallest,
+        uleb_min_len: Writer.LebLen = .smallest,
     },
 ) Oom!std.ArrayList(u8) {
     const type_sec_capacity = 3 * b.type_section.items.len;
     const defined_func_count = @as(u32, @intCast(b.func_types.items.len)) - b.func_import_count;
     assert(defined_func_count == b.code.len);
+    const defined_table_count = @as(u32, @intCast(b.table_types.items.len)) - b.table_import_count;
+    const table_sec_capacity = 3 * defined_table_count;
     const export_sec_capacity = 3 * b.exports.count();
     const code_sec_capacity = 3 * defined_func_count;
 
     var w = try Writer.init(allocator, (8 + type_sec_capacity) +
         defined_func_count +
+        table_sec_capacity +
         export_sec_capacity +
         code_sec_capacity);
 
@@ -458,11 +512,26 @@ pub fn toBinary(
     if (defined_func_count > 0) {
         var s = try Writer.initWithinScratch(scratch, 1 + defined_func_count);
         try s.writeUleb(defined_func_count, options.uleb_min_len);
-        for (b.func_types.items[b.func_import_count..]) |func_idx| {
-            try s.writeUleb(@intFromEnum(func_idx), options.uleb_min_len);
+        for (b.func_types.items[b.func_import_count..]) |type_idx| {
+            try s.writeUleb(@intFromEnum(type_idx), options.uleb_min_len);
         }
 
         try w.writeSection(3, s.buf.items, options.uleb_min_len);
+    }
+
+    if (defined_table_count > 0) {
+        var s = try Writer.initWithinScratch(scratch, 1 + table_sec_capacity);
+        try s.writeUleb(defined_table_count, options.uleb_min_len);
+        for (b.table_types.items[b.table_import_count..]) |table_type| {
+            try s.writeByte(@intFromEnum(table_type.elem_type));
+            try s.writeByte(@intFromBool(table_type.maximum != null));
+            try s.writeUleb(table_type.minimum, options.uleb_min_len);
+            if (table_type.maximum) |max| {
+                try s.writeUleb(max, options.uleb_min_len);
+            }
+        }
+
+        try w.writeSection(4, s.buf.items, options.uleb_min_len);
     }
 
     if (b.exports.count() > 0) {

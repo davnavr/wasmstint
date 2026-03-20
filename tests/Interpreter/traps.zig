@@ -19,7 +19,25 @@ const Context = struct {
         ctx.* = undefined;
     }
 
-    fn checkTrapIp(
+    fn expectTrapIp(
+        after_trap: *const Interpreter.State.Trapped,
+        trapping_function: wasmstint.runtime.FuncInst,
+        expected_trap_code: Interpreter.Trap.Code,
+        /// Based off the first byte of the first opcode of the trapping function.
+        expected_trap_offset: u32,
+    ) !void {
+        try testing.expectEqual(.function_call, after_trap.source());
+        try testing.expectEqual(expected_trap_code, after_trap.trap().code);
+
+        const frame = try checks.expectNonNull(after_trap.inner.currentFrame());
+        try testing.expectEqual( // check IP
+            trapping_function.expanded().wasm.code().inner.instructions_start +
+                expected_trap_offset,
+            frame.wasm.ip,
+        );
+    }
+
+    fn checkTrapIpForModule(
         ctx: *Context,
         /// Must have the following signature:
         /// ```wat
@@ -31,7 +49,6 @@ const Context = struct {
         /// The exact amount of fuel consumed before the trap occurs.
         consumed_fuel: u64,
         expected_trap_code: Interpreter.Trap.Code,
-        /// Based off the first byte of the first opcode of the trapping function.
         expected_trap_offset: u32,
     ) !void {
         _ = ctx.arena.reset(.retain_capacity);
@@ -60,15 +77,8 @@ const Context = struct {
                 .beginCall(testing.allocator, f, &.{}, &fuel),
             .trapped,
         );
-        try testing.expectEqual(.function_call, after_trap.source());
-        try testing.expectEqual(expected_trap_code, after_trap.trap().code);
         try testing.expectEqual(0, fuel.remaining);
-
-        const frame = try checks.expectNonNull(after_trap.inner.currentFrame());
-        try testing.expectEqual( // check IP
-            f.expanded().wasm.code().inner.instructions_start + expected_trap_offset,
-            frame.wasm.ip,
-        );
+        try expectTrapIp(&after_trap, f, expected_trap_code, expected_trap_offset);
     }
 };
 
@@ -90,7 +100,7 @@ test "basic" {
         }
         try f.@"export"(&b, try b.string(call_name));
 
-        try ctx.checkTrapIp(&b, 3, .unreachable_code_reached, 2);
+        try ctx.checkTrapIpForModule(&b, 3, .unreachable_code_reached, 2);
     }
 }
 

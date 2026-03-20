@@ -17,18 +17,18 @@ pub fn deinit(w: *Writer) void {
     w.* = undefined;
 }
 
-pub const UlebLen = enum(u3) {
+pub const LebLen = enum(u3) {
     smallest,
     @"2",
     @"3",
     @"4",
     @"5",
 
-    pub fn toByteUnits(len: UlebLen) u3 {
+    pub fn toByteUnits(len: LebLen) u3 {
         return @as(u3, @intFromEnum(len)) + 1;
     }
 
-    pub fn forValue(value: u32) UlebLen {
+    pub fn forUnsigned(value: u32) LebLen {
         return if (value <= 0x7F)
             .smallest
         else if (value <= 0x3FFF)
@@ -41,8 +41,8 @@ pub const UlebLen = enum(u3) {
             .@"5";
     }
 
-    fn forValueWithMinimum(min: UlebLen, value: u32) UlebLen {
-        return @enumFromInt(@max(@intFromEnum(min), @intFromEnum(UlebLen.forValue(value))));
+    fn forUnsignedWithMinimum(min: LebLen, value: u32) LebLen {
+        return @enumFromInt(@max(@intFromEnum(min), @intFromEnum(LebLen.forUnsigned(value))));
     }
 };
 
@@ -54,10 +54,14 @@ pub fn writeSlice(w: *Writer, bytes: []const u8) Oom!void {
     try w.buf.appendSlice(w.gpa, bytes);
 }
 
-pub fn writeUleb(w: *Writer, value: u32, min_len: UlebLen) Oom!void {
-    const dst = try w.buf.addManyAsSlice(w.gpa, min_len.forValueWithMinimum(value).toByteUnits());
+pub fn writeUleb(w: *Writer, value: u32, min_len: LebLen) Oom!void {
+    const dst = try w.buf.addManyAsSlice(w.gpa, min_len.forUnsignedWithMinimum(value).toByteUnits());
     std.leb.writeUnsignedExtended(dst, value);
 }
+
+// pub fn writeSleb(w: *Writer, value: i32, min_len: LebLen) Oom!void {
+//     const dst = try w.buf.addManyAsSlice(w.gpa, min_len.forSignedWithMinimum(value).toByteUnits());
+// }
 
 test writeUleb {
     var w = try Writer.init(std.testing.allocator, 512);
@@ -144,12 +148,12 @@ test writeUleb {
     );
 }
 
-pub fn writeByteVec(w: *Writer, bytes: []const u8, min_len: UlebLen) Oom!void {
+pub fn writeByteVec(w: *Writer, bytes: []const u8, min_len: LebLen) Oom!void {
     try w.writeUleb(@intCast(bytes.len), min_len);
     try w.writeSlice(bytes);
 }
 
-pub fn writeSection(w: *Writer, id: u8, contents: []const u8, min_len: UlebLen) Oom!void {
+pub fn writeSection(w: *Writer, id: u8, contents: []const u8, min_len: LebLen) Oom!void {
     try w.buf.ensureUnusedCapacity(w.gpa, 2 + contents.len);
     w.buf.appendAssumeCapacity(id);
     try w.writeByteVec(contents, min_len);
