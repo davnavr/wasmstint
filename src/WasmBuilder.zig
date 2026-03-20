@@ -341,6 +341,7 @@ pub const CodeWriter = struct {
             .nop,
             .end,
             => void,
+            .@"i32.const" => i32,
             .@"0xFC" => @compileError("argument type for " ++ @tagName(prefixed_opcode)),
             .@"0xFD" => @compileError("argument type for " ++ @tagName(prefixed_opcode)),
             else => @compileError("argument type for " ++ @tagName(opcode)),
@@ -374,15 +375,15 @@ pub const CodeWriter = struct {
     ) Oom!void {
         try w.body.writeByte(@intFromEnum(opcode));
         if (comptime @TypeOf(prefixed_opcode) != void) {
-            try w.body.writeUleb(@intFromEnum(prefixed_opcode), w.uleb_min_len);
+            try w.body.writeLeb(u32, @intFromEnum(prefixed_opcode), w.uleb_min_len);
         }
 
-        switch (comptime @TypeOf(args)) {
+        const ArgsType = @TypeOf(args);
+        switch (ArgsType) {
             void => {},
-            LocalIdx => try w.body.writeUleb(@intFromEnum(args), w.uleb_min_len),
-            else => |ArgsType| @compileError(
-                "handle " ++ @typeName(ArgsType) ++ " for " ++ @tagName(opcode),
-            ),
+            i32, i64 => try w.body.writeLeb(ArgsType, args, w.uleb_min_len),
+            LocalIdx => try w.body.writeLeb(u32, @intFromEnum(args), w.uleb_min_len),
+            else => @compileError("handle " ++ @typeName(ArgsType) ++ " for " ++ @tagName(opcode)),
         }
 
         switch (opcode) {
@@ -434,9 +435,9 @@ pub const CodeWriter = struct {
         }
 
         var encoded_locals = try Writer.init(scratch.allocator(), 1 + (2 * local_groups.items.len));
-        try encoded_locals.writeUleb(@intCast(local_groups.items.len), w.uleb_min_len);
+        try encoded_locals.writeLeb(u32, @intCast(local_groups.items.len), w.uleb_min_len);
         for (local_groups.items) |group| {
-            try encoded_locals.writeUleb(group.count, w.uleb_min_len);
+            try encoded_locals.writeLeb(u32, group.count, w.uleb_min_len);
             try encoded_locals.writeByte(@intFromEnum(group.ty));
         }
 
@@ -494,7 +495,7 @@ pub fn toBinary(
     try w.writeSlice(&(std.wasm.magic ++ std.wasm.version));
     if (b.type_section.items.len > 0) {
         var s = try Writer.initWithinScratch(scratch, 1 + type_sec_capacity);
-        try s.writeUleb(@intCast(b.type_section.items.len), options.uleb_min_len);
+        try s.writeLeb(u32, @intCast(b.type_section.items.len), options.uleb_min_len);
         for (b.type_section.items) |*func_types| {
             const type_len = func_types.param_count + func_types.result_count;
             try s.buf.ensureUnusedCapacity(scratch.allocator(), 3 + type_len);
@@ -511,9 +512,9 @@ pub fn toBinary(
 
     if (defined_func_count > 0) {
         var s = try Writer.initWithinScratch(scratch, 1 + defined_func_count);
-        try s.writeUleb(defined_func_count, options.uleb_min_len);
+        try s.writeLeb(u32, defined_func_count, options.uleb_min_len);
         for (b.func_types.items[b.func_import_count..]) |type_idx| {
-            try s.writeUleb(@intFromEnum(type_idx), options.uleb_min_len);
+            try s.writeLeb(u32, @intFromEnum(type_idx), options.uleb_min_len);
         }
 
         try w.writeSection(3, s.buf.items, options.uleb_min_len);
@@ -521,13 +522,13 @@ pub fn toBinary(
 
     if (defined_table_count > 0) {
         var s = try Writer.initWithinScratch(scratch, 1 + table_sec_capacity);
-        try s.writeUleb(defined_table_count, options.uleb_min_len);
+        try s.writeLeb(u32, defined_table_count, options.uleb_min_len);
         for (b.table_types.items[b.table_import_count..]) |table_type| {
             try s.writeByte(@intFromEnum(table_type.elem_type));
             try s.writeByte(@intFromBool(table_type.maximum != null));
-            try s.writeUleb(table_type.minimum, options.uleb_min_len);
+            try s.writeLeb(u32, table_type.minimum, options.uleb_min_len);
             if (table_type.maximum) |max| {
-                try s.writeUleb(max, options.uleb_min_len);
+                try s.writeLeb(u32, max, options.uleb_min_len);
             }
         }
 
@@ -536,11 +537,11 @@ pub fn toBinary(
 
     if (b.exports.count() > 0) {
         var s = try Writer.initWithinScratch(scratch, 1 + export_sec_capacity);
-        try s.writeUleb(@intCast(b.exports.count()), options.uleb_min_len);
+        try s.writeLeb(u32, @intCast(b.exports.count()), options.uleb_min_len);
         for (b.exports.keys(), b.exports.values()) |name, value| {
             try s.writeByteVec(name.slice(b), options.uleb_min_len);
             try s.writeByte(@intFromEnum(value));
-            try s.writeUleb(switch (value) {
+            try s.writeLeb(u32, switch (value) {
                 inline else => |idx| @intFromEnum(idx),
             }, options.uleb_min_len);
         }
@@ -550,7 +551,7 @@ pub fn toBinary(
 
     if (defined_func_count > 0) {
         var s = try Writer.initWithinScratch(scratch, 1 + code_sec_capacity);
-        try s.writeUleb(defined_func_count, options.uleb_min_len);
+        try s.writeLeb(u32, defined_func_count, options.uleb_min_len);
         for (b.code.items(.body_ptr), b.code.items(.body_size)) |body_ptr, body_size| {
             assert(body_size >= 2); // no code provided?
             try s.writeByteVec(body_ptr[0..body_size], options.uleb_min_len);
