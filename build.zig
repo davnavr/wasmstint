@@ -161,7 +161,7 @@ pub fn build(b: *Build) void {
             .name = "WasmBuilder",
             .root_module = wasm_builder_module,
             .use_llvm = use_llvm.ifPreferred(),
-            .max_rss = byte_size.mib(200), // arbitrary
+            .max_rss = byte_size.mib(293),
         })).step;
         tests.max_rss = byte_size.mib(20); // arbitrary
         unit_tests_step.dependOn(tests);
@@ -446,7 +446,7 @@ pub fn build(b: *Build) void {
                 .optimize = optimize,
             }),
             .use_llvm = use_llvm.ifPreferred(),
-            .max_rss = byte_size.mib(155),
+            .max_rss = byte_size.mib(389),
         });
         tests.root_module.addImport("wasmstint", wasmstint_module);
         tests.root_module.addImport("WasmBuilder", wasm_builder_module);

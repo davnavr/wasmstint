@@ -72,24 +72,23 @@ pub const FuncIdx = enum(u32) {
 
     pub fn writeCode(
         f: FuncIdx,
-        allocator: Allocator,
         b: *WasmBuilder,
-        arena: *ArenaAllocator,
-        options: struct {
-            uleb_min_len: Writer.UlebLen = .smallest,
-        },
+        allocator: Allocator,
+        options: struct { uleb_min_len: Writer.UlebLen = .smallest },
     ) CodeWriter {
-        _ = arena.reset(.retain_capacity);
         return CodeWriter{
             .builder = b,
             .function = f,
             .signature = f.signature(b).funcType(b),
             .body = Writer{ .gpa = allocator, .buf = .empty },
             .locals = .empty,
-            .arena = arena,
             .val_stack = .empty,
             .uleb_min_len = options.uleb_min_len,
         };
+    }
+
+    pub fn @"export"(f: FuncIdx, b: *WasmBuilder, name: String) ExportError!void {
+        try b.@"export"(name, .{ .func = f });
     }
 };
 
@@ -199,7 +198,7 @@ fn castToU32(value: anytype) Oom!u32 {
 }
 
 pub fn string(b: *WasmBuilder, bytes: []const u8) Oom!String {
-    const len = try castToU32(u32, bytes.len);
+    const len = try castToU32(bytes.len);
     try b.string_contents.ensureUnusedCapacity(b.gpa, len);
     try b.string_payloads.ensureUnusedCapacity(b.gpa, 1);
     const str: String = @enumFromInt(b.string_payloads.items.len);
@@ -223,12 +222,22 @@ pub fn funcType(
     b.val_types.appendSliceAssumeCapacity(results);
 
     const func_type: TypeIdx = @enumFromInt(b.type_section.items.len);
-    b.type_section.appendAssumeCapacity(b.gpa, .{
+    b.type_section.appendAssumeCapacity(.{
         .types = types_idx,
         .param_count = param_count,
         .result_count = result_count,
     });
     return func_type;
+}
+
+pub fn function(b: *WasmBuilder, signature: TypeIdx) Oom!FuncIdx {
+    const idx = b.func_types.items.len;
+    std.debug.assert(idx == b.func_import_count + b.code.len);
+    try b.func_types.ensureUnusedCapacity(b.gpa, 1);
+    try b.code.ensureUnusedCapacity(b.gpa, 1);
+    b.func_types.appendAssumeCapacity(signature);
+    _ = b.code.addOneAssumeCapacity();
+    return @enumFromInt(idx);
 }
 
 pub const ExportError = Oom || error{
@@ -252,7 +261,7 @@ pub const LocalIdx = enum(u32) {
 };
 
 pub const CodeWriter = struct {
-    builder: *const WasmBuilder,
+    builder: *WasmBuilder,
     function: FuncIdx,
     signature: TypeIdx.FuncType,
     body: Writer,
@@ -260,11 +269,7 @@ pub const CodeWriter = struct {
     ///
     /// Allocated in `body.gpa`.
     locals: std.ArrayList(ValType),
-    /// Lasts until `CodeWriter.finish()` is called.
-    arena: *ArenaAllocator,
-    /// Allocated in `arena`.
     val_stack: std.ArrayList(ValType),
-    // /// Allocated in `arena`.
     // ctrl_stack: std.ArrayList,
     uleb_min_len: Writer.UlebLen,
 
@@ -332,7 +337,7 @@ pub const CodeWriter = struct {
         switch (opcode) {
             .@"unreachable" => w.markUnreachable(),
             // .end => {}, // TODO: pop ctrl stack and results
-            .@"local.get" => try w.val_stack.append(w.arena.allocator(), w.localType(args)),
+            .@"local.get" => try w.val_stack.append(w.body.gpa, w.localType(args)),
             else => {},
         }
     }
@@ -374,7 +379,7 @@ pub const CodeWriter = struct {
                 }
             }
 
-            local_groups.append(scratch.allocator(), .{ .ty = ty, .count = 1 });
+            try local_groups.append(scratch.allocator(), .{ .ty = ty, .count = 1 });
         }
 
         var encoded_locals = try Writer.init(scratch.allocator(), 1 + (2 * local_groups.items.len));
@@ -397,14 +402,15 @@ pub const CodeWriter = struct {
         @memcpy(body[0..encoded_locals.buf.items.len], encoded_locals.buf.items);
         @memcpy(body[encoded_locals.buf.items.len..], w.body.buf.items);
 
-        w.builder.code.items[@intFromEnum(w.function)].* = Code{
+        w.builder.code.set(@intFromEnum(w.function), Code{
             .body_size = @intCast(body.len),
             .body_ptr = body.ptr,
-        };
+        });
 
         w.locals.deinit(w.body.gpa);
+        w.val_stack.deinit(w.body.gpa);
+        // w.ctrl_stack.deinit(w.body.gpa);
         w.body.deinit();
-        _ = w.arena.reset(.retain_capacity);
         w.* = undefined;
     }
 };
