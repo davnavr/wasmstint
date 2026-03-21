@@ -1666,12 +1666,12 @@ const opcode_handlers = struct {
 
         if (table.len <= elem_index) {
             const info = Trap.init(.table_access_out_of_bounds, .init(table_idx, .call_indirect));
-            return Transition.trap(ip, .none, eip, sp, stp, interp, info);
+            return Transition.trap(call_ip, .none, eip, sp, stp, interp, info);
         }
 
         const callee = table.base.func_ref[0..table.len][elem_index].get() orelse {
             const info = Trap.init(.indirect_call_to_null, .{ .index = elem_index });
-            return Transition.trap(ip, .none, eip, sp, stp, interp, info);
+            return Transition.trap(call_ip, .none, eip, sp, stp, interp, info);
         };
 
         const actual_signature = callee.signature();
@@ -1681,7 +1681,7 @@ const opcode_handlers = struct {
                 .{ .expected = expected_signature, .actual = actual_signature },
             );
 
-            return Transition.trap(ip, .none, eip, sp, stp, interp, info);
+            return Transition.trap(call_ip, .none, eip, sp, stp, interp, info);
         }
 
         // std.debug.print(" - calling {f}\n - sp = {*}\n", .{ callee, vals.stack.ptr });
