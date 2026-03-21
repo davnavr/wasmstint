@@ -102,6 +102,26 @@ test "basic" {
 
         try ctx.checkTrapIpForModule(&b, 3, .unreachable_code_reached, 2);
     }
+    {
+        var b = WasmBuilder.init(testing.allocator);
+        defer b.deinit();
+
+        const table = try b.table(.init(.funcref, .{ .minimum = 1 }));
+
+        const f = try b.function(try b.funcType(&.{}, &.{}));
+        {
+            var wip = f.writeCode(&b, testing.allocator, .{});
+            try wip.byte(.nop, {});
+            try wip.byte(.@"i32.const", 0);
+            try wip.byte(.call_indirect, .{ .table = table, .signature = f.signature(&b) });
+            try wip.byte(.nop, {});
+            try wip.byte(.end, {});
+            try wip.finish(&ctx.scratch);
+        }
+        try f.@"export"(&b, try b.string(call_name));
+
+        try ctx.checkTrapIpForModule(&b, 3, .indirect_call_to_null, 2);
+    }
 }
 
 // test "overlong"

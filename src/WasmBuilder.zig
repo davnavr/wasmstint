@@ -230,6 +230,7 @@ pub fn deinit(b: *WasmBuilder) void {
     b.val_types.deinit(b.gpa);
     b.type_section.deinit(b.gpa);
     b.func_types.deinit(b.gpa);
+    b.table_types.deinit(b.gpa);
 
     b.exports.deinit(b.gpa);
 
@@ -332,6 +333,11 @@ pub const CodeWriter = struct {
         };
     }
 
+    pub const CallIndirect = struct {
+        signature: TypeIdx,
+        table: TableIdx,
+    };
+
     fn OpcodeArgs(
         comptime opcode: opcodes.ByteOpcode,
         comptime prefixed_opcode: PrefixedOpcode(opcode),
@@ -342,6 +348,7 @@ pub const CodeWriter = struct {
             .end,
             => void,
             .@"i32.const" => i32,
+            .call_indirect => CallIndirect,
             .@"0xFC" => @compileError("argument type for " ++ @tagName(prefixed_opcode)),
             .@"0xFD" => @compileError("argument type for " ++ @tagName(prefixed_opcode)),
             else => @compileError("argument type for " ++ @tagName(opcode)),
@@ -367,6 +374,16 @@ pub const CodeWriter = struct {
         return @enumFromInt(i + w.signature.param_count);
     }
 
+    fn pushVal(w: *CodeWriter, ty: ValType) Oom!void {
+        try w.val_stack.append(w.body.gpa, ty);
+    }
+
+    fn popValExpecting(w: *CodeWriter, expecting: ValType) Oom!void {
+        const popped = w.val_stack.pop() orelse
+            @panic("TODO: stack underflow/handle polymorphic stack");
+        std.debug.assert(expecting == popped);
+    }
+
     pub fn op(
         w: *CodeWriter,
         comptime opcode: opcodes.ByteOpcode,
@@ -383,13 +400,23 @@ pub const CodeWriter = struct {
             void => {},
             i32, i64 => try w.body.writeLeb(ArgsType, args, w.uleb_min_len),
             LocalIdx => try w.body.writeLeb(u32, @intFromEnum(args), w.uleb_min_len),
+            CallIndirect => {
+                try w.body.writeLeb(u32, @intFromEnum(args.signature), w.uleb_min_len);
+                try w.body.writeLeb(u32, @intFromEnum(args.table), w.uleb_min_len);
+            },
             else => @compileError("handle " ++ @typeName(ArgsType) ++ " for " ++ @tagName(opcode)),
         }
 
         switch (opcode) {
             .@"unreachable" => w.markUnreachable(),
             // .end => {}, // TODO: pop ctrl stack and results
-            .@"local.get" => try w.val_stack.append(w.body.gpa, w.localType(args)),
+            .call_indirect => {
+                try w.popValExpecting(.i32);
+                // TODO: push and pop arguments
+            },
+            .@"local.get" => try w.pushVal(w.localType(args)),
+            .@"i32.const" => try w.pushVal(.i32),
+            .@"i64.const" => try w.pushVal(.i64),
             else => {},
         }
     }
