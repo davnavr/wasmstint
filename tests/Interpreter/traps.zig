@@ -21,22 +21,36 @@ const Context = struct {
 
     fn expectTrapIp(
         after_trap: *const Interpreter.State.Trapped,
-        trapping_function: wasmstint.runtime.FuncInst,
         expected_func: wasmstint.Module.FuncIdx,
         expected_trap_code: Interpreter.Trap.Code,
         /// Based off the first byte of the first opcode of the trapping function.
         expected_trap_offset: u32,
     ) !void {
-        const wasm_func = trapping_function.expanded().wasm;
+        const frame = try checks.expectNonNull(after_trap.inner.currentFrame());
+        const wasm_func = frame.function.expanded().wasm;
+        const code = wasm_func.code();
         try testing.expectEqual(expected_func, wasm_func.idx);
         try testing.expectEqual(.function_call, after_trap.source());
         try testing.expectEqual(expected_trap_code, after_trap.trap().code);
 
-        const frame = try checks.expectNonNull(after_trap.inner.currentFrame());
-        try testing.expectEqual( // check IP
-            wasm_func.code().inner.instructions_start + expected_trap_offset,
-            frame.wasm.ip,
-        );
+        const expected_ip = @intFromPtr(code.inner.instructions_start + expected_trap_offset);
+        const actual_ip = @intFromPtr(frame.wasm.ip);
+        if (expected_ip != actual_ip) {
+            const ip_diff = if (expected_ip > actual_ip)
+                expected_ip - actual_ip
+            else
+                actual_ip - expected_ip;
+
+            std.log.err(
+                "expected IP=0x{X}, got 0x{X} (off by {d} bytes)",
+                .{ expected_ip, actual_ip, ip_diff },
+            );
+            std.log.err("function bytecode is at 0x{X} to 0x{X}", .{
+                @intFromPtr(code.inner.instructions_start),
+                @intFromPtr(code.inner.instructions_end),
+            });
+            return error.TestExpectedEqual;
+        }
     }
 
     fn checkTrapIpForModule(
@@ -81,7 +95,7 @@ const Context = struct {
             .trapped,
         );
         try testing.expectEqual(0, fuel.remaining);
-        try expectTrapIp(&after_trap, f, expected_func, expected_trap_code, expected_trap_offset);
+        try expectTrapIp(&after_trap, expected_func, expected_trap_code, expected_trap_offset);
     }
 };
 
@@ -104,6 +118,37 @@ test "unreachable" {
         try f.@"export"(&b, try b.string(call_name));
 
         try ctx.checkTrapIpForModule(&b, 3, @enumFromInt(0), .unreachable_code_reached, 2);
+    }
+    {
+        var b = WasmBuilder.init(testing.allocator);
+        defer b.deinit();
+
+        const func_type = try b.funcType(&.{}, &.{});
+        const called = try b.function(func_type);
+        const trapping = try b.function(func_type);
+        {
+            var wip = called.writeCode(&b, testing.allocator, .{});
+            try wip.byte(.nop, {});
+            try wip.byte(.call, trapping);
+            try wip.byte(.@"unreachable", {});
+            try wip.byte(.end, {});
+            try wip.finish(&ctx.scratch);
+        }
+        try called.@"export"(&b, try b.string(call_name));
+
+        {
+            var wip = trapping.writeCode(&b, testing.allocator, .{});
+            try wip.byte(.nop, {});
+            try wip.byte(.nop, {});
+            try wip.byte(.nop, {});
+            try wip.byte(.nop, {});
+            try wip.byte(.@"unreachable", {});
+            try wip.byte(.nop, {});
+            try wip.byte(.end, {});
+            try wip.finish(&ctx.scratch);
+        }
+
+        try ctx.checkTrapIpForModule(&b, 7, @enumFromInt(1), .unreachable_code_reached, 4);
     }
 }
 

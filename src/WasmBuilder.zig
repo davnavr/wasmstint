@@ -347,6 +347,7 @@ pub const CodeWriter = struct {
             .nop,
             .end,
             => void,
+            .call => FuncIdx,
             .@"i32.const" => i32,
             .call_indirect => CallIndirect,
             .@"0xFC" => @compileError("argument type for " ++ @tagName(prefixed_opcode)),
@@ -399,7 +400,7 @@ pub const CodeWriter = struct {
         switch (ArgsType) {
             void => {},
             i32, i64 => try w.body.writeLeb(ArgsType, args, w.uleb_min_len),
-            LocalIdx => try w.body.writeLeb(u32, @intFromEnum(args), w.uleb_min_len),
+            LocalIdx, FuncIdx => try w.body.writeLeb(u32, @intFromEnum(args), w.uleb_min_len),
             CallIndirect => {
                 try w.body.writeLeb(u32, @intFromEnum(args.signature), w.uleb_min_len);
                 try w.body.writeLeb(u32, @intFromEnum(args.table), w.uleb_min_len);
@@ -410,6 +411,9 @@ pub const CodeWriter = struct {
         switch (opcode) {
             .@"unreachable" => w.markUnreachable(),
             // .end => {}, // TODO: pop ctrl stack and results
+            .call => {
+                // TODO: push and pop arguments
+            },
             .call_indirect => {
                 try w.popValExpecting(.i32);
                 // TODO: push and pop arguments
