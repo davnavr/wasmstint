@@ -22,17 +22,19 @@ const Context = struct {
     fn expectTrapIp(
         after_trap: *const Interpreter.State.Trapped,
         trapping_function: wasmstint.runtime.FuncInst,
+        expected_func: wasmstint.Module.FuncIdx,
         expected_trap_code: Interpreter.Trap.Code,
         /// Based off the first byte of the first opcode of the trapping function.
         expected_trap_offset: u32,
     ) !void {
+        const wasm_func = trapping_function.expanded().wasm;
+        try testing.expectEqual(expected_func, wasm_func.idx);
         try testing.expectEqual(.function_call, after_trap.source());
         try testing.expectEqual(expected_trap_code, after_trap.trap().code);
 
         const frame = try checks.expectNonNull(after_trap.inner.currentFrame());
         try testing.expectEqual( // check IP
-            trapping_function.expanded().wasm.code().inner.instructions_start +
-                expected_trap_offset,
+            wasm_func.code().inner.instructions_start + expected_trap_offset,
             frame.wasm.ip,
         );
     }
@@ -48,6 +50,7 @@ const Context = struct {
         wasm: *const WasmBuilder,
         /// The exact amount of fuel consumed before the trap occurs.
         consumed_fuel: u64,
+        expected_func: wasmstint.Module.FuncIdx,
         expected_trap_code: Interpreter.Trap.Code,
         expected_trap_offset: u32,
     ) !void {
@@ -78,11 +81,11 @@ const Context = struct {
             .trapped,
         );
         try testing.expectEqual(0, fuel.remaining);
-        try expectTrapIp(&after_trap, f, expected_trap_code, expected_trap_offset);
+        try expectTrapIp(&after_trap, f, expected_func, expected_trap_code, expected_trap_offset);
     }
 };
 
-test "basic" {
+test "unreachable" {
     var ctx = Context.init();
     defer ctx.deinit();
     {
@@ -100,8 +103,13 @@ test "basic" {
         }
         try f.@"export"(&b, try b.string(call_name));
 
-        try ctx.checkTrapIpForModule(&b, 3, .unreachable_code_reached, 2);
+        try ctx.checkTrapIpForModule(&b, 3, @enumFromInt(0), .unreachable_code_reached, 2);
     }
+}
+
+test "call_indirect" {
+    var ctx = Context.init();
+    defer ctx.deinit();
     {
         var b = WasmBuilder.init(testing.allocator);
         defer b.deinit();
@@ -112,6 +120,7 @@ test "basic" {
         {
             var wip = f.writeCode(&b, testing.allocator, .{});
             try wip.byte(.nop, {});
+            try wip.byte(.nop, {});
             try wip.byte(.@"i32.const", 0);
             try wip.byte(.call_indirect, .{ .table = table, .signature = f.signature(&b) });
             try wip.byte(.nop, {});
@@ -120,7 +129,7 @@ test "basic" {
         }
         try f.@"export"(&b, try b.string(call_name));
 
-        try ctx.checkTrapIpForModule(&b, 3, .indirect_call_to_null, 2);
+        try ctx.checkTrapIpForModule(&b, 4, @enumFromInt(0), .indirect_call_to_null, 3);
     }
 }
 
