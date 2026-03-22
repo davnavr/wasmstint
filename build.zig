@@ -102,7 +102,7 @@ pub fn build(b: *Build) void {
         const tests = &b.addRunArtifact(b.addTest(.{
             .name = "allocators",
             .root_module = allocators_module,
-            .max_rss = byte_size.mib(365),
+            .max_rss = byte_size.mib(461),
             .use_llvm = use_llvm.ifPreferred(),
         })).step;
         tests.max_rss = byte_size.mib(19);
@@ -141,7 +141,7 @@ pub fn build(b: *Build) void {
             .name = "cli_args",
             .root_module = cli_args_module,
             .use_llvm = use_llvm.ifPreferred(),
-            .max_rss = byte_size.mib(339),
+            .max_rss = byte_size.mib(466),
         })).step;
         tests.max_rss = byte_size.mib(19);
         unit_tests_step.dependOn(tests);
@@ -161,7 +161,7 @@ pub fn build(b: *Build) void {
             .name = "WasmBuilder",
             .root_module = wasm_builder_module,
             .use_llvm = use_llvm.ifPreferred(),
-            .max_rss = byte_size.mib(293),
+            .max_rss = byte_size.mib(452),
         })).step;
         tests.max_rss = byte_size.mib(20); // arbitrary
         unit_tests_step.dependOn(tests);
@@ -446,7 +446,7 @@ pub fn build(b: *Build) void {
                 .optimize = optimize,
             }),
             .use_llvm = use_llvm.ifPreferred(),
-            .max_rss = byte_size.mib(389),
+            .max_rss = byte_size.mib(616),
         });
         tests.root_module.addImport("wasmstint", wasmstint_module);
         tests.root_module.addImport("WasmBuilder", wasm_builder_module);
@@ -802,7 +802,7 @@ pub fn build(b: *Build) void {
                 .use_llvm = use_llvm.ifPreferred(),
             });
             const ffi_tests_run = &b.addRunArtifact(ffi_test).step;
-            ffi_tests_run.max_rss = byte_size.mib(12);
+            ffi_tests_run.max_rss = byte_size.mib(16);
             unit_tests_step.dependOn(ffi_tests_run);
         }
 
