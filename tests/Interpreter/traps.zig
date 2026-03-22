@@ -178,7 +178,29 @@ test "call_indirect" {
     }
 }
 
-// test "overlong"
+test "overlong" {
+    var ctx = Context.init();
+    defer ctx.deinit();
+    {
+        var b = WasmBuilder.init(testing.allocator);
+        defer b.deinit();
+
+        const mem = try b.memory(.init(.{}));
+        const f = try b.function(try b.funcType(&.{}, &.{}));
+        {
+            var wip = f.writeCode(&b, testing.allocator, .{});
+            try wip.byte(.nop, {});
+            try wip.byte(.@"i32.const", 16);
+            try wip.simd(.@"v128.load", .{ .memory = mem, .offset = 32 });
+            try wip.byte(.drop, {});
+            try wip.byte(.end, {});
+            try wip.finish(&ctx.scratch);
+        }
+        try f.@"export"(&b, try b.string(call_name));
+
+        try ctx.checkTrapIpForModule(&b, 3, @enumFromInt(0), .memory_access_out_of_bounds, 3);
+    }
+}
 
 const std = @import("std");
 const testing = std.testing;
