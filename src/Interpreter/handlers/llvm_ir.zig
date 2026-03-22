@@ -30,10 +30,6 @@ pub inline fn callOpcodeHandler(
     module: runtime.ModuleInst,
     ctx: *Interpreter,
 ) Transition {
-    std.log.debug(
-        "VIP={*}, EIP={*}, VSP={*}, LOC={*}, MODULE={*}, STP={*}",
-        .{ instr.next, instr.end, ctx.stack_top.ptr, locals.ptr, module.inner, stp },
-    ); // TODO: remove this
     return opcodeHandlerTrampoline(
         locals,
         ctx.stack_top,
@@ -505,8 +501,15 @@ fn trapWithNumericCode(
     return Transition.trapAt(trap_ip, eip, sp, stp, ctx, trap);
 }
 
+const TrapOpcode = packed struct(usize) {
+    byte: opcodes.ByteOpcode,
+    suffix: @Int(.unsigned, @typeInfo(usize).int.bits - 8),
+};
+
 fn trapMemoryAccessOutOfBounds(
-    trap_ip: Ip,
+    opcode: TrapOpcode,
+    /// First byte after all opcode bytes.
+    ip_after_opcode: Ip,
     sp: Sp,
     eip: Eip,
     stp: Stp,
@@ -518,6 +521,11 @@ fn trapMemoryAccessOutOfBounds(
     size: usize,
 ) callconv(.c) Transition {
     @branchHint(.cold);
+    const trap_ip = common.calculateTrapIp(ip_after_opcode, switch (opcode.byte) {
+        .@"0xFC" => .{ .fc = @enumFromInt(opcode.suffix) },
+        .@"0xFD" => .{ .fd = @enumFromInt(opcode.suffix) },
+        else => .none,
+    });
     const oob_info = Trap.MemoryAccessOutOfBounds.init(@enumFromInt(mem_idx), .access, .{
         .address = address + offset,
         .size = @enumFromInt(size),

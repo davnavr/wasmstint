@@ -100,28 +100,28 @@ pub const OpcodePrefix = union(enum(u8)) {
 
 /// Calculates a pointer to the first byte of the instruction based on a pointer to the first byte
 /// after it's opcode.
-pub fn calculateTrapIp(base_ip: Ip, comptime prefix: OpcodePrefix) Ip {
+pub fn calculateTrapIp(base_ip: Ip, prefix: OpcodePrefix) Ip {
     var ip = base_ip - 1;
-    switch (prefix) {
+    const prefixed: u32 = switch (prefix) {
         .none => return ip,
-        inline .fc, .fd => |opcode| {
-            var decoded: u32 = ip[0];
-            for (0..4) |_| {
-                ip -= 1;
-                std.debug.assert(decoded <= @intFromEnum(opcode)); // please check expected opcode
-                if (decoded == @intFromEnum(opcode)) {
-                    @branchHint(.likely);
-                    break;
-                }
+        inline .fc, .fd => |opcode| @intFromEnum(opcode),
+    };
 
-                decoded <<= 7;
-                decoded |= (0x7F & ip[0]);
-            } else unreachable;
+    var decoded: u32 = ip[0];
+    for (0..4) |_| {
+        ip -= 1;
+        std.debug.assert(decoded <= prefixed); // please check expected opcode
+        if (decoded == prefixed) {
+            @branchHint(.likely);
+            break;
+        }
 
-            std.debug.assert(ip[0] == comptime @intFromEnum(prefix));
-            return ip;
-        },
-    }
+        decoded <<= 7;
+        decoded |= (0x7F & ip[0]);
+    } else unreachable;
+
+    std.debug.assert(ip[0] == @intFromEnum(prefix));
+    return ip;
 }
 
 test calculateTrapIp {

@@ -1,3 +1,4 @@
+opcode: Opcode,
 wip: WipFunction,
 
 const OpcodeHandler = @This();
@@ -513,6 +514,20 @@ pub fn linearMemoryAccess(
     );
 
     wip.cursor = .{ .block = oob };
+    const opcode_byte = try b.sizeIntValue(@intFromEnum(switch (handler.opcode) {
+        .byte => |byte| byte,
+        .fc => .@"0xFC",
+        .fd => .@"0xFD",
+    }));
+    const opcode_info = switch (handler.opcode) {
+        .byte => opcode_byte,
+        inline .fc, .fd => |opcode| prefixed: {
+            const opcode_value = try b.sizeIntValue(@intFromEnum(opcode));
+            const high_bits = try wip.bin(.@"shl nuw", opcode_value, try b.sizeIntValue(8), "");
+            break :prefixed try wip.bin(.@"or", opcode_byte, high_bits, "");
+        },
+    };
+
     _ = try wip.callIntrinsicAssumeCold();
     _ = try wip.ret(
         try wip.call(
@@ -522,13 +537,9 @@ pub fn linearMemoryAccess(
             b.trap_memory_access_oob.typeOf(&b.module),
             b.trap_memory_access_oob.toValue(&b.module),
             &.{
-                try wip.gep(
-                    .inbounds,
-                    .i8,
-                    OpcodeHandlerParam.vip.arg(wip),
-                    &.{try b.sizeIntValue(-1)},
-                    "",
-                ), // TODO: provide u8, usize pair so trap handler can call calculateTrapIp
+                opcode_info,
+                // TODO: provide u8, usize pair so trap handler can call calculateTrapIp, maybe packed usize, low 8 bits are byte opcode, high is prefixed??
+                OpcodeHandlerParam.vip.arg(wip),
                 OpcodeHandlerParam.vsp.arg(wip),
                 OpcodeHandlerParam.eip.arg(wip),
                 OpcodeHandlerParam.stp.arg(wip),
@@ -675,6 +686,7 @@ const llvm = std.zig.llvm;
 
 const Builder = @import("Builder.zig");
 const value_stack_alignment = Builder.value_stack_alignment;
+const Opcode = @import("opcode.zig").Opcode;
 const OpcodeHandlerParam = @import("opcode_handler_param.zig").OpcodeHandlerParam;
 
 const Type = llvm.Builder.Type;

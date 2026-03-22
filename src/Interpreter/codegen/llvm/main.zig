@@ -597,7 +597,8 @@ fn buildLlvmModule(b: *Builder) Oom!void {
             try b.strtabStringSymbolPrefixed("trapMemoryAccessOutOfBounds"),
             try b.fnType(
                 .i32,
-                &[10]Type{
+                &[11]Type{
+                    b.size_type,
                     .ptr,
                     .ptr,
                     .ptr,

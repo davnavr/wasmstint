@@ -1161,7 +1161,6 @@ fn buildFloatOpcodeHandlers(b: *Builder) Oom!void {
             float_info.canonical_nan.toConst().?,
         );
 
-        // TODO: detect when LLVM emits a libc/compiler_rt call instead of inline instructions
         for (&[4]Intrinsic{ .ceil, .floor, .trunc, .roundeven }) |intrin| {
             var op = try b.opcodeHandlerFromPrefixedName(
                 FDPrefixOpcode,

@@ -646,7 +646,8 @@ pub fn opcodeHandler(b: *Builder, opcode: Opcode) Oom!OpcodeHandler {
         func.setAlignment(.fromByteUnits(16), &b.module);
     }
     b.opcode_handler_writing_lock.lock();
-    return .{
+    return OpcodeHandler{
+        .opcode = opcode,
         .wip = try WipFunction.init(
             &b.module,
             .{ .function = func, .strip = b.options.strip },
