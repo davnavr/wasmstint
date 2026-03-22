@@ -21,7 +21,7 @@ pub fn allocate(
     std.debug.assert(initial_capacity <= maximum_size);
 
     const max_limit = std.math.maxInt(u32) + 1;
-    if (initial_capacity >= max_limit or maximum_size >= max_limit) {
+    if (initial_capacity >= max_limit) {
         return error.OutOfMemory; // no memory64 support
     }
 
@@ -38,7 +38,7 @@ pub fn allocate(
             .base = buffer.ptr,
             .size = std.mem.alignBackward(usize, initial_size, MemInst.page_size),
             .capacity = rounded_capacity,
-            .limit = std.mem.alignBackward(usize, maximum_size, MemInst.page_size),
+            .limit = @min(max_limit, std.mem.alignBackward(usize, maximum_size, MemInst.page_size)),
             .vtable = &vtable,
         },
     };
