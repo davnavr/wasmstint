@@ -107,6 +107,19 @@ pub const TableIdx = enum(u32) {
     }
 };
 
+pub const MemIdx = enum(u32) {
+    _,
+
+    pub fn memType(m: MemIdx, b: *const WasmBuilder) *const MemType {
+        return b.mem_types.items[@intFromEnum(m)];
+    }
+
+    pub fn addrType(m: MemIdx, b: *const WasmBuilder) ValType {
+        std.debug.assert(@intFromEnum(m) < b.mem_types.items.len);
+        return .i32;
+    }
+};
+
 const Code = struct {
     body_size: u32,
     /// Allocated in the arena.
@@ -121,22 +134,25 @@ const Code = struct {
 const ExportOrImportKind = enum(u8) {
     func = 0x00,
     // table = 0x01,
+    // memory = 0x02,
 };
 
 pub const Import = struct {
     module: String,
     name: String,
-    value: Desc,
+    desc: Desc,
 
     pub const Desc = union(ExportOrImportKind) {
         func: FuncIdx,
-        // table: TableType,
+        // table: TableIdx,
+        // memory: MemIdx,
     };
 };
 
 pub const ExportDesc = union(ExportOrImportKind) {
     func: FuncIdx,
     // table: TableIdx,
+    // memory: MemIdx,
 
     const LookupContext = struct {
         b: *const WasmBuilder,
@@ -173,6 +189,19 @@ pub const TableType = struct {
     }
 };
 
+pub const MemType = struct {
+    minimum: u32,
+    maximum: ?u32,
+
+    pub fn init(limits: struct { minimum: u32 = 0, maximum: ?u32 = null }) MemType {
+        if (limits.maximum) |max| {
+            assert(limits.minimum <= max);
+        }
+
+        return MemType{ .minimum = limits.minimum, .maximum = limits.maximum };
+    }
+};
+
 gpa: Allocator,
 /// Allocated with `gpa`.
 arena_state: ArenaAllocator.State,
@@ -186,10 +215,13 @@ type_section: std.ArrayList(TypeIdx.FuncType),
 func_types: std.ArrayList(TypeIdx),
 /// Contains the types of all imported then defined tables.
 table_types: std.ArrayList(TableType),
+/// Contains the types of all imported then defined memories.
+mem_types: std.ArrayList(MemType),
 
 // imports: std.MultiArrayList(Import),
 func_import_count: u32,
 table_import_count: u32,
+mem_import_count: u32,
 
 exports: std.ArrayHashMapUnmanaged(String, ExportDesc, ExportDesc.LookupContext, true),
 
@@ -209,9 +241,11 @@ pub fn init(gpa: Allocator) WasmBuilder {
         .type_section = .empty,
         .func_types = .empty,
         .table_types = .empty,
+        .mem_types = .empty,
 
         .func_import_count = 0,
         .table_import_count = 0,
+        .mem_import_count = 0,
 
         .exports = .empty,
 
@@ -231,6 +265,7 @@ pub fn deinit(b: *WasmBuilder) void {
     b.type_section.deinit(b.gpa);
     b.func_types.deinit(b.gpa);
     b.table_types.deinit(b.gpa);
+    b.mem_types.deinit(b.gpa);
 
     b.exports.deinit(b.gpa);
 
@@ -276,6 +311,10 @@ pub fn funcType(
     return func_type;
 }
 
+// TODO: Check that no definitions were defined, ensures imports are defined first
+// /// Imports must be defined before any definitions are added.
+// pub fn import(b: *WasmBuilder, module: String, name: String, desc: Import.Desc) Oom!void {}
+
 pub fn function(b: *WasmBuilder, signature: TypeIdx) Oom!FuncIdx {
     const idx = b.func_types.items.len;
     assert(idx == b.func_import_count + b.code.len);
@@ -288,7 +327,15 @@ pub fn function(b: *WasmBuilder, signature: TypeIdx) Oom!FuncIdx {
 
 pub fn table(b: *WasmBuilder, table_type: TableType) Oom!TableIdx {
     const idx = b.table_types.items.len;
+    std.debug.assert(idx >= b.table_import_count);
     try b.table_types.append(b.gpa, table_type);
+    return @enumFromInt(idx);
+}
+
+pub fn memory(b: *WasmBuilder, mem_type: MemType) Oom!MemIdx {
+    const idx = b.mem_types.items.len;
+    std.debug.assert(idx >= b.mem_import_count);
+    try b.mem_types.append(b.gpa, mem_type);
     return @enumFromInt(idx);
 }
 
@@ -338,6 +385,34 @@ pub const CodeWriter = struct {
         table: TableIdx,
     };
 
+    pub const MemArg = struct {
+        memory: MemIdx,
+        alignment: Alignment = .natural,
+        offset: u32 = 0,
+
+        pub const Alignment = enum(u8) {
+            @"1" = 0,
+            @"2" = 1,
+            @"4" = 2,
+            @"8" = 3,
+            @"16" = 4,
+            natural = 255,
+        };
+
+        fn write(arg: MemArg, w: *CodeWriter, natural_alignment: Alignment) Oom!void {
+            const mem_idx = @intFromEnum(arg.memory);
+            std.debug.assert(mem_idx == 0);
+            std.debug.assert(mem_idx < w.builder.mem_types.items.len);
+            std.debug.assert(natural_alignment != .natural);
+            const a = @intFromEnum(
+                if (arg.alignment == .natural) natural_alignment else arg.alignment,
+            );
+            std.debug.assert(a <= @intFromEnum(natural_alignment));
+            try w.body.writeLeb(u32, a, w.uleb_min_len);
+            try w.body.writeLeb(u32, arg.offset, w.uleb_min_len);
+        }
+    };
+
     fn OpcodeArgs(
         comptime opcode: opcodes.ByteOpcode,
         comptime prefixed_opcode: PrefixedOpcode(opcode),
@@ -346,12 +421,18 @@ pub const CodeWriter = struct {
             .@"unreachable",
             .nop,
             .end,
+            .drop,
             => void,
             .call => FuncIdx,
             .@"i32.const" => i32,
             .call_indirect => CallIndirect,
-            .@"0xFC" => @compileError("argument type for " ++ @tagName(prefixed_opcode)),
-            .@"0xFD" => @compileError("argument type for " ++ @tagName(prefixed_opcode)),
+            .@"0xFC" => switch (prefixed_opcode) {
+                else => @compileError("argument type for " ++ @tagName(prefixed_opcode)),
+            },
+            .@"0xFD" => switch (prefixed_opcode) {
+                .@"v128.load" => MemArg,
+                else => @compileError("argument type for " ++ @tagName(prefixed_opcode)),
+            },
             else => @compileError("argument type for " ++ @tagName(opcode)),
         };
     }
@@ -379,8 +460,13 @@ pub const CodeWriter = struct {
         try w.val_stack.append(w.body.gpa, ty);
     }
 
+    fn popVal(w: *CodeWriter) ?ValType {
+        // TODO: If `null`, assert ctrl frame unreachable
+        return w.val_stack.pop();
+    }
+
     fn popValExpecting(w: *CodeWriter, expecting: ValType) Oom!void {
-        const popped = w.val_stack.pop() orelse
+        const popped = w.popVal() orelse
             @panic("TODO: stack underflow/handle polymorphic stack");
         std.debug.assert(expecting == popped);
     }
@@ -400,10 +486,27 @@ pub const CodeWriter = struct {
         switch (ArgsType) {
             void => {},
             i32, i64 => try w.body.writeLeb(ArgsType, args, w.uleb_min_len),
-            LocalIdx, FuncIdx => try w.body.writeLeb(u32, @intFromEnum(args), w.uleb_min_len),
+            LocalIdx => {
+                std.debug.assert(@intFromEnum(args) < w.locals.items.len + w.signature.param_count);
+                try w.body.writeLeb(u32, @intFromEnum(args), w.uleb_min_len);
+            },
+            FuncIdx => {
+                std.debug.assert(@intFromEnum(args) < w.builder.func_types.items.len);
+                try w.body.writeLeb(u32, @intFromEnum(args), w.uleb_min_len);
+            },
             CallIndirect => {
                 try w.body.writeLeb(u32, @intFromEnum(args.signature), w.uleb_min_len);
+                std.debug.assert(@intFromEnum(args.table) < w.builder.table_types.items.len);
                 try w.body.writeLeb(u32, @intFromEnum(args.table), w.uleb_min_len);
+            },
+            MemArg => {
+                try MemArg.write(args, w, switch (opcode) {
+                    .@"0xFD" => switch (prefixed_opcode) {
+                        .@"v128.load" => .@"16",
+                        else => @compileError(@tagName(prefixed_opcode)),
+                    },
+                    else => @compileError(@tagName(opcode)),
+                });
             },
             else => @compileError("handle " ++ @typeName(ArgsType) ++ " for " ++ @tagName(opcode)),
         }
@@ -418,9 +521,19 @@ pub const CodeWriter = struct {
                 try w.popValExpecting(.i32);
                 // TODO: push and pop arguments
             },
+            .drop => {
+                _ = w.popVal();
+            },
             .@"local.get" => try w.pushVal(w.localType(args)),
             .@"i32.const" => try w.pushVal(.i32),
             .@"i64.const" => try w.pushVal(.i64),
+            .@"0xFC" => switch (prefixed_opcode) {
+                .@"v128.load" => {
+                    try w.popValExpecting(args.memory.addrType(w.builder));
+                    try w.pushVal(.v128);
+                },
+                else => {},
+            },
             else => {},
         }
     }
@@ -437,6 +550,14 @@ pub const CodeWriter = struct {
             }
         }
         try w.op(opcode, {}, args);
+    }
+
+    pub fn simd(
+        w: *CodeWriter,
+        comptime opcode: opcodes.FDPrefixOpcode,
+        args: OpcodeArgs(.@"0xFD", opcode),
+    ) Oom!void {
+        try w.op(.@"0xFD", opcode, args);
     }
 
     /// Don't forget to write the last `end` opcode.
@@ -514,12 +635,15 @@ pub fn toBinary(
     assert(defined_func_count == b.code.len);
     const defined_table_count = @as(u32, @intCast(b.table_types.items.len)) - b.table_import_count;
     const table_sec_capacity = 3 * defined_table_count;
+    const defined_mem_count = @as(u32, @intCast(b.mem_types.items.len)) - b.mem_import_count;
+    const mem_sec_capacity = 2 * defined_mem_count;
     const export_sec_capacity = 3 * b.exports.count();
     const code_sec_capacity = 3 * defined_func_count;
 
     var w = try Writer.init(allocator, (8 + type_sec_capacity) +
         defined_func_count +
         table_sec_capacity +
+        mem_sec_capacity +
         export_sec_capacity +
         code_sec_capacity);
 
@@ -564,6 +688,20 @@ pub fn toBinary(
         }
 
         try w.writeSection(4, s.buf.items, options.uleb_min_len);
+    }
+
+    if (defined_mem_count > 0) {
+        var s = try Writer.initWithinScratch(scratch, 1 + mem_sec_capacity);
+        try s.writeLeb(u32, defined_mem_count, options.uleb_min_len);
+        for (b.mem_types.items[b.mem_import_count..]) |mem_type| {
+            try s.writeByte(@intFromBool(mem_type.maximum != null));
+            try s.writeLeb(u32, mem_type.minimum, options.uleb_min_len);
+            if (mem_type.maximum) |max| {
+                try s.writeLeb(u32, max, options.uleb_min_len);
+            }
+        }
+
+        try w.writeSection(5, s.buf.items, options.uleb_min_len);
     }
 
     if (b.exports.count() > 0) {
