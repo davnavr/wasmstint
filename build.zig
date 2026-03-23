@@ -817,13 +817,29 @@ pub fn build(b: *Build) void {
         }
         {
             const test_fuzzed_step = b.step(
-                "test-fuzzed",
+                "test-spec-fuzzed",
                 "Run WAST test cases discovered by fuzzing",
             );
             const fuzzed_test_dir = b.path("tests/fuzzed");
-            for (&[_][]const u8{ "validation.wast", "wasmi_diff.wast", "execution.wast" }) |name| {
-                const path = fuzzed_test_dir.path(b, name);
-                test_fuzzed_step.dependOn(buildWastTest(b, spectest_exe, path, wast2json, name));
+            for (&[_]struct { tests: []const []const u8, enabled: bool }{
+                .{
+                    .tests = &.{ "validation.wast", "execution.wast" },
+                    .enabled = true,
+                },
+                .{
+                    .tests = &.{"wasmi_diff.wast"},
+                    .enabled = wasm_features.simd128,
+                },
+            }) |group| {
+                if (!group.enabled) {
+                    continue;
+                }
+
+                for (group.tests) |name| {
+                    const path = fuzzed_test_dir.path(b, name);
+                    const test_step = buildWastTest(b, spectest_exe, path, wast2json, name);
+                    test_fuzzed_step.dependOn(test_step);
+                }
             }
 
             test_spec_all_step.dependOn(test_fuzzed_step);
