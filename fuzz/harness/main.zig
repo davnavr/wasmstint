@@ -153,7 +153,7 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
     wasm_buffer.generate(&input, &configuration) catch |e| return switch (e) {
         error.BadInput => {
             std.debug.print("failed to generate WASM module\n", .{});
-            return 1;
+            return @intFromBool(!arguments.@"skip-bad-input");
         },
     };
     defer wasm_buffer.deinit();

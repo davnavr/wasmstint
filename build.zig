@@ -924,6 +924,7 @@ pub fn build(b: *Build) void {
             .target = target,
             .optimize = optimize,
         });
+        ffi_module.addImport("wasm_features", wasm_options);
 
         for (rust_include_paths.items) |include_path| {
             ffi_module.addLibraryPath(include_path);
@@ -941,8 +942,13 @@ pub fn build(b: *Build) void {
                 .target = target,
                 .optimize = optimize,
             });
-            target_module.addImport("wasmstint", wasmstint_module);
-            target_module.addImport("ffi", ffi_module);
+            for (&[3]struct { []const u8, *Build.Module }{
+                .{ "wasmstint", wasmstint_module },
+                .{ "ffi", ffi_module },
+                .{ "wasm_features", wasm_options },
+            }) |info| {
+                target_module.addImport(info.@"0", info.@"1");
+            }
 
             const libfuzzer_harness_lib = b.addLibrary(.{
                 .name = b.fmt("{s}-libfuzzer", .{fuzz_target_name}),

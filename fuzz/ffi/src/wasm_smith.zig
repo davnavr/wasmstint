@@ -7,6 +7,14 @@ pub const Configuration = extern struct {
         disabled = 0,
         enabled = 1,
         randomized = 2,
+
+        const randomized_or_disabled = Flag.randomized;
+    };
+
+    pub const AlwaysDisabled = enum(u8) {
+        disabled = 0,
+
+        const randomized_or_disabled = AlwaysDisabled.disabled;
     };
 
     pub const AllowedInstructionsMask = packed struct(u32) {
@@ -53,7 +61,7 @@ pub const Configuration = extern struct {
     saturating_float_to_int_enabled: Flag = .randomized,
     sign_extension_ops_enabled: Flag = .randomized,
     shared_everything_threads_enabled: Flag = .disabled,
-    simd_enabled: Flag = .randomized,
+    simd_enabled: if (wasm_features.simd128) Flag else AlwaysDisabled = .randomized_or_disabled,
     tail_call_enabled: Flag = .randomized,
     table_max_size_required: Flag = .randomized,
     threads_enabled: Flag = .disabled,
@@ -112,3 +120,4 @@ pub const ModuleBuffer = extern struct {
 const std = @import("std");
 const ByteSlice = @import("ffi.zig").ByteSlice;
 const Input = @import("input.zig").Input;
+const wasm_features = @import("wasm_features");
