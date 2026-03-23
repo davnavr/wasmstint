@@ -654,10 +654,13 @@ pub const GlobalType = extern struct {
 
     fn parse(reader: Reader, diag: ParseDiagnostics) Reader.Error!GlobalType {
         const val_type = try ValType.parse(reader, diag);
-        return .{
-            .val_type = val_type,
-            .mut = try reader.readByteTag(GlobalType.Mut, diag, "malformed mutability flag"),
-        };
+        return if (val_type == .v128 and !wasm_features.simd128)
+            diag.writeAll(.parse, "SIMD support disabled")
+        else
+            GlobalType{
+                .val_type = val_type,
+                .mut = try reader.readByteTag(GlobalType.Mut, diag, "malformed mutability flag"),
+            };
     }
 };
 
@@ -2249,6 +2252,7 @@ const Reader = @import("Module/Reader.zig");
 const opcodes = @import("opcodes");
 const validator = @import("Module/validator.zig");
 const coz = @import("coz");
+const wasm_features = @import("wasm_features");
 
 test {
     _ = Reader;

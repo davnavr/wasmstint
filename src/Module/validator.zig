@@ -1212,6 +1212,8 @@ fn validateTailCallSignature(
     }
 }
 
+const no_simd_message = "SIMD support disabled";
+
 pub fn rawValidate(
     allocator: Allocator,
     module: Module,
@@ -1244,6 +1246,11 @@ pub fn rawValidate(
         for (local_groups) |*group| {
             const local_count = try reader.readUleb128(u32, diag, "locals count");
             const local_type = try ValType.parse(reader, diag);
+
+            if (local_type == .v128 and !wasm_features.simd128) {
+                return diag.writeAll(.parse, no_simd_message);
+            }
+
             total_locals_count = std.math.add(u32, total_locals_count, local_count) catch
                 return diag.writeAll(.parse, "too many locals");
             group.* = .{ .type = local_type, .count = local_count };
@@ -2283,12 +2290,18 @@ pub fn rawValidate(
             },
 
             // SIMD proposal (https://github.com/WebAssembly/simd)
-            .@"0xFD" => switch (try reader.readUleb128Enum(
-                u8,
-                opcodes.FDPrefixOpcode,
-                diag,
-                "SIMD opcode",
-            )) {
+            .@"0xFD" => switch (opcode: {
+                if (!wasm_features.simd128) {
+                    return diag.writeAll(.parse, no_simd_message);
+                }
+
+                break :opcode try reader.readUleb128Enum(
+                    u8,
+                    opcodes.FDPrefixOpcode,
+                    diag,
+                    "SIMD opcode",
+                );
+            }) {
                 .@"v128.load" => try validateLoadInstr(
                     &reader,
                     &val_stack,
@@ -2775,4 +2788,5 @@ const Diagnostics = Reader.Diagnostics;
 const ValType = Module.ValType;
 const V128 = @import("../v128.zig").V128;
 const opcodes = @import("opcodes");
+const wasm_features = @import("wasm_features");
 const coz = @import("coz");
