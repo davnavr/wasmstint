@@ -178,7 +178,11 @@ test "call_indirect" {
     }
 }
 
-test "overlong" {
+test "overlong SIMD" {
+    if (!wasm_features.simd128) {
+        return error.SkipZigTest;
+    }
+
     var ctx = Context.init();
     defer ctx.deinit();
     {
@@ -191,6 +195,7 @@ test "overlong" {
             var wip = f.writeCode(&b, testing.allocator, .{});
             try wip.byte(.nop, {});
             try wip.byte(.@"i32.const", 16);
+            // TODO: actually make this overlong, then actually have a test for normal memory OOB
             try wip.simd(.@"v128.load", .{ .memory = mem, .offset = 32 });
             try wip.byte(.drop, {});
             try wip.byte(.end, {});
@@ -205,6 +210,7 @@ test "overlong" {
 const std = @import("std");
 const testing = std.testing;
 const wasmstint = @import("wasmstint");
+const wasm_features = @import("wasm_features");
 const Interpreter = wasmstint.Interpreter;
 const checks = @import("checks.zig");
 const setup = @import("setup.zig");

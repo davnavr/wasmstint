@@ -180,10 +180,13 @@ pub fn build(b: *Build) void {
         ) orelse true,
     };
 
-    const wasm_options = b.addOptions();
-    inline for (comptime std.meta.fieldNames(WasmFeatures)) |field| {
-        wasm_options.addOption(bool, field, @field(wasm_features, field));
-    }
+    const wasm_options = options: {
+        const wasm_options = b.addOptions();
+        inline for (comptime std.meta.fieldNames(WasmFeatures)) |field| {
+            wasm_options.addOption(bool, field, @field(wasm_features, field));
+        }
+        break :options wasm_options.createModule();
+    };
 
     const wasmstint_module = wasmstint: {
         const root_module = b.addModule("wasmstint", .{
@@ -192,11 +195,11 @@ pub fn build(b: *Build) void {
             .optimize = optimize,
             // .link_libc = link_libc,
         });
-        root_module.addOptions("wasm_features", wasm_options);
-        for (&[3]struct { []const u8, *Build.Module }{
+        for (&[4]struct { []const u8, *Build.Module }{
             .{ "coz", coz_module },
             .{ "allocators", allocators_module },
             .{ "opcodes", opcodes_module },
+            .{ "wasm_features", wasm_options },
         }) |info| {
             root_module.addImport(info.@"0", info.@"1");
         }
@@ -471,8 +474,13 @@ pub fn build(b: *Build) void {
             .use_llvm = use_llvm.ifPreferred(),
             .max_rss = byte_size.mib(616),
         });
-        tests.root_module.addImport("wasmstint", wasmstint_module);
-        tests.root_module.addImport("WasmBuilder", wasm_builder_module);
+        for (&[3]struct { []const u8, *Build.Module }{
+            .{ "wasm_features", wasm_options },
+            .{ "wasmstint", wasmstint_module },
+            .{ "WasmBuilder", wasm_builder_module },
+        }) |info| {
+            tests.root_module.addImport(info.@"0", info.@"1");
+        }
 
         const run_tests = &b.addRunArtifact(tests).step;
         run_tests.max_rss = byte_size.mib(50); // arbitrary amount
