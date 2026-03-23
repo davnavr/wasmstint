@@ -3,6 +3,9 @@ pub const Options = struct {
     symbol_prefix: []const u8,
     pic: bool,
     features: []const std.Target.x86.Feature,
+    wasm_features: struct {
+        simd128: bool,
+    },
 };
 
 out: std.Io.File.Writer,

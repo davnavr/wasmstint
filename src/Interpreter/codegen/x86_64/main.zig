@@ -79,7 +79,9 @@ pub fn main(init: std.process.Init.Minimal) noreturn {
     defineReferenceOpcodeHandlers(&asm_writer);
     definePrefixOpcodeHandlers(&asm_writer);
     defineBulkMemoryOpcodeHandlers(&asm_writer);
-    @import("simd.zig").defineAllOpcodes(&asm_writer);
+    if (asm_writer.options.wasm_features.simd128) {
+        @import("simd.zig").defineAllOpcodes(&asm_writer);
+    }
 
     defineOpcodeDispatchTables(&asm_writer);
 
@@ -2539,6 +2541,10 @@ fn definePrefixOpcodeHandlers(as: *AsmWriter) void {
         .{ .@"0xFD", .fd_prefix_dispatch_table },
     }) |info| {
         const opcode, const table = info;
+        if (opcode == .@"0xFD" and !as.options.wasm_features.simd128) {
+            continue;
+        }
+
         var op = as.startFunction(@tagName(opcode), .{ .binding = .local, .alignment = .@"32" });
         as.addOpcodeToLookup(.{ .byte = opcode });
         AsmWriter.OpcodeHandler.writeStartingCfiDirectives(as);
@@ -3749,7 +3755,11 @@ fn defineOpcodeDispatchTables(as: *AsmWriter) void {
         .ReleaseFast, .ReleaseSmall => "invalidByteOpcode",
     };
 
-    inline for (comptime std.enums.values(DispatchTable)) |table| {
+    for (std.enums.values(DispatchTable)) |table| {
+        if (table == .fd_prefix_dispatch_table and !as.options.wasm_features.simd128) {
+            continue;
+        }
+
         const invalid = switch (table) {
             .byte_dispatch_table => "invalidByteOpcode",
             else => invalid_prefixed_opcode,
@@ -3763,7 +3773,11 @@ fn defineOpcodeDispatchTables(as: *AsmWriter) void {
             \\
         , .{ .symbol_prefix = as.options.symbol_prefix, .name = table });
         for (0..size) |i| {
-            table.printOpcodeHandlerAddress(as, invalid, i);
+            switch (table) {
+                inline else => |chosen_table| {
+                    chosen_table.printOpcodeHandlerAddress(as, invalid, i);
+                },
+            }
         }
         as.print(
             \\.size {[symbol_prefix]s}{[name]t}, {[size]d}

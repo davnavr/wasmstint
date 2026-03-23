@@ -53,6 +53,11 @@ const byte_size = struct {
     }
 };
 
+const WasmFeatures = struct {
+    simd128: bool,
+    // tail_call: bool,
+};
+
 fn stringifyZon(b: *Build, object: anytype, capacity: usize) []const u8 {
     var alloc = std.Io.Writer.Allocating.initCapacity(b.allocator, capacity) catch @panic("oom");
     std.zon.stringify.serialize(object, .{ .whitespace = false }, &alloc.writer) catch
@@ -167,6 +172,19 @@ pub fn build(b: *Build) void {
         unit_tests_step.dependOn(tests);
     }
 
+    const wasm_features = WasmFeatures{
+        .simd128 = b.option(
+            bool,
+            "simd128",
+            "Disable or enable support for the 128-bit SIMD proposal",
+        ) orelse true,
+    };
+
+    const wasm_options = b.addOptions();
+    inline for (comptime std.meta.fieldNames(WasmFeatures)) |field| {
+        wasm_options.addOption(bool, field, @field(wasm_features, field));
+    }
+
     const wasmstint_module = wasmstint: {
         const root_module = b.addModule("wasmstint", .{
             .root_source_file = b.path("src/root.zig"),
@@ -174,6 +192,7 @@ pub fn build(b: *Build) void {
             .optimize = optimize,
             // .link_libc = link_libc,
         });
+        root_module.addOptions("wasm_features", wasm_options);
         for (&[3]struct { []const u8, *Build.Module }{
             .{ "coz", coz_module },
             .{ "allocators", allocators_module },
@@ -203,6 +222,7 @@ pub fn build(b: *Build) void {
                 symbol_prefix: []const u8,
                 pic: bool,
                 features: []const std.Target.x86.Feature,
+                wasm_features: WasmFeatures,
             };
 
             const cpu_feature_set = target.result.cpu.features;
@@ -223,6 +243,7 @@ pub fn build(b: *Build) void {
                 .pic = pic orelse true, // Assume PIC if unspecified
                 // .target_triple = options.target.query.zigTriple(b.allocator) catch @panic("oom"),
                 .features = cpu_features.items,
+                .wasm_features = wasm_features,
             };
 
             const codegen_exe = b.addExecutable(.{
@@ -389,6 +410,7 @@ pub fn build(b: *Build) void {
                     triple: []const u8,
                     cpu_features: []const u8,
                 },
+                wasm_features: WasmFeatures,
             };
 
             const options = Options{
@@ -399,6 +421,7 @@ pub fn build(b: *Build) void {
                     .triple = target_triple,
                     .cpu_features = target.query.serializeCpuAlloc(b.allocator) catch @panic("oom"),
                 },
+                .wasm_features = wasm_features,
             };
 
             const run_codegen = b.addRunArtifact(codegen_exe);
@@ -563,19 +586,29 @@ pub fn build(b: *Build) void {
             break :exe runner_exe;
         };
 
-        const wasm_target = b.resolveTargetQuery(.{
-            .cpu_arch = .wasm32,
-            .os_tag = .wasi,
-            .cpu_features_add = std.Target.wasm.featureSet(&.{
-                .simd128,
+        const wasm_target = target: {
+            var features_buf: [7]std.Target.wasm.Feature = undefined;
+            var features = std.ArrayList(std.Target.wasm.Feature).initBuffer(&features_buf);
+            if (wasm_features.simd128) {
+                features.appendAssumeCapacity(.simd128);
+            }
+            // if (wasm_features.tail_call) {
+            features.appendAssumeCapacity(.tail_call);
+            // }
+
+            features.appendSliceAssumeCapacity(&[5]std.Target.wasm.Feature{
                 .bulk_memory,
-                .tail_call,
                 .multivalue,
                 .extended_const,
                 .mutable_globals,
                 .nontrapping_fptoint,
-            }),
-        });
+            });
+            break :target b.resolveTargetQuery(.{
+                .cpu_arch = .wasm32,
+                .os_tag = .wasi,
+                .cpu_features_add = std.Target.wasm.featureSet(features.items),
+            });
+        };
 
         const tests_dir = b.path("tests/wasip1/zig");
         const tests_dir_handle = b.build_root.handle.openDir(
@@ -739,18 +772,32 @@ pub fn build(b: *Build) void {
         };
 
         const test_groups = @import("tests/testsuite.zon");
-        const test_group_names = comptime std.meta.fieldNames(@TypeOf(test_groups));
+        const test_group_names = std.enums.values(std.meta.FieldEnum(@TypeOf(test_groups)));
 
         const test_spec_all_step = b.step("test-spec", "Run all specification tests");
 
-        inline for (test_group_names) |group_name| {
-            const group: []const []const u8 = &@field(test_groups, group_name);
-            const test_spec_group_step = b.step(
-                "test-spec-" ++ group_name,
-                "Run " ++ group_name ++ " specification tests",
-            );
+        for (test_group_names) |group| {
+            const group_tests: []const []const u8 = switch (group) {
+                inline else => |current_group| &@field(test_groups, @tagName(current_group)),
+            };
+            const test_spec_group_step = step: switch (group) {
+                inline else => |current_group| {
+                    const group_name = comptime @tagName(current_group);
+                    break :step b.step(
+                        "test-spec-" ++ group_name,
+                        "Run " ++ group_name ++ " specification tests",
+                    );
+                },
+            };
 
-            for (group) |name| {
+            if (group == .simd and !wasm_features.simd128) {
+                test_spec_group_step.dependOn(
+                    &b.addFail("to run SIMD tests, pass -Dsimd128").step,
+                );
+                continue;
+            }
+
+            for (group_tests) |name| {
                 const wast_name = b.fmt("{s}.wast", .{name});
                 const path = spectest_dep.path(wast_name);
                 test_spec_group_step.dependOn(

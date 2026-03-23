@@ -305,7 +305,9 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         },
         .{},
     );
-    b.dispatch_tables.fd = try b.addDispatchTable("fd_prefix_dispatch_table", 256, .{});
+    if (b.options.wasm_features.simd128) {
+        b.dispatch_tables.fd = try b.addDispatchTable("fd_prefix_dispatch_table", 256, .{});
+    }
 
     {
         const trampoline = try b.addFunction(
@@ -882,14 +884,17 @@ fn buildLlvmModule(b: *Builder) Oom!void {
     try buildFloatOpcodeHandlers(b);
     try buildReferenceOpcodeHandlers(b);
     try buildPrefixOpcodeHandlers(b);
-    try @import("simd.zig").buildOpcodeHandlers(b);
 
-    inline for ([3]type{
-        ByteOpcode,
-        opcodes.FCPrefixOpcode,
-        opcodes.FDPrefixOpcode,
-    }) |OpcodeType| {
+    if (b.options.wasm_features.simd128) {
+        try @import("simd.zig").buildOpcodeHandlers(b);
+    }
+
+    inline for ([2]type{ ByteOpcode, opcodes.FCPrefixOpcode }) |OpcodeType| {
         try b.setDispatchTableInitializer(OpcodeType);
+    }
+
+    if (b.options.wasm_features.simd128) {
+        try b.setDispatchTableInitializer(opcodes.FDPrefixOpcode);
     }
 }
 
@@ -4609,7 +4614,12 @@ fn buildPrefixOpcodeHandlers(b: *Builder) Oom!void {
         .{ .@"0xFC", b.dispatch_tables.fc },
         .{ .@"0xFD", b.dispatch_tables.fd },
     }) |info| {
-        var handler = try b.opcodeHandler(.{ .byte = info.@"0" });
+        const prefix_opcode, const dispatch_table = info;
+        if (prefix_opcode == .@"0xFD" and !b.options.wasm_features.simd128) {
+            continue;
+        }
+
+        var handler = try b.opcodeHandler(.{ .byte = prefix_opcode });
         const wip = &handler.wip;
 
         const jmp_args_template: [10]Value = args: {
@@ -4624,7 +4634,7 @@ fn buildPrefixOpcodeHandlers(b: *Builder) Oom!void {
         };
 
         wip.cursor = .{ .block = try wip.block(0, "Entry") };
-        const table = llvm.Builder.Global.Index.ptrConst(info.@"1", &b.module)
+        const table = llvm.Builder.Global.Index.ptrConst(dispatch_table, &b.module)
             .kind.variable.toValue(&b.module);
 
         var blocks: [6]Function.Block.Index = undefined;

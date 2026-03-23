@@ -6,6 +6,9 @@ pub const Options = struct {
         triple: []const u8,
         cpu_features: []const u8,
     },
+    wasm_features: struct {
+        simd128: bool,
+    },
 };
 
 pub const TargetInfo = struct {

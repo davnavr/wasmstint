@@ -2427,7 +2427,7 @@ const opcode_handlers = struct {
     }
 
     pub const @"0xFC" = fc_prefixed_dispatch.handler;
-    pub const @"0xFD" = fd_prefixed_dispatch.handler;
+    pub const @"0xFD" = if (wasm_features.simd128) fd_prefixed_dispatch.handler else invalid;
     pub const @"i32.trunc_sat_f32_s" = i32_opcode_handlers.trunc_sat_f32_s;
     pub const @"i32.trunc_sat_f32_u" = i32_opcode_handlers.trunc_sat_f32_u;
     pub const @"i32.trunc_sat_f64_s" = i32_opcode_handlers.trunc_sat_f64_s;
@@ -2785,6 +2785,7 @@ pub const byte_dispatch_table = common.dispatchTable(
 const std = @import("std");
 const CallingConvention = std.builtin.CallingConvention;
 const builtin = @import("builtin");
+const wasm_features = @import("wasm_features");
 const coz = @import("coz");
 
 const opcodes = @import("opcodes");
