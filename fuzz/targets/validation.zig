@@ -58,10 +58,10 @@ pub fn testOne(
         }
 
         const inner = &code.inner;
-        if (@intFromPtr(module.inner.raw.code_section) >= @intFromPtr(inner.instructions_start)) {
+        if (@intFromPtr(module.inner.code_section) >= @intFromPtr(inner.instructions_start)) {
             std.debug.panic(
                 "instruction start {*} out of bounds of code section {*}",
-                .{ inner.instructions_start, module.inner.raw.code_section },
+                .{ inner.instructions_start, module.inner.code_section },
             );
         }
 
