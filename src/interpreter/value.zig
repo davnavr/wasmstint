@@ -204,6 +204,8 @@ pub const TaggedValue = union(enum) {
 
 const std = @import("std");
 const Writer = std.Io.Writer;
-const Module = @import("../Module.zig");
-const V128 = @import("../v128.zig").V128;
-const runtime = @import("../runtime.zig");
+
+const wasmstint = @import("wasmstint");
+const Module = wasmstint.Module;
+const V128 = wasmstint.V128;
+const runtime = wasmstint.runtime;

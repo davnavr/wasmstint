@@ -4,10 +4,11 @@
 
 pub const Module = @import("Module.zig");
 pub const runtime = @import("runtime.zig");
-pub const Interpreter = @import("Interpreter.zig");
+pub const Interpreter = @import("interpreter").Interpreter;
 
 pub const pointer = @import("pointer.zig");
 pub const V128 = @import("v128.zig").V128;
+pub const round = @import("round.zig");
 
 pub fn waitForDebugger(io: std.Io) void {
     const os = @import("builtin").target.os;
@@ -43,6 +44,5 @@ const std = @import("std");
 
 test {
     _ = Module;
-    _ = Interpreter;
     _ = pointer;
 }

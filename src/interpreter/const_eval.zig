@@ -116,8 +116,9 @@ pub fn calculate(
 
 const std = @import("std");
 const builtin = @import("builtin");
-const Module = @import("../Module.zig");
 const Value = @import("value.zig").Value;
 const Instr = @import("Instr.zig");
-const ModuleInst = @import("../runtime/module_inst.zig").ModuleInst;
 const opcodes = @import("opcodes");
+const wasmstint = @import("wasmstint");
+const Module = wasmstint.Module;
+const ModuleInst = wasmstint.runtime.ModuleInst;

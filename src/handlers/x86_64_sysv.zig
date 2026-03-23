@@ -1076,13 +1076,15 @@ const std = @import("std");
 const builtin = @import("builtin");
 const opcodes = @import("opcodes");
 
-const Module = @import("../../Module.zig");
-const Interpreter = @import("../../Interpreter.zig");
-const runtime = @import("../../runtime.zig");
-const round = @import("../../round.zig");
+const wasmstint = @import("wasmstint");
+const Module = wasmstint.Module;
+const runtime = wasmstint.runtime;
+const round = wasmstint.round;
 
-const Instr = @import("../Instr.zig");
-const Stack = @import("../Stack.zig");
+const interpreter = @import("interpreter");
+const Interpreter = interpreter.Interpreter;
+const Instr = interpreter.Instr;
+const Stack = interpreter.Stack;
 
 const common = @import("../handlers.zig");
 const Transition = common.Transition;

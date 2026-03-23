@@ -147,4 +147,4 @@ pub fn toHostCode(trap: *const Trap) ?u31 {
 }
 
 const std = @import("std");
-const Module = @import("../Module.zig");
+const Module = @import("wasmstint").Module;

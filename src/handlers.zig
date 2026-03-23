@@ -1,3 +1,7 @@
+//! Internal API.
+//!
+//! Provides the implementation for WebAssembly opcodes.
+
 const portable = @import("handlers/portable.zig");
 const x86_64_sysv = @import("handlers/x86_64_sysv.zig");
 const llvm_ir = @import("handlers/llvm_ir.zig");
@@ -531,15 +535,17 @@ const std = @import("std");
 const Oom = std.mem.Allocator.Error;
 const builtin = @import("builtin");
 const coz = @import("coz");
-
-const Instr = @import("Instr.zig");
-const Interpreter = @import("../Interpreter.zig");
-const Stack = @import("Stack.zig");
-const Trap = @import("Trap.zig");
-const Value = @import("value.zig").Value;
-const Version = @import("version.zig").Version;
-
 const opcodes = @import("opcodes");
-const runtime = @import("../runtime.zig");
-const Module = @import("../Module.zig");
-const SideTable = @import("side_table.zig").SideTable;
+
+const interpreter = @import("interpreter");
+const Instr = interpreter.Instr;
+const Interpreter = interpreter.Interpreter;
+const Trap = Interpreter.Trap;
+const Stack = interpreter.Stack;
+const Value = interpreter.Value;
+const Version = interpreter.Version;
+const SideTable = interpreter.SideTable;
+
+const wasmstint = @import("wasmstint");
+const runtime = wasmstint.runtime;
+const Module = wasmstint.Module;

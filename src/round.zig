@@ -1,5 +1,4 @@
-//! Floating-point rounding operations following WebAssembly semantics.
-
+/// Floating-point rounding operations following WebAssembly semantics.
 pub fn operations(comptime F: type) type {
     return struct {
         const is_vector = switch (@typeInfo(F)) {

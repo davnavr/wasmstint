@@ -4,16 +4,8 @@
 
 // TODO: Rename this to `Computation` or `Execution` or `Thread`
 
-const Value = @import("Interpreter/value.zig").Value;
-const Stack = @import("Interpreter/Stack.zig");
-const SideTable = @import("Interpreter/side_table.zig").SideTable;
-const Instr = @import("Interpreter/Instr.zig");
-const handlers = @import("Interpreter/handlers.zig");
-const instantiation = @import("Interpreter/instantiation.zig");
-const Version = @import("Interpreter/version.zig").Version;
-
 pub const TaggedValue = Value.Tagged;
-pub const Trap = @import("Interpreter/Trap.zig");
+pub const Trap = @import("Trap.zig");
 
 stack: Stack,
 /// Must not be accessed from within opcode handlers.
@@ -891,10 +883,19 @@ const std = @import("std");
 const builtin = @import("builtin");
 const coz = @import("coz");
 const Allocator = std.mem.Allocator;
-const Module = @import("Module.zig");
-const runtime = @import("runtime.zig");
+const handlers = @import("handlers");
+
+const wasmstint = @import("wasmstint");
+const Module = wasmstint.Module;
+const runtime = wasmstint.runtime;
+
+const Value = @import("value.zig").Value;
+const Stack = @import("Stack.zig");
+const SideTable = @import("side_table.zig").SideTable;
+const Instr = @import("Instr.zig");
+const instantiation = @import("instantiation.zig");
+const Version = @import("version.zig").Version;
 
 test {
     _ = Instr;
-    _ = handlers;
 }

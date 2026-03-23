@@ -195,17 +195,40 @@ pub fn build(b: *Build) void {
             .optimize = optimize,
             // .link_libc = link_libc,
         });
-        for (&[4]struct { []const u8, *Build.Module }{
+        const handlers_module = b.createModule(.{
+            .root_source_file = b.path("src/handlers.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const interpreter_module = b.createModule(.{
+            .root_source_file = b.path("src/interpreter.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        interpreter_module.addImport("handlers", handlers_module);
+
+        const module_options = b.addOptions();
+        const module_options_import = module_options.createModule();
+
+        for (&[5]struct { []const u8, *Build.Module }{
             .{ "coz", coz_module },
             .{ "allocators", allocators_module },
             .{ "opcodes", opcodes_module },
             .{ "wasm_features", wasm_options },
+            .{ "options", module_options_import },
         }) |info| {
-            root_module.addImport(info.@"0", info.@"1");
+            for (&[3]*Build.Module{ root_module, handlers_module, interpreter_module }) |m| {
+                m.addImport(info.@"0", info.@"1");
+            }
         }
 
-        const module_options = b.addOptions();
-        root_module.addOptions("options", module_options);
+        for (&[2]*Build.Module{ handlers_module, interpreter_module }) |m| {
+            m.addImport("wasmstint", root_module);
+        }
+
+        for (&[2]*Build.Module{ root_module, handlers_module }) |m| {
+            m.addImport("interpreter", interpreter_module);
+        }
 
         const interpreter_backend = b.option(
             InterpreterBackend,
@@ -215,7 +238,7 @@ pub fn build(b: *Build) void {
         module_options.addOption(InterpreterBackend, "interpreter_backend", interpreter_backend);
 
         const enum_set_module = b.createModule(.{
-            .root_source_file = b.path("src/Interpreter/codegen/enum_set.zig"),
+            .root_source_file = b.path("src/codegen/enum_set.zig"),
         });
 
         if (interpreter_backend == .assembly and target.result.cpu.arch == .x86_64) {
@@ -252,7 +275,7 @@ pub fn build(b: *Build) void {
             const codegen_exe = b.addExecutable(.{
                 .name = "wasmstint-codegen-x86_64_sysv",
                 .root_module = b.createModule(.{
-                    .root_source_file = b.path("src/Interpreter/codegen/x86_64/main.zig"),
+                    .root_source_file = b.path("src/codegen/x86_64/main.zig"),
                     .target = b.graph.host,
                     .optimize = .Debug,
                     .single_threaded = true,
@@ -267,7 +290,7 @@ pub fn build(b: *Build) void {
             const run_codegen = b.addRunArtifact(codegen_exe);
             run_codegen.step.max_rss = byte_size.mib(3);
             run_codegen.addArg(stringifyZon(b, options, 512));
-            root_module.addAssemblyFile(run_codegen.addOutputFileArg("x86_64_sysv.s"));
+            handlers_module.addAssemblyFile(run_codegen.addOutputFileArg("x86_64_sysv.s"));
             // root_module.addAnonymousImport("asm_generated", .{
             //     .root_source_file = run_codegen.addOutputFileArg("x86_64_sys_decls.zig"),
             //     .target = options.target,
@@ -279,9 +302,7 @@ pub fn build(b: *Build) void {
             const target_info_bc = b.addLibrary(.{
                 .name = "target_info",
                 .root_module = b.createModule(.{
-                    .root_source_file = b.path(
-                        "src/Interpreter/codegen/llvm/target_info_source.zig",
-                    ),
+                    .root_source_file = b.path("src/codegen/llvm/target_info_source.zig"),
                     .target = target,
                     .optimize = .ReleaseFast,
                     .strip = true,
@@ -293,9 +314,7 @@ pub fn build(b: *Build) void {
                 const extract_target_info_exe = b.addExecutable(.{
                     .name = "wasmstint-codegen-llvm-extract-target-info",
                     .root_module = b.createModule(.{
-                        .root_source_file = b.path(
-                            "src/Interpreter/codegen/llvm/extract_target_info.zig",
-                        ),
+                        .root_source_file = b.path("src/codegen/llvm/extract_target_info.zig"),
                         .target = b.graph.host,
                         .optimize = .Debug,
                         .single_threaded = true,
@@ -314,9 +333,7 @@ pub fn build(b: *Build) void {
                 const sample_intrinsics_exe = b.addExecutable(.{
                     .name = "wasmstint-codegen-llvm-sample-intrinsics",
                     .root_module = b.createModule(.{
-                        .root_source_file = b.path(
-                            "src/Interpreter/codegen/llvm/sample_intrinsics.zig",
-                        ),
+                        .root_source_file = b.path("src/codegen/llvm/sample_intrinsics.zig"),
                         .target = b.graph.host,
                         .optimize = .Debug,
                         .single_threaded = true,
@@ -366,9 +383,7 @@ pub fn build(b: *Build) void {
                 const intrinsic_detection_exe = b.addExecutable(.{
                     .name = "wasmstint-codegen-llvm-intrinsic-detection",
                     .root_module = b.createModule(.{
-                        .root_source_file = b.path(
-                            "src/Interpreter/codegen/llvm/intrinsic_detection.zig",
-                        ),
+                        .root_source_file = b.path("src/codegen/llvm/intrinsic_detection.zig"),
                         .target = b.graph.host,
                         .optimize = .Debug,
                         .single_threaded = true,
@@ -384,14 +399,17 @@ pub fn build(b: *Build) void {
                     .basename = "detected_intrinsics.zon",
                 });
             };
-            root_module.addAnonymousImport("detected_intrinsics", .{
-                .root_source_file = detected_intrinsics,
-            });
+
+            for (&[2]*Build.Module{ root_module, handlers_module }) |m| {
+                m.addAnonymousImport("detected_intrinsics", .{
+                    .root_source_file = detected_intrinsics,
+                });
+            }
 
             const codegen_exe = b.addExecutable(.{
                 .name = "wasmstint-codegen-llvm",
                 .root_module = b.createModule(.{
-                    .root_source_file = b.path("src/Interpreter/codegen/llvm/main.zig"),
+                    .root_source_file = b.path("src/codegen/llvm/main.zig"),
                     .target = b.graph.host,
                     .optimize = .Debug,
                     .single_threaded = true,
@@ -432,7 +450,7 @@ pub fn build(b: *Build) void {
             run_codegen.addArg(stringifyZon(b, options, 1024));
             run_codegen.addFileArg(target_info);
             run_codegen.addFileArg(detected_intrinsics);
-            root_module.addObjectFile(run_codegen.addOutputFileArg("wasmstint-interpreter.bc"));
+            handlers_module.addObjectFile(run_codegen.addOutputFileArg("wasmstint-interpreter.bc"));
 
             module_options.addOption([]const u8, "symbol_prefix", symbol_prefix);
         }
@@ -446,7 +464,7 @@ pub fn build(b: *Build) void {
                     .optimize = optimize,
                 }),
                 .use_llvm = use_llvm.ifPreferred(),
-                .max_rss = byte_size.mib(398),
+                .max_rss = byte_size.mib(170), // arbitrary amount
             });
             for (&[3]struct { []const u8, *Build.Module }{
                 .{ "coz", coz_module },
@@ -458,6 +476,30 @@ pub fn build(b: *Build) void {
 
             const run_tests = &b.addRunArtifact(tests).step;
             run_tests.max_rss = byte_size.mib(43);
+            unit_tests_step.dependOn(run_tests);
+        }
+        {
+            const tests = b.addTest(.{
+                .name = "wasmstint.handlers",
+                .root_module = handlers_module,
+                .use_llvm = use_llvm.ifPreferred(),
+                .max_rss = byte_size.mib(150), // arbitrary amount
+            });
+
+            const run_tests = &b.addRunArtifact(tests).step;
+            run_tests.max_rss = byte_size.mib(20); // arbitrary amount
+            unit_tests_step.dependOn(run_tests);
+        }
+        {
+            const tests = b.addTest(.{
+                .name = "wasmstint.interpreter",
+                .root_module = interpreter_module,
+                .use_llvm = use_llvm.ifPreferred(),
+                .max_rss = byte_size.mib(150), // arbitrary amount
+            });
+
+            const run_tests = &b.addRunArtifact(tests).step;
+            run_tests.max_rss = byte_size.mib(20); // arbitrary amount
             unit_tests_step.dependOn(run_tests);
         }
 

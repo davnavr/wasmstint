@@ -1311,7 +1311,7 @@ fn floatOpcodeHandlers(comptime F: type) type {
         const Ints = @Vector(interpretation.laneCount(), I);
 
         const operators = struct {
-            const rounding = @import("../../../round.zig").operations(Floats);
+            const rounding = wasmstint.round.operations(Floats);
 
             const ceil = rounding.ceil;
             const floor = rounding.floor;
@@ -1460,12 +1460,11 @@ pub const @"f64x2.pmin" = f64x2_arith_ops.pmin;
 pub const @"f64x2.pmax" = f64x2_arith_ops.pmax;
 
 const std = @import("std");
-
-const runtime = @import("../../../runtime.zig");
-const Interpreter = @import("../../../Interpreter.zig");
-const Fuel = Interpreter.Fuel;
 const FDPrefixOpcode = @import("opcodes").FDPrefixOpcode;
-const V128 = @import("../../../v128.zig").V128;
+
+const wasmstint = @import("wasmstint");
+const runtime = wasmstint.runtime;
+const V128 = wasmstint.V128;
 
 const portable = @import("../portable.zig");
 const ohcc = portable.ohcc;
@@ -1480,6 +1479,10 @@ const Eip = handlers.Eip;
 const Sp = handlers.Sp;
 const Stp = handlers.Stp;
 const Transition = handlers.Transition;
-const Instr = @import("../../Instr.zig");
-const Stack = @import("../../Stack.zig");
-const Value = @import("../../value.zig").Value;
+
+const interpreter = @import("interpreter");
+const Interpreter = interpreter.Interpreter;
+const Fuel = Interpreter.Fuel;
+const Instr = interpreter.Instr;
+const Stack = interpreter.Stack;
+const Value = interpreter.Value;

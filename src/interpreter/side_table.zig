@@ -138,6 +138,7 @@ pub const SideTable = extern struct {
 
 const std = @import("std");
 const builtin = @import("builtin");
-const Module = @import("../Module.zig");
+const wasmstint = @import("wasmstint");
+const Module = wasmstint.Module;
 const Stack = @import("Stack.zig");
 const Instr = @import("Instr.zig");

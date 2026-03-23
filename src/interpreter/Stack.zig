@@ -1097,7 +1097,9 @@ const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 const Value = @import("value.zig").Value;
 const SideTable = @import("side_table.zig").SideTable;
-const runtime = @import("../runtime.zig");
+
+const wasmstint = @import("wasmstint");
+const runtime = wasmstint.runtime;
 const FuncInst = runtime.FuncInst;
-const Module = @import("../Module.zig");
+const Module = wasmstint.Module;
 const coz = @import("coz");

@@ -313,10 +313,12 @@ pub const TableInst = extern struct {
 
 const std = @import("std");
 const builtin = @import("builtin");
-const const_eval = @import("../Interpreter/const_eval.zig");
 const Oom = std.mem.Allocator.Error;
 const FuncRef = @import("value.zig").FuncRef;
 const ExternAddr = @import("value.zig").ExternAddr;
 const Module = @import("../Module.zig");
 const ModuleInst = @import("module_inst.zig").ModuleInst;
-const InterpreterValue = @import("../Interpreter/value.zig").Value;
+
+const interpreter = @import("interpreter");
+const const_eval = interpreter.const_eval;
+const InterpreterValue = interpreter.Value;

@@ -1119,7 +1119,7 @@ fn floatOpcodeHandlers(comptime F: type) type {
                 return -z;
             }
 
-            const rounding = @import("../../round.zig").operations(F);
+            const rounding = wasmstint.round.operations(F);
 
             const ceil = rounding.ceil;
             const floor = rounding.floor;
@@ -2787,18 +2787,20 @@ const CallingConvention = std.builtin.CallingConvention;
 const builtin = @import("builtin");
 const wasm_features = @import("wasm_features");
 const coz = @import("coz");
-
 const opcodes = @import("opcodes");
-const Module = @import("../../Module.zig");
-const runtime = @import("../../runtime.zig");
 
-const Instr = @import("../Instr.zig");
-const Interpreter = @import("../../Interpreter.zig");
+const wasmstint = @import("wasmstint");
+const Module = wasmstint.Module;
+const runtime = wasmstint.runtime;
+
+const interpreter = @import("interpreter");
+const Instr = interpreter.Instr;
+const Interpreter = interpreter.Interpreter;
+const Trap = Interpreter.Trap;
 const Fuel = Interpreter.Fuel;
-const SideTable = @import("../side_table.zig").SideTable;
-const Stack = @import("../Stack.zig");
-const Trap = @import("../Trap.zig");
-const Value = @import("../value.zig").Value;
+const SideTable = interpreter.SideTable;
+const Stack = interpreter.Stack;
+const Value = interpreter.Value;
 
 const common = @import("../handlers.zig");
 const Ip = common.Ip;

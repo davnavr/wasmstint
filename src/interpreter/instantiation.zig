@@ -101,6 +101,6 @@ pub fn setupModule(
 
 const std = @import("std");
 const Trap = @import("Trap.zig");
-const runtime = @import("../runtime.zig");
+const runtime = @import("wasmstint").runtime;
 const Value = @import("value.zig").Value;
 const const_eval = @import("const_eval.zig");

@@ -212,11 +212,13 @@ pub inline fn skipBlockType(reader: *Instr) void {
 const std = @import("std");
 const builtin = @import("builtin");
 const coz = @import("coz");
-const Module = @import("../Module.zig");
-const Interpreter = @import("../Interpreter.zig");
+const Interpreter = @import("Interpreter.zig");
 const Fuel = Interpreter.Fuel;
 const Stack = @import("Stack.zig");
 const Value = @import("value.zig").Value;
 const SideTable = @import("side_table.zig").SideTable;
-const handlers = @import("handlers.zig");
-const runtime = @import("../runtime.zig");
+const handlers = @import("handlers");
+
+const wasmstint = @import("wasmstint");
+const Module = wasmstint.Module;
+const runtime = wasmstint.runtime;
