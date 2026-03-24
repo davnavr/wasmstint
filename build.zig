@@ -168,7 +168,7 @@ pub fn build(b: *Build) void {
             .use_llvm = use_llvm.ifPreferred(),
             .max_rss = byte_size.mib(452),
         })).step;
-        tests.max_rss = byte_size.mib(20); // arbitrary
+        tests.max_rss = byte_size.mib(20); // arbitrary amount
         unit_tests_step.dependOn(tests);
     }
 
@@ -416,7 +416,7 @@ pub fn build(b: *Build) void {
                     .pic = false,
                     // .code_model = .small, // Forces usage of LLVM backend
                 }),
-                .max_rss = byte_size.mib(213), // arbitrary amount
+                .max_rss = byte_size.mib(213),
             });
             codegen_exe.root_module.addImport("opcodes", opcodes_module);
             codegen_exe.root_module.addImport("enum_set", enum_set_module);
@@ -446,7 +446,7 @@ pub fn build(b: *Build) void {
             };
 
             const run_codegen = b.addRunArtifact(codegen_exe);
-            run_codegen.step.max_rss = byte_size.mib(3); // arbitrary
+            run_codegen.step.max_rss = byte_size.mib(3); // arbitrary amount
             run_codegen.addArg(stringifyZon(b, options, 1024));
             run_codegen.addFileArg(target_info);
             run_codegen.addFileArg(detected_intrinsics);
@@ -465,7 +465,7 @@ pub fn build(b: *Build) void {
                 .name = "wasmstint",
                 .root_module = test_wasmstint_module,
                 .use_llvm = use_llvm.ifPreferred(),
-                .max_rss = byte_size.mib(170), // arbitrary amount
+                .max_rss = byte_size.mib(456),
             });
             for (&[3]struct { []const u8, *Build.Module }{
                 .{ "coz", coz_module },
@@ -488,7 +488,7 @@ pub fn build(b: *Build) void {
                     .optimize = optimize,
                 }),
                 .use_llvm = use_llvm.ifPreferred(),
-                .max_rss = byte_size.mib(150), // arbitrary amount
+                .max_rss = byte_size.mib(457),
             });
             for (&[2]struct { []const u8, *Build.Module }{
                 .{ "opcodes", opcodes_module },
@@ -510,7 +510,7 @@ pub fn build(b: *Build) void {
                     .optimize = optimize,
                 }),
                 .use_llvm = use_llvm.ifPreferred(),
-                .max_rss = byte_size.mib(150), // arbitrary amount
+                .max_rss = byte_size.mib(464),
             });
             for (&[2]struct { []const u8, *Build.Module }{
                 .{ "coz", coz_module },
@@ -535,7 +535,7 @@ pub fn build(b: *Build) void {
                 .optimize = optimize,
             }),
             .use_llvm = use_llvm.ifPreferred(),
-            .max_rss = byte_size.mib(616),
+            .max_rss = byte_size.mib(634),
         });
         for (&[3]struct { []const u8, *Build.Module }{
             .{ "wasm_features", wasm_options },
@@ -802,7 +802,7 @@ pub fn build(b: *Build) void {
                     .optimize = .ReleaseFast,
                 }),
                 .use_llvm = true,
-                .max_rss = byte_size.mib(500), // arbitrary value
+                .max_rss = byte_size.mib(500), // arbitrary amount
             });
             wabt_lib.root_module.addConfigHeader(config_header);
             wabt_lib.root_module.addIncludePath(wabt_dep.path("include"));
@@ -927,12 +927,13 @@ pub fn build(b: *Build) void {
     {
         {
             const ffi_test = b.addTest(.{
+                .name = "fuzz-ffi",
                 .root_module = b.createModule(.{
                     .root_source_file = b.path("fuzz/ffi/src/ffi.zig"),
                     .target = target,
                     .optimize = optimize,
                 }),
-                .max_rss = byte_size.mib(376),
+                .max_rss = byte_size.mib(457),
                 .use_llvm = use_llvm.ifPreferred(),
             });
             const ffi_tests_run = &b.addRunArtifact(ffi_test).step;
@@ -1055,7 +1056,7 @@ pub fn build(b: *Build) void {
                 );
             }
 
-            afl_clang_lto.step.max_rss = byte_size.mib(268); // arbitrary amount
+            afl_clang_lto.step.max_rss = byte_size.mib(268);
 
             afl_clang_lto.addArg("-o");
             const afl_output_exe: []const u8 = b.fmt("{s}-afl", .{fuzz_target_name});
