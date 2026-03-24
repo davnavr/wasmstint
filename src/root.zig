@@ -6,12 +6,18 @@ pub const Module = @import("Module.zig");
 pub const runtime = @import("runtime.zig");
 pub const Interpreter = @import("interpreter").Interpreter;
 
+comptime {
+    if (!builtin.is_test) {
+        _ = @import("interpreter"); // ensure inclusion of `@export`ed functions.
+    }
+}
+
 pub const pointer = @import("pointer.zig");
 pub const V128 = @import("v128.zig").V128;
 pub const round = @import("round.zig");
 
 pub fn waitForDebugger(io: std.Io) void {
-    const os = @import("builtin").target.os;
+    const os = builtin.target.os;
     if (os.tag == .windows) {
         std.debug.print("Attach debugger to process {}\n", .{std.os.windows.GetCurrentProcessId()});
 
@@ -41,6 +47,7 @@ comptime {
 }
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 test {
     _ = Module;

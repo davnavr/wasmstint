@@ -9,6 +9,12 @@ pub const Stack = @import("interpreter/Stack.zig");
 pub const Value = @import("interpreter/value.zig").Value;
 pub const Version = @import("interpreter/version.zig").Version;
 
+comptime {
+    if (!@import("builtin").is_test) {
+        _ = @import("handlers"); // ensure inclusion of `@export`ed functions.
+    }
+}
+
 test {
     _ = Interpreter;
 }
