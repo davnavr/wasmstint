@@ -655,7 +655,7 @@ pub const GlobalType = extern struct {
     fn parse(reader: Reader, diag: ParseDiagnostics) Reader.Error!GlobalType {
         const val_type = try ValType.parse(reader, diag);
         return if (val_type == .v128 and !wasm_features.simd128)
-            diag.writeAll(.parse, "SIMD support disabled")
+            diag.writeAll(.parse, "invalid global type, " ++ Reader.no_simd_message)
         else
             GlobalType{
                 .val_type = val_type,
@@ -1284,6 +1284,12 @@ fn parseTypeSec(
         const param_types = try val_types.addManyAsSlice(arena.allocator(), param_count);
         for (param_types) |*ty| {
             ty.* = try ValType.parse(type_reader, diag);
+            if (ty.* == .v128 and !wasm_features.simd128) {
+                return diag.writeAll(
+                    .parse,
+                    "expected valid param type, " ++ Reader.no_simd_message,
+                );
+            }
         }
 
         const result_count = try type_reader.readUleb128Casted(u32, u16, diag, "result type count");
@@ -1294,6 +1300,12 @@ fn parseTypeSec(
         const result_types = val_types.addManyAsSliceAssumeCapacity(result_count);
         for (result_types) |*ty| {
             ty.* = try ValType.parse(type_reader, diag);
+            if (ty.* == .v128 and !wasm_features.simd128) {
+                return diag.writeAll(
+                    .parse,
+                    "expected valid result type, " ++ Reader.no_simd_message,
+                );
+            }
         }
 
         func_type.* = FuncType{

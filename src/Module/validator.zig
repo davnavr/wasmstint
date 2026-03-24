@@ -1212,8 +1212,6 @@ fn validateTailCallSignature(
     }
 }
 
-const no_simd_message = "SIMD support disabled";
-
 pub fn rawValidate(
     allocator: Allocator,
     module: Module,
@@ -1248,7 +1246,10 @@ pub fn rawValidate(
             const local_type = try ValType.parse(reader, diag);
 
             if (local_type == .v128 and !wasm_features.simd128) {
-                return diag.writeAll(.parse, no_simd_message);
+                return diag.writeAll(
+                    .parse,
+                    "expected valid local type, " ++ Reader.no_simd_message,
+                );
             }
 
             total_locals_count = std.math.add(u32, total_locals_count, local_count) catch
@@ -2292,7 +2293,10 @@ pub fn rawValidate(
             // SIMD proposal (https://github.com/WebAssembly/simd)
             .@"0xFD" => switch (opcode: {
                 if (!wasm_features.simd128) {
-                    return diag.writeAll(.parse, no_simd_message);
+                    return diag.writeAll(
+                        .parse,
+                        "unexpected opcode: 0xFD, " ++ Reader.no_simd_message,
+                    );
                 }
 
                 break :opcode try reader.readUleb128Enum(

@@ -63,6 +63,8 @@ pub const Diagnostics = struct {
     }
 };
 
+pub const no_simd_message = "SIMD support disabled";
+
 pub fn init(bytes: *[]const u8) Reader {
     return .{ .bytes = bytes };
 }
