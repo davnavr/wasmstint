@@ -6,6 +6,8 @@ size: std.mem.Alignment,
 const LinearMemoryAccess = @This();
 
 /// Pointer to memory base is stored in `r15`, while offset into to memory is stored in `r13d`.
+///
+/// It is assumed that `VIP` initially refers to the first byte after the opcode.
 pub fn start(
     as: *AsmWriter,
     /// Offset from value stack pointer to `i32` memory offset.
@@ -14,6 +16,7 @@ pub fn start(
 ) LinearMemoryAccess {
     std.debug.assert(offset % 16 == 0);
     const oob = as.label(&.{"oob"});
+    as.printInstrs(&.{"push {[vip]f} # save VIP to first byte after opcode"}, .{ .vip = Gpr.vip });
     const align_skip = SkipUlebIdx.fastPath(as, .r13, "align");
     const offset_decode = DecodeUlebIdx.fastPath(as, .r13, .{ .r14, .r15 }, "offset");
     as.printInstrs(&.{
@@ -24,6 +27,7 @@ pub fn start(
         "lea r11, [r13 + {[access_size]d}]",
         "cmp r11, qword ptr [r14 + {[size_field_off]d}]",
         "ja {[oob]f} # exceeded memory bounds",
+        "pop r11 # reset stack pointer, pops VIP to first byte after opcode ",
         "# Actually perform the access",
     }, .{
         .mems = Gpr.mems,
@@ -50,7 +54,7 @@ pub fn end(access: *LinearMemoryAccess, op: *AsmWriter.OpcodeHandler, as: *AsmWr
     as.write(".p2align 4\n");
     access.oob.place(as);
     as.printInstrs(&.{
-        "lea {[param_0]f}, [{[vip]f} - 1] #0 VIP",
+        "pop rdi #0 VIP to first byte",
         "#1 VSP in rsi",
         "mov {[param_2]f}, {[eip]f} #2 EIP",
         "mov {[param_3]f}, {[stp]f} #3 STP",
@@ -60,8 +64,6 @@ pub fn end(access: *LinearMemoryAccess, op: *AsmWriter.OpcodeHandler, as: *AsmWr
         "mov {[param_7]f}, {[size]d} #7 size",
         "mov {[param_8]f}, r14 #8 *MemInst",
     }, .{
-        .param_0 = SystemVParam{ .index = 0 },
-        .vip = Gpr.vip,
         .param_2 = SystemVParam{ .index = 2 },
         .eip = Gpr.eip,
         .param_3 = SystemVParam{ .index = 3 },
@@ -71,6 +73,25 @@ pub fn end(access: *LinearMemoryAccess, op: *AsmWriter.OpcodeHandler, as: *AsmWr
         .size = @intFromEnum(access.size),
         .param_7 = SystemVParam{ .index = 7, .size = .dword },
         .param_8 = SystemVParam{ .index = 8 },
+    });
+    switch (op.opcode) {
+        .byte => {},
+        inline .fc, .fd => |prefixed| {
+            as.printInstrs(&.{"mov eax, {[opcode]d} # opcode {[opcode_name]t}"}, .{
+                .opcode = @shlExact(@as(u32, @intFromEnum(prefixed)), 8),
+                .opcode_name = prefixed,
+            });
+        },
+    }
+    const opcode_byte = op.opcode.prefixByte();
+    as.printInstrs(&.{"{[instr]s} eax, 0x{[byte]X:0>2} # opcode byte {[byte_name]t}"}, .{
+        .instr = if (op.opcode == .byte) "mov" else "or",
+        .byte = @intFromEnum(opcode_byte),
+        .byte_name = opcode_byte,
+    });
+
+    as.printInstrs(&.{"mov {[param_9]f}, eax # opcode info"}, .{
+        .param_9 = SystemVParam{ .index = 9, .size = .dword },
     });
     as.popSystemVSavedRegisters();
     as.printInstrs(&.{

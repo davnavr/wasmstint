@@ -885,7 +885,7 @@ fn trapInvalidConversionToInteger(
 }
 
 fn trapMemoryAccessOutOfBounds(
-    trap_ip: Ip, // rdi
+    vip: Ip, // rdi
     sp: Sp, // stays in rsi
     eip: Eip, // r10 -> rdx
     stp: Stp, // rbx -> rcx
@@ -895,10 +895,12 @@ fn trapMemoryAccessOutOfBounds(
     address: u32, // rbp + 16
     size: u8, // rbp + 24
     memory: *const runtime.MemInst, // rbp + 32
+    opcode_info: u32,
 ) callconv(sysvcc) Transition {
     @branchHint(.cold);
+    const trap_opcode: common.TrapOpcode = @bitCast(@as(usize, opcode_info));
     return Transition.trapAt(
-        trap_ip,
+        common.calculateTrapIp(vip, trap_opcode.prefixOf()),
         eip,
         sp,
         stp,

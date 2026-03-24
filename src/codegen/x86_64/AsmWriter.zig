@@ -444,6 +444,7 @@ pub fn writeInstrs(as: *AsmWriter, lines: []const []const u8) void {
 pub const OpcodeHandler = struct {
     function: Function,
     out_of_fuel: Label,
+    opcode: Opcode,
 
     pub fn writeStartingCfiDirectives(as: *AsmWriter) void {
         as.writeInstrs(&.{
@@ -580,6 +581,14 @@ pub const Opcode = union(enum) {
         );
     }
 
+    pub fn prefixByte(opcode: Opcode) opcodes.ByteOpcode {
+        return switch (opcode) {
+            .byte => |b| b,
+            .fc => .@"0xFC",
+            .fd => .@"0xFD",
+        };
+    }
+
     pub fn name(opcode: Opcode) []const u8 {
         return switch (opcode) {
             .byte => |byte| if (byte != .@"select t") @tagName(byte) else "select_t",
@@ -614,7 +623,7 @@ pub fn defineOpcodeHandler(
     });
     as.addOpcodeToLookup(opcode);
     OpcodeHandler.writeStartingCfiDirectives(as);
-    return .{ .function = func, .out_of_fuel = as.label(&.{"out_of_fuel"}) };
+    return .{ .function = func, .out_of_fuel = as.label(&.{"out_of_fuel"}), .opcode = opcode };
 }
 
 pub fn pushSystemVSavedRegisters(as: *AsmWriter) void {

@@ -102,6 +102,19 @@ pub const OpcodePrefix = union(enum(u8)) {
     fd: opcodes.FDPrefixOpcode = 0xFD,
 };
 
+pub const TrapOpcode = packed struct(usize) {
+    byte: opcodes.ByteOpcode,
+    suffix: @Int(.unsigned, @typeInfo(usize).int.bits - 8),
+
+    pub fn prefixOf(opcode: TrapOpcode) OpcodePrefix {
+        return switch (opcode.byte) {
+            .@"0xFC" => .{ .fc = @enumFromInt(opcode.suffix) },
+            .@"0xFD" => .{ .fd = @enumFromInt(opcode.suffix) },
+            else => .none,
+        };
+    }
+};
+
 /// Calculates a pointer to the first byte of the instruction based on a pointer to the first byte
 /// after it's opcode.
 pub fn calculateTrapIp(base_ip: Ip, prefix: OpcodePrefix) Ip {
