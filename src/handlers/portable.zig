@@ -309,10 +309,8 @@ pub const MemArg = struct {
     offset: u32,
 
     pub fn read(i: *Instr, module: runtime.ModuleInst) MemArg {
-        // Before multi-memory, spec probably only allows reading single byte here!
-
         // align, maximum is 16 bytes (1 << 4)
-        _ = @as(u3, @intCast(i.readByte()));
+        _ = @as(u3, @intCast(i.readIdxRaw()));
         const mem_idx = Module.MemIdx.default;
         return .{
             .offset = @as(u32, i.readIdxRaw()),
@@ -1279,7 +1277,9 @@ fn prefixDispatchTable(
             eip: Eip,
         ) callconv(ohcc) Transition {
             var instr = Instr.init(ip, eip);
-            const next = entries[@intFromEnum(instr.readIdx(Opcode))];
+            const index = instr.readIdxRaw();
+            _ = @as(Opcode, @enumFromInt(index));
+            const next = entries[index];
             return handlerTailCall(next, instr.next, sp, fuel, stp, locals, module, interp, eip);
         }
     };
