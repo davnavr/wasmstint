@@ -923,6 +923,21 @@ pub fn build(b: *Build) void {
 
             test_spec_all_step.dependOn(test_regression_step);
         }
+
+        {
+            const test_disabled_features = b.step(
+                "test-spec-disabled",
+                "Run WAST test cases for disabled features",
+            );
+            if (!wasm_features.simd128) {
+                const path = b.path("tests/features/no-simd.wast");
+                test_disabled_features.dependOn(
+                    buildWastTest(b, spectest_exe, path, wast2json, "no-simd.wast"),
+                );
+            }
+
+            test_spec_all_step.dependOn(test_disabled_features);
+        }
     }
     {
         {
