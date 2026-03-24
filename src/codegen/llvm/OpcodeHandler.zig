@@ -538,7 +538,6 @@ pub fn linearMemoryAccess(
             b.trap_memory_access_oob.toValue(&b.module),
             &.{
                 opcode_info,
-                // TODO: provide u8, usize pair so trap handler can call calculateTrapIp, maybe packed usize, low 8 bits are byte opcode, high is prefixed??
                 OpcodeHandlerParam.vip.arg(wip),
                 OpcodeHandlerParam.vsp.arg(wip),
                 OpcodeHandlerParam.eip.arg(wip),

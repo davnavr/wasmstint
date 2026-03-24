@@ -455,14 +455,15 @@ pub fn build(b: *Build) void {
             module_options.addOption([]const u8, "symbol_prefix", symbol_prefix);
         }
 
+        const test_wasmstint_module = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
         {
             const tests = b.addTest(.{
                 .name = "wasmstint",
-                .root_module = b.createModule(.{
-                    .root_source_file = b.path("src/root.zig"),
-                    .target = target,
-                    .optimize = optimize,
-                }),
+                .root_module = test_wasmstint_module,
                 .use_llvm = use_llvm.ifPreferred(),
                 .max_rss = byte_size.mib(170), // arbitrary amount
             });
@@ -481,10 +482,20 @@ pub fn build(b: *Build) void {
         {
             const tests = b.addTest(.{
                 .name = "wasmstint.handlers",
-                .root_module = handlers_module,
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/handlers.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                }),
                 .use_llvm = use_llvm.ifPreferred(),
                 .max_rss = byte_size.mib(150), // arbitrary amount
             });
+            for (&[2]struct { []const u8, *Build.Module }{
+                .{ "opcodes", opcodes_module },
+                .{ "wasmstint", test_wasmstint_module },
+            }) |info| {
+                tests.root_module.addImport(info.@"0", info.@"1");
+            }
 
             const run_tests = &b.addRunArtifact(tests).step;
             run_tests.max_rss = byte_size.mib(20); // arbitrary amount
@@ -493,10 +504,20 @@ pub fn build(b: *Build) void {
         {
             const tests = b.addTest(.{
                 .name = "wasmstint.interpreter",
-                .root_module = interpreter_module,
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/interpreter.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                }),
                 .use_llvm = use_llvm.ifPreferred(),
                 .max_rss = byte_size.mib(150), // arbitrary amount
             });
+            for (&[2]struct { []const u8, *Build.Module }{
+                .{ "coz", coz_module },
+                .{ "wasmstint", test_wasmstint_module },
+            }) |info| {
+                tests.root_module.addImport(info.@"0", info.@"1");
+            }
 
             const run_tests = &b.addRunArtifact(tests).step;
             run_tests.max_rss = byte_size.mib(20); // arbitrary amount
