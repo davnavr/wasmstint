@@ -282,7 +282,7 @@ pub fn build(b: *Build) void {
                     .pic = false,
                     // .code_model = .small, // Forces usage of LLVM backend
                 }),
-                .max_rss = byte_size.mib(182),
+                .max_rss = byte_size.mib(184),
             });
             codegen_exe.root_module.addImport("opcodes", opcodes_module);
             codegen_exe.root_module.addImport("enum_set", enum_set_module);

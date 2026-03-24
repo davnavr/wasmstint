@@ -430,7 +430,12 @@ pub const CodeWriter = struct {
                 else => @compileError("argument type for " ++ @tagName(prefixed_opcode)),
             },
             .@"0xFD" => switch (prefixed_opcode) {
-                .@"v128.load" => MemArg,
+                .@"v128.load",
+                .@"v128.load8_splat",
+                .@"v128.load16_splat",
+                .@"v128.load32_splat",
+                .@"v128.load64_splat",
+                => MemArg,
                 else => @compileError("argument type for " ++ @tagName(prefixed_opcode)),
             },
             else => @compileError("argument type for " ++ @tagName(opcode)),
@@ -503,6 +508,10 @@ pub const CodeWriter = struct {
                 try MemArg.write(args, w, switch (opcode) {
                     .@"0xFD" => switch (prefixed_opcode) {
                         .@"v128.load" => .@"16",
+                        .@"v128.load8_splat" => .@"1",
+                        .@"v128.load16_splat" => .@"2",
+                        .@"v128.load32_splat" => .@"4",
+                        .@"v128.load64_splat" => .@"8",
                         else => @compileError(@tagName(prefixed_opcode)),
                     },
                     else => @compileError(@tagName(opcode)),
@@ -528,7 +537,12 @@ pub const CodeWriter = struct {
             .@"i32.const" => try w.pushVal(.i32),
             .@"i64.const" => try w.pushVal(.i64),
             .@"0xFC" => switch (prefixed_opcode) {
-                .@"v128.load" => {
+                .@"v128.load",
+                .@"v128.load8_splat",
+                .@"v128.load16_splat",
+                .@"v128.load32_splat",
+                .@"v128.load64_splat",
+                => {
                     try w.popValExpecting(args.memory.addrType(w.builder));
                     try w.pushVal(.v128);
                 },

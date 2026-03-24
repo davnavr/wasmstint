@@ -178,7 +178,7 @@ test "call_indirect" {
     }
 }
 
-test "overlong SIMD" {
+test "SIMD" {
     if (!wasm_features.simd128) {
         return error.SkipZigTest;
     }
@@ -195,7 +195,6 @@ test "overlong SIMD" {
             var wip = f.writeCode(&b, testing.allocator, .{});
             try wip.byte(.nop, {});
             try wip.byte(.@"i32.const", 16);
-            // TODO: actually make this overlong, then actually have a test for normal memory OOB
             try wip.simd(.@"v128.load", .{ .memory = mem, .offset = 32 });
             try wip.byte(.drop, {});
             try wip.byte(.end, {});
@@ -204,6 +203,28 @@ test "overlong SIMD" {
         try f.@"export"(&b, try b.string(call_name));
 
         try ctx.checkTrapIpForModule(&b, 3, @enumFromInt(0), .memory_access_out_of_bounds, 3);
+    }
+    {
+        var b = WasmBuilder.init(testing.allocator);
+        defer b.deinit();
+
+        const mem = try b.memory(.init(.{}));
+        const f = try b.function(try b.funcType(&.{}, &.{}));
+        {
+            var wip = f.writeCode(&b, testing.allocator, .{});
+            try wip.byte(.nop, {});
+            try wip.byte(.@"i32.const", 132);
+            try wip.byte(.nop, {});
+            wip.uleb_min_len = .@"3";
+            try wip.simd(.@"v128.load32_splat", .{ .memory = mem, .offset = 8 });
+            wip.uleb_min_len = .smallest;
+            try wip.byte(.drop, {});
+            try wip.byte(.end, {});
+            try wip.finish(&ctx.scratch);
+        }
+        try f.@"export"(&b, try b.string(call_name));
+
+        try ctx.checkTrapIpForModule(&b, 4, @enumFromInt(0), .memory_access_out_of_bounds, 5);
     }
 }
 
