@@ -2300,7 +2300,7 @@ pub fn rawValidate(
                 }
 
                 break :opcode try reader.readUleb128Enum(
-                    u8,
+                    u32,
                     opcodes.FDPrefixOpcode,
                     diag,
                     "SIMD opcode",
