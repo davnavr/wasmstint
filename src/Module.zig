@@ -1038,14 +1038,14 @@ pub fn parse(
 
     var module_arena = ArenaAllocator.init(gpa);
     var module = allocator: {
-        var allocator = allocators.ReservationAllocator(.@"16").zero;
-        try allocator.reserve(FuncType, counts.type);
-        try allocator.reserve(ValType, sections.readers.type.bytes.len -| counts.type);
-        try allocator.reserve(ImportName, counts.import);
+        var calc = allocators.Reservation{};
+        try calc.reserve(FuncType, counts.type);
+        try calc.reserve(ValType, sections.readers.type.bytes.len -| counts.type);
+        try calc.reserve(ImportName, counts.import);
         // Assume most imports are functions
         const func_estimate: u32 = counts.func +| (counts.import / 2);
-        try allocator.reserve(*const FuncType, func_estimate);
-        try allocator.reserve(
+        try calc.reserve(*const FuncType, func_estimate);
+        try calc.reserve(
             std.DynamicBitSetUnmanaged.MaskInt,
             std.math.divCeil(
                 u32,
@@ -1053,24 +1053,24 @@ pub fn parse(
                 @typeInfo(std.DynamicBitSetUnmanaged.MaskInt).int.bits,
             ) catch unreachable,
         );
-        try allocator.reserve(TableType, @max(@min(1, counts.import), counts.table));
-        try allocator.reserve(MemType, @max(@min(1, counts.mem), counts.mem));
-        try allocator.reserve(GlobalType, counts.global);
-        try allocator.reserve(ConstExpr, counts.global);
+        try calc.reserve(TableType, @max(@min(1, counts.import), counts.table));
+        try calc.reserve(MemType, @max(@min(1, counts.mem), counts.mem));
+        try calc.reserve(GlobalType, counts.global);
+        try calc.reserve(ConstExpr, counts.global);
         // try allocator.reserve(u16, counts.global); // global_value_offsets
-        try allocator.reserve(Export, counts.@"export");
-        try allocator.reserve(
+        try calc.reserve(Export, counts.@"export");
+        try calc.reserve(
             u32,
             std.math.divCeil(u32, @intCast(counts.elem), 32) catch unreachable,
         );
-        try allocator.reserve(ElemSegment, counts.elem);
-        try allocator.reserve(u32, counts.data);
-        try allocator.reserve([*]const u8, counts.data);
-        try allocator.reserve(Code.Entry, counts.code);
-        try allocator.reserve(Code, counts.code);
-        try allocator.reserve(CustomSection, custom_sections_buf.items.len);
+        try calc.reserve(ElemSegment, counts.elem);
+        try calc.reserve(u32, counts.data);
+        try calc.reserve([*]const u8, counts.data);
+        try calc.reserve(Code.Entry, counts.code);
+        try calc.reserve(Code, counts.code);
+        try calc.reserve(CustomSection, custom_sections_buf.items.len);
 
-        break :allocator try allocator.arenaFallbackAllocatorWithHeaderAligned(
+        break :allocator try calc.arenaFallbackAllocatorWithHeaderAligned(
             &module_arena,
             Inner,
             .fromByteUnits(std.atomic.cache_line),
@@ -1468,7 +1468,7 @@ fn parseImportSec(
         },
         .types = types: {
             var final_types: ImportSec.Types = undefined;
-            var types_size = allocators.ReservationAllocator(.@"16").zero;
+            var types_size = allocators.Reservation{};
             inline for (@typeInfo(ImportSec.Types).@"struct".fields) |f| {
                 try types_size.reserve(
                     @typeInfo(@FieldType(ImportSec.Types, f.name)).pointer.child,

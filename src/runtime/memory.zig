@@ -78,12 +78,19 @@ pub const MemInst = extern struct {
         const old_capacity = src.capacity;
         const limit = src.limit;
 
-        const moved = Movable.move(@ptrCast(src), to.ptr);
+        const moved = Movable.move(@ptrCast(src), to);
         std.debug.assert(old_size == moved.size);
         std.debug.assert(old_capacity == moved.capacity);
         std.debug.assert(limit == moved.limit);
         moved.checkInvariants();
         return moved;
+    }
+
+    /// See `move()`.
+    pub fn moveToAllocation(src: *MemInst, allocator: std.mem.Allocator) Oom!*MemInst {
+        const dst = try src.vtable.moving.layout.allocate(allocator);
+        errdefer comptime unreachable;
+        return src.move(@alignCast(dst));
     }
 
     /// Asserts that `new_size` is a multiple of the `page_size`.

@@ -13,7 +13,7 @@ pub const ModuleInst = extern struct {
     /// Makes calculating the layout of a `ModuleInst` a single cost when a `Module` is parsed,
     /// rather than recalculating it every time a module is instantiated.
     pub const Shape = struct {
-        size: allocators.ReservationAllocator(.@"16"),
+        size: allocators.Reservation,
         // /// Stores the offsets of the values of defined globals.
         // ///
         // /// These offsets are relative to the address of the value of the first defined global.
@@ -31,7 +31,10 @@ pub const ModuleInst = extern struct {
         ) std.mem.Allocator.Error!void {
             const info = module.inner;
 
-            var size = allocators.ReservationAllocator(.@"16"){ .bytes = @sizeOf(Header) };
+            var size = allocators.Reservation{
+                .size = @sizeOf(Header),
+                .alignment = .fromByteUnits(std.atomic.cache_line),
+            };
             try size.reserveAligned(
                 FuncRef.Wasm.Block,
                 .fromByteUnits(@sizeOf(FuncRef.Wasm.Block)),
@@ -344,6 +347,8 @@ pub const ModuleInst = extern struct {
     ///
     /// Additionally, callers are responsible for freeing any imported functions, memories, globals
     /// used by this module.
+    ///
+    /// TODO: Allow caller of deinit to reuse defined memories/tables
     pub fn deinit(inst: *ModuleInst, allocator: std.mem.Allocator) void {
         for (inst.inner.definedMemInsts()) |mem| {
             mem.free();

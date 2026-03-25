@@ -1,6 +1,8 @@
 pub const Layout = extern struct {
     size: usize,
     /// Expressed as a power of two.
+    ///
+    /// Must be a valid `std.mem.Alignment`.
     alignment: usize,
 
     pub fn ofType(comptime T: type) Layout {
@@ -12,6 +14,10 @@ pub const Layout = extern struct {
 
     pub fn alignmentOf(layout: Layout) std.mem.Alignment {
         return @enumFromInt(layout.alignment);
+    }
+
+    pub fn allocate(layout: Layout, allocator: Allocator) Allocator.Error![]u8 {
+        return try @import("allocators").allocBytes(allocator, layout.size, layout.alignmentOf());
     }
 };
 
@@ -49,19 +55,19 @@ pub fn MovableInterface(comptime T: type, comptime fields: [2][]const u8) type {
         };
 
         fn vtable(this: *T) *const VTable {
-            return &@field(@field(this, fields.@"0"), fields.@"1");
+            return &@field(@field(this, fields[0]), fields[1]);
         }
 
         pub fn move(src: *T, dst: []align(@alignOf(T)) u8) *T {
             const table = vtable(src);
-            std.debug.assert(table.layout.size.toByteUnits() >= @sizeOf(T));
+            std.debug.assert(table.layout.size >= @sizeOf(T));
             const alignment = table.layout.alignmentOf().toByteUnits();
             std.debug.assert(alignment >= @alignOf(T));
 
             std.debug.assert(table.layout.size == dst.len);
             std.debug.assert(@intFromPtr(dst.ptr) % alignment == 0);
             defer src.* = undefined;
-            const moved = table.move(src, dst);
+            const moved = table.move(src, dst.ptr);
 
             std.debug.assert(@intFromPtr(moved) >= @intFromPtr(dst.ptr));
             std.debug.assert(@intFromPtr(dst.ptr) + dst.len - @sizeOf(T) >= @intFromPtr(moved));
@@ -72,3 +78,4 @@ pub fn MovableInterface(comptime T: type, comptime fields: [2][]const u8) type {
 }
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
