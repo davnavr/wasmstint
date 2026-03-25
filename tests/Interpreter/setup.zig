@@ -101,6 +101,7 @@ pub const WasmModule = struct {
             testing.allocator,
             import_provider,
             &import_failure,
+            // TODO: Definitions.deinit()
             runtime.ModuleAlloc.Definitions{ .tables = table_ptrs, .memories = mem_ptrs },
         ) catch |e| {
             if (e == error.ImportFailure) {

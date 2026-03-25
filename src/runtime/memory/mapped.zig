@@ -3,10 +3,12 @@ pub const Mapped = extern struct {
     memory: MemInst,
 
     const empty = Mapped{
-        .memory = memory: {
-            var memory = MemInst.empty;
-            memory.base = @ptrFromInt(page_size_min);
-            break :memory memory;
+        .memory = MemInst{
+            .base = @ptrFromInt(page_size_min),
+            .size = 0,
+            .capacity = 0,
+            .limit = 0,
+            .vtable = &vtable,
         },
     };
 
@@ -154,6 +156,7 @@ pub const Mapped = extern struct {
     const vtable = MemInst.VTable{
         .grow = grow,
         .free = free,
+        .moving = .forType(Mapped, "memory"),
     };
 };
 
@@ -171,6 +174,7 @@ fn free(mem: *MemInst) void {
             virtual_memory.mman.unmap(pages) catch |e| unexpectedError(e);
         }
     }
+    inst.* = undefined;
 }
 
 inline fn unexpectedError(e: anyerror) void {

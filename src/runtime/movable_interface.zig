@@ -1,0 +1,74 @@
+pub const Layout = extern struct {
+    size: usize,
+    /// Expressed as a power of two.
+    alignment: usize,
+
+    pub fn ofType(comptime T: type) Layout {
+        return Layout{
+            .size = @sizeOf(T),
+            .alignment = @intFromEnum(std.mem.Alignment.fromByteUnits(@alignOf(T))),
+        };
+    }
+
+    pub fn alignmentOf(layout: Layout) std.mem.Alignment {
+        return @enumFromInt(layout.alignment);
+    }
+};
+
+pub fn MovableInterface(comptime T: type, comptime fields: [2][]const u8) type {
+    return extern struct {
+        interface: T,
+
+        pub const VTable = struct {
+            /// - The `size` must be at least `@sizeOf(T)`.
+            /// - The `alignment` must be at least `@alignOf(T)`.
+            layout: Layout,
+            /// Copies `src` into the given `dest` buffer, then returns a pointer within `dest`
+            /// referring to the moved object.
+            move: *const fn (
+                /// Implementations are encouraged to set the contents of `src` to `undefined`.
+                src: *T,
+                /// Must have a length of `layout.size` with an alignment of
+                /// `layout.alignment`
+                dst: [*]align(@alignOf(T)) u8,
+            ) *T,
+
+            pub fn forType(comptime S: type, comptime field_name: []const u8) VTable {
+                const impl = struct {
+                    fn move(src: *T, dst: [*]align(@alignOf(T)) u8) *T {
+                        const parent: *S = @fieldParentPtr(field_name, src);
+                        const to: *S = @ptrCast(@alignCast(dst));
+                        to.* = parent.*;
+                        parent.* = undefined;
+                        return &@field(to, field_name);
+                    }
+                };
+
+                return VTable{ .layout = Layout.ofType(S), .move = impl.move };
+            }
+        };
+
+        fn vtable(this: *T) *const VTable {
+            return &@field(@field(this, fields.@"0"), fields.@"1");
+        }
+
+        pub fn move(src: *T, dst: []align(@alignOf(T)) u8) *T {
+            const table = vtable(src);
+            std.debug.assert(table.layout.size.toByteUnits() >= @sizeOf(T));
+            const alignment = table.layout.alignmentOf().toByteUnits();
+            std.debug.assert(alignment >= @alignOf(T));
+
+            std.debug.assert(table.layout.size == dst.len);
+            std.debug.assert(@intFromPtr(dst.ptr) % alignment == 0);
+            defer src.* = undefined;
+            const moved = table.move(src, dst);
+
+            std.debug.assert(@intFromPtr(moved) >= @intFromPtr(dst.ptr));
+            std.debug.assert(@intFromPtr(dst.ptr) + dst.len - @sizeOf(T) >= @intFromPtr(moved));
+
+            return moved;
+        }
+    };
+}
+
+const std = @import("std");

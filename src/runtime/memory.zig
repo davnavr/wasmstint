@@ -1,3 +1,6 @@
+/// Interface for implementing WebAssembly linear memory.
+///
+/// Do not copy values of this type, as implementations may use `@fieldParentPtr`.
 pub const MemInst = extern struct {
     base: [*]align(buffer_align) u8,
     // shared: bool,
@@ -33,6 +36,11 @@ pub const MemInst = extern struct {
         std.debug.assert(mem.limit % page_size == 0);
     }
 
+    const Movable = @import("movable_interface.zig").MovableInterface(
+        MemInst,
+        .{ "vtable", "moving" },
+    );
+
     pub const VTable = struct {
         /// Implements the logic for performing a resize when there is no more capacity remaining.
         ///
@@ -46,6 +54,7 @@ pub const MemInst = extern struct {
             new_size: usize,
         ) Oom!void,
         free: *const fn (*MemInst) void,
+        moving: Movable.VTable,
     };
 
     fn checkEndingZeroBytes(inst: *MemInst) void {
@@ -59,6 +68,22 @@ pub const MemInst = extern struct {
                 }
             }
         }
+    }
+
+    /// Moves the provided `MemInst` implementation into the `to` buffer.
+    pub fn move(src: *MemInst, to: []align(@alignOf(MemInst)) u8) *MemInst {
+        std.debug.assert(to.len == src.vtable.moving.layout.size);
+
+        const old_size = src.size;
+        const old_capacity = src.capacity;
+        const limit = src.limit;
+
+        const moved = Movable.move(@ptrCast(src), to.ptr);
+        std.debug.assert(old_size == moved.size);
+        std.debug.assert(old_capacity == moved.capacity);
+        std.debug.assert(limit == moved.limit);
+        moved.checkInvariants();
+        return moved;
     }
 
     /// Asserts that `new_size` is a multiple of the `page_size`.
@@ -93,17 +118,12 @@ pub const MemInst = extern struct {
     pub const Mapped = @import("memory/mapped.zig").Mapped;
     pub const Allocated = @import("memory/Allocated.zig");
 
-    /// A linear memory of size `0`, that cannot grow.
-    pub const empty = MemInst{
-        .base = &.{},
-        .size = 0,
-        .capacity = 0,
-        .limit = 0,
-        .vtable = &VTable{
-            .grow = noGrow,
-            .free = emptyFree,
-        },
-    };
+    fn moveStaticBuffer(src: *MemInst, dst: [*]align(@alignOf(MemInst)) u8) *MemInst {
+        const to: *MemInst = @ptrCast(@alignCast(dst));
+        to.* = src.*;
+        src.* = undefined;
+        return to;
+    }
 
     /// Does not check that the buffer is all zeroes.
     fn fromStaticBufferUnchecked(buffer: []align(buffer_align) u8, size: usize) MemInst {
@@ -118,6 +138,10 @@ pub const MemInst = extern struct {
             .vtable = &VTable{
                 .grow = noGrow,
                 .free = emptyFree,
+                .moving = .{
+                    .layout = .ofType(MemInst),
+                    .move = moveStaticBuffer,
+                },
             },
         };
     }
