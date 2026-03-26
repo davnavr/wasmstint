@@ -121,94 +121,11 @@ pub const MemInst = extern struct {
 
     pub const Mapped = @import("memory/mapped.zig").Mapped;
     pub const Allocated = @import("memory/Allocated.zig");
-
-    fn moveStaticBuffer(src: *MemInst, dst: [*]u8) *MemInst {
-        const to: *MemInst = @ptrCast(@alignCast(dst));
-        to.* = src.*;
-        src.* = undefined;
-        return to;
-    }
-
-    /// Does not check that the buffer is all zeroes.
-    fn fromStaticBufferUnchecked(buffer: []align(buffer_align) u8, size: usize) MemInst {
-        std.debug.assert(buffer.len % page_size == 0);
-        std.debug.assert(size <= buffer.len);
-        std.debug.assert(size % page_size == 0);
-        return MemInst{
-            .base = buffer.ptr,
-            .size = size,
-            .capacity = buffer.len,
-            .limit = buffer.len,
-            .vtable = &VTable{
-                .grow = noGrow,
-                .free = emptyFree,
-                .moving = .{
-                    .layout = .ofType(MemInst),
-                    .move = moveStaticBuffer,
-                },
-            },
-        };
-    }
-
-    /// Like `fromStaticBuffer()`, but instead only asserts that `buffer` contains only zero bytes.
-    pub fn fromStaticBufferAssumeZeroed(
-        buffer: []align(buffer_align) u8,
-        size: usize,
-    ) MemInst {
-        const actual_buf = buffer[0..std.mem.alignBackward(usize, buffer.len, page_size)];
-        const actual_size = std.mem.alignBackward(usize, size, page_size);
-        std.debug.assert(actual_size <= actual_buf.len);
-        if (@inComptime()) {
-            comptime {
-                for (actual_buf, 0..) |b, i| {
-                    if (b != 0) {
-                        @compileError(
-                            std.fmt.comptimePrint(
-                                "non-zero byte in linear memory buffer at index {d}",
-                                .{i},
-                            ),
-                        );
-                    }
-                }
-            }
-        } else if (builtin.mode == .Debug) {
-            for (actual_buf, 0..) |*b, i| {
-                if (b.* != 0) {
-                    std.debug.panic(
-                        "buffer must be zeroed: non-zero byte 0x{X:0>2} at index {d} (0x{X})",
-                        .{ b.*, i, @intFromPtr(b) },
-                    );
-                }
-            }
-        }
-
-        return .fromStaticBufferUnchecked(actual_buf, actual_size);
-    }
-
-    /// Creates a `MemInst` from a static buffer, setting all bytes to zero.
-    ///
-    /// Rounds the buffer size down to the nearest multiple of the `page_size`.
-    pub fn fromStaticBuffer(
-        buffer: []align(buffer_align) u8,
-        /// The initial size of the linear memory, rounded down to the nearest multiple of the page
-        /// size.
-        size: usize,
-    ) MemInst {
-        const actual_buf = buffer[0..std.mem.alignBackward(usize, buffer.len, page_size)];
-        const actual_size = std.mem.alignBackward(usize, size, page_size);
-        std.debug.assert(actual_size <= actual_buf.len);
-        @memset(actual_buf, 0);
-        return .fromStaticBufferUnchecked(actual_buf, actual_size);
-    }
+    pub const StaticBuffer = @import("memory/StaticBuffer.zig");
 
     pub fn noGrow(_: *MemInst, new_size: usize) Oom!void {
         _ = new_size;
         return error.OutOfMemory;
-    }
-
-    fn emptyFree(inst: *MemInst) void {
-        std.debug.assert(inst.size == 0);
-        std.debug.assert(inst.capacity == 0);
     }
 
     /// Returns a memory type matching the current memory instance.
