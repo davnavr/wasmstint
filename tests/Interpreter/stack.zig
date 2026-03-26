@@ -25,9 +25,7 @@ test {
     var module = try setup.WasmModule.init(wasm.items, &scratch);
     defer module.deinit();
 
-    var module_definitions: setup.WasmModule.ModuleDefinitions = undefined;
-    var module_alloc = try module.allocate(&module_definitions, &scratch, .none);
-    defer module_definitions.deinit();
+    var module_alloc = try module.allocate(&scratch, .none);
 
     var interp: Interpreter = undefined;
     var fuel = Interpreter.Fuel{ .remaining = std.math.maxInt(u32) };

@@ -30,22 +30,8 @@ pub const WasmModule = struct {
         module.inner.deinitLeakCodeEntries(testing.allocator);
     }
 
-    pub const ModuleDefinitions = struct {
-        tables: []runtime.TableInst.Allocated,
-        memories: []runtime.MemInst.Allocated,
-
-        /// Does not free the underlying tables & memories, only the slices.
-        pub fn deinit(defs: *ModuleDefinitions) void {
-            testing.allocator.free(defs.tables);
-            testing.allocator.free(defs.memories);
-            defs.* = undefined;
-        }
-    };
-
     pub fn allocate(
         module: WasmModule,
-        /// Initialized after this function returns successfully.
-        defined: *ModuleDefinitions,
         scratch: *ArenaAllocator,
         import_provider: runtime.ImportProvider,
     ) !runtime.ModuleAlloc {
@@ -53,47 +39,46 @@ pub const WasmModule = struct {
         const table_types = module.inner.tableDefinedTypes();
         const mem_types = module.inner.memDefinedTypes();
 
-        const table_ptrs = try scratch.allocator().alloc(*runtime.TableInst, table_types.len);
-        const mem_ptrs = try scratch.allocator().alloc(*runtime.MemInst, mem_types.len);
-
-        var tables = try std.ArrayList(runtime.TableInst.Allocated)
-            .initCapacity(testing.allocator, table_types.len);
+        const table_arena = try scratch.allocator()
+            .alloc(runtime.TableInst.Allocated, table_types.len);
+        var table_ptrs = try std.ArrayList(*runtime.TableInst)
+            .initCapacity(scratch.allocator(), table_types.len);
         errdefer {
-            for (tables.items) |*t| {
-                t.table.free();
+            for (table_ptrs.items) |table| {
+                table.free();
             }
         }
 
-        for (0.., table_ptrs, table_types) |i, *t, *ty| {
-            tables.appendAssumeCapacity(try runtime.TableInst.Allocated.allocateFromType(
+        const memory_arena = try scratch.allocator()
+            .alloc(runtime.MemInst.Allocated, mem_types.len);
+        var mem_ptrs = try std.ArrayList(*runtime.MemInst)
+            .initCapacity(scratch.allocator(), mem_types.len);
+        errdefer {
+            for (mem_ptrs.items) |memory| {
+                memory.free();
+            }
+        }
+
+        for (table_arena, table_types) |*table, *ty| {
+            table.* = try runtime.TableInst.Allocated.allocateFromType(
                 testing.allocator,
                 ty,
                 null,
                 @intCast(ty.limits.min),
                 @intCast(ty.limits.max),
-            ));
-            t.* = &tables.items[i].table;
+            );
+            table_ptrs.appendAssumeCapacity(&table.table);
         }
 
-        var memories = try std.ArrayList(runtime.MemInst.Allocated)
-            .initCapacity(testing.allocator, mem_types.len);
-        errdefer {
-            for (memories.items) |*m| {
-                m.memory.free();
-            }
-        }
-
-        for (0.., mem_ptrs, mem_types) |i, *m, *ty| {
-            memories.appendAssumeCapacity(try runtime.MemInst.Allocated.allocateFromType(
+        for (memory_arena, mem_types) |*memory, *ty| {
+            memory.* = try runtime.MemInst.Allocated.allocateFromType(
                 testing.allocator,
                 ty,
                 ty.limits.min * runtime.MemInst.page_size,
                 ty.limits.max * runtime.MemInst.page_size,
-            ));
-            m.* = &memories.items[i].memory;
+            );
+            mem_ptrs.appendAssumeCapacity(&memory.memory);
         }
-
-        defined.* = .{ .memories = memories.items, .tables = tables.items };
 
         var import_failure: runtime.ImportProvider.FailedRequest = undefined;
         return runtime.ModuleAlloc.allocateWithDefinitions(
@@ -101,8 +86,11 @@ pub const WasmModule = struct {
             testing.allocator,
             import_provider,
             &import_failure,
-            // TODO: Definitions.deinit()
-            runtime.ModuleAlloc.Definitions{ .tables = table_ptrs, .memories = mem_ptrs },
+            // No need to call `Definitions.deinit()`, earlier `errdefer`s do cleanup.
+            runtime.ModuleAlloc.Definitions{
+                .tables = table_ptrs.items,
+                .memories = mem_ptrs.items,
+            },
         ) catch |e| {
             if (e == error.ImportFailure) {
                 std.log.err("{f}", .{import_failure});

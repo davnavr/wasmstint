@@ -74,9 +74,7 @@ const Context = struct {
         var module = try setup.WasmModule.init(wasm_binary, &ctx.scratch);
         defer module.deinit();
 
-        var module_definitions: setup.WasmModule.ModuleDefinitions = undefined;
-        var module_alloc = try module.allocate(&module_definitions, &ctx.scratch, .none);
-        defer module_definitions.deinit();
+        var module_alloc = try module.allocate(&ctx.scratch, .none);
 
         var interp: Interpreter = undefined;
         var fuel = Interpreter.Fuel{ .remaining = consumed_fuel };

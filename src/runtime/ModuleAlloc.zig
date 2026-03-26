@@ -48,6 +48,8 @@ pub fn allocateWithDefinitions(
     /// Optional pointer where diagnostics are written on `ImportProvider.Error`.
     import_failure: ?*ImportProvider.FailedRequest,
     /// The provided slices only need to last for the duration of this function call.
+    ///
+    /// On success, ownership of the definitions is transferred to the allocated `ModuleInst`.
     definitions: Definitions,
 ) AllocationError!ModuleAlloc {
     const defined_table_types = module.tableDefinedTypes();
