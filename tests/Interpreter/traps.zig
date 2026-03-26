@@ -75,6 +75,7 @@ const Context = struct {
         defer module.deinit();
 
         var module_alloc = try module.allocate(&ctx.scratch, .none);
+        // errdefer module_alloc.deinit();
 
         var interp: Interpreter = undefined;
         var fuel = Interpreter.Fuel{ .remaining = consumed_fuel };

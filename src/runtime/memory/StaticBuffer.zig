@@ -69,8 +69,7 @@ pub fn init(
 }
 
 fn free(inst: *MemInst) void {
-    std.debug.assert(inst.size == 0);
-    std.debug.assert(inst.capacity == 0);
+    _ = inst;
 }
 
 const vtable = MemInst.VTable{

@@ -30,6 +30,27 @@ pub const WasmModule = struct {
         module.inner.deinitLeakCodeEntries(testing.allocator);
     }
 
+    pub fn allocateWithDefinitions(
+        module: WasmModule,
+        import_provider: runtime.ImportProvider,
+        definitions: runtime.ModuleAlloc.Definitions,
+    ) !runtime.ModuleAlloc {
+        var import_failure: runtime.ImportProvider.FailedRequest = undefined;
+        return runtime.ModuleAlloc.allocateWithDefinitions(
+            module.inner,
+            testing.allocator,
+            import_provider,
+            &import_failure,
+            definitions,
+        ) catch |e| {
+            if (e == error.ImportFailure) {
+                std.log.err("{f}", .{import_failure});
+            }
+
+            return e;
+        };
+    }
+
     pub fn allocate(
         module: WasmModule,
         scratch: *ArenaAllocator,
@@ -80,24 +101,14 @@ pub const WasmModule = struct {
             mem_ptrs.appendAssumeCapacity(&memory.memory);
         }
 
-        var import_failure: runtime.ImportProvider.FailedRequest = undefined;
-        return runtime.ModuleAlloc.allocateWithDefinitions(
-            module.inner,
-            testing.allocator,
+        return try module.allocateWithDefinitions(
             import_provider,
-            &import_failure,
             // No need to call `Definitions.deinit()`, earlier `errdefer`s do cleanup.
             runtime.ModuleAlloc.Definitions{
                 .tables = table_ptrs.items,
                 .memories = mem_ptrs.items,
             },
-        ) catch |e| {
-            if (e == error.ImportFailure) {
-                std.log.err("{f}", .{import_failure});
-            }
-
-            return e;
-        };
+        );
     }
 };
 
