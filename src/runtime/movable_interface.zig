@@ -21,7 +21,7 @@ pub const Layout = extern struct {
     }
 };
 
-pub fn MovableInterface(comptime T: type, comptime fields: [2][]const u8) type {
+pub fn MovableInterface(comptime T: type) type {
     return extern struct {
         interface: T,
 
@@ -29,19 +29,23 @@ pub fn MovableInterface(comptime T: type, comptime fields: [2][]const u8) type {
             /// - The `size` must be at least `@sizeOf(T)`.
             /// - The `alignment` must be at least `@alignOf(T)`.
             layout: Layout,
-            /// Copies `src` into the given `dest` buffer, then returns a pointer within `dest`
-            /// referring to the moved object.
+            /// Copies `src` into the given `dest` buffer, then returns a pointer to the newly
+            /// moved interface.
             move: *const fn (
                 /// Implementations are encouraged to set the contents of `src` to `undefined`.
                 src: *T,
                 /// Must have a length of `layout.size` with an alignment of
                 /// `layout.alignment`
-                dst: [*]align(@alignOf(T)) u8,
+                dst: [*]u8,
             ) *T,
 
-            pub fn forType(comptime S: type, comptime field_name: []const u8) VTable {
+            pub fn forType(
+                comptime S: type,
+                /// `S` must contain a field of type `T`.
+                comptime field_name: []const u8,
+            ) VTable {
                 const impl = struct {
-                    fn move(src: *T, dst: [*]align(@alignOf(T)) u8) *T {
+                    fn move(src: *T, dst: [*]u8) *T {
                         const parent: *S = @fieldParentPtr(field_name, src);
                         const to: *S = @ptrCast(@alignCast(dst));
                         to.* = parent.*;
@@ -54,25 +58,16 @@ pub fn MovableInterface(comptime T: type, comptime fields: [2][]const u8) type {
             }
         };
 
-        fn vtable(this: *T) *const VTable {
-            return &@field(@field(this, fields[0]), fields[1]);
+        inline fn vtable(this: *T) *const VTable {
+            return &this.vtable.moving;
         }
 
-        pub fn move(src: *T, dst: []align(@alignOf(T)) u8) *T {
+        pub fn move(src: *T, dst: []u8) *T {
             const table = vtable(src);
-            std.debug.assert(table.layout.size >= @sizeOf(T));
-            const alignment = table.layout.alignmentOf().toByteUnits();
-            std.debug.assert(alignment >= @alignOf(T));
-
             std.debug.assert(table.layout.size == dst.len);
-            std.debug.assert(@intFromPtr(dst.ptr) % alignment == 0);
+            std.debug.assert(@intFromPtr(dst.ptr) % table.layout.alignmentOf().toByteUnits() == 0);
             defer src.* = undefined;
-            const moved = table.move(src, dst.ptr);
-
-            std.debug.assert(@intFromPtr(moved) >= @intFromPtr(dst.ptr));
-            std.debug.assert(@intFromPtr(dst.ptr) + dst.len - @sizeOf(T) >= @intFromPtr(moved));
-
-            return moved;
+            return table.move(src, dst.ptr);
         }
     };
 }

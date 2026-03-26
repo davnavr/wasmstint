@@ -36,10 +36,7 @@ pub const MemInst = extern struct {
         std.debug.assert(mem.limit % page_size == 0);
     }
 
-    const Movable = @import("movable_interface.zig").MovableInterface(
-        MemInst,
-        .{ "vtable", "moving" },
-    );
+    const Movable = @import("movable_interface.zig").MovableInterface(MemInst);
 
     pub const VTable = struct {
         /// Implements the logic for performing a resize when there is no more capacity remaining.
@@ -71,7 +68,7 @@ pub const MemInst = extern struct {
     }
 
     /// Moves the provided `MemInst` implementation into the `to` buffer.
-    pub fn move(src: *MemInst, to: []align(@alignOf(MemInst)) u8) *MemInst {
+    pub fn move(src: *MemInst, to: []u8) *MemInst {
         std.debug.assert(to.len == src.vtable.moving.layout.size);
 
         const old_size = src.size;
@@ -125,7 +122,7 @@ pub const MemInst = extern struct {
     pub const Mapped = @import("memory/mapped.zig").Mapped;
     pub const Allocated = @import("memory/Allocated.zig");
 
-    fn moveStaticBuffer(src: *MemInst, dst: [*]align(@alignOf(MemInst)) u8) *MemInst {
+    fn moveStaticBuffer(src: *MemInst, dst: [*]u8) *MemInst {
         const to: *MemInst = @ptrCast(@alignCast(dst));
         to.* = src.*;
         src.* = undefined;
