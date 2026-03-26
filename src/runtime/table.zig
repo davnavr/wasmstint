@@ -111,6 +111,13 @@ pub const TableInst = extern struct {
         return moved;
     }
 
+    /// See `move()`.
+    pub fn moveToAllocation(src: *TableInst, allocator: std.mem.Allocator) Oom!*TableInst {
+        const dst = try src.vtable.moving.layout.allocate(allocator);
+        errdefer comptime unreachable;
+        return src.move(@alignCast(dst));
+    }
+
     pub fn free(table: *TableInst) void {
         table.checkInvariants();
         table.vtable.free(table);

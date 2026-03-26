@@ -22,6 +22,7 @@ pub const Definitions = struct {
     // More fields may be added in the future
     //tags: []const Tag = &.{},
 
+    /// Only frees the `TableInst`s and `MemInst`s, not the slices.
     pub fn deinit(definitions: *Definitions) void {
         for (definitions.tables) |table| {
             table.free();
@@ -57,7 +58,10 @@ pub fn allocateWithDefinitions(
     const definitions_layout = layout: {
         var layout = allocators.Reservation{};
 
-        // TODO: layout for tables
+        for (definitions.tables) |table| {
+            const table_layout = table.vtable.moving.layout;
+            try layout.reserveAligned(u8, @enumFromInt(table_layout.alignment), table_layout.size);
+        }
 
         for (definitions.memories) |mem| {
             const mem_layout = mem.vtable.moving.layout;
@@ -214,7 +218,7 @@ pub fn allocateWithDefinitions(
         std.debug.assert(table_inst.len == table_type.limits.min);
         // TODO: table_type.matches(table_inst.tableType())
         std.debug.assert(table_inst.limits().matches(&table_type.limits));
-        table_addr.* = table_inst;
+        table_addr.* = table_inst.moveToAllocation(arena.allocator()) catch unreachable;
     }
 
     for (
