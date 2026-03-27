@@ -146,7 +146,7 @@ pub fn build(b: *Build) void {
             .name = "cli_args",
             .root_module = cli_args_module,
             .use_llvm = use_llvm.ifPreferred(),
-            .max_rss = byte_size.mib(466),
+            .max_rss = byte_size.mib(480),
         })).step;
         tests.max_rss = byte_size.mib(19);
         unit_tests_step.dependOn(tests);
@@ -166,7 +166,7 @@ pub fn build(b: *Build) void {
             .name = "WasmBuilder",
             .root_module = wasm_builder_module,
             .use_llvm = use_llvm.ifPreferred(),
-            .max_rss = byte_size.mib(458),
+            .max_rss = byte_size.mib(475),
         })).step;
         tests.max_rss = byte_size.mib(20); // arbitrary amount
         unit_tests_step.dependOn(tests);
@@ -465,7 +465,7 @@ pub fn build(b: *Build) void {
                 .name = "wasmstint",
                 .root_module = test_wasmstint_module,
                 .use_llvm = use_llvm.ifPreferred(),
-                .max_rss = byte_size.mib(460),
+                .max_rss = byte_size.mib(470),
             });
             for (&[3]struct { []const u8, *Build.Module }{
                 .{ "coz", coz_module },
@@ -488,7 +488,7 @@ pub fn build(b: *Build) void {
                     .optimize = optimize,
                 }),
                 .use_llvm = use_llvm.ifPreferred(),
-                .max_rss = byte_size.mib(457),
+                .max_rss = byte_size.mib(458),
             });
             for (&[2]struct { []const u8, *Build.Module }{
                 .{ "opcodes", opcodes_module },
@@ -510,7 +510,7 @@ pub fn build(b: *Build) void {
                     .optimize = optimize,
                 }),
                 .use_llvm = use_llvm.ifPreferred(),
-                .max_rss = byte_size.mib(464),
+                .max_rss = byte_size.mib(473),
             });
             for (&[2]struct { []const u8, *Build.Module }{
                 .{ "coz", coz_module },
@@ -948,7 +948,7 @@ pub fn build(b: *Build) void {
                     .target = target,
                     .optimize = optimize,
                 }),
-                .max_rss = byte_size.mib(457),
+                .max_rss = byte_size.mib(464),
                 .use_llvm = use_llvm.ifPreferred(),
             });
             const ffi_tests_run = &b.addRunArtifact(ffi_test).step;
