@@ -387,6 +387,11 @@ pub fn hasX86Feature(b: *Builder, feature: std.Target.x86.Feature) bool {
         std.Target.x86.featureSetHas(b.target.cpu.features, feature);
 }
 
+pub fn hasAarch64Feature(b: *Builder, feature: std.Target.aarch64.Feature) bool {
+    return b.target.cpu.arch.isAARCH64() and
+        std.Target.aarch64.featureSetHas(b.target.cpu.features, feature);
+}
+
 const FunctionOptions = struct {
     linkage: llvm.Builder.Linkage = .external,
     preemption: llvm.Builder.Preemption = .dso_preemptable,

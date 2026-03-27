@@ -1736,6 +1736,7 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
         );
 
         const result: Value = saturated: {
+            const intrin_args = .{ bin_op.c_1, bin_op.c_2 };
             const product = if (b.hasX86Feature(.ssse3)) ssse3: {
                 const intrin_ty = try b.fnType(i16x8, &.{ i16x8, i16x8 });
                 const intrin_name = try b.module.strtabString("llvm.x86.ssse3.pmul.hr.sw.128");
@@ -1746,7 +1747,20 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
                     .none,
                     intrin_ty,
                     intrin.toValue(&b.module),
-                    &.{ bin_op.c_1, bin_op.c_2 },
+                    &intrin_args,
+                    "mul",
+                );
+            } else if (b.hasAarch64Feature(.neon)) neon: {
+                const intrin_ty = try b.fnType(i16x8, &.{ i16x8, i16x8 });
+                const intrin_name = try b.module.strtabString("llvm.aarch64.neon.sqrdmulh.v8i16");
+                const intrin = try b.module.addFunction(intrin_ty, intrin_name, .default);
+                break :neon try wip.call(
+                    .normal,
+                    .default,
+                    .none,
+                    intrin_ty,
+                    intrin.toValue(&b.module),
+                    &intrin_args,
                     "mul",
                 );
             } else portable: {
