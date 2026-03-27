@@ -23,13 +23,10 @@ pub fn testOne(
         .{ .diagnostics = .init(&diagnostic_writer.writer) },
     ) catch |e| switch (e) {
         error.OutOfMemory => |oom| return oom,
-        error.InvalidWasm, error.MalformedWasm => |err| {
-            std.debug.panic(
-                "module validation error {t}: {s}",
-                .{ e, diagnostic_writer.written() },
-            );
-            return err;
-        },
+        error.InvalidWasm, error.MalformedWasm => std.debug.panic(
+            "module validation error {t}: {s}",
+            .{ e, diagnostic_writer.written() },
+        ),
         error.WasmImplementationLimit => return,
     };
 
@@ -39,10 +36,10 @@ pub fn testOne(
         .init(&diagnostic_writer.writer),
     ) catch |e| switch (e) {
         error.OutOfMemory => |oom| return oom,
-        error.InvalidWasm, error.MalformedWasm => |err| {
-            std.debug.print("code validation error {t}: {s}", .{ e, diagnostic_writer.written() });
-            return err;
-        },
+        error.InvalidWasm, error.MalformedWasm => std.debug.panic(
+            "code validation error {t}: {s}",
+            .{ e, diagnostic_writer.written() },
+        ),
         error.WasmImplementationLimit => return,
     };
 
@@ -141,7 +138,7 @@ pub fn testOne(
         ) catch |e| switch (e) {
             error.OutOfMemory => |oom| return oom,
             error.ImportFailure => |err| {
-                std.debug.print("{f}", .{import_error});
+                std.log.err("{f}", .{import_error});
                 return switch (import_error.reason) {
                     .error_returned => |captured| @as(ImportProvider.Error, @errorCast(captured)),
                     else => err,
@@ -172,7 +169,7 @@ pub fn testOne(
             input,
         ) catch |e| switch (e) {
             error.OutOfMemory, error.OutOfFuel, error.BadInput, error.Trapped => {
-                std.debug.print("start function did not return: {t}\n", .{e});
+                std.log.warn("start function did not return: {t}", .{e});
                 return;
             },
         };
@@ -187,7 +184,7 @@ pub fn testOne(
         const e = exports.at(i);
         switch (e.val) {
             .func => |func| {
-                std.debug.print("invoking {f}\n", .{e});
+                std.log.info("invoking {f}", .{e});
                 const param_types = func.signature().parameters();
                 const params = try scratch.allocator().alloc(
                     wasmstint.Interpreter.TaggedValue,
@@ -197,10 +194,9 @@ pub fn testOne(
                     dst.* = try generateTaggedValue(input, param_ty);
                 }
 
-                std.debug.print(
-                    "parameters {f}\n",
-                    .{wasmstint.Interpreter.TaggedValue.sliceFormatter(params)},
-                );
+                std.log.info("parameters {f}", .{
+                    wasmstint.Interpreter.TaggedValue.sliceFormatter(params),
+                });
                 const results = mainLoop(
                     try interp.reset().awaiting_host.beginCall(
                         allocator,
@@ -212,14 +208,13 @@ pub fn testOne(
                     &fuel,
                     input,
                 ) catch |err| {
-                    std.debug.print("function did not return: {t}\n", .{err});
+                    std.log.info("function did not return: {t}", .{err});
                     continue;
                 };
 
-                std.debug.print(
-                    "function returned {f}\n",
-                    .{wasmstint.Interpreter.TaggedValue.sliceFormatter(results)},
-                );
+                std.log.info("function returned {f}", .{
+                    wasmstint.Interpreter.TaggedValue.sliceFormatter(results),
+                });
             },
             else => {},
         }
@@ -254,7 +249,7 @@ const ImportProvider = struct {
     ) Error!?wasmstint.runtime.ExternVal {
         const provider: *ImportProvider = @ptrCast(@alignCast(ctx));
         const allocator = provider.arena.allocator();
-        std.debug.print("resolving (import {f} {f} {f})\n", .{ module, name, desc });
+        std.log.info("resolving (import {f} {f} {f})", .{ module, name, desc });
         return switch (desc) {
             .func => |func_type| .{
                 .func = wasmstint.runtime.FuncRef.init(.{
@@ -401,10 +396,10 @@ fn mainLoop(
                         dst.* = try generateTaggedValue(input, result_ty);
                     }
 
-                    std.debug.print("host {f} returning {f}\n", .{
-                        host_func,
-                        wasmstint.Interpreter.TaggedValue.sliceFormatter(results),
-                    });
+                    std.log.info(
+                        "host {f} returning {f}",
+                        .{ host_func, wasmstint.Interpreter.TaggedValue.sliceFormatter(results) },
+                    );
                     break :next host.returnFromHost(results, fuel) catch
                         @panic("signature mismatch");
                 } else {
@@ -425,8 +420,8 @@ fn mainLoop(
                             grow_request.new_size <= wasm_smith_config.max_max_memory_bytes and
                             try input.boolean();
 
-                        std.debug.print(
-                            "memory.grow from {[old]d} to {[new]d} {[status]s}\n",
+                        std.log.info(
+                            "memory.grow from {[old]d} to {[new]d} {[status]s}",
                             .{
                                 .old = grow_request.old_size,
                                 .new = grow_request.new_size,
@@ -442,8 +437,8 @@ fn mainLoop(
                             grow_request.new_len <= wasm_smith_config.max_max_table_elements and
                             try input.boolean();
 
-                        std.debug.print(
-                            "table.grow from {[old]d} to {[new]d} {[status]s}\n",
+                        std.log.info(
+                            "table.grow from {[old]d} to {[new]d} {[status]s}",
                             .{
                                 .old = grow_request.old_len,
                                 .new = grow_request.new_len,
@@ -469,7 +464,7 @@ fn mainLoop(
                     }
                 }
 
-                std.debug.print("trap {f}\n", .{trapped.trap().code});
+                std.log.warn("trap {f}", .{trapped.trap().code});
                 return error.Trapped;
             },
         };
