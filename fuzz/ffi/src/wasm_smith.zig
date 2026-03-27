@@ -36,6 +36,10 @@ pub const Configuration = extern struct {
         pub const default = MemoryOffsetChoices.init(90, 9, 1);
     };
 
+    pub fn ConditionalFlag(comptime enabled: bool) type {
+        return if (enabled) Flag else AlwaysDisabled;
+    }
+
     available_imports: ByteSlice = .empty,
     exports: ByteSlice = .empty,
     module_shape: ByteSlice = .empty,
@@ -61,8 +65,8 @@ pub const Configuration = extern struct {
     saturating_float_to_int_enabled: Flag = .randomized,
     sign_extension_ops_enabled: Flag = .randomized,
     shared_everything_threads_enabled: Flag = .disabled,
-    simd_enabled: if (wasm_features.simd128) Flag else AlwaysDisabled = .randomized_or_disabled,
-    tail_call_enabled: Flag = .randomized,
+    simd_enabled: ConditionalFlag(wasm_features.simd128) = .randomized_or_disabled,
+    tail_call_enabled: ConditionalFlag(wasm_features.tail_call) = .randomized_or_disabled,
     table_max_size_required: Flag = .randomized,
     threads_enabled: Flag = .disabled,
     allow_invalid_funcs: Flag = .disabled,
