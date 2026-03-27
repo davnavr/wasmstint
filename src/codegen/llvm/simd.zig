@@ -872,6 +872,7 @@ fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
     const i8x16 = try Interpretation.i8x16.vectorType(b);
 
     // On x86+ssse3, can be compiled down to two `pshufb` instructions (and masking).
+    // TODO: On aarch64+neon, could use `tbl`, which follows the semantics exactly.
     {
         var shuffle = try b.opcodeHandler(.{ .fd = .@"i8x16.shuffle" });
         const wip = &shuffle.wip;
@@ -888,28 +889,32 @@ fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
             "vip_after_imm",
         );
 
-        const concat_vecs = try wip.shuffleVector(
-            bin_op.c_1,
-            bin_op.c_2,
-            try b.module.vectorValue(try b.module.vectorType(.normal, 32, .i32), &indices: {
-                var concat_indices: [32]Constant = undefined;
-                for (0..32, &concat_indices) |i, *idx| {
-                    idx.* = try b.module.intConst(.i32, i);
-                }
-                break :indices concat_indices;
-            }),
-            "concat_vecs",
-        );
+        const result = portable: {
+            const concat_vecs = try wip.shuffleVector(
+                bin_op.c_1,
+                bin_op.c_2,
+                try b.module.vectorValue(try b.module.vectorType(.normal, 32, .i32), &indices: {
+                    var concat_indices: [32]Constant = undefined;
+                    for (0..32, &concat_indices) |i, *idx| {
+                        idx.* = try b.module.intConst(.i32, i);
+                    }
+                    break :indices concat_indices;
+                }),
+                "concat_vecs",
+            );
 
-        // Panics due to insufficient capacity
-        try b.module.type_extra.ensureUnusedCapacity(b.module.gpa, 128);
-        var result = try b.module.poisonValue(i8x16);
-        for (0..16) |i| {
-            const i_value = try b.sizeIntValue(@intCast(i));
-            const index = try wip.extractElement(indices, i_value, "");
-            const chosen = try wip.extractElement(concat_vecs, index, "");
-            result = try wip.insertElement(result, chosen, i_value, "");
-        }
+            // `Builder` panics due to insufficient capacity
+            try b.module.type_extra.ensureUnusedCapacity(b.module.gpa, 128);
+            var result = try b.module.poisonValue(i8x16);
+            for (0..16) |i| {
+                const i_value = try b.sizeIntValue(@intCast(i));
+                const index = try wip.extractElement(indices, i_value, "");
+                const chosen = try wip.extractElement(concat_vecs, index, "");
+                result = try wip.insertElement(result, chosen, i_value, "");
+            }
+
+            break :portable result;
+        };
 
         try bin_op.writeResult(&shuffle, result);
 
@@ -920,6 +925,7 @@ fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
 
     const zero_byte = try b.module.intValue(.i8, 0);
     // On x86+ssse3, can be compiled down to `paddusb`+`pshufb`
+    // On aarch64+neon, could use `tbl`, which follows the semantics exactly.
     {
         var swizzle = try b.opcodeHandler(.{ .fd = .@"i8x16.swizzle" });
         const wip = &swizzle.wip;
@@ -961,6 +967,21 @@ fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
                 pshufb.toValue(&b.module),
                 &.{ source, clamped_indices },
                 "result",
+            );
+
+            _ = try wip.store(.normal, result, result_ptr, value_stack_alignment);
+        } else if (b.hasAarch64Feature(.neon)) {
+            const intrin_ty = try b.fnType(i8x16, &.{ i8x16, i8x16 });
+            const intrin_name = try b.module.strtabString("llvm.aarch64.neon.tbl1.v16i8");
+            const intrin = try b.module.addFunction(intrin_ty, intrin_name, .default);
+            const result = try wip.call(
+                .normal,
+                .default,
+                .none,
+                intrin_ty,
+                intrin.toValue(&b.module),
+                &.{ source, indices },
+                "mul",
             );
 
             _ = try wip.store(.normal, result, result_ptr, value_stack_alignment);
@@ -1714,8 +1735,8 @@ fn buildIntegerOpcodeHandlers(b: *Builder) Oom!void {
         }
     }
 
-    // On x86+ssse3, can use `pmulhrsw` with overflow detection
-    // On aarch64, this apparently follows the semantics of `sqrdmulh`
+    // On x86+ssse3, uses `pmulhrsw` with overflow detection.
+    // On aarch64+neon, uses `sqrdmulh`, which follows the semantics exactly.
     // See also: https://github.com/WebAssembly/relaxed-simd/issues/40
     {
         const i16x8 = try Interpretation.i16x8.vectorType(b);
