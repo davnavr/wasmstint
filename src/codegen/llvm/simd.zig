@@ -872,7 +872,7 @@ fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
     const i8x16 = try Interpretation.i8x16.vectorType(b);
 
     // On x86+ssse3, can be compiled down to two `pshufb` instructions (and masking).
-    // TODO: On aarch64+neon, could use `tbl`, which follows the semantics exactly.
+    // On aarch64+neon, uses a `tbl` instruction.
     {
         var shuffle = try b.opcodeHandler(.{ .fd = .@"i8x16.shuffle" });
         const wip = &shuffle.wip;
@@ -889,7 +889,20 @@ fn buildLaneAccessOpcodeHandlers(b: *Builder) Oom!void {
             "vip_after_imm",
         );
 
-        const result = portable: {
+        const result = if (b.hasAarch64Feature(.neon)) neon: {
+            const intrin_ty = try b.fnType(i8x16, &.{ i8x16, i8x16, i8x16 });
+            const intrin_name = try b.module.strtabString("llvm.aarch64.neon.tbl2.v16i8");
+            const intrin = try b.module.addFunction(intrin_ty, intrin_name, .default);
+            break :neon try wip.call(
+                .normal,
+                .default,
+                .none,
+                intrin_ty,
+                intrin.toValue(&b.module),
+                &.{ bin_op.c_1, bin_op.c_2, indices },
+                "mul",
+            );
+        } else portable: {
             const concat_vecs = try wip.shuffleVector(
                 bin_op.c_1,
                 bin_op.c_2,
