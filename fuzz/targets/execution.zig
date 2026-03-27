@@ -9,15 +9,12 @@ pub fn testOne(
     scratch: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
 ) !void {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
     var diagnostic_writer = std.Io.Writer.Allocating.init(allocator);
     defer diagnostic_writer.deinit();
 
     var wasm: []const u8 = wasm_module;
     const parsed_module = wasmstint.Module.parse(
-        arena.allocator(),
+        allocator,
         &wasm,
         scratch,
         .{ .diagnostics = .init(&diagnostic_writer.writer) },
@@ -29,9 +26,10 @@ pub fn testOne(
         ),
         error.WasmImplementationLimit => return,
     };
+    defer parsed_module.deinit(allocator, allocator);
 
     const finished = parsed_module.finishCodeValidation(
-        arena.allocator(),
+        allocator,
         scratch,
         .init(&diagnostic_writer.writer),
     ) catch |e| switch (e) {
@@ -48,136 +46,139 @@ pub fn testOne(
     }
 
     var import_provider = ImportProvider{
-        .arena = &arena,
+        .arena = std.heap.ArenaAllocator.init(allocator),
         .input = input,
-        .memories = try std.ArrayList(wasmstint.runtime.MemInst.Mapped).initCapacity(
-            arena.allocator(),
-            parsed_module.memImportTypes().len,
-        ),
-        .tables = try std.ArrayList(wasmstint.runtime.TableInst.Allocated).initCapacity(
-            arena.allocator(),
-            parsed_module.tableImportTypes().len,
-        ),
+        .memories = try std.ArrayList(wasmstint.runtime.MemInst.Mapped)
+            .initCapacity(allocator, parsed_module.memImportTypes().len),
+        .tables = try std.ArrayList(wasmstint.runtime.TableInst.Allocated)
+            .initCapacity(allocator, parsed_module.tableImportTypes().len),
     };
     defer import_provider.deinit();
 
-    var module_alloc = allocate: {
-        _ = scratch.reset(.retain_capacity);
-        const defined_table_types = parsed_module.tableDefinedTypes();
-        const defined_table_insts = try scratch.allocator()
-            .alloc(*wasmstint.runtime.TableInst, defined_table_types.len);
-        // Leaks tables on error
-        for (
-            defined_table_types,
-            try scratch.allocator()
-                .alloc(wasmstint.runtime.TableInst.Allocated, defined_table_types.len),
-            defined_table_insts,
-        ) |*table_type, *table, *table_inst| {
-            if (table_type.limits.min > wasm_smith_config.max_max_table_elements) {
-                return error.OutOfMemory;
-            }
-
-            const min_elems: u32 = @intCast(table_type.limits.min);
-            const chosen_max = try input.uintInRangeInclusive(
-                u32,
-                min_elems,
-                @min(table_type.limits.max, wasm_smith_config.max_max_table_elements),
-            );
-            table.* = try wasmstint.runtime.TableInst.Allocated.allocateFromType(
-                arena.allocator(),
-                table_type,
-                null,
-                try input.uintInRangeInclusive(u32, min_elems, chosen_max),
-                chosen_max,
-            );
-            table_inst.* = &table.table;
-        }
-
-        const defined_memory_types = parsed_module.memDefinedTypes();
-        const defined_memory_insts = try scratch.allocator()
-            .alloc(*wasmstint.runtime.MemInst, defined_memory_types.len);
-        // Leaks memories on error
-        for (
-            defined_memory_types,
-            try scratch.allocator()
-                .alloc(wasmstint.runtime.MemInst.Mapped, defined_memory_types.len),
-            defined_memory_insts,
-        ) |*mem_type, *mem, *mem_inst| {
-            const min_bytes = mem_type.limits.min * wasm_page_size;
-            if (min_bytes > wasm_smith_config.max_max_memory_bytes) {
-                return error.OutOfMemory;
-            }
-
-            const chosen_max = try input.uintInRangeInclusive(
-                usize,
-                min_bytes,
-                @min(mem_type.limits.max * wasm_page_size, wasm_smith_config.max_max_memory_bytes),
-            );
-            mem.* = try wasmstint.runtime.MemInst.Mapped.allocateFromType(
-                mem_type,
-                try input.uintInRangeInclusive(usize, min_bytes, chosen_max),
-                chosen_max,
-            );
-            mem_inst.* = &mem.memory;
-        }
-
-        var definitions = wasmstint.runtime.ModuleAlloc.Definitions{
-            .tables = defined_table_insts,
-            .memories = defined_memory_insts,
-        };
-        // At this point, tables & memories no longer leak on error
-        errdefer definitions.deinit();
-
-        var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
-        break :allocate wasmstint.runtime.ModuleAlloc.allocateWithDefinitions(
-            parsed_module,
-            arena.allocator(),
-            import_provider.importProvider(),
-            &import_error,
-            definitions,
-        ) catch |e| switch (e) {
-            error.OutOfMemory => |oom| return oom,
-            error.ImportFailure => |err| {
-                std.log.err("{f}", .{import_error});
-                return switch (import_error.reason) {
-                    .error_returned => |captured| @as(ImportProvider.Error, @errorCast(captured)),
-                    else => err,
-                };
-            },
-        };
-    };
-
     var interp: wasmstint.Interpreter = undefined;
-    const initial_state = try interp.init(
-        allocator,
-        .{ .stack_reserve = try input.uintInRangeInclusive(u32, 0, max_interpreter_stack) },
-    );
+    const initial_state = try interp.init(allocator, .{
+        .stack_reserve = try input.uintInRangeInclusive(u32, 0, max_interpreter_stack),
+    });
     defer interp.deinit(allocator);
 
     var fuel = wasmstint.Interpreter.Fuel{ .remaining = max_fuel };
-    {
-        const instantiate_state = try initial_state.awaiting_host.instantiateModule(
-            allocator,
-            &module_alloc,
-            &fuel,
-        );
+    var module = module: {
+        var module_alloc = allocate: {
+            _ = scratch.reset(.retain_capacity);
+            const defined_table_types = parsed_module.tableDefinedTypes();
+            var defined_table_insts = try std.ArrayList(*wasmstint.runtime.TableInst)
+                .initCapacity(scratch.allocator(), defined_table_types.len);
+            errdefer for (defined_table_insts.items) |inst| {
+                inst.free();
+            };
+            for (
+                defined_table_types,
+                try scratch.allocator()
+                    .alloc(wasmstint.runtime.TableInst.Allocated, defined_table_types.len),
+            ) |*table_type, *table| {
+                if (table_type.limits.min > wasm_smith_config.max_max_table_elements) {
+                    return error.OutOfMemory;
+                }
+
+                const min_elems: u32 = @intCast(table_type.limits.min);
+                const chosen_max = try input.uintInRangeInclusive(
+                    u32,
+                    min_elems,
+                    @min(table_type.limits.max, wasm_smith_config.max_max_table_elements),
+                );
+                table.* = try wasmstint.runtime.TableInst.Allocated.allocateFromType(
+                    allocator,
+                    table_type,
+                    null,
+                    try input.uintInRangeInclusive(u32, min_elems, chosen_max),
+                    chosen_max,
+                );
+                defined_table_insts.appendAssumeCapacity(&table.table);
+            }
+
+            const defined_memory_types = parsed_module.memDefinedTypes();
+            const defined_memory_insts = try scratch.allocator()
+                .alloc(*wasmstint.runtime.MemInst, defined_memory_types.len);
+            // TODO: Leaks memories on error
+            for (
+                defined_memory_types,
+                try scratch.allocator()
+                    .alloc(wasmstint.runtime.MemInst.Mapped, defined_memory_types.len),
+                defined_memory_insts,
+            ) |*mem_type, *mem, *mem_inst| {
+                const min_bytes = mem_type.limits.min * wasm_page_size;
+                if (min_bytes > wasm_smith_config.max_max_memory_bytes) {
+                    return error.OutOfMemory;
+                }
+
+                const chosen_max = try input.uintInRangeInclusive(
+                    usize,
+                    min_bytes,
+                    @min(
+                        mem_type.limits.max * wasm_page_size,
+                        wasm_smith_config.max_max_memory_bytes,
+                    ),
+                );
+                mem.* = try wasmstint.runtime.MemInst.Mapped.allocateFromType(
+                    mem_type,
+                    try input.uintInRangeInclusive(usize, min_bytes, chosen_max),
+                    chosen_max,
+                );
+                mem_inst.* = &mem.memory;
+            }
+
+            var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
+            break :allocate wasmstint.runtime.ModuleAlloc.allocateWithDefinitions(
+                parsed_module,
+                allocator,
+                import_provider.importProvider(),
+                &import_error,
+                // Previous `errdefer`s handles deallocation
+                wasmstint.runtime.ModuleAlloc.Definitions{
+                    .tables = defined_table_insts.items,
+                    .memories = defined_memory_insts,
+                },
+            ) catch |e| switch (e) {
+                error.OutOfMemory => |oom| return oom,
+                error.ImportFailure => |err| {
+                    std.log.err("{f}", .{import_error});
+                    return switch (import_error.reason) {
+                        .error_returned => |captured| @as(
+                            ImportProvider.Error,
+                            @errorCast(captured),
+                        ),
+                        else => err,
+                    };
+                },
+            };
+        };
+        var free_module_alloc = true;
+        defer if (free_module_alloc) module_alloc.deinit(allocator);
+
+        const instantiate_state = try initial_state.awaiting_host
+            .instantiateModule(allocator, &module_alloc, &fuel);
 
         const start_results = mainLoop(
             instantiate_state,
             scratch,
             &fuel,
             input,
-        ) catch |e| switch (e) {
-            error.OutOfMemory, error.OutOfFuel, error.BadInput, error.Trapped => {
-                std.log.warn("start function did not return: {t}", .{e});
-                return;
-            },
+        ) catch |e| {
+            std.log.warn("start function did not return: {t}", .{e});
+            switch (e) {
+                error.BadInput, error.OutOfMemory => return e,
+                error.OutOfFuel, error.CallStackExhaustion, error.Trapped => return,
+            }
         };
 
-        std.debug.assert(start_results.len == 0);
-    }
+        errdefer comptime unreachable;
 
-    const module = module_alloc.assumeInstantiated();
+        free_module_alloc = false;
+        std.debug.assert(start_results.len == 0);
+        break :module module_alloc.assumeInstantiated();
+    };
+    defer module.deinit(allocator);
+
     const exports = module.exports();
     for (0..exports.len) |i| {
         _ = scratch.reset(.retain_capacity);
@@ -234,7 +235,7 @@ fn generateExternAddr(input: *ffi.Input) ffi.Input.Error!wasmstint.runtime.Exter
 }
 
 const ImportProvider = struct {
-    arena: *std.heap.ArenaAllocator,
+    arena: std.heap.ArenaAllocator,
     input: *ffi.Input,
     memories: std.ArrayList(wasmstint.runtime.MemInst.Mapped),
     tables: std.ArrayList(wasmstint.runtime.TableInst.Allocated),
@@ -248,13 +249,13 @@ const ImportProvider = struct {
         desc: wasmstint.runtime.ImportProvider.Desc,
     ) Error!?wasmstint.runtime.ExternVal {
         const provider: *ImportProvider = @ptrCast(@alignCast(ctx));
-        const allocator = provider.arena.allocator();
         std.log.info("resolving (import {f} {f} {f})", .{ module, name, desc });
         return switch (desc) {
             .func => |func_type| .{
                 .func = wasmstint.runtime.FuncRef.init(.{
                     .host = func: {
-                        const func = try allocator.create(wasmstint.runtime.HostFunc);
+                        const func = try provider.arena.allocator()
+                            .create(wasmstint.runtime.HostFunc);
                         func.* = .{ .signature = func_type.* };
                         break :func func;
                     },
@@ -302,12 +303,14 @@ const ImportProvider = struct {
                     );
                     //const table = provider.tables.addOneAssumeCapacity();
                     //errdefer provider.tables.pop().?;
+                    const initial_capacity = try provider.input
+                        .uintInRangeInclusive(u32, limit_min, max_elems);
                     const provided_table =
                         try wasmstint.runtime.TableInst.Allocated.allocateFromType(
-                            allocator,
+                            provider.arena.child_allocator,
                             table_type,
                             null,
-                            try provider.input.uintInRangeInclusive(u32, limit_min, max_elems),
+                            initial_capacity,
                             max_elems,
                         );
 
@@ -322,8 +325,7 @@ const ImportProvider = struct {
                     .value = switch (global_type.val_type) {
                         inline else => |val_type| val: {
                             const Val = wasmstint.runtime.GlobalAddr.Pointee(val_type);
-                            const val = try allocator.create(Val);
-
+                            const val = try provider.arena.allocator().create(Val);
                             val.* = switch (val_type) {
                                 .i32, .i64 => try provider.input.int(Val),
                                 .f32, .f64 => try provider.input.floatFromBits(Val),
@@ -352,6 +354,9 @@ const ImportProvider = struct {
         for (provider.tables.items) |*table| {
             table.table.free();
         }
+        provider.memories.deinit(provider.arena.child_allocator);
+        provider.tables.deinit(provider.arena.child_allocator);
+        provider.arena.deinit();
         provider.* = undefined;
     }
 };
@@ -411,7 +416,7 @@ fn mainLoop(
                 return host.allocResults(scratch.allocator());
             },
             .awaiting_validation => @panic("awaiting validation"),
-            .call_stack_exhaustion => return error.OutOfMemory,
+            .call_stack_exhaustion => return error.CallStackExhaustion,
             .interrupted => |*interrupt| {
                 switch (interrupt.cause().*) {
                     .out_of_fuel => return error.OutOfFuel,
