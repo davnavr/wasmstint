@@ -414,11 +414,16 @@ fn defineCallOpcodeHandlers(as: *AsmWriter) void {
         idx_decode.writeSlowPath(as);
         call.end(as);
     }
-    for (&[2]struct { opcodes.ByteOpcode, []const u8 }{
-        .{ .call_indirect, "invokeWithinWasmIndirect" },
-        .{ .return_call_indirect, "tailCallWithinWasmIndirect" },
+    const wasm_features = as.options.wasm_features;
+    for (&[2]struct { opcodes.ByteOpcode, []const u8, bool }{
+        .{ .call_indirect, "invokeWithinWasmIndirect", true },
+        .{ .return_call_indirect, "tailCallWithinWasmIndirect", wasm_features.tail_call },
     }) |info| {
-        const opcode, const function_name = info;
+        const opcode, const function_name, const enabled = info;
+        if (!enabled) {
+            continue;
+        }
+
         var call_indirect = as.defineOpcodeHandler(.{ .byte = opcode }, .fromByteUnits(128));
         as.printInstrs(&.{
             "lea rdi, [{[vip]f} - 1] #0 save ip to call_indirect byte, clobbers locals",
@@ -513,7 +518,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter) void {
         }, .{ .prefix = as.options.symbol_prefix });
         call_indirect.end(as);
     }
-    {
+    if (wasm_features.tail_call) {
         var return_call = as.defineOpcodeHandler(.{ .byte = .return_call }, .@"64");
         as.printInstrs(
             &.{"lea r8, [{[vip]f} - 1] #4 save VIP to call byte, clobbers mems"},

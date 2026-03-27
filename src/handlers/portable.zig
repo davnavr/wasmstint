@@ -1708,7 +1708,10 @@ const opcode_handlers = struct {
         interp: *Interpreter,
         eip: Eip,
     ) callconv(ohcc) Transition {
-        _ = locals;
+        if (comptime !wasm_features.tail_call) {
+            return invalid(ip, sp, fuel, stp, locals, module, interp, eip);
+        }
+
         const return_call_ip = ip - 1;
         std.debug.assert(return_call_ip[0] == @intFromEnum(opcodes.ByteOpcode.return_call));
 
@@ -1745,7 +1748,10 @@ const opcode_handlers = struct {
         interp: *Interpreter,
         eip: Eip,
     ) callconv(ohcc) Transition {
-        _ = locals;
+        if (comptime !wasm_features.tail_call) {
+            return invalid(ip, sp, fuel, stp, locals, module, interp, eip);
+        }
+
         const return_call_indirect_ip = ip - 1;
         std.debug.assert( // expected `return_call_indirect`
             return_call_indirect_ip[0] == @intFromEnum(opcodes.ByteOpcode.return_call_indirect),

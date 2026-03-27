@@ -5,6 +5,7 @@ pub const Options = struct {
     features: []const std.Target.x86.Feature,
     wasm_features: struct {
         simd128: bool,
+        tail_call: bool,
     },
 };
 

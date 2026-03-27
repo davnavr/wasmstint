@@ -55,7 +55,7 @@ const byte_size = struct {
 
 const WasmFeatures = struct {
     simd128: bool,
-    // tail_call: bool,
+    tail_call: bool,
 };
 
 fn stringifyZon(b: *Build, object: anytype, capacity: usize) []const u8 {
@@ -177,6 +177,11 @@ pub fn build(b: *Build) void {
             bool,
             "simd128",
             "Disable or enable support for the 128-bit SIMD proposal",
+        ) orelse true,
+        .tail_call = b.option(
+            bool,
+            "tail-call",
+            "Disable or enable support for the tail call proposal",
         ) orelse true,
     };
 
@@ -663,9 +668,9 @@ pub fn build(b: *Build) void {
             if (wasm_features.simd128) {
                 features.appendAssumeCapacity(.simd128);
             }
-            // if (wasm_features.tail_call) {
-            features.appendAssumeCapacity(.tail_call);
-            // }
+            if (wasm_features.tail_call) {
+                features.appendAssumeCapacity(.tail_call);
+            }
 
             features.appendSliceAssumeCapacity(&[5]std.Target.wasm.Feature{
                 .bulk_memory,
@@ -861,11 +866,20 @@ pub fn build(b: *Build) void {
                 },
             };
 
-            if (group == .simd and !wasm_features.simd128) {
-                test_spec_group_step.dependOn(
-                    &b.addFail("to run SIMD tests, pass -Dsimd128").step,
-                );
-                continue;
+            switch (group) {
+                .simd => if (!wasm_features.simd128) {
+                    test_spec_group_step.dependOn(
+                        &b.addFail("to run SIMD tests, pass -Dsimd128").step,
+                    );
+                    continue;
+                },
+                .@"tail-call" => if (!wasm_features.tail_call) {
+                    test_spec_group_step.dependOn(
+                        &b.addFail("to run tail call tests, pass -Dtail-call").step,
+                    );
+                    continue;
+                },
+                else => {},
             }
 
             for (group_tests) |name| {
@@ -893,6 +907,7 @@ pub fn build(b: *Build) void {
                     .tests = &.{"wasmi_diff.wast"},
                     .enabled = wasm_features.simd128,
                 },
+                // TODO: test for no tail call
             }) |group| {
                 if (!group.enabled) {
                     continue;

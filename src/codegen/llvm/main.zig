@@ -1257,10 +1257,10 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
     for (&[2]ByteOpcode{ .call, .return_call }) |opcode| {
         const helper_name: []const u8, const helper_params: []const Type = switch (opcode) {
             .call => .{ "invokeWithinWasm", &@as([9]Type, @as([8]Type, @splat(.ptr)) ++ .{.i32}) },
-            .return_call => .{
+            .return_call => if (b.options.wasm_features.tail_call) .{
                 "tailCallWithinWasm",
                 &@as([8]Type, @as([7]Type, @splat(.ptr)) ++ .{.i32}),
-            },
+            } else continue,
             else => unreachable,
         };
         const helper = try b.addFunction(
@@ -1364,6 +1364,15 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
     );
 
     for (&[2]ByteOpcode{ .call_indirect, .return_call_indirect }) |opcode| {
+        const helper_name = switch (opcode) {
+            .call_indirect => "invokeWithinWasmIndirect",
+            .return_call_indirect => if (b.options.wasm_features.tail_call)
+                "tailCallWithinWasmIndirect"
+            else
+                continue,
+            else => unreachable,
+        };
+
         var call = try b.opcodeHandler(.{ .byte = opcode });
         call.wip.cursor = .{ .block = try call.wip.block(0, "Entry") };
         const out_alloca = try call.wip.alloca(
@@ -1439,11 +1448,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         call.wip.cursor = .{ .block = call_helper };
         const wasm_frame = call: {
             const helper = try b.addFunction(
-                try b.strtabStringSymbolPrefixed(switch (opcode) {
-                    .call_indirect => "invokeWithinWasmIndirect",
-                    .return_call_indirect => "tailCallWithinWasmIndirect",
-                    else => unreachable,
-                }),
+                try b.strtabStringSymbolPrefixed(helper_name),
                 try b.fnType(.ptr, &@as([9]Type, @splat(.ptr))),
                 .ccc,
                 .{ .linkage = .external, .preemption = .dso_local },

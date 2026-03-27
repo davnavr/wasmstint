@@ -1047,8 +1047,6 @@ comptime {
         "returnFromWasm",
         "invokeWithinWasm",
         "invokeWithinWasmIndirect",
-        "tailCallWithinWasm",
-        "tailCallWithinWasmIndirect",
 
         "constructFuncRef",
 
@@ -1072,11 +1070,18 @@ comptime {
     }) |name| {
         @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
     }
+
+    if (wasm_features.tail_call) {
+        for (&[_][]const u8{ "tailCallWithinWasm", "tailCallWithinWasmIndirect" }) |name| {
+            @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
+        }
+    }
 }
 
 const std = @import("std");
 const builtin = @import("builtin");
 const opcodes = @import("opcodes");
+const wasm_features = @import("wasm_features");
 
 const wasmstint = @import("wasmstint");
 const Module = wasmstint.Module;

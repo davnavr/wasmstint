@@ -8,6 +8,7 @@ pub const Options = struct {
     },
     wasm_features: struct {
         simd128: bool,
+        tail_call: bool,
     },
 };
 

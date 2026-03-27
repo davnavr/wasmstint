@@ -709,8 +709,6 @@ comptime {
         "invokeWithinWasm",
         "invokeWithinWasmIndirect",
         "returnFromWasm",
-        "tailCallWithinWasm",
-        "tailCallWithinWasmIndirect",
         "memoryGrowReallocate",
         "tableGrowReallocate",
         "tableInit",
@@ -728,6 +726,12 @@ comptime {
         "trapIndirectCallToNull",
     }) |name| {
         @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
+    }
+
+    if (wasm_features.tail_call) {
+        for (&[_][]const u8{ "tailCallWithinWasm", "tailCallWithinWasmIndirect" }) |name| {
+            @export(&@field(@This(), name), .{ .name = symbol_prefix ++ name });
+        }
     }
 }
 
@@ -861,6 +865,7 @@ const std = @import("std");
 const CallingConvention = std.builtin.CallingConvention;
 const builtin = @import("builtin");
 const opcodes = @import("opcodes");
+const wasm_features = @import("wasm_features");
 const detected_intrinsics = @import("detected_intrinsics");
 
 const wasmstint = @import("wasmstint");
