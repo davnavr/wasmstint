@@ -969,15 +969,29 @@ pub fn build(b: *Build) void {
             native_target.os.tag == chosen_target.os.tag and
             native_target.abi == chosen_target.abi)
         {
+            // Path to artifact for native target
             rust_include_paths.appendAssumeCapacity(rust_target_dir.path(b, "release"));
+        } else if (chosen_target.cpu.arch == .aarch64 and
+            chosen_target.os.tag == .linux and
+            chosen_target.abi == .gnu)
+        {
+            const path = rust_target_dir.path(b, "aarch64-unknown-linux-gnu/release");
+            rust_include_paths.appendAssumeCapacity(path);
+        } else if (chosen_target.cpu.arch == .x86_64 and
+            chosen_target.os.tag == .windows and
+            chosen_target.abi == .gnu)
+        {
+            const path = rust_target_dir.path(b, "x86_64-pc-windows-gnu/release");
+            rust_include_paths.appendAssumeCapacity(path);
         }
 
-        // TODO: translate `chosen_target` to Rust target triple
-        //rust_include_paths.appendAssumeCapacity();
+        // Rust can't compile `cdylib` on `aarch64-unknown-linux-musl`
 
         const fail_no_rust_include = if (rust_include_paths.items.len == 0)
             &b.addFail(
-                "could not determine include path for FFI wrapper (run cargo build in ./fuzz/ffi)",
+                \\could not determine include path for FFI wrapper:
+                \\ run cargo build in ./fuzz/ffi
+                \\ or manually add include path",
             ).step
         else
             null;
