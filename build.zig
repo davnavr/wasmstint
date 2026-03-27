@@ -1066,7 +1066,7 @@ pub fn build(b: *Build) void {
                     .optimize = optimize,
                     .pic = true, // afl-clang-lto seems to require PIC
                 }),
-                .max_rss = byte_size.mib(319),
+                .max_rss = byte_size.mib(498),
                 .use_llvm = true,
                 // .use_lld = options.project.use_llvm.interpreter,
             });
