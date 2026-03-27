@@ -17,17 +17,14 @@ pub const WasmModule = struct {
             .random_seed = std.testing.random_seed,
             .diagnostics = diag,
         });
-        errdefer module.deinitLeakCodeEntries(testing.allocator);
+        errdefer module.deinit(testing.allocator, testing.allocator);
         try testing.expect(try module.finishCodeValidation(testing.allocator, scratch, diag));
 
         return .{ .inner = module };
     }
 
     pub fn deinit(module: WasmModule) void {
-        for (module.inner.inner.code[0..module.inner.inner.code_count]) |*code| {
-            code.deinit(testing.allocator);
-        }
-        module.inner.deinitLeakCodeEntries(testing.allocator);
+        module.inner.deinit(testing.allocator, testing.allocator);
     }
 
     pub fn allocateWithDefinitions(

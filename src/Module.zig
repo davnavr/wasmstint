@@ -2246,12 +2246,35 @@ pub fn deinitLeakCodeEntries(module: Module, gpa: Allocator) void {
     }).deinit();
 }
 
-// pub fn deinit(
-//     module: Module,
-//     gpa: Allocator,
-//     code_deinit_ctx: anytype,
-//     code_deinit: fn (@TypeOf(code_deinit_ctx), *CodeEntry) void,
-// ) void {}
+pub fn deinitWithContext(
+    module: Module,
+    gpa: Allocator,
+    code_deinit_ctx: anytype,
+    code_deinit: fn (@TypeOf(code_deinit_ctx), *Code) void,
+) void {
+    for (module.inner.code[0..module.inner.code_count]) |*code_entry| {
+        if (code_entry.isValidationFinished()) {
+            code_deinit(code_deinit_ctx, code_entry);
+        }
+    }
+    module.deinitLeakCodeEntries(gpa);
+}
+
+pub fn deinit(module: Module, module_allocator: Allocator, code_allocator: Allocator) void {
+    const DeinitContext = struct {
+        allocator: Allocator,
+
+        fn deinitCodeEntry(ctx: @This(), code_entry: *Code) void {
+            code_entry.deinit(ctx.allocator);
+        }
+    };
+
+    return module.deinitWithContext(
+        module_allocator,
+        DeinitContext{ .allocator = code_allocator },
+        DeinitContext.deinitCodeEntry,
+    );
+}
 
 const std = @import("std");
 const Type = std.builtin.Type;
