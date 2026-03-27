@@ -424,8 +424,14 @@ pub const CodeWriter = struct {
             .drop,
             => void,
             .call => FuncIdx,
+            .@"local.get", .@"local.set", .@"local.tee" => LocalIdx,
             .@"i32.const" => i32,
             .call_indirect => CallIndirect,
+            .@"i32.store",
+            .@"i64.store",
+            .@"f32.store",
+            .@"f64.store",
+            => MemArg,
             .@"0xFC" => switch (prefixed_opcode) {
                 else => @compileError("argument type for " ++ @tagName(prefixed_opcode)),
             },
@@ -454,6 +460,11 @@ pub const CodeWriter = struct {
             w.locals.items[i - w.signature.param_count];
     }
 
+    pub fn param(w: *CodeWriter, i: u32) LocalIdx {
+        std.debug.assert(i < w.signature.param_count);
+        return @enumFromInt(i);
+    }
+
     pub fn declareLocal(w: *CodeWriter, ty: ValType) Oom!LocalIdx {
         try w.locals.ensureUnusedCapacity(w.body.gpa, 1);
         const i = w.locals.items.len;
@@ -474,6 +485,12 @@ pub const CodeWriter = struct {
         const popped = w.popVal() orelse
             @panic("TODO: stack underflow/handle polymorphic stack");
         std.debug.assert(expecting == popped);
+    }
+
+    fn popManyValsExpecting(w: *CodeWriter, expecting: []const ValType) Oom!void {
+        for (0..expecting.len) |i| {
+            try w.popValExpecting(expecting[expecting.len - 1 - i]);
+        }
     }
 
     pub fn op(
@@ -506,6 +523,16 @@ pub const CodeWriter = struct {
             },
             MemArg => {
                 try MemArg.write(args, w, switch (opcode) {
+                    .@"i32.store",
+                    .@"f32.store",
+                    .@"i32.load",
+                    .@"f32.load",
+                    => .@"4",
+                    .@"i64.store",
+                    .@"f64.store",
+                    .@"i64.load",
+                    .@"f64.load",
+                    => .@"8",
                     .@"0xFD" => switch (prefixed_opcode) {
                         .@"v128.load" => .@"16",
                         .@"v128.load8_splat" => .@"1",
@@ -514,7 +541,7 @@ pub const CodeWriter = struct {
                         .@"v128.load64_splat" => .@"8",
                         else => @compileError(@tagName(prefixed_opcode)),
                     },
-                    else => @compileError(@tagName(opcode)),
+                    else => @compileError("specify natural alignment for " ++ @tagName(opcode)),
                 });
             },
             else => @compileError("handle " ++ @typeName(ArgsType) ++ " for " ++ @tagName(opcode)),
@@ -534,6 +561,10 @@ pub const CodeWriter = struct {
                 _ = w.popVal();
             },
             .@"local.get" => try w.pushVal(w.localType(args)),
+            .@"i32.store" => try w.popManyValsExpecting(&[2]ValType{ .i32, .i32 }),
+            .@"i64.store" => try w.popManyValsExpecting(&[2]ValType{ .i32, .i64 }),
+            .@"f32.store" => try w.popManyValsExpecting(&[2]ValType{ .i32, .f32 }),
+            .@"f64.store" => try w.popManyValsExpecting(&[2]ValType{ .i32, .f64 }),
             .@"i32.const" => try w.pushVal(.i32),
             .@"i64.const" => try w.pushVal(.i64),
             .@"0xFC" => switch (prefixed_opcode) {
@@ -673,7 +704,7 @@ pub fn toBinary(
             const types = func_types.types.slice(b, type_len);
             // Works since `ValType` currently is just a `u8`.
             try s.writeByteVec(@ptrCast(types[0..func_types.param_count]), options.uleb_min_len);
-            try s.writeByteVec(@ptrCast(types[func_types.result_count..]), options.uleb_min_len);
+            try s.writeByteVec(@ptrCast(types[func_types.param_count..]), options.uleb_min_len);
         }
 
         try w.writeSection(1, s.buf.items, options.uleb_min_len);

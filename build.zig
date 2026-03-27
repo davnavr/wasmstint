@@ -166,7 +166,7 @@ pub fn build(b: *Build) void {
             .name = "WasmBuilder",
             .root_module = wasm_builder_module,
             .use_llvm = use_llvm.ifPreferred(),
-            .max_rss = byte_size.mib(452),
+            .max_rss = byte_size.mib(458),
         })).step;
         tests.max_rss = byte_size.mib(20); // arbitrary amount
         unit_tests_step.dependOn(tests);
@@ -465,7 +465,7 @@ pub fn build(b: *Build) void {
                 .name = "wasmstint",
                 .root_module = test_wasmstint_module,
                 .use_llvm = use_llvm.ifPreferred(),
-                .max_rss = byte_size.mib(456),
+                .max_rss = byte_size.mib(460),
             });
             for (&[3]struct { []const u8, *Build.Module }{
                 .{ "coz", coz_module },
@@ -498,7 +498,7 @@ pub fn build(b: *Build) void {
             }
 
             const run_tests = &b.addRunArtifact(tests).step;
-            run_tests.max_rss = byte_size.mib(20); // arbitrary amount
+            run_tests.max_rss = byte_size.mib(25);
             unit_tests_step.dependOn(run_tests);
         }
         {
@@ -520,7 +520,7 @@ pub fn build(b: *Build) void {
             }
 
             const run_tests = &b.addRunArtifact(tests).step;
-            run_tests.max_rss = byte_size.mib(20); // arbitrary amount
+            run_tests.max_rss = byte_size.mib(25);
             unit_tests_step.dependOn(run_tests);
         }
 
@@ -535,7 +535,7 @@ pub fn build(b: *Build) void {
                 .optimize = optimize,
             }),
             .use_llvm = use_llvm.ifPreferred(),
-            .max_rss = byte_size.mib(634),
+            .max_rss = byte_size.mib(681),
         });
         for (&[3]struct { []const u8, *Build.Module }{
             .{ "wasm_features", wasm_options },

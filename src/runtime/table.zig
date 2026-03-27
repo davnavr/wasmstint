@@ -45,6 +45,8 @@ pub const TableInst = extern struct {
         }
     }
 
+    const Movable = @import("movable_interface.zig").MovableInterface(TableInst);
+
     pub const VTable = struct {
         /// Implements the logic for performing a resize when there is no more capacity remaining.
         ///
@@ -57,6 +59,7 @@ pub const TableInst = extern struct {
             new_len: u32,
         ) Oom!void,
         free: *const fn (*TableInst) void,
+        moving: Movable.VTable,
     };
 
     pub fn grow(table: *TableInst, init_elem: ?*anyopaque, new_len: u32) Oom!void {
@@ -90,6 +93,31 @@ pub const TableInst = extern struct {
         }
     }
 
+    /// Moves the provided `TableInst` implementation into the `to` buffer.
+    pub fn move(src: *TableInst, to: []u8) *TableInst {
+        std.debug.assert(to.len == src.vtable.moving.layout.size);
+
+        const old_len = src.len;
+        const old_capacity = src.capacity;
+        const elem_type = src.elem_type;
+        const limit = src.limit;
+
+        const moved = Movable.move(@ptrCast(src), to);
+        std.debug.assert(old_len == moved.len);
+        std.debug.assert(old_capacity == moved.capacity);
+        std.debug.assert(elem_type == moved.elem_type);
+        std.debug.assert(limit == moved.limit);
+        moved.checkInvariants();
+        return moved;
+    }
+
+    /// See `move()`.
+    pub fn moveToAllocation(src: *TableInst, allocator: std.mem.Allocator) Oom!*TableInst {
+        const dst = try src.vtable.moving.layout.allocate(allocator);
+        errdefer comptime unreachable;
+        return src.move(@alignCast(dst));
+    }
+
     pub fn free(table: *TableInst) void {
         table.checkInvariants();
         table.vtable.free(table);
@@ -97,6 +125,13 @@ pub const TableInst = extern struct {
     }
 
     pub const Allocated = @import("table/Allocated.zig");
+
+    fn moveStaticBuffer(src: *TableInst, dst: [*]u8) *TableInst {
+        const to: *TableInst = @ptrCast(@alignCast(dst));
+        to.* = src.*;
+        src.* = undefined;
+        return to;
+    }
 
     /// Creates a `TableInst` from a static buffer.
     pub fn fromStaticBuffer(
@@ -115,6 +150,10 @@ pub const TableInst = extern struct {
             .vtable = &VTable{
                 .grow = noGrow,
                 .free = emptyFree,
+                .moving = .{
+                    .layout = .ofType(TableInst),
+                    .move = moveStaticBuffer,
+                },
             },
         };
     }

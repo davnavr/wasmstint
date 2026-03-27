@@ -22,6 +22,7 @@ pub const Definitions = struct {
     // More fields may be added in the future
     //tags: []const Tag = &.{},
 
+    /// Only frees the `TableInst`s and `MemInst`s, not the slices.
     pub fn deinit(definitions: *Definitions) void {
         for (definitions.tables) |table| {
             table.free();
@@ -47,6 +48,8 @@ pub fn allocateWithDefinitions(
     /// Optional pointer where diagnostics are written on `ImportProvider.Error`.
     import_failure: ?*ImportProvider.FailedRequest,
     /// The provided slices only need to last for the duration of this function call.
+    ///
+    /// On success, ownership of the definitions is transferred to the allocated `ModuleInst`.
     definitions: Definitions,
 ) AllocationError!ModuleAlloc {
     const defined_table_types = module.tableDefinedTypes();
@@ -54,13 +57,31 @@ pub fn allocateWithDefinitions(
     std.debug.assert(definitions.tables.len == defined_table_types.len);
     std.debug.assert(definitions.memories.len == defined_mem_types.len);
 
-    var arena = std.heap.FixedBufferAllocator.init(
-        try allocator.alignedAlloc(
-            u8,
-            .fromByteUnits(std.atomic.cache_line),
-            module.inner.parent().runtime_shape.size.bytes,
-        ),
-    );
+    const definitions_layout = layout: {
+        var layout = allocators.Reservation{};
+
+        for (definitions.tables) |table| {
+            const table_layout = table.vtable.moving.layout;
+            try layout.reserveAligned(u8, @enumFromInt(table_layout.alignment), table_layout.size);
+        }
+
+        for (definitions.memories) |mem| {
+            const mem_layout = mem.vtable.moving.layout;
+            try layout.reserveAligned(u8, @enumFromInt(mem_layout.alignment), mem_layout.size);
+        }
+
+        break :layout layout;
+    };
+
+    const final_layout = layout: {
+        var layout = module.inner.parent().runtime_shape.size;
+        try layout.append(definitions_layout);
+        break :layout layout;
+    };
+
+    std.debug.assert(final_layout.alignment.toByteUnits() >= std.atomic.cache_line);
+
+    var arena = try final_layout.bufferAllocator(allocator);
     errdefer allocator.free(arena.buffer);
 
     const header: *align(std.atomic.cache_line) ModuleInst.Header =
@@ -199,17 +220,17 @@ pub fn allocateWithDefinitions(
         std.debug.assert(table_inst.len == table_type.limits.min);
         // TODO: table_type.matches(table_inst.tableType())
         std.debug.assert(table_inst.limits().matches(&table_type.limits));
-        table_addr.* = table_inst;
+        table_addr.* = table_inst.moveToAllocation(arena.allocator()) catch unreachable;
     }
 
     for (
         mems[module.inner.mem_import_count..],
         defined_mem_types,
         definitions.memories,
-    ) |*mem_addr, *mem_type, mem_inst| {
-        std.debug.assert(mem_inst.size == mem_type.limits.min * MemInst.page_size);
-        std.debug.assert(mem_inst.memType().matches(mem_type));
-        mem_addr.* = mem_inst;
+    ) |*mem_addr, *mem_type, src_mem| {
+        std.debug.assert(src_mem.size == mem_type.limits.min * MemInst.page_size);
+        std.debug.assert(src_mem.memType().matches(mem_type));
+        mem_addr.* = src_mem.moveToAllocation(arena.allocator()) catch unreachable;
     }
 
     @memset(datas_drop_mask, std.math.maxInt(u32));
@@ -249,6 +270,7 @@ pub fn deinit(module: *ModuleAlloc, allocator: Allocator) void {
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const allocators = @import("allocators");
 const Module = @import("../Module.zig");
 const ModuleInst = @import("module_inst.zig").ModuleInst;
 const value = @import("value.zig");

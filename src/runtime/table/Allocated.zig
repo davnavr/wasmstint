@@ -67,6 +67,7 @@ pub fn allocateFromType(
 const vtable = TableInst.VTable{
     .grow = grow,
     .free = free,
+    .moving = .forType(Allocated, "table"),
 };
 
 /// After a successful resize, `table.len == new_len`, and the elements in the newly

@@ -1,15 +1,27 @@
 //! Memory allocators for not you and me!
 
 pub const LimitedAllocator = @import("allocators/LimitedAllocator.zig");
-const reservation_allocator = @import("allocators/reservation_allocator.zig");
-pub const ReservationAllocator = reservation_allocator.ReservationAllocator;
+pub const Reservation = @import("allocators/Reservation.zig");
 pub const ArenaFallbackAllocator = @import("allocators/ArenaFallbackAllocator.zig");
 pub const virtual_memory = @import("allocators/virtual_memory.zig");
 pub const PageAllocation = @import("allocators/PageAllocation.zig");
 
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+
+pub fn allocBytes(
+    allocator: Allocator,
+    size: usize,
+    alignment: std.mem.Alignment,
+) Allocator.Error![]u8 {
+    const base = allocator.rawAlloc(size, alignment, @returnAddress()) orelse
+        return error.OutOfMemory;
+
+    return base[0..size];
+}
+
 test {
     _ = LimitedAllocator;
-    _ = reservation_allocator;
     _ = ArenaFallbackAllocator;
     _ = virtual_memory;
     _ = PageAllocation;

@@ -67,17 +67,13 @@ pub fn testOne(
     var module_alloc = allocate: {
         _ = scratch.reset(.retain_capacity);
         const defined_table_types = parsed_module.tableDefinedTypes();
-        const defined_tables = try arena.allocator().alloc(
-            wasmstint.runtime.TableInst.Allocated,
-            defined_table_types.len,
-        );
-        const defined_table_insts = try scratch.allocator().alloc(
-            *wasmstint.runtime.TableInst,
-            defined_table_types.len,
-        );
+        const defined_table_insts = try scratch.allocator()
+            .alloc(*wasmstint.runtime.TableInst, defined_table_types.len);
+        // Leaks tables on error
         for (
             defined_table_types,
-            defined_tables,
+            try scratch.allocator()
+                .alloc(wasmstint.runtime.TableInst.Allocated, defined_table_types.len),
             defined_table_insts,
         ) |*table_type, *table, *table_inst| {
             if (table_type.limits.min > wasm_smith_config.max_max_table_elements) {
@@ -101,17 +97,13 @@ pub fn testOne(
         }
 
         const defined_memory_types = parsed_module.memDefinedTypes();
-        const defined_memories = try arena.allocator().alloc(
-            wasmstint.runtime.MemInst.Mapped,
-            defined_memory_types.len,
-        );
-        const defined_memory_insts = try scratch.allocator().alloc(
-            *wasmstint.runtime.MemInst,
-            defined_memory_types.len,
-        );
+        const defined_memory_insts = try scratch.allocator()
+            .alloc(*wasmstint.runtime.MemInst, defined_memory_types.len);
+        // Leaks memories on error
         for (
             defined_memory_types,
-            defined_memories,
+            try scratch.allocator()
+                .alloc(wasmstint.runtime.MemInst.Mapped, defined_memory_types.len),
             defined_memory_insts,
         ) |*mem_type, *mem, *mem_inst| {
             const min_bytes = mem_type.limits.min * wasm_page_size;
@@ -136,6 +128,7 @@ pub fn testOne(
             .tables = defined_table_insts,
             .memories = defined_memory_insts,
         };
+        // At this point, tables & memories no longer leak on error
         errdefer definitions.deinit();
 
         var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;

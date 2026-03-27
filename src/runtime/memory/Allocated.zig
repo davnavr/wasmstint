@@ -102,11 +102,13 @@ fn grow(mem: *MemInst, new_size: usize) Oom!void {
 fn free(mem: *MemInst) void {
     const inst: *Allocated = @fieldParentPtr("memory", mem);
     inst.allocator.free(mem.allocated());
+    inst.* = undefined;
 }
 
 const vtable = MemInst.VTable{
     .grow = grow,
     .free = free,
+    .moving = .forType(Allocated, "memory"),
 };
 
 const std = @import("std");
