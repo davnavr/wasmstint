@@ -48,6 +48,10 @@ pub fn testOne(
     var import_provider = ImportProvider{
         .arena = std.heap.ArenaAllocator.init(allocator),
         .input = input,
+        .functions = try std.ArrayList(wasmstint.runtime.FuncRef).initCapacity(
+            allocator,
+            parsed_module.funcImportTypes().len + parsed_module.exports().len,
+        ),
         .memories = try std.ArrayList(wasmstint.runtime.MemInst.Mapped)
             .initCapacity(allocator, parsed_module.memImportTypes().len),
         .tables = try std.ArrayList(wasmstint.runtime.TableInst.Allocated)
@@ -88,8 +92,13 @@ pub fn testOne(
                 const limited_max = @min(table_type.limits.max, config_max);
                 const chosen_max = try input.uintInRangeInclusive(u32, min_elems, limited_max);
                 const initial_cap = try input.uintInRangeInclusive(u32, min_elems, chosen_max);
-                table.* =
-                    try .allocateFromType(allocator, table_type, null, initial_cap, chosen_max);
+                table.* = try wasmstint.runtime.TableInst.Allocated.allocateFromType(
+                    allocator,
+                    table_type,
+                    null,
+                    initial_cap,
+                    chosen_max,
+                );
                 definitions.tables.appendAssumeCapacity(&table.table);
             }
 
@@ -103,7 +112,8 @@ pub fn testOne(
                 const limited_max = @min(mem_type.limits.max * wasm_page_size, config_max);
                 const chosen_max = try input.uintInRangeInclusive(usize, min_bytes, limited_max);
                 const initial_cap = try input.uintInRangeInclusive(usize, min_bytes, chosen_max);
-                mem.* = try .allocateFromType(mem_type, initial_cap, chosen_max);
+                mem.* = try wasmstint.runtime.MemInst.Mapped
+                    .allocateFromType(mem_type, initial_cap, chosen_max);
                 definitions.memories.appendAssumeCapacity(&mem.memory);
             }
 
@@ -139,6 +149,7 @@ pub fn testOne(
             scratch,
             &fuel,
             input,
+            import_provider.functions.items,
         ) catch |e| {
             std.log.warn("start function did not return: {t}", .{e});
             switch (e) {
@@ -156,45 +167,51 @@ pub fn testOne(
     defer module.deinit(allocator);
 
     const exports = module.exports();
+    var func_exports = try std.ArrayList(wasmstint.runtime.ModuleInst.ExportVals.Export)
+        .initCapacity(allocator, exports.len);
+    defer func_exports.deinit(allocator);
     for (0..exports.len) |i| {
-        _ = scratch.reset(.retain_capacity);
         const e = exports.at(i);
         switch (e.val) {
             .func => |func| {
-                std.log.info("invoking {f}", .{e});
-                const param_types = func.signature().parameters();
-                const params = try scratch.allocator().alloc(
-                    wasmstint.Interpreter.TaggedValue,
-                    param_types.len,
-                );
-                for (param_types, params) |param_ty, *dst| {
-                    dst.* = try generateTaggedValue(input, param_ty);
-                }
-
-                std.log.info("parameters {f}", .{
-                    wasmstint.Interpreter.TaggedValue.sliceFormatter(params),
-                });
-                const results = mainLoop(
-                    try interp.reset().awaiting_host.beginCall(
-                        allocator,
-                        func.funcInst(),
-                        params,
-                        &fuel,
-                    ),
-                    scratch,
-                    &fuel,
-                    input,
-                ) catch |err| {
-                    std.log.info("function did not return: {t}", .{err});
-                    continue;
-                };
-
-                std.log.info("function returned {f}", .{
-                    wasmstint.Interpreter.TaggedValue.sliceFormatter(results),
-                });
+                func_exports.appendAssumeCapacity(e);
+                import_provider.functions.appendAssumeCapacity(func);
             },
             else => {},
         }
+    }
+
+    for (func_exports.items) |e| {
+        _ = scratch.reset(.retain_capacity);
+        std.log.info("invoking {f}", .{e});
+        const func = e.val.func;
+        const param_types = func.signature().parameters();
+        const params = try scratch.allocator().alloc(
+            wasmstint.Interpreter.TaggedValue,
+            param_types.len,
+        );
+        for (param_types, params) |param_ty, *dst| {
+            dst.* =
+                try generateTaggedValue(input, param_ty, import_provider.functions.items);
+        }
+
+        std.log.info("parameters {f}", .{
+            wasmstint.Interpreter.TaggedValue.sliceFormatter(params),
+        });
+        const results = mainLoop(
+            try interp.reset().awaiting_host.beginCall(allocator, func.funcInst(), params, &fuel),
+            scratch,
+            &fuel,
+            input,
+            import_provider.functions.items,
+        ) catch |err| {
+            std.log.info("function did not return: {t}", .{err});
+            continue;
+        };
+
+        std.log.info("function returned {f}", .{
+            wasmstint.Interpreter.TaggedValue.sliceFormatter(results),
+        });
     }
 }
 
@@ -213,6 +230,7 @@ fn generateExternAddr(input: *ffi.Input) ffi.Input.Error!wasmstint.runtime.Exter
 const ImportProvider = struct {
     arena: std.heap.ArenaAllocator,
     input: *ffi.Input,
+    functions: std.ArrayList(wasmstint.runtime.FuncRef),
     memories: std.ArrayList(wasmstint.runtime.MemInst.Mapped),
     tables: std.ArrayList(wasmstint.runtime.TableInst.Allocated),
 
@@ -227,16 +245,19 @@ const ImportProvider = struct {
         const provider: *ImportProvider = @ptrCast(@alignCast(ctx));
         std.log.info("resolving (import {f} {f} {f})", .{ module, name, desc });
         return switch (desc) {
-            .func => |func_type| .{
-                .func = wasmstint.runtime.FuncRef.init(.{
+            .func => |func_type| .{ .func = func_ref: {
+                const func = wasmstint.runtime.FuncRef.init(.{
                     .host = func: {
                         const func = try provider.arena.allocator()
                             .create(wasmstint.runtime.HostFunc);
                         func.* = .{ .signature = func_type.* };
                         break :func func;
                     },
-                }),
-            },
+                });
+
+                provider.functions.appendAssumeCapacity(func);
+                break :func_ref func;
+            } },
             .mem => |mem_type| .{
                 .mem = mem: {
                     const min_size = mem_type.limits.min * wasm_page_size;
@@ -252,8 +273,6 @@ const ImportProvider = struct {
                             wasm_smith_config.max_max_memory_bytes,
                         ),
                     );
-                    //const mem = provider.memories.addOneAssumeCapacity();
-                    //errdefer provider.memories.pop().?;
                     const provided_mem = try wasmstint.runtime.MemInst.Mapped.allocateFromType(
                         mem_type,
                         try provider.input.uintInRangeInclusive(usize, min_size, max_size),
@@ -330,6 +349,7 @@ const ImportProvider = struct {
         for (provider.tables.items) |*table| {
             table.table.free();
         }
+        provider.functions.deinit(provider.arena.child_allocator);
         provider.memories.deinit(provider.arena.child_allocator);
         provider.tables.deinit(provider.arena.child_allocator);
         provider.arena.deinit();
@@ -340,6 +360,7 @@ const ImportProvider = struct {
 fn generateTaggedValue(
     input: *ffi.Input,
     ty: wasmstint.Module.ValType,
+    functions: []const wasmstint.runtime.FuncRef,
 ) !wasmstint.Interpreter.TaggedValue {
     return switch (ty) {
         .i32 => .{ .i32 = try input.int(i32) },
@@ -347,8 +368,12 @@ fn generateTaggedValue(
         .f32 => .{ .f32 = try input.floatFromBits(f32) },
         .f64 => .{ .f64 = try input.floatFromBits(f64) },
         .externref => .{ .externref = try generateExternAddr(input) },
-        // TODO: Generate random funcref
-        .funcref => .{ .funcref = .null },
+        .funcref => .{
+            .funcref = if (try input.boolean())
+                @bitCast(try input.choose(wasmstint.runtime.FuncRef, u32, functions))
+            else
+                .null,
+        },
         .v128 => .{ .v128 = .{ .u8x16 = (try input.takeArray(16)).* } },
         // else => unreachable,
     };
@@ -359,6 +384,7 @@ fn mainLoop(
     scratch: *std.heap.ArenaAllocator,
     fuel: *wasmstint.Interpreter.Fuel,
     input: *ffi.Input,
+    functions: []const wasmstint.runtime.FuncRef,
 ) ![]const wasmstint.Interpreter.TaggedValue {
     var state = initial_state;
     var host_trap_code: ?u31 = null;
@@ -374,7 +400,7 @@ fn mainLoop(
                         result_types.len,
                     );
                     for (result_types, results) |result_ty, *dst| {
-                        dst.* = try generateTaggedValue(input, result_ty);
+                        dst.* = try generateTaggedValue(input, result_ty, functions);
                     }
 
                     std.log.info(
