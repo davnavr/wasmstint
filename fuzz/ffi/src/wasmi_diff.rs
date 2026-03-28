@@ -6,6 +6,7 @@ use std::ptr::NonNull;
 pub struct Execution {
     /// Only set when [`actions_ptr`] is not `None`.
     pub trap: Trap,
+    pub mem_export_count: u8,
     pub func_export_count: u16,
 
     pub actions_len: u32,
@@ -775,6 +776,7 @@ fn collect_exports<'a, 'rt>(
         .arena()
         .alloc_slice_copy::<FuncArities>(func_export_arities.into_bump_slice());
     let ctx = store.data_mut();
+    ctx.execution.mem_export_count = u8::try_from(mem_exports.len()).unwrap();
     ctx.execution.func_export_count = u16::try_from(func_export_arities.len()).unwrap();
     ctx.execution.func_export_arities = non_null_slice_to_ptr(NonNull::from(func_export_arities));
     ctx.func_exports = func_exports.into_bump_slice();
@@ -796,6 +798,7 @@ unsafe fn execute(
         actions_len: 0,
         actions_ptr: std::ptr::null(),
 
+        mem_export_count: 0,
         func_export_count: 0,
         func_export_arities: NonNull::<FuncArities>::dangling(),
 

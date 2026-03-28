@@ -15,6 +15,7 @@ pub const wasm_smith_config = ffi.wasm_smith.Configuration{
 const Execution = struct {
     const Inner = extern struct {
         unsafe_trap: Trap,
+        mem_export_count: u8,
         func_export_count: u16,
 
         actions_len: u32,
@@ -580,17 +581,15 @@ const Exports = struct {
 
     fn resolve(
         module: wasmstint.runtime.ModuleInst,
-        arena: *std.heap.ArenaAllocator,
+        allocator: Allocator,
         execution: Execution,
         scratch: *std.heap.ArenaAllocator,
     ) error{OutOfMemory}!Exports {
         const exports = exports: {
             const wasm_exports = module.exports();
             _ = scratch.reset(.retain_capacity);
-            const exports_buf = try scratch.allocator().alloc(
-                wasmstint.runtime.ModuleInst.ExportVals.Export,
-                wasm_exports.len,
-            );
+            const exports_buf = try scratch.allocator()
+                .alloc(wasmstint.runtime.ModuleInst.ExportVals.Export, wasm_exports.len);
             for (0.., exports_buf) |i, *dst| {
                 dst.* = wasm_exports.at(i);
             }
@@ -615,21 +614,14 @@ const Exports = struct {
             break :exports exports_buf;
         };
 
-        var mem_exports = try std.ArrayList(*const wasmstint.runtime.MemInst).initCapacity(
-            arena.allocator(),
-            exports.len,
-        );
-        var func_exports = try std.ArrayList(wasmstint.runtime.FuncRef).initCapacity(
-            arena.allocator(),
-            execution.inner.func_export_count,
-        );
+        var mem_exports = try std.ArrayList(*const wasmstint.runtime.MemInst)
+            .initCapacity(allocator, execution.inner.mem_export_count);
+        var func_exports = try std.ArrayList(wasmstint.runtime.FuncRef)
+            .initCapacity(allocator, execution.inner.func_export_count);
         for (exports) |*exp| {
             switch (exp.val) {
                 .func => |func_export| {
-                    std.debug.print(
-                        "export function #{d}: {f}\n",
-                        .{ func_exports.items.len, exp },
-                    );
+                    std.log.info("export function #{d}: {f}", .{ func_exports.items.len, exp });
 
                     const target_signature = func_export.signature();
                     const expected_arity = execution.funcExportArities()[func_exports.items.len];
@@ -656,11 +648,7 @@ const Exports = struct {
                     );
                 },
                 .mem => |mem_export| {
-                    std.debug.print(
-                        "export memory #{d}: {f}\n",
-                        .{ mem_exports.items.len, exp },
-                    );
-
+                    std.log.info("export memory #{d}: {f}", .{ mem_exports.items.len, exp });
                     mem_exports.appendAssumeCapacity(mem_export);
                 },
                 else => continue,
@@ -674,10 +662,17 @@ const Exports = struct {
             );
         }
 
+        std.debug.assert(mem_exports.items.len == mem_exports.capacity);
+        std.debug.assert(func_exports.items.len == func_exports.capacity);
         return Exports{
             .memories = mem_exports.items,
             .functions = func_exports.items,
         };
+    }
+
+    fn deinit(exports: *Exports, allocator: Allocator) void {
+        allocator.free(exports.memories);
+        allocator.free(exports.functions);
     }
 };
 
@@ -685,14 +680,14 @@ pub fn testOne(
     wasm_module: []const u8,
     input: *ffi.Input,
     scratch: *std.heap.ArenaAllocator,
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
 ) !void {
     var execution = try Execution.run(wasm_module, input, max_fuel);
     defer execution.deinit();
 
     if (execution.trap()) |wasmi_trap| {
         _ = wasmi_trap.toWasmstintTrapCode() catch |e| {
-            std.debug.print("cannot instantiate: wasmi trapped {t}\n", .{e});
+            std.log.info("cannot instantiate: wasmi trapped {t}", .{e});
             return switch (e) {
                 // wasmi fuel consumption is deterministic, but that doesn't matter here.
                 error.OutOfFuel,
@@ -704,65 +699,50 @@ pub fn testOne(
         };
     }
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
     var diagnostic_writer = Writer.Allocating.init(allocator);
     defer diagnostic_writer.deinit();
 
     var wasm: []const u8 = wasm_module;
     const parsed_module = wasmstint.Module.parse(
-        arena.allocator(),
+        allocator,
         &wasm,
         scratch,
         .{ .diagnostics = .init(&diagnostic_writer.writer) },
     ) catch |e| switch (e) {
         error.OutOfMemory => |oom| return oom,
-        error.InvalidWasm, error.MalformedWasm => |err| {
-            std.debug.panic(
-                "module validation error {t}: {s}",
-                .{ e, diagnostic_writer.written() },
-            );
-            return err;
-        },
+        error.InvalidWasm, error.MalformedWasm => std.debug.panic(
+            "module validation error {t}: {s}",
+            .{ e, diagnostic_writer.written() },
+        ),
         error.WasmImplementationLimit => return,
     };
+    defer parsed_module.deinit(allocator, allocator);
     _ = scratch.reset(.retain_capacity);
 
     const finished = parsed_module.finishCodeValidation(
-        arena.allocator(),
+        allocator,
         scratch,
         .init(&diagnostic_writer.writer),
     ) catch |e| switch (e) {
         error.OutOfMemory => |oom| return oom,
-        error.InvalidWasm, error.MalformedWasm => |err| {
-            std.debug.print("code validation error {t}: {s}", .{ e, diagnostic_writer.written() });
-            return err;
+        error.InvalidWasm, error.MalformedWasm => {
+            std.debug.panic("code validation error {t}: {s}", .{ e, diagnostic_writer.written() });
         },
         error.WasmImplementationLimit => return,
     };
     _ = scratch.reset(.retain_capacity);
 
     if (!finished) {
-        return error.ValidationOfCodeEntriesWasNotFinished;
+        return error.ValidationOfCodeEntriesWasNotFinished; // TODO: print which ones weren't finished
     }
 
     var import_provider = ImportProvider{
-        .arena = &arena,
+        .arena = std.heap.ArenaAllocator.init(allocator),
         .input = input,
         .global_import_vals = execution.globalImportVals(),
-        .functions = try std.ArrayList(wasmstint.runtime.HostFunc).initCapacity(
-            arena.allocator(),
-            parsed_module.funcImportTypes().len,
-        ),
-        .memories = try std.ArrayList(wasmstint.runtime.MemInst.Mapped).initCapacity(
-            arena.allocator(),
-            parsed_module.memImportTypes().len,
-        ),
-        .tables = try std.ArrayList(wasmstint.runtime.TableInst.Allocated).initCapacity(
-            arena.allocator(),
-            parsed_module.tableImportTypes().len,
-        ),
+        .functions = try .initCapacity(allocator, parsed_module.funcImportTypes().len),
+        .memories = try .initCapacity(allocator, parsed_module.memImportTypes().len),
+        .tables = try .initCapacity(allocator, parsed_module.tableImportTypes().len),
     };
     defer import_provider.deinit();
 
@@ -790,7 +770,7 @@ pub fn testOne(
             const chosen_max = try input.uintInRangeInclusive(u32, min_elems, limit_max);
             const initial_cap = try input.uintInRangeInclusive(u32, min_elems, chosen_max);
             table.* = try wasmstint.runtime.TableInst.Allocated
-                .allocateFromType(arena.allocator(), table_type, null, initial_cap, chosen_max);
+                .allocateFromType(allocator, table_type, null, initial_cap, chosen_max);
             definitions.tables.appendAssumeCapacity(&table.table);
         }
 
@@ -815,14 +795,14 @@ pub fn testOne(
         var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
         break :allocate wasmstint.runtime.ModuleAlloc.allocateWithDefinitions(
             parsed_module,
-            arena.allocator(),
+            allocator,
             import_provider.importProvider(),
             &import_error,
             definitions.definitions(),
         ) catch |e| switch (e) {
             error.OutOfMemory => |oom| return oom,
             error.ImportFailure => |err| {
-                std.debug.print("{f}", .{import_error});
+                std.log.err("{f}", .{import_error});
                 return switch (import_error.reason) {
                     .error_returned => |captured| @as(ImportProvider.Error, @errorCast(captured)),
                     else => err,
@@ -830,6 +810,8 @@ pub fn testOne(
             },
         };
     };
+    var module_alloc_deinit = true;
+    defer if (module_alloc_deinit) module_alloc.deinit(allocator);
 
     if (import_provider.global_import_count != import_provider.global_import_vals.len) {
         const missing = import_provider.global_import_vals[import_provider.global_import_count..];
@@ -843,31 +825,22 @@ pub fn testOne(
             }
         };
 
-        std.debug.panic(
-            "expected {d} global imports, but got {d}; {d} are missing:\n{f}",
-            .{
-                import_provider.global_import_vals.len,
-                import_provider.global_import_count,
-                missing.len,
-                Formatter{ .missing = missing },
-            },
-        );
+        std.debug.panic("expected {d} global imports, but got {d}; {d} are missing:\n{f}", .{
+            import_provider.global_import_vals.len,
+            import_provider.global_import_count,
+            missing.len,
+            Formatter{ .missing = missing },
+        });
     }
 
     var host_state = HostState{};
     var interp: wasmstint.Interpreter = undefined;
     var fuel = wasmstint.Interpreter.Fuel{ .remaining = max_fuel };
-    const initial_state = try interp.init(
-        allocator,
-        .{ .stack_reserve = max_interpreter_stack },
-    );
+    const initial_state = try interp.init(allocator, .{ .stack_reserve = max_interpreter_stack });
     defer interp.deinit(allocator);
     {
-        const instantiate_state = try initial_state.awaiting_host.instantiateModule(
-            allocator,
-            &module_alloc,
-            &fuel,
-        );
+        const instantiate_state = try initial_state.awaiting_host
+            .instantiateModule(allocator, &module_alloc, &fuel);
 
         const start_results = mainLoop(
             instantiate_state,
@@ -878,7 +851,7 @@ pub fn testOne(
             &fuel,
         ) catch |e| switch (e) {
             error.OutOfFuel => |err| {
-                std.debug.print("start function did not return: {t}\n", .{err});
+                std.log.err("start function did not return: {t}", .{err});
                 return error.BadInput;
             },
             error.OutOfMemory, error.SignatureMismatch => |other| return other,
@@ -901,7 +874,7 @@ pub fn testOne(
                 _ = scratch.reset(.retain_capacity);
             },
             .trapped => |trap_code| {
-                std.debug.print("start function trapped: {f}\n", .{trap_code});
+                std.log.err("start function trapped: {f}", .{trap_code});
                 if (execution.trap()) |wasmi_trap| {
                     const expected_trap = wasmi_trap.toWasmstintTrapCode() catch unreachable;
 
@@ -920,8 +893,11 @@ pub fn testOne(
         }
     }
 
-    const module = module_alloc.assumeInstantiated();
-    const exports = try Exports.resolve(module, &arena, execution, scratch);
+    module_alloc_deinit = false;
+    var module = module_alloc.assumeInstantiated();
+    defer module.deinit(allocator);
+    var exports = try Exports.resolve(module, allocator, execution, scratch);
+    defer exports.deinit(allocator);
 
     for (0.., execution.actions()) |action_num, *action| {
         switch (action.payload()) {
@@ -953,34 +929,29 @@ pub fn testOne(
 
                 const provided_args = call_action.action.args_ptr[0..target_arities.param_count];
                 const expected_results = call_action.results(execution);
-                std.debug.print(
-                    "action #{[num]d} - call #{[func]d} {[args]f} -> {[results]f}\n",
-                    .{
-                        .num = action_num,
-                        .func = call_action.func.n,
-                        .args = Execution.ArgumentVal.sliceFormatter(provided_args),
-                        .results = expected_results,
-                    },
-                );
+                std.log.info("action #{[num]d} - call #{[func]d} {[args]f} -> {[results]f}", .{
+                    .num = action_num,
+                    .func = call_action.func.n,
+                    .args = Execution.ArgumentVal.sliceFormatter(provided_args),
+                    .results = expected_results,
+                });
 
                 switch (expected_results) {
                     .values => {},
                     .trapped => |wasmi_trap| {
                         _ = wasmi_trap.toWasmstintTrapCode() catch |e| {
-                            std.debug.print("execution diverges: wasmi trapped {t}\n", .{e});
+                            std.log.info("execution diverges: wasmi trapped {t}", .{e});
                             return switch (e) {
-                                // wasmi fuel consumption is deterministic
-                                error.OutOfFuel => error.BadInput,
-                                error.StackOverflow => {},
+                                error.OutOfFuel, // wasmi fuel consumption is deterministic
+                                error.StackOverflow,
+                                => error.BadInput,
                             };
                         };
                     },
                 }
 
-                const args_buf = try scratch.allocator().alloc(
-                    wasmstint.Interpreter.TaggedValue,
-                    target_signature.param_count,
-                );
+                const args_buf = try scratch.allocator()
+                    .alloc(wasmstint.Interpreter.TaggedValue, target_signature.param_count);
                 for (args_buf, provided_args) |*dst, *src| {
                     dst.* = src.toWasmstintValue(import_provider.functions.items);
                 }
@@ -999,10 +970,10 @@ pub fn testOne(
                     &fuel,
                 ) catch |e| switch (e) {
                     error.OutOfFuel => |err| {
-                        std.debug.print(
-                            "function #{d} did not return: {t}\n",
-                            .{ call_action.func.n, err },
-                        );
+                        std.log.err("function #{d} did not return: {t}\n", .{
+                            call_action.func.n,
+                            err,
+                        });
                         return error.BadInput;
                     },
                     error.OutOfMemory, error.SignatureMismatch => |other| return other,
@@ -1079,8 +1050,8 @@ pub fn testOne(
                 _ = scratch.reset(.retain_capacity);
             },
             .hash_memory => |hash_memory| {
-                std.debug.print(
-                    "action #{[num]d} - hash memory #{[mem]d} -> {[hash]X:0>16}\n",
+                std.log.info(
+                    "action #{[num]d} - hash memory #{[mem]d} -> {[hash]X:0>16}",
                     .{ .num = action_num, .mem = hash_memory.memory.n, .hash = hash_memory.hash },
                 );
 
@@ -1164,14 +1135,11 @@ fn mainLoop(
                 const provided_results = host_call.record
                     .results_ptr[0..host_call_arities.result_count];
 
-                std.debug.print(
-                    "host call #{d} {f} -> {f}\n",
-                    .{
-                        host_call.number,
-                        fmt_expected_args,
-                        Execution.ArgumentVal.sliceFormatter(provided_results),
-                    },
-                );
+                std.log.info("host call #{d} {f} -> {f}", .{
+                    host_call.number,
+                    fmt_expected_args,
+                    Execution.ArgumentVal.sliceFormatter(provided_results),
+                });
 
                 const fmt_actual_args = wasmstint.Interpreter.TaggedValue
                     .sliceFormatter(actual_args);
@@ -1201,7 +1169,7 @@ fn mainLoop(
                     dst.* = src.toWasmstintValue(host_functions);
                 }
 
-                std.debug.print("host {f} returning {f}\n", .{
+                std.log.info("host {f} returning {f}\n", .{
                     awaiting.currentHostFunction().?,
                     wasmstint.Interpreter.TaggedValue.sliceFormatter(results_buf),
                 });
@@ -1215,7 +1183,7 @@ fn mainLoop(
                 switch (interrupt.cause().*) {
                     .out_of_fuel => return error.OutOfFuel,
                     .memory_grow => |memory_grow| {
-                        std.debug.print(
+                        std.log.info(
                             "memory.grow #{d}  from {d} to {d}\n",
                             .{ host.memory_grow_count, memory_grow.old_size, memory_grow.new_size },
                         );
@@ -1238,24 +1206,25 @@ fn mainLoop(
                             );
                         }
 
-                        std.debug.print(
-                            "memory.grow #{d} was {s}\n",
-                            .{ actual.number, if (actual.record.allowed) "allowed" else "blocked" },
-                        );
+                        std.log.info("memory.grow #{d} was {s}\n", .{
+                            actual.number,
+                            if (actual.record.allowed) "allowed" else "blocked",
+                        });
 
                         if (actual.record.allowed) {
                             try memory_grow.grow();
                         }
                     },
                     .table_grow => |table_grow| {
-                        std.debug.print(
-                            "table.grow #{d} from {d} to {d}\n",
+                        std.log.info(
+                            "table.grow #{d} from {d} to {d}",
                             .{ host.table_grow_count, table_grow.old_len, table_grow.new_len },
                         );
                         const actual = host.nextTableGrowth(exec);
                         if (actual.record.current != table_grow.old_len) {
                             std.debug.panic(
-                                "expected old length to be {[expected]d} elements, got {[actual]d}",
+                                "expected old length to be {[expected]d} elements, got " ++
+                                    "{[actual]d}",
                                 .{
                                     .expected = actual.record.current,
                                     .actual = table_grow.old_len,
@@ -1263,7 +1232,8 @@ fn mainLoop(
                             );
                         } else if (actual.record.desired != table_grow.new_len) {
                             std.debug.panic(
-                                "expected new length to be {[expected]d} elements, got {[actual]d}",
+                                "expected new length to be {[expected]d} elements, got " ++
+                                    "{[actual]d}",
                                 .{
                                     .expected = actual.record.desired,
                                     .actual = table_grow.new_len,
@@ -1271,10 +1241,10 @@ fn mainLoop(
                             );
                         }
 
-                        std.debug.print(
-                            "table.grow #{d} was {s}\n",
-                            .{ actual.number, if (actual.record.allowed) "allowed" else "blocked" },
-                        );
+                        std.log.info("table.grow #{d} was {s}\n", .{
+                            actual.number,
+                            if (actual.record.allowed) "allowed" else "blocked",
+                        });
 
                         if (actual.record.allowed) {
                             try table_grow.grow();
@@ -1289,12 +1259,12 @@ fn mainLoop(
     }
 }
 
-// TODO: Duplicate code taken from `./execution.zig` target.
 const ImportProvider = struct {
-    arena: *std.heap.ArenaAllocator,
+    arena: std.heap.ArenaAllocator,
     input: *ffi.Input,
     global_import_vals: []const Execution.ArgumentVal,
     global_import_count: u32 = 0,
+    // These have a fixed capacity, and are allocated in `arena.child_allocator`.
     functions: std.ArrayList(wasmstint.runtime.HostFunc),
     memories: std.ArrayList(wasmstint.runtime.MemInst.Mapped),
     tables: std.ArrayList(wasmstint.runtime.TableInst.Allocated),
@@ -1308,8 +1278,7 @@ const ImportProvider = struct {
         desc: wasmstint.runtime.ImportProvider.Desc,
     ) Error!?wasmstint.runtime.ExternVal {
         const provider: *ImportProvider = @ptrCast(@alignCast(ctx));
-        const allocator = provider.arena.allocator();
-        std.debug.print("resolving (import {f} {f} {f})\n", .{ module, name, desc });
+        std.log.info("resolving (import {f} {f} {f})", .{ module, name, desc });
         return switch (desc) {
             .func => |func_type| .{
                 .func = wasmstint.runtime.FuncRef.init(.{
@@ -1322,22 +1291,18 @@ const ImportProvider = struct {
             },
             .mem => |mem_type| .{
                 .mem = mem: {
-                    const min_size = mem_type.limits.min * wasmstint.runtime.MemInst.page_size;
-                    if (min_size > wasm_smith_config.max_max_memory_bytes) {
+                    const page_size = wasmstint.runtime.MemInst.page_size;
+                    const min_size = mem_type.limits.min * page_size;
+                    const config_max = wasm_smith_config.max_max_memory_bytes;
+                    if (min_size > config_max) {
                         return error.OutOfMemory; // memory min size too large
                     }
 
-                    const max_size = @min(
-                        mem_type.limits.max * wasmstint.runtime.MemInst.page_size,
-                        wasm_smith_config.max_max_memory_bytes,
-                    );
-                    //const mem = provider.memories.addOneAssumeCapacity();
-                    //errdefer provider.memories.pop().?;
-                    const provided_mem = try wasmstint.runtime.MemInst.Mapped.allocateFromType(
-                        mem_type,
-                        try provider.input.uintInRangeInclusive(usize, min_size, max_size),
-                        max_size,
-                    );
+                    const max_size = @min(mem_type.limits.max * page_size, config_max);
+                    const initial_cap = try provider.input
+                        .uintInRangeInclusive(usize, min_size, max_size);
+                    const provided_mem = try wasmstint.runtime.MemInst.Mapped
+                        .allocateFromType(mem_type, initial_cap, max_size);
 
                     const mem = provider.memories.addOneAssumeCapacity();
                     mem.* = provided_mem;
@@ -1347,26 +1312,20 @@ const ImportProvider = struct {
             .table => |table_type| .{
                 .table = table: {
                     const limit_min: u32 = @intCast(table_type.limits.min);
-                    if (limit_min > wasm_smith_config.max_max_table_elements) {
+                    const config_max = wasm_smith_config.max_max_table_elements;
+                    if (limit_min > config_max) {
                         return error.OutOfMemory; // table min length too large
                     }
 
-                    const max_elems = @min(
-                        wasm_smith_config.max_max_table_elements,
-                        table_type.limits.max,
-                    );
-                    //const table = provider.tables.addOneAssumeCapacity();
-                    //errdefer provider.tables.pop().?;
+                    const max_elems = @min(config_max, table_type.limits.max);
+                    const initial_cap = try provider.input
+                        .uintInRangeInclusive(u32, limit_min, max_elems);
                     const provided_table =
                         try wasmstint.runtime.TableInst.Allocated.allocateFromType(
-                            allocator,
+                            provider.arena.child_allocator,
                             table_type,
                             null,
-                            try provider.input.uintInRangeInclusive(
-                                u32,
-                                limit_min,
-                                max_elems,
-                            ),
+                            initial_cap,
                             max_elems,
                         );
 
@@ -1402,7 +1361,7 @@ const ImportProvider = struct {
                         switch (global_type.val_type) {
                             inline else => |val_type| {
                                 const Val = wasmstint.runtime.GlobalAddr.Pointee(val_type);
-                                const val = try allocator.create(Val);
+                                const val = try provider.arena.allocator().create(Val);
 
                                 val.* = @field(
                                     value.toWasmstintValue(provider.functions.items),
@@ -1430,11 +1389,16 @@ const ImportProvider = struct {
         for (provider.tables.items) |*table| {
             table.table.free();
         }
+        provider.functions.deinit(provider.arena.child_allocator);
+        provider.memories.deinit(provider.arena.child_allocator);
+        provider.tables.deinit(provider.arena.child_allocator);
+        provider.arena.deinit();
         provider.* = undefined;
     }
 };
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 const wasmstint = @import("wasmstint");
 const ffi = @import("ffi");
