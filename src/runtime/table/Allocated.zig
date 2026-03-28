@@ -78,10 +78,12 @@ fn grow(inst: *TableInst, init_elem: ?*anyopaque, new_len: u32) Oom!void {
     std.debug.assert(inst.len <= inst.limit);
 
     const table: *Allocated = @fieldParentPtr("table", inst);
-    const old_elems: []?*anyopaque = inst.elements();
-    const new_capacity: u32 = if (table.allocator.resize(old_elems, new_len))
+    const old_allocation = inst.base.ptr[0..inst.capacity];
+    const new_capacity: u32 = if (table.allocator.resize(old_allocation, new_len))
         new_len
     else realloc: {
+        const old_elems: []?*anyopaque = inst.elements();
+
         // Resize in place failed, try new allocation
         const new_elems = try table.allocator.alloc(
             ?*anyopaque,
@@ -94,6 +96,7 @@ fn grow(inst: *TableInst, init_elem: ?*anyopaque, new_len: u32) Oom!void {
 
         inst.base.ptr = new_elems.ptr;
 
+        table.allocator.free(old_allocation);
         break :realloc @intCast(new_elems.len);
     };
 
