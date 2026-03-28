@@ -850,7 +850,7 @@ pub fn testOne(
             import_provider.functions.items,
             &fuel,
         ) catch |e| switch (e) {
-            error.OutOfFuel => |err| {
+            error.OutOfFuel, error.CallStackExhaustion => |err| {
                 std.log.err("start function did not return: {t}", .{err});
                 return error.BadInput;
             },
@@ -969,7 +969,7 @@ pub fn testOne(
                     import_provider.functions.items,
                     &fuel,
                 ) catch |e| switch (e) {
-                    error.OutOfFuel => |err| {
+                    error.OutOfFuel, error.CallStackExhaustion => |err| {
                         std.log.err("function #{d} did not return: {t}\n", .{
                             call_action.func.n,
                             err,
@@ -1178,7 +1178,7 @@ fn mainLoop(
                 return .{ .values = try awaiting.allocResults(scratch.allocator()) };
             },
             .awaiting_validation => @panic("code validation should be finished"),
-            .call_stack_exhaustion => return error.OutOfMemory,
+            .call_stack_exhaustion => return error.CallStackExhaustion,
             .interrupted => |*interrupt| {
                 switch (interrupt.cause().*) {
                     .out_of_fuel => return error.OutOfFuel,
