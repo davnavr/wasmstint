@@ -23,7 +23,7 @@ pub fn testOne(
         ),
         error.WasmImplementationLimit => return,
     };
-    defer module.deinitLeakCodeEntries(allocator);
+    defer module.deinit(allocator, allocator);
 
     if (wasm.len != 0) {
         std.debug.panic("WASM buffer was not fully parsed: {d} bytes remaining", .{wasm.len});
@@ -31,11 +31,8 @@ pub fn testOne(
 
     _ = scratch.reset(.retain_capacity);
 
-    var code_arena = std.heap.ArenaAllocator.init(allocator);
-    defer code_arena.deinit();
-
     const finished = module.finishCodeValidation(
-        code_arena.allocator(), // TODO: Provide way to deallocate individual code entries
+        allocator,
         scratch,
         .init(&diagnostic_writer.writer),
     ) catch |e| switch (e) {
