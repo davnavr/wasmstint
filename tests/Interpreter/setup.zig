@@ -57,26 +57,14 @@ pub const WasmModule = struct {
         const table_types = module.inner.tableDefinedTypes();
         const mem_types = module.inner.memDefinedTypes();
 
+        var definitions = runtime.ModuleAlloc.Definitions.Builder{
+            .tables = try .initCapacity(scratch.allocator(), table_types.len),
+            .memories = try .initCapacity(scratch.allocator(), mem_types.len),
+        };
+        errdefer definitions.definitions().deinit();
+
         const table_arena = try scratch.allocator()
             .alloc(runtime.TableInst.Allocated, table_types.len);
-        var table_ptrs = try std.ArrayList(*runtime.TableInst)
-            .initCapacity(scratch.allocator(), table_types.len);
-        errdefer {
-            for (table_ptrs.items) |table| {
-                table.free();
-            }
-        }
-
-        const memory_arena = try scratch.allocator()
-            .alloc(runtime.MemInst.Allocated, mem_types.len);
-        var mem_ptrs = try std.ArrayList(*runtime.MemInst)
-            .initCapacity(scratch.allocator(), mem_types.len);
-        errdefer {
-            for (mem_ptrs.items) |memory| {
-                memory.free();
-            }
-        }
-
         for (table_arena, table_types) |*table, *ty| {
             table.* = try runtime.TableInst.Allocated.allocateFromType(
                 testing.allocator,
@@ -85,9 +73,11 @@ pub const WasmModule = struct {
                 @intCast(ty.limits.min),
                 @intCast(ty.limits.max),
             );
-            table_ptrs.appendAssumeCapacity(&table.table);
+            definitions.tables.appendAssumeCapacity(&table.table);
         }
 
+        const memory_arena = try scratch.allocator()
+            .alloc(runtime.MemInst.Allocated, mem_types.len);
         for (memory_arena, mem_types) |*memory, *ty| {
             memory.* = try runtime.MemInst.Allocated.allocateFromType(
                 testing.allocator,
@@ -95,17 +85,10 @@ pub const WasmModule = struct {
                 ty.limits.min * runtime.MemInst.page_size,
                 ty.limits.max * runtime.MemInst.page_size,
             );
-            mem_ptrs.appendAssumeCapacity(&memory.memory);
+            definitions.memories.appendAssumeCapacity(&memory.memory);
         }
 
-        return try module.allocateWithDefinitions(
-            import_provider,
-            // No need to call `Definitions.deinit()`, earlier `errdefer`s do cleanup.
-            runtime.ModuleAlloc.Definitions{
-                .tables = table_ptrs.items,
-                .memories = mem_ptrs.items,
-            },
-        );
+        return try module.allocateWithDefinitions(import_provider, definitions.definitions());
     }
 };
 

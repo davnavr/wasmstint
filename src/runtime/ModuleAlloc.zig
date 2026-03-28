@@ -16,22 +16,36 @@ instantiated: bool,
 pub const AllocationError = ImportProvider.Error || Allocator.Error;
 
 /// The pointers to individual `TableInst`s and `MemInst`s must outlive the `ModuleInst`.
+///
+/// More fields may be added in the future.
 pub const Definitions = struct {
     tables: []const *TableInst = &.{},
     memories: []const *MemInst = &.{},
-    // More fields may be added in the future
     //tags: []const Tag = &.{},
 
     /// Only frees the `TableInst`s and `MemInst`s, not the slices.
-    pub fn deinit(definitions: *Definitions) void {
+    pub fn deinit(definitions: *const Definitions) void {
         for (definitions.tables) |table| {
             table.free();
         }
         for (definitions.memories) |mem| {
             mem.free();
         }
-        definitions.* = undefined;
     }
+
+    /// More fields may be added in the future.
+    pub const Builder = struct {
+        tables: std.ArrayList(*TableInst) = .empty,
+        memories: std.ArrayList(*MemInst) = .empty,
+
+        /// `Builder` must outlive the returned `Definitions`.
+        pub fn definitions(builder: *const Builder) Definitions {
+            return Definitions{
+                .tables = builder.tables.items,
+                .memories = builder.memories.items,
+            };
+        }
+    };
 };
 
 /// On successful allocation, the ownership of each value in the `Definitions` is passed to

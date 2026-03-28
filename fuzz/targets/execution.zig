@@ -66,65 +66,45 @@ pub fn testOne(
         var module_alloc = allocate: {
             _ = scratch.reset(.retain_capacity);
             const defined_table_types = parsed_module.tableDefinedTypes();
-            var defined_table_insts = try std.ArrayList(*wasmstint.runtime.TableInst)
-                .initCapacity(scratch.allocator(), defined_table_types.len);
-            errdefer for (defined_table_insts.items) |inst| {
-                inst.free();
+            const defined_memory_types = parsed_module.memDefinedTypes();
+            var definitions = wasmstint.runtime.ModuleAlloc.Definitions.Builder{
+                .tables = try .initCapacity(scratch.allocator(), defined_table_types.len),
+                .memories = try .initCapacity(scratch.allocator(), defined_memory_types.len),
             };
-            for (
-                defined_table_types,
-                try scratch.allocator()
-                    .alloc(wasmstint.runtime.TableInst.Allocated, defined_table_types.len),
-            ) |*table_type, *table| {
-                if (table_type.limits.min > wasm_smith_config.max_max_table_elements) {
+            errdefer definitions.definitions().deinit();
+
+            const defined_table_insts = try scratch.allocator()
+                .alloc(wasmstint.runtime.TableInst.Allocated, defined_table_types.len);
+            const defined_memory_insts = try scratch.allocator()
+                .alloc(wasmstint.runtime.MemInst.Mapped, defined_memory_types.len);
+
+            for (defined_table_types, defined_table_insts) |*table_type, *table| {
+                const config_max = wasm_smith_config.max_max_table_elements;
+                if (table_type.limits.min > config_max) {
                     return error.OutOfMemory;
                 }
 
                 const min_elems: u32 = @intCast(table_type.limits.min);
-                const chosen_max = try input.uintInRangeInclusive(
-                    u32,
-                    min_elems,
-                    @min(table_type.limits.max, wasm_smith_config.max_max_table_elements),
-                );
-                table.* = try wasmstint.runtime.TableInst.Allocated.allocateFromType(
-                    allocator,
-                    table_type,
-                    null,
-                    try input.uintInRangeInclusive(u32, min_elems, chosen_max),
-                    chosen_max,
-                );
-                defined_table_insts.appendAssumeCapacity(&table.table);
+                const limited_max = @min(table_type.limits.max, config_max);
+                const chosen_max = try input.uintInRangeInclusive(u32, min_elems, limited_max);
+                const initial_cap = try input.uintInRangeInclusive(u32, min_elems, chosen_max);
+                table.* =
+                    try .allocateFromType(allocator, table_type, null, initial_cap, chosen_max);
+                definitions.tables.appendAssumeCapacity(&table.table);
             }
 
-            const defined_memory_types = parsed_module.memDefinedTypes();
-            const defined_memory_insts = try scratch.allocator()
-                .alloc(*wasmstint.runtime.MemInst, defined_memory_types.len);
-            // TODO: Leaks memories on error
-            for (
-                defined_memory_types,
-                try scratch.allocator()
-                    .alloc(wasmstint.runtime.MemInst.Mapped, defined_memory_types.len),
-                defined_memory_insts,
-            ) |*mem_type, *mem, *mem_inst| {
+            for (defined_memory_types, defined_memory_insts) |*mem_type, *mem| {
                 const min_bytes = mem_type.limits.min * wasm_page_size;
-                if (min_bytes > wasm_smith_config.max_max_memory_bytes) {
+                const config_max = wasm_smith_config.max_max_memory_bytes;
+                if (min_bytes > config_max) {
                     return error.OutOfMemory;
                 }
 
-                const chosen_max = try input.uintInRangeInclusive(
-                    usize,
-                    min_bytes,
-                    @min(
-                        mem_type.limits.max * wasm_page_size,
-                        wasm_smith_config.max_max_memory_bytes,
-                    ),
-                );
-                mem.* = try wasmstint.runtime.MemInst.Mapped.allocateFromType(
-                    mem_type,
-                    try input.uintInRangeInclusive(usize, min_bytes, chosen_max),
-                    chosen_max,
-                );
-                mem_inst.* = &mem.memory;
+                const limited_max = @min(mem_type.limits.max * wasm_page_size, config_max);
+                const chosen_max = try input.uintInRangeInclusive(usize, min_bytes, limited_max);
+                const initial_cap = try input.uintInRangeInclusive(usize, min_bytes, chosen_max);
+                mem.* = try .allocateFromType(mem_type, initial_cap, chosen_max);
+                definitions.memories.appendAssumeCapacity(&mem.memory);
             }
 
             var import_error: wasmstint.runtime.ImportProvider.FailedRequest = undefined;
@@ -133,11 +113,7 @@ pub fn testOne(
                 allocator,
                 import_provider.importProvider(),
                 &import_error,
-                // Previous `errdefer`s handles deallocation
-                wasmstint.runtime.ModuleAlloc.Definitions{
-                    .tables = defined_table_insts.items,
-                    .memories = defined_memory_insts,
-                },
+                definitions.definitions(),
             ) catch |e| switch (e) {
                 error.OutOfMemory => |oom| return oom,
                 error.ImportFailure => |err| {
