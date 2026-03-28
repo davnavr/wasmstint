@@ -42,7 +42,7 @@ pub export fn LLVMFuzzerTestOneInput(data_ptr: [*]const u8, data_size: usize) St
     var wasm_buffer: ffi.wasm_smith.ModuleBuffer = undefined;
     wasm_buffer.generate(&input, &configuration) catch |e| return switch (e) {
         error.BadInput => {
-            std.debug.print("failed to generate WASM module\n", .{});
+            std.log.err("failed to generate WASM module (length = {d})", .{data_size});
             return Status.reject;
         },
     };

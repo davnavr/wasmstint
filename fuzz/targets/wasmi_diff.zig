@@ -42,6 +42,7 @@ const Execution = struct {
 
     inner: *const Inner,
 
+    /// Returns whether instantiation of the module by `wasmi` resulted in a trap.
     fn trap(exec: Execution) ?Trap {
         return if (exec.inner.actions_ptr == null)
             exec.inner.unsafe_trap
@@ -693,8 +694,12 @@ pub fn testOne(
         _ = wasmi_trap.toWasmstintTrapCode() catch |e| {
             std.debug.print("cannot instantiate: wasmi trapped {t}\n", .{e});
             return switch (e) {
-                error.OutOfFuel => error.BadInput, // wasmi fuel consumption is deterministic
-                error.StackOverflow => {},
+                // wasmi fuel consumption is deterministic, but that doesn't matter here.
+                error.OutOfFuel,
+                error.StackOverflow,
+                // In both cases, `wasmstint` might succesfully continue execution, so the test
+                // case is rejected.
+                => error.BadInput,
             };
         };
     }
@@ -910,14 +915,7 @@ pub fn testOne(
                 }
 
                 if (execution.trap()) |trap| {
-                    _ = trap.toWasmstintTrapCode() catch |e| {
-                        std.debug.print(
-                            "wasmstint instantiated module, but wasmi failed: {t}",
-                            .{e},
-                        );
-                        return error.BadInput;
-                    };
-
+                    _ = trap.toWasmstintTrapCode() catch unreachable;
                     std.debug.panic(
                         "wasmi trapped during instantiation {d} where wasmstint succeeded",
                         .{trap},
@@ -929,9 +927,7 @@ pub fn testOne(
             .trapped => |trap_code| {
                 std.debug.print("start function trapped: {f}\n", .{trap_code});
                 if (execution.trap()) |wasmi_trap| {
-                    const expected_trap = wasmi_trap.toWasmstintTrapCode() catch |e| {
-                        std.debug.panic("unexpected wasmi trap during instantiation: {t}", .{e});
-                    };
+                    const expected_trap = wasmi_trap.toWasmstintTrapCode() catch unreachable;
 
                     if (expected_trap != trap_code) {
                         std.debug.panic(
