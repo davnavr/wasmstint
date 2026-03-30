@@ -972,8 +972,6 @@ pub fn build(b: *Build) void {
             unit_tests_step.dependOn(ffi_tests_run);
         }
 
-        const fuzz_step = b.step("fuzz", "Run a fuzz test (requires Rust)");
-
         var rust_include_paths_buf: [2]Build.LazyPath = undefined;
         var rust_include_paths = std.ArrayList(Build.LazyPath).initBuffer(&rust_include_paths_buf);
 
@@ -1011,15 +1009,6 @@ pub fn build(b: *Build) void {
             ).step
         else
             null;
-
-        const chosen_fuzz_target = b.option(
-            FuzzTarget,
-            "fuzz-target",
-            "Which fuzz target to run",
-        ) orelse {
-            fuzz_step.dependOn(&b.addFail("Specify fuzz target with -Dfuzz-target").step);
-            return;
-        };
 
         const chosen_fuzz_runner = b.option(
             FuzzRunner,
@@ -1145,22 +1134,21 @@ pub fn build(b: *Build) void {
                 standalone_exe.root_module.addImport(info.@"0", info.@"1");
             }
 
-            if (fuzz_target == chosen_fuzz_target) {
-                const runner_step: *Step.Run = switch (chosen_fuzz_runner) {
-                    .afl => afl: {
-                        const run_afl = Step.Run.create(b, afl_output_exe);
-                        run_afl.addFileArg(afl_exe);
-                        break :afl run_afl;
-                    },
-                    .standalone => b.addRunArtifact(standalone_exe),
-                };
+            const runner_step: *Step.Run = switch (chosen_fuzz_runner) {
+                .afl => afl: {
+                    const run_afl = Step.Run.create(b, afl_output_exe);
+                    run_afl.addFileArg(afl_exe);
+                    break :afl run_afl;
+                },
+                .standalone => b.addRunArtifact(standalone_exe),
+            };
 
-                if (b.args) |args| {
-                    runner_step.addArgs(args);
-                }
-
-                fuzz_step.dependOn(&runner_step.step);
+            if (b.args) |args| {
+                runner_step.addArgs(args);
             }
+
+            const step_name = b.fmt("{s}", .{fuzz_target_name});
+            b.step(step_name, "Run a fuzz test (requires Rust)").dependOn(&runner_step.step);
         }
     }
 }
