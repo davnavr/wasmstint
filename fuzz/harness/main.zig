@@ -145,7 +145,7 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
 
     _ = scratch.reset(.retain_capacity);
 
-    var input = ffi.Input.init(input_src.contents());
+    var input = fuzz_data.Input.init(input_src.contents());
 
     // Generate the WASM module
     const configuration = ffi.wasm_smith.Configuration.fromTarget(target);
@@ -213,3 +213,4 @@ const target = @import("target");
 const file_content = @import("file_content");
 const cli_args = @import("cli_args");
 const ffi = @import("ffi");
+const fuzz_data = @import("fuzz_data");

@@ -122,6 +122,7 @@ pub const ModuleBuffer = extern struct {
 };
 
 const std = @import("std");
-const ByteSlice = @import("ffi.zig").ByteSlice;
-const Input = @import("input.zig").Input;
+const fuzz_data = @import("fuzz_data");
+const ByteSlice = fuzz_data.ByteSlice;
+const Input = fuzz_data.Input;
 const wasm_features = @import("wasm_features");

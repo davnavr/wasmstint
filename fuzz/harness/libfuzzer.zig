@@ -4,7 +4,7 @@
 
 inline fn testOne(
     wasm: []const u8,
-    input: *ffi.Input,
+    input: *fuzz_data.Input,
     scratch: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
 ) anyerror!void {
@@ -36,7 +36,7 @@ pub export fn LLVMFuzzerTestOneInput(data_ptr: [*]const u8, data_size: usize) St
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
 
-    var input = ffi.Input.init(data);
+    var input = fuzz_data.Input.init(data);
 
     const configuration = ffi.wasm_smith.Configuration.fromTarget(target);
     var wasm_buffer: ffi.wasm_smith.ModuleBuffer = undefined;
@@ -135,4 +135,5 @@ const std = @import("std");
 /// LLVM docs state that `exit()`ing shouldn't be done.
 const abort = std.process.abort;
 const ffi = @import("ffi");
+const fuzz_data = @import("fuzz_data");
 const target = @import("target");

@@ -5,7 +5,7 @@ pub const wasm_smith_config = ffi.wasm_smith.Configuration{};
 
 pub fn testOne(
     wasm_module: []const u8,
-    input: *ffi.Input,
+    input: *fuzz_data.Input,
     scratch: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
 ) !void {
@@ -218,7 +218,7 @@ pub fn testOne(
     }
 }
 
-fn generateExternAddr(input: *ffi.Input) ffi.Input.Error!wasmstint.runtime.ExternAddr {
+fn generateExternAddr(input: *fuzz_data.Input) fuzz_data.Input.Error!wasmstint.runtime.ExternAddr {
     const Bits = packed struct(u32) {
         high: u4,
         low: u28,
@@ -232,7 +232,7 @@ fn generateExternAddr(input: *ffi.Input) ffi.Input.Error!wasmstint.runtime.Exter
 
 const ImportProvider = struct {
     arena: std.heap.ArenaAllocator,
-    input: *ffi.Input,
+    input: *fuzz_data.Input,
     functions: std.ArrayList(wasmstint.runtime.FuncRef),
     memories: std.ArrayList(wasmstint.runtime.MemInst.Mapped),
     tables: std.ArrayList(wasmstint.runtime.TableInst.Allocated),
@@ -361,7 +361,7 @@ const ImportProvider = struct {
 };
 
 fn generateTaggedValue(
-    input: *ffi.Input,
+    input: *fuzz_data.Input,
     ty: wasmstint.Module.ValType,
     functions: []const wasmstint.runtime.FuncRef,
 ) !wasmstint.Interpreter.TaggedValue {
@@ -386,7 +386,7 @@ fn mainLoop(
     initial_state: wasmstint.Interpreter.State,
     scratch: *std.heap.ArenaAllocator,
     fuel: *wasmstint.Interpreter.Fuel,
-    input: *ffi.Input,
+    input: *fuzz_data.Input,
     functions: []const wasmstint.runtime.FuncRef,
 ) ![]const wasmstint.Interpreter.TaggedValue {
     var state = initial_state;
@@ -485,3 +485,4 @@ const std = @import("std");
 const wasmstint = @import("wasmstint");
 const wasm_page_size = wasmstint.runtime.MemInst.page_size;
 const ffi = @import("ffi");
+const fuzz_data = @import("fuzz_data");

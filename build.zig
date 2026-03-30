@@ -955,14 +955,15 @@ pub fn build(b: *Build) void {
         }
     }
     {
+        const fuzz_data_module = b.createModule(.{
+            .root_source_file = b.path("fuzz/data.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
         {
             const ffi_test = b.addTest(.{
-                .name = "fuzz-ffi",
-                .root_module = b.createModule(.{
-                    .root_source_file = b.path("fuzz/ffi/src/ffi.zig"),
-                    .target = target,
-                    .optimize = optimize,
-                }),
+                .name = "fuzz_data",
+                .root_module = fuzz_data_module,
                 .max_rss = byte_size.mib(464),
                 .use_llvm = use_llvm.ifPreferred(),
             });
@@ -1028,11 +1029,12 @@ pub fn build(b: *Build) void {
 
         const ffi_module = b.createModule(.{
             .root_source_file = b.path("fuzz/ffi/src/ffi.zig"),
-            .link_libc = true,
+            .link_libc = true, // links to Rust cdylib
             .target = target,
             .optimize = optimize,
         });
         ffi_module.addImport("wasm_features", wasm_options);
+        ffi_module.addImport("fuzz_data", fuzz_data_module);
 
         for (rust_include_paths.items) |include_path| {
             ffi_module.addLibraryPath(include_path);
@@ -1050,9 +1052,10 @@ pub fn build(b: *Build) void {
                 .target = target,
                 .optimize = optimize,
             });
-            for (&[3]struct { []const u8, *Build.Module }{
+            for (&[4]struct { []const u8, *Build.Module }{
                 .{ "wasmstint", wasmstint_module },
                 .{ "ffi", ffi_module },
+                .{ "fuzz_data", fuzz_data_module },
                 .{ "wasm_features", wasm_options },
             }) |info| {
                 target_module.addImport(info.@"0", info.@"1");
@@ -1073,8 +1076,13 @@ pub fn build(b: *Build) void {
             libfuzzer_harness_lib.sanitize_coverage_trace_pc_guard = true; // required for AFL++
             libfuzzer_harness_lib.lto = .full;
             libfuzzer_harness_lib.bundle_compiler_rt = true;
-            libfuzzer_harness_lib.root_module.addImport("target", target_module);
-            libfuzzer_harness_lib.root_module.addImport("ffi", ffi_module);
+            for (&[3]struct { []const u8, *Build.Module }{
+                .{ "target", target_module },
+                .{ "ffi", ffi_module },
+                .{ "fuzz_data", fuzz_data_module },
+            }) |info| {
+                libfuzzer_harness_lib.root_module.addImport(info.@"0", info.@"1");
+            }
 
             // TODO(zig): limit parallelism of afl-clang-lto https://github.com/ziglang/zig/issues/12101
             const afl_clang_lto = b.addSystemCommand(
@@ -1127,9 +1135,10 @@ pub fn build(b: *Build) void {
             if (fail_no_rust_include) |fail| {
                 standalone_exe.step.dependOn(fail);
             }
-            for (&[4]struct { []const u8, *Build.Module }{
+            for (&[5]struct { []const u8, *Build.Module }{
                 .{ "target", target_module },
                 .{ "ffi", ffi_module },
+                .{ "fuzz_data", fuzz_data_module },
                 .{ "file_content", file_content_module },
                 .{ "cli_args", cli_args_module },
             }) |info| {

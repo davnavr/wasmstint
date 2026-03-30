@@ -474,7 +474,7 @@ const Execution = struct {
 
     fn run(
         wasm_module: []const u8,
-        input: *ffi.Input,
+        input: *fuzz_data.Input,
         fuel: u64,
     ) !Execution {
         const Limits = extern struct {
@@ -484,7 +484,7 @@ const Execution = struct {
 
         const diff = @extern(
             *const fn (
-                input: *ffi.Input,
+                input: *fuzz_data.Input,
                 wasm_ptr: [*]const u8,
                 wasm_len: usize,
                 fuel: u64,
@@ -678,7 +678,7 @@ const Exports = struct {
 
 pub fn testOne(
     wasm_module: []const u8,
-    input: *ffi.Input,
+    input: *fuzz_data.Input,
     scratch: *std.heap.ArenaAllocator,
     allocator: Allocator,
 ) !void {
@@ -1261,7 +1261,7 @@ fn mainLoop(
 
 const ImportProvider = struct {
     arena: std.heap.ArenaAllocator,
-    input: *ffi.Input,
+    input: *fuzz_data.Input,
     global_import_vals: []const Execution.ArgumentVal,
     global_import_count: u32 = 0,
     // These have a fixed capacity, and are allocated in `arena.child_allocator`.
@@ -1402,3 +1402,4 @@ const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 const wasmstint = @import("wasmstint");
 const ffi = @import("ffi");
+const fuzz_data = @import("fuzz_data");

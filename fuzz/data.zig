@@ -1,4 +1,23 @@
+/// Used when to pass byte slices across the FFI boundary.
+pub const ByteSlice = extern struct {
+    ptr: [*]const u8,
+    len: usize,
+
+    pub fn init(bytes: []const u8) ByteSlice {
+        return ByteSlice{ .ptr = bytes.ptr, .len = bytes.len };
+    }
+
+    pub fn slice(bytes: ByteSlice) []const u8 {
+        return bytes.ptr[0..bytes.len];
+    }
+
+    pub const empty = ByteSlice.init("");
+};
+
 /// Note that some functions may introduce a bias, assuming the input bytes are random.
+///
+/// TODO: See if default values should be returned. Here's what Rust's `arbitrary` trait does:
+/// https://github.com/rust-fuzz/arbitrary/issues/92
 pub const Input = extern struct {
     bytes: ByteSlice,
 
@@ -89,22 +108,22 @@ pub const Input = extern struct {
     }
 };
 
-test {
+const std = @import("std");
+const testing = std.testing;
+
+test Input {
     const original = "helloworld\x34\x12\x00\x01\x02\x03\x04\x05\x07\x08\x00";
     var input = Input.init(original);
-    try std.testing.expectEqual(original[0..5], input.take(5));
-    try std.testing.expectEqual(original[5..10], input.takeArray(5));
-    try std.testing.expectEqual(0x1234, input.int(u16));
-    try std.testing.expectEqual(false, input.boolean());
-    try std.testing.expectEqual(true, input.boolean());
-    try std.testing.expectEqual(false, input.boolean());
-    try std.testing.expectEqual(3, input.uintLessThan(u8, 4));
-    try std.testing.expectEqual(0, input.uintLessThan(u8, 4));
-    try std.testing.expectEqual(3, input.uintInRangeExclusive(u8, 2, 6));
-    try std.testing.expectEqual(5, input.uintInRangeExclusive(u8, 2, 6));
-    try std.testing.expectEqual(2, input.uintInRangeExclusive(u8, 2, 6));
-    try std.testing.expectEqual(42, input.uintInRangeInclusive(u8, 42, 42));
+    try testing.expectEqual(original[0..5], input.take(5));
+    try testing.expectEqual(original[5..10], input.takeArray(5));
+    try testing.expectEqual(0x1234, input.int(u16));
+    try testing.expectEqual(false, input.boolean());
+    try testing.expectEqual(true, input.boolean());
+    try testing.expectEqual(false, input.boolean());
+    try testing.expectEqual(3, input.uintLessThan(u8, 4));
+    try testing.expectEqual(0, input.uintLessThan(u8, 4));
+    try testing.expectEqual(3, input.uintInRangeExclusive(u8, 2, 6));
+    try testing.expectEqual(5, input.uintInRangeExclusive(u8, 2, 6));
+    try testing.expectEqual(2, input.uintInRangeExclusive(u8, 2, 6));
+    try testing.expectEqual(42, input.uintInRangeInclusive(u8, 42, 42));
 }
-
-const std = @import("std");
-const ByteSlice = @import("ffi.zig").ByteSlice;
