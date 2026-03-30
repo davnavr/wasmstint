@@ -10,7 +10,7 @@ var larget_local_count: u16 = init_counter;
 pub fn testOne(
     wasm_module: []const u8,
     input: *fuzz_data.Input,
-    scratch: *std.heap.ArenaAllocator,
+    scratch: *ArenaAllocator,
     allocator: std.mem.Allocator,
 ) error{OutOfMemory}!void {
     _ = input;
@@ -108,12 +108,19 @@ pub fn testOne(
 //     }
 // }
 
+fn testOneAllocationFailure(
+    allocator: std.mem.Allocator,
+    wasm: []const u8,
+    input: *fuzz_data.Input,
+) !void {
+    var scratch = ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    try testOne(wasm, input, &scratch, allocator);
+}
+
 test {
     const fuzz_buffer = try testing.allocator.alloc(u8, 2048);
     defer testing.allocator.free(fuzz_buffer);
-
-    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
-    defer scratch.deinit();
 
     var rng = std.Random.DefaultPrng.init(testing.random_seed);
     var generated_cases: usize = 0;
@@ -130,7 +137,11 @@ test {
         };
         defer wasm_buffer.deinit();
 
-        try testOne(wasm_buffer.bytes(), &input, &scratch, testing.allocator);
+        try testing.checkAllAllocationFailures(
+            testing.allocator,
+            testOneAllocationFailure,
+            .{ wasm_buffer.bytes(), &input },
+        );
 
         generated_cases += 1;
     }
@@ -143,6 +154,7 @@ test {
 }
 
 const std = @import("std");
+const ArenaAllocator = std.heap.ArenaAllocator;
 const testing = std.testing;
 const wasmstint = @import("wasmstint");
 const fuzz_data = @import("fuzz_data");
