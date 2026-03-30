@@ -193,6 +193,12 @@ pub fn build(b: *Build) void {
         break :options wasm_options.createModule();
     };
 
+    const interpreter_backend = b.option(
+        InterpreterBackend,
+        "interpreter-backend",
+        "Set the interpreter implementation to use",
+    ) orelse InterpreterBackend.zig;
+
     const wasmstint_module = wasmstint: {
         const root_module = b.addModule("wasmstint", .{
             .root_source_file = b.path("src/root.zig"),
@@ -213,6 +219,7 @@ pub fn build(b: *Build) void {
         interpreter_module.addImport("handlers", handlers_module);
 
         const module_options = b.addOptions();
+        module_options.addOption(InterpreterBackend, "interpreter_backend", interpreter_backend);
         const module_options_import = module_options.createModule();
 
         for (&[5]struct { []const u8, *Build.Module }{
@@ -234,13 +241,6 @@ pub fn build(b: *Build) void {
         for (&[2]*Build.Module{ root_module, handlers_module }) |m| {
             m.addImport("interpreter", interpreter_module);
         }
-
-        const interpreter_backend = b.option(
-            InterpreterBackend,
-            "interpreter-backend",
-            "Set the interpreter implementation to use",
-        ) orelse InterpreterBackend.zig;
-        module_options.addOption(InterpreterBackend, "interpreter_backend", interpreter_backend);
 
         const enum_set_module = b.createModule(.{
             .root_source_file = b.path("src/codegen/enum_set.zig"),
@@ -1035,7 +1035,6 @@ pub fn build(b: *Build) void {
         );
 
         for (std.enums.values(FuzzTarget)) |fuzz_target| {
-            const fuzz_target_name: []const u8 = b.fmt("fuzz-{t}", .{fuzz_target});
             const target_module = b.createModule(.{
                 .root_source_file = b.path(b.fmt("fuzz/targets/{t}.zig", .{fuzz_target})),
                 .target = target,
@@ -1050,6 +1049,15 @@ pub fn build(b: *Build) void {
                 target_module.addImport(info.@"0", info.@"1");
             }
 
+            const step_name = b.fmt("fuzz-{t}", .{fuzz_target});
+            const fuzz_target_name: []const u8 = b.fmt("{s}{s}", .{
+                step_name,
+                switch (interpreter_backend) {
+                    .zig => "",
+                    .assembly => "-asm",
+                    .@"llvm-ir" => "-bc",
+                },
+            });
             const libfuzzer_harness_lib = b.addLibrary(.{
                 .name = b.fmt("{s}-libfuzzer", .{fuzz_target_name}),
                 .root_module = b.createModule(.{
@@ -1147,7 +1155,6 @@ pub fn build(b: *Build) void {
                 runner_step.addArgs(args);
             }
 
-            const step_name = b.fmt("{s}", .{fuzz_target_name});
             b.step(step_name, "Run a fuzz test (requires Rust)").dependOn(&runner_step.step);
         }
     }
