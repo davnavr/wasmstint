@@ -204,9 +204,12 @@ pub fn testOne(
             &fuel,
             input,
             import_provider.functions.items,
-        ) catch |err| {
-            std.log.info("function did not return: {t}", .{err});
-            continue;
+        ) catch |err| switch (err) {
+            error.BadInput => |fail| return fail,
+            else => {
+                std.log.info("function did not return: {t}", .{err});
+                continue;
+            },
         };
 
         std.log.info("function returned {f}", .{
@@ -325,7 +328,7 @@ const ImportProvider = struct {
                                 .i32, .i64 => try provider.input.int(Val),
                                 .f32, .f64 => try provider.input.floatFromBits(Val),
                                 .externref => try generateExternAddr(provider.input),
-                                .funcref => Val.null,
+                                .funcref => Val.null, // TODO: pick random funcref
                                 .v128 => .{ .u8x16 = (try provider.input.takeArray(16)).* },
                                 // else => unreachable,
                             };
