@@ -1,9 +1,18 @@
+const is_smoke_test = @import("builtin").is_test;
+const init_counter = if (is_smoke_test) 0 else @compileError("not in smoke test");
+var largest_code_count: usize = init_counter;
+var largest_side_table_len: u32 = init_counter;
+var larget_max_values: u16 = init_counter;
+var larget_local_count: u16 = init_counter;
+
+// TODO: counters in validation code to track which opcodes were validated
+
 pub fn testOne(
     wasm_module: []const u8,
     input: *fuzz_data.Input,
     scratch: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
-) error{ OutOfMemory, SkipZigTest }!void {
+) error{OutOfMemory}!void {
     _ = input;
 
     var diagnostic_writer = try std.Io.Writer.Allocating.initCapacity(allocator, 128);
@@ -21,7 +30,10 @@ pub fn testOne(
             "module validation error {t}: {s}",
             .{ e, diagnostic_writer.written() },
         ),
-        error.WasmImplementationLimit => return,
+        error.WasmImplementationLimit => {
+            std.log.warn("hit implementation limit", .{});
+            return;
+        },
     };
     defer module.deinit(allocator, allocator);
 
@@ -41,7 +53,10 @@ pub fn testOne(
             "code validation error {t}: {s}",
             .{ e, diagnostic_writer.written() },
         ),
-        error.WasmImplementationLimit => return,
+        error.WasmImplementationLimit => {
+            std.log.warn("hit implementation limit", .{});
+            return;
+        },
     };
 
     if (!finished) {
@@ -68,9 +83,22 @@ pub fn testOne(
                 .{ inner.instructions_end, inner.instructions_start },
             );
         }
+
+        // TODO: check delta IP OOB, delta STP OOB, and copy_count <= max_values
+
+        if (is_smoke_test) {
+            largest_side_table_len = @max(largest_side_table_len, inner.side_table_len);
+            larget_max_values = @max(larget_local_count, inner.max_values);
+            larget_local_count = @max(larget_local_count, inner.local_values);
+        }
     }
 
-    std.debug.print("validated {d} functions\n", .{module.codeEntries().len});
+    const code_count = module.codeEntries().len;
+    if (is_smoke_test) {
+        largest_code_count = @max(largest_code_count, code_count);
+    } else {
+        std.debug.print("validated {d} functions\n", .{code_count});
+    }
 }
 
 // test {
@@ -80,6 +108,42 @@ pub fn testOne(
 //     }
 // }
 
+test {
+    const fuzz_buffer = try testing.allocator.alloc(u8, 2048);
+    defer testing.allocator.free(fuzz_buffer);
+
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+
+    var rng = std.Random.DefaultPrng.init(testing.random_seed);
+    var generated_cases: usize = 0;
+    const total_case_count = 2000;
+    for (0..total_case_count) |i| {
+        errdefer std.log.err("failed while generating test case {d}", .{i});
+
+        rng.fill(fuzz_buffer);
+
+        var input = fuzz_data.Input.init(fuzz_buffer);
+        var wasm_buffer: ffi.wasm_smith.ModuleBuffer = undefined;
+        wasm_buffer.generate(&input, &.{}) catch |e| return switch (e) {
+            error.BadInput => continue,
+        };
+        defer wasm_buffer.deinit();
+
+        try testOne(wasm_buffer.bytes(), &input, &scratch, testing.allocator);
+
+        generated_cases += 1;
+    }
+
+    try testing.expect(generated_cases >= generated_cases - (generated_cases / 4));
+    try testing.expect(largest_code_count >= 5);
+    try testing.expect(largest_side_table_len >= 128);
+    try testing.expect(larget_max_values >= 50);
+    try testing.expect(larget_local_count >= 50);
+}
+
 const std = @import("std");
+const testing = std.testing;
 const wasmstint = @import("wasmstint");
 const fuzz_data = @import("fuzz_data");
+const ffi = @import("ffi");

@@ -31,12 +31,6 @@ const InterpreterBackend = enum {
     @"llvm-ir",
 };
 
-const FuzzTarget = enum {
-    validation,
-    execution,
-    wasmi_diff,
-};
-
 const FuzzRunner = enum {
     /// Requires `afl-fuzz` from AFL++.
     afl,
@@ -1034,6 +1028,18 @@ pub fn build(b: *Build) void {
             .{ .preferred_link_mode = .dynamic, .search_strategy = .paths_first },
         );
 
+        // https://fitzgen.com/2022/10/24/how-fuzzy-are-your-fuzzers.html
+        const smoke_test_step = b.step(
+            "test-fuzz-smoke",
+            "Run fuzz target tests to check properties (requires Rust)",
+        );
+
+        const FuzzTarget = enum {
+            validation,
+            execution,
+            @"wasmi-diff",
+        };
+
         for (std.enums.values(FuzzTarget)) |fuzz_target| {
             const target_module = b.createModule(.{
                 .root_source_file = b.path(b.fmt("fuzz/targets/{t}.zig", .{fuzz_target})),
@@ -1050,6 +1056,28 @@ pub fn build(b: *Build) void {
             }
 
             const step_name = b.fmt("fuzz-{t}", .{fuzz_target});
+            const smoke_test_name = b.fmt("{s}-smoke", .{step_name});
+            const smoke_test: ?struct {
+                max_rss: usize,
+            } = switch (fuzz_target) {
+                .validation => .{
+                    .max_rss = byte_size.mib(184),
+                },
+                else => null,
+            };
+            // If in the future, Zig's builtin fuzz runner needs to be used, maybe passing
+            // module options to toggle counters/smoke test will work.
+            if (smoke_test) |test_info| {
+                const run_smoke_test = &b.addRunArtifact(b.addTest(.{
+                    .name = smoke_test_name,
+                    .root_module = target_module,
+                    .max_rss = test_info.max_rss,
+                    .use_llvm = use_llvm.ifPreferred(),
+                })).step;
+                run_smoke_test.max_rss = byte_size.mib(15);
+                smoke_test_step.dependOn(run_smoke_test);
+            }
+
             const fuzz_target_name: []const u8 = b.fmt("{s}{s}", .{
                 step_name,
                 switch (interpreter_backend) {
