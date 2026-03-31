@@ -1233,6 +1233,10 @@ pub fn rawValidate(
         defer coz_all_locals.end();
 
         const local_group_count = try reader.readUleb128(u32, diag, "locals count");
+        const max_local_count = std.math.maxInt(u16);
+        if (local_group_count > max_local_count) {
+            return error.WasmImplementationLimit; // too many local groups
+        }
 
         const LocalGroup = struct { type: ValType, count: u32 };
 
@@ -1257,7 +1261,7 @@ pub fn rawValidate(
             group.* = .{ .type = local_type, .count = local_count };
         }
 
-        if (total_locals_count > std.math.maxInt(u16)) {
+        if (total_locals_count > max_local_count) {
             return error.WasmImplementationLimit; // too many locals
         }
 
