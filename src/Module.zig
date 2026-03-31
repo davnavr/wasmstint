@@ -367,46 +367,55 @@ pub const Name = struct {
         return name.ptr[0..name.len];
     }
 
-    /// Prints a WebAssembly Text Format string literal, emitting escape sequences for
-    /// non-printable and non-ASCII characters.
-    pub fn format(name: Name, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.writeByte('"');
-        var remaining = name.bytes();
-        while (remaining.len > 0) {
-            switch (remaining[0]) {
-                '\t' => try writer.writeAll("\\t"),
-                '\n' => try writer.writeAll("\\n"),
-                '\r' => try writer.writeAll("\\r"),
-                '\"' => try writer.writeAll("\\\""),
-                '\'' => try writer.writeAll("\\'"),
-                '\\' => try writer.writeAll("\\\\"),
-                else => if (std.ascii.isPrint(remaining[0])) {
-                    try writer.writeByte(remaining[0]);
-                    remaining = remaining[1..];
-                    continue;
-                } else {
-                    // Unicode escape sequence
-                    const utf8_len = std.unicode.utf8ByteSequenceLength(remaining[0]) catch
-                        unreachable;
+    pub const Formatter = struct {
+        name: std.unicode.Utf8View,
 
-                    const codepoint = switch (utf8_len) {
-                        1 => remaining[0],
-                        2 => std.unicode.utf8Decode2(remaining[0..2].*) catch unreachable,
-                        3 => std.unicode.utf8Decode3(remaining[0..3].*) catch unreachable,
-                        4 => std.unicode.utf8Decode4(remaining[0..4].*) catch unreachable,
-                        else => unreachable,
-                    };
+        /// Prints a WebAssembly Text Format string literal, emitting escape sequences for
+        /// non-printable and non-ASCII characters.
+        pub fn format(f: Formatter, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            try writer.writeByte('"');
+            var remaining = f.name.bytes;
+            while (remaining.len > 0) {
+                switch (remaining[0]) {
+                    '\t' => try writer.writeAll("\\t"),
+                    '\n' => try writer.writeAll("\\n"),
+                    '\r' => try writer.writeAll("\\r"),
+                    '\"' => try writer.writeAll("\\\""),
+                    '\'' => try writer.writeAll("\\'"),
+                    '\\' => try writer.writeAll("\\\\"),
+                    else => if (std.ascii.isPrint(remaining[0])) {
+                        try writer.writeByte(remaining[0]);
+                        remaining = remaining[1..];
+                        continue;
+                    } else {
+                        // Unicode escape sequence
+                        const utf8_len = std.unicode.utf8ByteSequenceLength(remaining[0]) catch
+                            unreachable;
 
-                    remaining = remaining[utf8_len..];
-                    try writer.print("\\u{{{x}}}", .{codepoint});
-                    continue;
-                },
+                        const codepoint = switch (utf8_len) {
+                            1 => remaining[0],
+                            2 => std.unicode.utf8Decode2(remaining[0..2].*) catch unreachable,
+                            3 => std.unicode.utf8Decode3(remaining[0..3].*) catch unreachable,
+                            4 => std.unicode.utf8Decode4(remaining[0..4].*) catch unreachable,
+                            else => unreachable,
+                        };
+
+                        remaining = remaining[utf8_len..];
+                        try writer.print("\\u{{{x}}}", .{codepoint});
+                        continue;
+                    },
+                }
+
+                remaining = remaining[1..];
             }
 
-            remaining = remaining[1..];
+            try writer.writeByte('"');
         }
+    };
 
-        try writer.writeByte('"');
+    /// See `Formatter`.
+    pub fn format(name: Name, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try (Formatter{ .name = .{ .bytes = name.bytes() } }).format(writer);
     }
 };
 
@@ -1717,7 +1726,9 @@ fn parseExportSec(
         if (export_dedup.getOrPutAssumeCapacityContext(name.bytes, export_dedup_context)
             .found_existing)
         {
-            return diag.print(.validation, "duplicate export name \"{s}\"", .{name.bytes});
+            return diag.print(.validation, "duplicate export name {f}", .{
+                Name.Formatter{ .name = name },
+            });
         }
 
         const tag = try export_reader.readByteTag(ImportExportDesc, diag, "export tag");
