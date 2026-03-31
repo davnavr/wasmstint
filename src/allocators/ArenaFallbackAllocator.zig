@@ -56,8 +56,10 @@ fn remap(
         );
 
         if (resized) {
+            // Succesful resize in place
             return buf.ptr;
         } else {
+            // Shrinking should be a successful resize in place.
             std.debug.assert(new_len > buf.len);
             const new_ptr = self.arena.allocator().rawAlloc(
                 new_len,
@@ -65,7 +67,8 @@ fn remap(
                 ret_addr,
             ) orelse return null;
 
-            @memcpy(new_ptr[0..new_len], buf);
+            // Copy contents of old allocation
+            @memcpy(new_ptr[0..buf.len], buf);
 
             FixedBufferAllocator.free(@ptrCast(&self.buffer), buf, alignment, ret_addr);
 
