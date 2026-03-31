@@ -20,6 +20,10 @@ const Arguments = cli_args.CliArgs(.{
             .long = "skip-bad-input",
             .description = "Don't fail if error.BadInput is returned",
         }),
+        cli_args.Flag.boolean(.{
+            .long = "skip-out-of-memory",
+            .description = "Don't fail if error.OutOfMemory is returned",
+        }),
     } ++ if (needs_wasm) .{
         cli_args.Flag.string(
             .{
@@ -131,18 +135,18 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
         arguments.input,
         &scratch,
         allocator.allocator(),
-    ) catch |e| {
-        switch (e) {
-            error.OutOfMemory => std.debug.panic(
-                "oom reading {f}",
-                .{std.unicode.fmtUtf8(arguments.input)},
-            ),
-            else => |err| std.log.err(
+    ) catch |e| switch (e) {
+        error.OutOfMemory => std.debug.panic(
+            "oom reading {f}",
+            .{std.unicode.fmtUtf8(arguments.input)},
+        ),
+        else => |err| {
+            std.log.err(
                 "failed to read file {f}: {t}",
                 .{ std.unicode.fmtUtf8(arguments.input), err },
-            ),
-        }
-        return 1;
+            );
+            return 1;
+        },
     };
 
     defer input_src.deinit(allocator.allocator());
@@ -216,7 +220,20 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
             .{ &scratch, allocator.allocator() },
     ) catch |e| err: {
         switch (@as(anyerror, e)) {
-            error.BadInput => if (arguments.@"skip-bad-input") break :err,
+            error.BadInput => if (arguments.@"skip-bad-input") {
+                std.log.warn("test case rejected", .{});
+                if (@errorReturnTrace()) |t| {
+                    std.debug.dumpStackTrace(t);
+                }
+                break :err;
+            },
+            error.OutOfMemory => if (arguments.@"skip-out-of-memory") {
+                std.log.warn("test case out-of-memory", .{});
+                if (@errorReturnTrace()) |t| {
+                    std.debug.dumpStackTrace(t);
+                }
+                break :err;
+            },
             else => {},
         }
 
