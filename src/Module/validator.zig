@@ -1535,13 +1535,18 @@ pub fn rawValidate(
                 const current_height = val_stack.len();
 
                 const label_count = try reader.readUleb128(u32, diag, "br_table label count");
-                const labels = try per_instr_arena.allocator().alloc(u32, label_count);
+                if (label_count > 6_000_000) {
+                    return error.WasmImplementationLimit; // too many labels in br_table
+                }
 
-                try side_table.entries.ensureUnusedCapacity(scratch.allocator(), labels.len);
+                try side_table.entries.ensureUnusedCapacity(scratch.allocator(), label_count);
 
                 // Validation bases the "arity" on the default branch, so all labels must be parsed
                 // to get to the default label.
-                for (labels) |*n| n.* = try reader.readUleb128(u32, diag, "br_table label");
+                const labels = try per_instr_arena.allocator().alloc(u32, label_count);
+                for (labels) |*n| {
+                    n.* = try reader.readUleb128(u32, diag, "br_table label");
+                }
 
                 // TODO: Skip branch fixup processing for unreachable code.
                 const last_label = try Label.read(
