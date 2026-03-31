@@ -4,13 +4,13 @@ pub const Lookup = std.ArrayHashMapUnmanaged(FuncIdx, void, Context, false);
 
 // Could exclude import functions from this set to save space, but current approach is simple
 lookup: Lookup,
-arena: *std.heap.ArenaAllocator,
+arena: ?*std.heap.ArenaAllocator,
 
 const FuncRefs = @This();
 
 pub const dummy = FuncRefs{
     .lookup = .empty,
-    .arena = undefined,
+    .arena = null,
 };
 
 pub fn init(
@@ -31,7 +31,7 @@ pub fn init(
 }
 
 pub fn ensureUnusedCapacity(refs: *FuncRefs, additional: usize) Allocator.Error!void {
-    try refs.lookup.ensureUnusedCapacityContext(refs.arena.allocator(), additional, Context{});
+    try refs.lookup.ensureUnusedCapacityContext(refs.arena.?.allocator(), additional, Context{});
 }
 
 const Context = struct {
@@ -51,10 +51,13 @@ const Context = struct {
 ///
 /// [validation rules]: https://webassembly.github.io/extended-const/core/valid/conventions.html#context
 pub fn insert(refs: *FuncRefs, idx: FuncIdx) Allocator.Error!void {
-    try refs.lookup.putContext(refs.arena.allocator(), idx, {}, Context{});
+    if (refs.arena) |arena| {
+        try refs.lookup.putContext(arena.allocator(), idx, {}, Context{});
+    }
 }
 
 pub fn finish(refs: *FuncRefs, allocator: Allocator) Allocator.Error!Lookup {
+    std.debug.assert(refs.arena != null);
     // Ideally, this would always discard excess capacity, but `MultiArrayList.clone()` doesn't
     const cloned = try refs.lookup.cloneContext(allocator, Context{});
     errdefer comptime unreachable;

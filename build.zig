@@ -894,7 +894,7 @@ pub fn build(b: *Build) void {
             const fuzzed_test_dir = b.path("tests/fuzzed");
             for (&[_]struct { tests: []const []const u8, enabled: bool }{
                 .{
-                    .tests = &.{ "validation.wast", "execution.wast" },
+                    .tests = &.{ "validation.wast", "execution.wast", "parsing.wast" },
                     .enabled = true,
                 },
                 .{
