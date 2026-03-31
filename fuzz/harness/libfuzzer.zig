@@ -2,15 +2,6 @@
 //!
 //! [`libFuzzer`]: https://www.llvm.org/docs/LibFuzzer.html
 
-inline fn testOne(
-    wasm: []const u8,
-    input: *fuzz_data.Input,
-    scratch: *std.heap.ArenaAllocator,
-    allocator: std.mem.Allocator,
-) anyerror!void {
-    return target.testOne(wasm, input, scratch, allocator);
-}
-
 const Status = enum(c_int) {
     accept = 0,
     reject = -1,
@@ -36,19 +27,26 @@ pub export fn LLVMFuzzerTestOneInput(data_ptr: [*]const u8, data_size: usize) St
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
 
-    var input = fuzz_data.Input.init(data);
+    const needs_wasm = comptime @typeInfo(@TypeOf(target.testOne)).@"fn".params.len == 4;
 
-    const configuration = ffi.wasm_smith.Configuration.fromTarget(target);
-    var wasm_buffer: ffi.wasm_smith.ModuleBuffer = undefined;
-    wasm_buffer.generate(&input, &configuration) catch |e| return switch (e) {
-        error.BadInput => {
-            std.log.err("failed to generate WASM module (length = {d})", .{data_size});
-            return Status.reject;
-        },
-    };
-    defer wasm_buffer.deinit();
+    var input = if (needs_wasm) fuzz_data.Input.init(data);
+    const configuration = if (needs_wasm) ffi.wasm_smith.Configuration.fromTarget(target);
+    var wasm_buffer: if (needs_wasm) ffi.wasm_smith.ModuleBuffer else void = undefined;
+    if (needs_wasm) {
+        wasm_buffer.generate(&input, &configuration) catch |e| return switch (e) {
+            error.BadInput => {
+                std.log.err("failed to generate WASM module (length = {d})", .{data_size});
+                return Status.reject;
+            },
+        };
+    }
+    defer if (needs_wasm) wasm_buffer.deinit();
 
-    testOne(wasm_buffer.bytes(), &input, &scratch, allocator) catch |e| switch (e) {
+    @call(
+        .auto,
+        target.testOne,
+        (if (needs_wasm) .{ wasm_buffer.bytes(), &input } else .{data}) ++ .{ &scratch, allocator },
+    ) catch |e| switch (@as(anyerror, e)) {
         error.SkipZigTest, error.BadInput => return Status.reject,
         error.OutOfMemory => {},
         else => abortOnError(e),

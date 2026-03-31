@@ -3,9 +3,11 @@ pub const std_options = std.Options{
     .networking = false,
 };
 
+const needs_wasm = @typeInfo(@TypeOf(target.testOne)).@"fn".params.len == 4;
+
 const Arguments = cli_args.CliArgs(.{
     .description = "Standalone fuzz test case executor.",
-    .flags = &[_]cli_args.Flag{
+    .flags = &(.{
         cli_args.Flag.string(
             .{
                 .long = "input",
@@ -14,6 +16,11 @@ const Arguments = cli_args.CliArgs(.{
             },
             "PATH",
         ).required(),
+        cli_args.Flag.boolean(.{
+            .long = "skip-bad-input",
+            .description = "Don't fail if error.BadInput is returned",
+        }),
+    } ++ if (needs_wasm) .{
         cli_args.Flag.string(
             .{
                 .long = "save-module",
@@ -28,11 +35,7 @@ const Arguments = cli_args.CliArgs(.{
             },
             "PATH",
         ),
-        cli_args.Flag.boolean(.{
-            .long = "skip-bad-input",
-            .description = "Don't fail if error.BadInput is returned",
-        }),
-    },
+    } else .{}),
 });
 
 const InputSource = union(enum) {
@@ -90,7 +93,7 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
         const leak_count = allocator.detectLeaks();
         allocator.deinitWithoutLeakChecks();
         if (leak_count > 0) {
-            std.debug.print("{d} leaked allocations\n", .{leak_count});
+            std.log.err("{d} leaked allocations", .{leak_count});
             std.process.exit(1);
         }
     }
@@ -109,11 +112,12 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
     };
     _ = scratch.reset(.retain_capacity);
 
-    if (std.mem.eql(u8, arguments.input, "-") and
+    if (needs_wasm and
+        std.mem.eql(u8, arguments.input, "-") and
         arguments.@"replace-module" != null and
         std.mem.eql(u8, arguments.@"replace-module".?, "-"))
     {
-        std.debug.print("cannot use stdout for both --input and --replace-module\n", .{});
+        std.log.err("cannot use stdout for both --input and --replace-module", .{});
         return 1;
     }
 
@@ -133,7 +137,7 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
                 "oom reading {f}",
                 .{std.unicode.fmtUtf8(arguments.input)},
             ),
-            else => |err| std.debug.print(
+            else => |err| std.log.err(
                 "failed to read file {f}: {t}",
                 .{ std.unicode.fmtUtf8(arguments.input), err },
             ),
@@ -145,40 +149,46 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
 
     _ = scratch.reset(.retain_capacity);
 
-    var input = fuzz_data.Input.init(input_src.contents());
+    var input = if (needs_wasm) fuzz_data.Input.init(input_src.contents());
 
     // Generate the WASM module
-    const configuration = ffi.wasm_smith.Configuration.fromTarget(target);
-    var wasm_buffer: ffi.wasm_smith.ModuleBuffer = undefined;
-    wasm_buffer.generate(&input, &configuration) catch |e| return switch (e) {
-        error.BadInput => {
-            std.debug.print("failed to generate WASM module\n", .{});
-            return @intFromBool(!arguments.@"skip-bad-input");
-        },
-    };
-    defer wasm_buffer.deinit();
+    const configuration = if (needs_wasm) ffi.wasm_smith.Configuration.fromTarget(target);
+    var wasm_buffer: if (needs_wasm) ffi.wasm_smith.ModuleBuffer else void = undefined;
+    if (needs_wasm) {
+        wasm_buffer.generate(&input, &configuration) catch |e| return switch (e) {
+            error.BadInput => {
+                std.log.err("failed to generate WASM module", .{});
+                return @intFromBool(!arguments.@"skip-bad-input");
+            },
+        };
+    }
+    defer if (needs_wasm) wasm_buffer.deinit();
 
-    if (arguments.@"save-module") |save_module_path| {
+    if (!needs_wasm) {
+        // no module to save
+    } else if (arguments.@"save-module") |save_module_path| {
         const fmt_path = std.unicode.fmtUtf8(save_module_path);
         const save_stdout = std.mem.eql(u8, "-", save_module_path);
         const file = if (save_stdout)
             std.Io.File.stdout()
         else
             cwd.createFile(io, save_module_path, .{}) catch |e| {
-                std.debug.print("error opening path to save module {f}: {t}\n", .{ fmt_path, e });
+                std.log.err("could not open path to save module {f}: {t}", .{ fmt_path, e });
                 return 1;
             };
         defer if (!save_stdout) file.close(io);
 
         var writer = file.writerStreaming(io, &.{});
         writer.interface.writeAll(wasm_buffer.bytes()) catch {
-            std.debug.print("error saving module to {f}: {t}", .{ fmt_path, writer.err.? });
+            std.log.err("could not save module to {f}: {t}", .{ fmt_path, writer.err.? });
             return 1;
         };
     }
 
-    var replaced_module: InputSource = undefined;
-    const wasm: []const u8 = if (arguments.@"replace-module") |replace_module_path| replace: {
+    var replaced_module: if (needs_wasm) InputSource else void = undefined;
+    const wasm: if (needs_wasm) []const u8 else void = if (comptime !needs_wasm) {
+        // nothing
+    } else if (arguments.@"replace-module") |replace_module_path| replace: {
         replaced_module = InputSource.read(
             io,
             cwd,
@@ -186,8 +196,8 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
             &scratch,
             allocator.allocator(),
         ) catch |e| {
-            std.debug.print(
-                "could not open module file {f}: {t}\n",
+            std.log.err(
+                "could not open module file {f}: {t}",
                 .{ std.unicode.fmtUtf8(replace_module_path), e },
             );
             return 1;
@@ -195,9 +205,16 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
         break :replace replaced_module.contents();
     } else wasm_buffer.bytes();
 
-    defer if (arguments.@"replace-module" != null) replaced_module.deinit(allocator.allocator());
+    defer if (needs_wasm and arguments.@"replace-module" != null) {
+        replaced_module.deinit(allocator.allocator());
+    };
 
-    target.testOne(wasm, &input, &scratch, allocator.allocator()) catch |e| err: {
+    @call(
+        .auto,
+        target.testOne,
+        (if (needs_wasm) .{ wasm, &input } else .{input_src.contents()}) ++
+            .{ &scratch, allocator.allocator() },
+    ) catch |e| err: {
         switch (@as(anyerror, e)) {
             error.BadInput => if (arguments.@"skip-bad-input") break :err,
             else => {},
@@ -205,6 +222,7 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
 
         return e;
     };
+
     return 0;
 }
 

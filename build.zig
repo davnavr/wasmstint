@@ -1035,6 +1035,7 @@ pub fn build(b: *Build) void {
         );
 
         const FuzzTarget = enum {
+            parsing,
             validation,
             execution,
             @"wasmi-diff",
@@ -1046,13 +1047,21 @@ pub fn build(b: *Build) void {
                 .target = target,
                 .optimize = optimize,
             });
-            for (&[4]struct { []const u8, *Build.Module }{
+            for (&[3]struct { []const u8, *Build.Module }{
                 .{ "wasmstint", wasmstint_module },
-                .{ "ffi", ffi_module },
                 .{ "fuzz_data", fuzz_data_module },
                 .{ "wasm_features", wasm_options },
             }) |info| {
                 target_module.addImport(info.@"0", info.@"1");
+            }
+
+            const needs_ffi = switch (fuzz_target) {
+                .parsing => false,
+                else => true,
+            };
+
+            if (needs_ffi) {
+                target_module.addImport("ffi", ffi_module);
             }
 
             const step_name = b.fmt("fuzz-{t}", .{fuzz_target});
@@ -1093,6 +1102,7 @@ pub fn build(b: *Build) void {
                     .target = target,
                     .optimize = optimize,
                     .pic = true, // afl-clang-lto seems to require PIC
+                    .link_libc = true,
                 }),
                 .max_rss = byte_size.mib(498),
                 .use_llvm = true,
@@ -1101,12 +1111,14 @@ pub fn build(b: *Build) void {
             libfuzzer_harness_lib.sanitize_coverage_trace_pc_guard = true; // required for AFL++
             libfuzzer_harness_lib.lto = .full;
             libfuzzer_harness_lib.bundle_compiler_rt = true;
-            for (&[3]struct { []const u8, *Build.Module }{
+            for (&[2]struct { []const u8, *Build.Module }{
                 .{ "target", target_module },
-                .{ "ffi", ffi_module },
                 .{ "fuzz_data", fuzz_data_module },
             }) |info| {
                 libfuzzer_harness_lib.root_module.addImport(info.@"0", info.@"1");
+            }
+            if (needs_ffi) {
+                libfuzzer_harness_lib.root_module.addImport("ffi", ffi_module);
             }
 
             // TODO(zig): limit parallelism of afl-clang-lto https://github.com/ziglang/zig/issues/12101
