@@ -89,14 +89,15 @@ fn abortOnError(e: anyerror) noreturn {
     @branchHint(.cold);
     var stderr_buffer: [128]u8 align(16) = undefined;
     const stderr = std.debug.lockStderr(&stderr_buffer).terminal();
-    defer std.debug.unlockStderr();
 
     abort: {
+        defer std.debug.unlockStderr();
         stderr.setColor(.bright_red) catch break :abort;
         stderr.writer.writeAll("error: ") catch break :abort;
         stderr.setColor(.reset) catch break :abort;
         stderr.writer.print("{t}\n", .{e}) catch break :abort;
         dumpStackTrace(@errorReturnTrace(), stderr) catch break :abort;
+        stderr.writer.flush() catch {};
     }
 
     abort();
@@ -111,6 +112,7 @@ fn panicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {
     const stderr = std.debug.lockStderr(&stderr_buffer).terminal();
 
     abort: {
+        defer std.debug.unlockStderr();
         stderr.setColor(.bright_red) catch break :abort;
         stderr.writer.writeAll("panic") catch break :abort;
         stderr.setColor(.reset) catch break :abort;
@@ -122,6 +124,7 @@ fn panicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {
         }
         stderr.writer.print(" : {s}\n", .{msg}) catch break :abort;
         dumpStackTrace(@errorReturnTrace(), stderr) catch break :abort;
+        stderr.writer.flush() catch {};
     }
 
     abort();
