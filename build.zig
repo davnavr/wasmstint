@@ -1141,6 +1141,7 @@ pub fn build(b: *Build) void {
 
             { // Unfortunately, filtering by file seems to be broken
                 afl_clang_lto.addFileInput(b.path("fuzz/denylist.txt"));
+                afl_clang_lto.clearEnvironment(); // ensures output can be cached
                 afl_clang_lto.setEnvironmentVariable(
                     "AFL_LLVM_DENYLIST",
                     // TODO(zig): allow environment variable of lazy path
