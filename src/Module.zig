@@ -40,29 +40,6 @@ pub const MemIdx = enum(u7) {
 pub const ElemIdx = enum(u16) { _ };
 pub const DataIdx = enum(u16) { _ };
 
-fn SmallIdx(comptime Int: type, comptime Idx: type) type {
-    return enum(Int) {
-        comptime {
-            std.debug.assert(@bitSizeOf(Int) < @bitSizeOf(Idx));
-        }
-
-        _,
-
-        const Self = @This();
-
-        pub fn init(idx: Idx) LimitError!Self {
-            return @enumFromInt(
-                std.math.cast(Int, @intFromEnum(idx)) orelse
-                    return error.WasmImplementationLimit,
-            );
-        }
-
-        pub fn get(idx: Self) Idx {
-            return @enumFromInt(@intFromEnum(idx));
-        }
-    };
-}
-
 const Module = @This();
 
 // Fields are ordered manually, for the following reasons:
@@ -904,6 +881,10 @@ const Sections = struct {
                     );
 
                     if (options.keep_custom_sections) {
+                        if (custom_sections.items.len >= std.math.maxInt(u32)) {
+                            return error.WasmImplementationLimit; // too many custom sections
+                        }
+
                         try custom_sections.append(
                             arena.allocator(),
                             CustomSection{
@@ -1031,13 +1012,17 @@ pub fn parse(
         );
     };
 
-    if (custom_sections_buf.items.len > std.math.maxInt(u32)) {
-        return error.WasmImplementationLimit; // too many custom sections
-    }
-
     const has_data_count_section = !sections.readers.data_count.isEmpty();
 
     const counts = try Sections.Counts.parse(&sections.readers, diag);
+
+    if (counts.elem > std.math.maxInt(@typeInfo(ElemIdx).@"enum".tag_type)) {
+        return error.WasmImplementationLimit; // too many element element segments
+    }
+
+    if (counts.data > std.math.maxInt(@typeInfo(DataIdx).@"enum".tag_type)) {
+        return error.WasmImplementationLimit; // too many data segments
+    }
 
     if (has_data_count_section and counts.data_count != counts.data) {
         return diag.writeAll(.parse, "data count and data section have inconsistent lengths");
@@ -1817,10 +1802,6 @@ fn parseElemSec(
     const elems_reader: Reader = readers.elem;
     const start = elems_reader.bytes.ptr;
 
-    if (count > std.math.maxInt(@typeInfo(ElemIdx).@"enum".tag_type)) {
-        return error.WasmImplementationLimit; // too many element element segments
-    }
-
     const elems = try arena.allocator().alloc(ElemSegment, count);
     const non_declarative_mask = try arena.allocator().alloc(
         u32,
@@ -2122,10 +2103,6 @@ fn parseDataSec(
 ) !DataSec {
     const datas_reader: Reader = readers.data;
     const start = datas_reader.bytes.ptr;
-
-    if (count > std.math.maxInt(@typeInfo(DataIdx).@"enum".tag_type)) {
-        return error.WasmImplementationLimit; // too many data segments
-    }
 
     const data_ptrs = try arena.allocator().alloc([*]const u8, count);
     const data_lens = try arena.allocator().alloc(u32, count);
