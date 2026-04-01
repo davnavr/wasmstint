@@ -1123,9 +1123,13 @@ pub fn build(b: *Build) void {
 
             // TODO(zig): limit parallelism of afl-clang-lto https://github.com/ziglang/zig/issues/12101
             const afl_clang_lto = b.addSystemCommand(
-                &.{ "afl-clang-lto", "-g", "-Wall", "-fsanitize=fuzzer", "-lwasmstint_fuzz_ffi", "-v" },
+                &.{ "afl-clang-lto", "-g", "-Wall", "-fsanitize=fuzzer", "-v" },
             );
             afl_clang_lto.disable_zig_progress = true;
+
+            if (needs_ffi) {
+                afl_clang_lto.addArg("-lwasmstint_fuzz_ffi");
+            }
 
             if (fail_no_rust_include) |fail| {
                 afl_clang_lto.step.dependOn(fail);
@@ -1153,9 +1157,11 @@ pub fn build(b: *Build) void {
 
             afl_clang_lto.addArtifactArg(libfuzzer_harness_lib);
 
-            for (rust_include_paths.items) |include_path| {
-                afl_clang_lto.addArg("-L");
-                afl_clang_lto.addDirectoryArg(include_path);
+            if (needs_ffi) {
+                for (rust_include_paths.items) |include_path| {
+                    afl_clang_lto.addArg("-L");
+                    afl_clang_lto.addDirectoryArg(include_path);
+                }
             }
 
             const standalone_exe = b.addExecutable(.{
