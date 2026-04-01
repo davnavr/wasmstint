@@ -549,6 +549,25 @@ pub fn build(b: *Build) void {
         unit_tests_step.dependOn(run_tests);
     }
 
+    {
+        const exe = b.addExecutable(.{
+            .name = "wasmstint-coremark",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/coremark/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .use_llvm = use_llvm.ifPreferred(),
+            .max_rss = byte_size.mib(460),
+        });
+        exe.root_module.addImport("wasmstint", wasmstint_module);
+
+        const run_exe = &b.addRunArtifact(exe).step;
+        run_exe.max_rss = byte_size.mib(50); // arbitrary amount
+
+        b.step("test-coremark", "Run the coremark-minimal benchmark").dependOn(run_exe);
+    }
+
     const spectest_exe = runner: {
         var executables: [2]*Step.Compile = undefined;
         for (&executables) |*e| {
