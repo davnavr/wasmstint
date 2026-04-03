@@ -556,9 +556,10 @@ pub fn build(b: *Build) void {
                 .root_source_file = b.path("tests/coremark/main.zig"),
                 .target = target,
                 .optimize = optimize,
+                .single_threaded = true,
             }),
             .use_llvm = use_llvm.ifPreferred(),
-            .max_rss = byte_size.mib(460),
+            .max_rss = byte_size.mib(552),
         });
         exe.root_module.addImport("wasmstint", wasmstint_module);
 

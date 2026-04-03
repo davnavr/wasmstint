@@ -18,9 +18,9 @@ pub fn main() !void {
     std.debug.assert(try module.finishCodeValidation(arena.allocator(), &scratch, .none));
 
     const mem_type = &module.memDefinedTypes()[0];
-    var memory = try wasmstint.runtime.MemInst.Mapped.allocateFromType(
+    var memory = try runtime.MemInst.Mapped.allocateFromType(
         mem_type,
-        mem_type.limits.min * wasmstint.runtime.MemInst.page_size,
+        mem_type.limits.min * runtime.MemInst.page_size,
         std.math.maxInt(usize),
     );
 
