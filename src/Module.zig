@@ -113,6 +113,8 @@ const RawInner = extern struct {
     datas_lens: [*]const u32,
     active_datas: [*]const ActiveData,
 
+    name_section: *const NameSection,
+
     /// Internal API.
     pub inline fn parent(inner: *const RawInner) *const Inner {
         return @as(*const Inner, @fieldParentPtr("raw", inner));
@@ -308,6 +310,10 @@ pub const Start = packed struct(u32) {
         }
     }
 };
+
+pub inline fn nameSection(module: Module) *const NameSection {
+    return module.inner.name_section;
+}
 
 pub const WasmSlice = extern struct {
     offset: u32,
@@ -749,6 +755,8 @@ pub const CustomSection = struct {
     }
 };
 
+const NameSection = @import("Module/NameSection.zig");
+
 pub const wasm_preamble = "\x00asm\x01\x00\x00\x00";
 
 const ImportExportDesc = enum(u8) {
@@ -769,16 +777,28 @@ pub const ParseOptions = struct {
     /// If set to `true`, any custom sections encountered during parsing can later be accessed
     /// by calling `.customSections()`.
     keep_custom_sections: bool = false,
-    // diagnostics: ?*ParserDiagnostics = null,
     /// Random seed provided to hash maps, such as the one used for ensuring all exports have unique
     /// names.
     random_seed: u64 = 42,
     diagnostics: ParseDiagnostics = .none,
+    /// Whether or not to parse the custom `name` section, if it exists in the parsed module.
+    parse_names: Metadata = .parse_without_diagnostics,
+    // /// Whether or not to parse embedded DWARF debug information, if it exists in the parsed module.
+    // parse_dwarf_metadata: Metadata = .ignore,
+
+    /// Indicates whether custom sections containing metadata should be parsed.
+    pub const Metadata = union(enum) {
+        ignore,
+        parse: ParseDiagnostics,
+
+        pub const parse_without_diagnostics = Metadata{ .parse = .none };
+    };
 };
 
 const Sections = struct {
     known: *Known,
     readers: Readers,
+    name_section: ?[]const u8,
 
     const Known = Struct([]const u8, &[0]u8{});
     const Readers = Struct(Reader, null);
@@ -864,6 +884,8 @@ const Sections = struct {
             @field(section_readers, f.name) = Reader.init(&@field(known_sections, f.name));
         }
 
+        var name_section: ?[]const u8 = null;
+
         const diag = options.diagnostics;
         while (!reader.isEmpty()) {
             const id = try reader.readByteTag(Id, diag, "malformed section id");
@@ -874,6 +896,16 @@ const Sections = struct {
                     var custom_sec_contents = section_contents;
                     const custom_sec = Reader.init(&custom_sec_contents);
                     const section_name = try custom_sec.readName(diag);
+
+                    // Name section "should" only appear after the data section, but it's better to
+                    // have some name information rather than to silently discard it. WASM doesn't
+                    // allow custom sections to impact semantics.
+                    if (options.parse_names != .ignore and
+                        std.mem.eql(u8, section_name.bytes, "name") and
+                        name_section != null)
+                    {
+                        name_section = custom_sec_contents;
+                    }
 
                     std.debug.assert(
                         @intFromPtr(section_name.bytes.ptr + section_name.bytes.len) ==
@@ -923,7 +955,11 @@ const Sections = struct {
 
         std.debug.assert(reader.isEmpty());
 
-        return Sections{ .known = known_sections, .readers = section_readers };
+        return Sections{
+            .known = known_sections,
+            .readers = section_readers,
+            .name_section = name_section,
+        };
     }
 
     const Counts = extern struct {
@@ -1184,6 +1220,24 @@ pub fn parse(
         );
     };
 
+    // OOM during name parsing means module parsing as a whole fails.
+    const name_section = names: {
+        if (sections.name_section) |name_sec| {
+            switch (options.parse_names) {
+                .ignore => {},
+                .parse => |names_diag| break :names try NameSection.parse(
+                    &module_arena,
+                    name_sec,
+                    &scratch,
+                    names_diag,
+                    .{ .func = counts.func },
+                ),
+            }
+        }
+
+        break :names &NameSection.absent;
+    };
+
     const func_refs_finished = try func_refs.finish(module_arena.allocator());
     module.inner.* = Inner{
         .raw = RawInner{
@@ -1241,6 +1295,8 @@ pub fn parse(
             .datas_lens = data_sec.datas_lens.ptr,
             .active_datas = data_sec.active_datas.ptr,
             .active_datas_count = @intCast(data_sec.active_datas.len),
+
+            .name_section = name_section,
         },
         .arena = module_arena.state,
         .wasm = original_wasm,
