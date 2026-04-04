@@ -851,7 +851,12 @@ fn mainLoop(
                 break :next interrupt.resumeExecution(fuel);
             },
             .trapped => |*trapped| {
-                return fail.format(error.GenericError, "trap {t}", .{trapped.trap().code});
+                const stack_trace = trapped.inner.walkCallStack();
+                return fail.format(
+                    error.GenericError,
+                    "trap {t}\nstack trace:\n{f}",
+                    .{ trapped.trap().code, stack_trace },
+                );
             },
         };
     }
