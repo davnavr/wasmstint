@@ -1036,24 +1036,7 @@ pub const Walker = struct {
         }
     }
 
-    fn FormatLowAddress(comptime P: type) type {
-        return struct {
-            ptr: P,
-
-            comptime {
-                std.debug.assert(@typeInfo(P) == .pointer);
-            }
-
-            pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-                try writer.print("[*{X:0>6}]", .{@as(u24, @truncate(@intFromPtr(self.ptr)))});
-            }
-        };
-    }
-
-    fn formatLowAddress(ptr: anytype) FormatLowAddress(@TypeOf(ptr)) {
-        return .{ .ptr = ptr };
-    }
-
+    // TODO: rename this or move elsewhere, currently only used for panic messages in debug checks
     pub fn formatIp(ip: Module.Code.Ip, writer: *Writer) Writer.Error!void {
         try writer.print("0x{X:0>2}", .{ip[0]});
         if (std.enums.fromInt(@import("opcodes").ByteOpcode, ip[0])) |opcode| {
@@ -1062,27 +1045,86 @@ pub const Walker = struct {
         try writer.print("@{X}", .{@intFromPtr(ip)});
     }
 
-    pub fn format(initial_walker: Walker, writer: *Writer) Writer.Error!void {
+    pub const FormatOptions = struct {
+        /// Used to print a colored stack trace to a terminal.
+        ///
+        /// If set, always results in the color being reset.
+        color: std.Io.Terminal.Mode = .no_color,
+
+        // TODO: have option to just print name & other info instead of WAT syntax
+
+        /// If `true`, print the address of each interpreter stack frame.
+        print_frame_address: bool = false,
+
+        /// The maximum number of frames to display.
+        max_frame_count: u32 = 500,
+        // TODO: option to print module name from name section
+    };
+
+    pub fn formatStackTrace(
+        initial_walker: Walker,
+        options: FormatOptions,
+        writer: *Writer,
+    ) Writer.Error!void {
+        var term = std.Io.Terminal{ .writer = writer, .mode = options.color };
         var walker = initial_walker;
         const n = walker.stack.call_depth;
-        while (walker.currentFrame()) |frame| {
-            defer _ = walker.next();
-            try writer.print("#{[index]} {[addr]f} {[callee]f}", .{
-                .index = n - walker.stack.call_depth,
-                .addr = formatLowAddress(frame),
-                .callee = frame.function,
-            });
+        const index_width: u32 = std.math.log10_int(@max(2, options.max_frame_count)) + 1;
+        for (0..n) |i| {
+            defer std.debug.assert(walker.next());
+            const frame = walker.currentFrame().?;
 
+            try writer.print("{[index]d: >[width]}: ", .{ .index = i, .width = index_width });
+
+            term.setColor(.bold) catch {};
             switch (frame.function.expanded()) {
-                .wasm => try writer.print(
-                    " ip={[ip]f}",
-                    .{ .ip = std.fmt.Alt(Module.Code.Ip, formatIp){ .data = frame.wasm.ip } },
-                ),
-                .host => {},
+                .wasm => |wasm| {
+                    var buf: [9]u8 = undefined;
+                    var buf_writer = Writer.fixed(&buf);
+                    buf_writer.writeAll("0x") catch unreachable;
+                    const ip = frame.wasm.ip - wasm.module.header().module.inner.parent().wasm.ptr;
+                    buf_writer.print("{X}", .{ip}) catch unreachable;
+                    try writer.print("{s: >9}", .{buf_writer.buffered()});
+                },
+                .host => try writer.writeAll(" <host> "),
+            }
+
+            term.setColor(.reset) catch {};
+            try writer.writeAll(" - ");
+            try frame.function.format(writer);
+
+            if (options.print_frame_address) {
+                term.setColor(.dim) catch {};
+                try writer.print("@ 0x{X}", .{@intFromPtr(frame)});
+                term.setColor(.reset) catch {};
             }
 
             try writer.writeByte('\n');
         }
+
+        if (n > options.max_frame_count) {
+            term.setColor(.dim) catch {};
+            try writer.print("{d} frames omitted\n", .{n - options.max_frame_count});
+        }
+
+        term.setColor(.reset) catch {};
+    }
+
+    pub const Formatter = struct {
+        initial_walker: Walker,
+        options: FormatOptions,
+
+        pub fn format(f: Formatter, writer: *Writer) Writer.Error!void {
+            return try f.initial_walker.formatStackTrace(f.options, writer);
+        }
+    };
+
+    pub fn fmt(initial_walker: Walker, options: FormatOptions) Formatter {
+        return Formatter{ .initial_walker = initial_walker, .options = options };
+    }
+
+    pub fn format(initial_walker: Walker, writer: *Writer) Writer.Error!void {
+        return try initial_walker.formatStackTrace(.{}, writer);
     }
 };
 

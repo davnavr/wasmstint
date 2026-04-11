@@ -85,6 +85,18 @@ pub const FuncInst = extern struct {
         };
     }
 
+    // const FormatOptions = struct {
+    //     /// If `true`, prints the function index for a non-host `FuncInst`, even when a name is not
+    //     /// provided.
+    //     print_func_idx: bool = true,
+    //     /// If `true`, prints the runtime address of the underlying `runtime.ModuleInst`.
+    //     print_module_address: bool = false,
+    //     /// If `true`, prints the runtime address for a `HostFunc`.
+    //     print_host_func_address: bool = false,
+    //     print_export_names: enum { none, all, first } = .first,
+    // TODO: Option to decide to read from custom name section (and parameter names too)
+    // };
+
     pub const Expanded = union(Tag) {
         wasm: Wasm,
         host: *const HostFunc,
@@ -100,10 +112,15 @@ pub const FuncInst = extern struct {
             try writer.writeAll("(func ");
             switch (func.*) {
                 .wasm => |wasm| {
-                    try writer.print("$f{}", .{@intFromEnum(wasm.idx)});
-
                     const module = wasm.module.header().module;
+                    if (module.nameSection().functionName(wasm.idx).get()) |func_id| {
+                        try func_id.formatIdentifier(module.nameSection(), writer);
+                    } else {
+                        try writer.print("(;{d};)", .{@intFromEnum(wasm.idx)});
+                    }
+
                     // for (wasm.module.findExportNames(.{ .func = wasm.idx })) |name| {
+
                     for (module.exports()) |exp| {
                         const desc = exp.descIdx();
                         if (desc == .func and desc.func == wasm.idx) {

@@ -138,6 +138,14 @@ pub const Name = packed struct(u48) {
         return name.offset.ptr(section)[0..name.len];
     }
 
+    pub fn formatIdentifier(
+        name: Name,
+        section: *const NameSection,
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        return try Module.Name.formatIdentifier(Module.Name.init(name.bytes(section)), writer);
+    }
+
     pub const Optional = packed struct(u49) {
         inner_unsafe: Name,
         is_some: bool,
@@ -177,7 +185,7 @@ pub const Name = packed struct(u48) {
 };
 
 fn compareFuncIdx(context: FuncIdx, item: FuncIdx) Order {
-    return std.math.order(context, item);
+    return std.math.order(@intFromEnum(context), @intFromEnum(item));
 }
 
 /// Does a binary search to find the name of the given function.
