@@ -922,7 +922,7 @@ const Sections = struct {
                     // allow custom sections to impact semantics.
                     if (options.parse_names != .ignore and
                         std.mem.eql(u8, section_name.bytes, "name") and
-                        name_section != null)
+                        name_section == null)
                     {
                         name_section = custom_sec_contents;
                     }
@@ -1243,15 +1243,18 @@ pub fn parse(
     // OOM during name parsing means module parsing as a whole fails.
     const name_section = names: {
         if (sections.name_section) |name_sec| {
-            switch (options.parse_names) {
+            absent: switch (options.parse_names) {
                 .ignore => {},
-                .parse => |names_diag| break :names try NameSection.parse(
+                .parse => |names_diag| break :names NameSection.parse(
                     &module_arena,
                     name_sec,
                     &scratch,
                     names_diag,
                     .{ .func = counts.func },
-                ),
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => |oom| return oom,
+                    else => break :absent,
+                },
             }
         }
 

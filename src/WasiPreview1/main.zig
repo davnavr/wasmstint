@@ -486,13 +486,21 @@ fn realMain(init: std.process.Init.Minimal) Error!i32 {
 
     _ = scratch.reset(.retain_capacity);
     var parse_diagnostics = Io.Writer.Allocating.init(arena.allocator());
+    var parse_names_diagnostics = Io.Writer.Allocating.init(arena.allocator());
     const parsed_module = module: {
         var wasm: []const u8 = wasm_binary.contents();
         break :module wasmstint.Module.parse(
             arena.allocator(),
             &wasm,
             &scratch,
-            .{ .diagnostics = .init(&parse_diagnostics.writer), .random_seed = rt_rng_seeds[0] },
+            wasmstint.Module.ParseOptions{
+                .diagnostics = .init(&parse_diagnostics.writer),
+                .random_seed = rt_rng_seeds[0],
+                .parse_names = if (builtin.mode == .Debug)
+                    .{ .parse = .init(&parse_names_diagnostics.writer) }
+                else
+                    .parse_without_diagnostics,
+            },
         ) catch |e| switch (e) {
             error.OutOfMemory => oom("module"),
             error.InvalidWasm => return fail.format(
@@ -513,6 +521,10 @@ fn realMain(init: std.process.Init.Minimal) Error!i32 {
         };
     };
     _ = scratch.reset(.retain_capacity);
+
+    if (builtin.mode == .Debug and parse_names_diagnostics.written().len > 0) {
+        std.debug.print("\nmalformed name section: {s}\n", .{parse_names_diagnostics.written()});
+    }
 
     std.debug.assert(parse_diagnostics.written().len == 0);
     // TODO: switch to enable lazy validation, also helper thread to validate in background
