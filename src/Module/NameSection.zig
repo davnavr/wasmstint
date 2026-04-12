@@ -146,6 +146,13 @@ pub const Name = packed struct(u48) {
         return try Module.Name.formatIdentifier(Module.Name.init(name.bytes(section)), writer);
     }
 
+    pub fn fmtIdentifier(
+        name: Name,
+        section: *const NameSection,
+    ) std.fmt.Alt(Module.Name, Module.Name.formatIdentifier) {
+        return Module.Name.init(name.bytes(section)).fmtIdentifier();
+    }
+
     pub const Optional = packed struct(u49) {
         inner_unsafe: Name,
         is_some: bool,
@@ -254,9 +261,19 @@ const Sections = struct {
         var readers: Readers = undefined;
         var present = std.EnumSet(Id).initEmpty();
 
+        // TODO: Actually read sections one-by-one, allowing at least some name subsections to be parsed
+        // even when unknown subsections are present
+
+        // TODO: On parse error, don't discard all name information
+
         while (!reader.isEmpty()) {
-            const id = try reader.readByteTag(Id, diag, "malformed name subsection id");
+            const id_byte = try reader.readByte(diag, "name subsection id");
             const section_contents = try reader.readByteVec(diag, "section contents");
+            // Silently skip unknown subsections.
+            // LLVM appears to emit custom subsections for global and data segment names. These are
+            // not documented in the appendix of the 3.0 WebAssembly standard nor the WASM tool
+            // conventions.
+            const id = std.enums.fromInt(Id, id_byte) orelse continue;
             if (last) |prev| {
                 if (prev == id) {
                     return diag.print(

@@ -1250,7 +1250,7 @@ pub fn parse(
                     name_sec,
                     &scratch,
                     names_diag,
-                    .{ .func = counts.func },
+                    .{ .func = @intCast(import_sec.types.funcs.len) },
                 ) catch |err| switch (err) {
                     error.OutOfMemory => |oom| return oom,
                     else => break :absent,

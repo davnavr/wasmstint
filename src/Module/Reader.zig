@@ -282,7 +282,8 @@ test readIleb128 {
 
 pub fn readByteVec(reader: Reader, diag: Diagnostics, desc: []const u8) Error![]const u8 {
     const len = try reader.readUleb128(u32, diag, "bytes length");
-    return reader.read(len, diag, desc);
+    const contents = try reader.read(len, diag, desc);
+    return contents;
 }
 
 pub fn readName(reader: Reader, diag: Diagnostics) Error!std.unicode.Utf8View {
