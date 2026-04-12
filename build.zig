@@ -1146,6 +1146,7 @@ pub fn build(b: *Build) void {
                 &.{ "afl-clang-lto", "-g", "-Wall", "-fsanitize=fuzzer", "-v" },
             );
             afl_clang_lto.disable_zig_progress = true;
+            afl_clang_lto.clearEnvironment(); // ensures output can be cached
 
             if (needs_ffi) {
                 afl_clang_lto.addArg("-lwasmstint_fuzz_ffi");
@@ -1159,15 +1160,25 @@ pub fn build(b: *Build) void {
                 afl_clang_lto.step.dependOn(&b.addFail("AFL fuzz harness requires -Dpic=true").step);
             }
 
+            afl_clang_lto.setEnvironmentVariable("AFL_QUIET", "1");
+
             { // Unfortunately, filtering by file seems to be broken
                 afl_clang_lto.addFileInput(b.path("fuzz/denylist.txt"));
-                afl_clang_lto.clearEnvironment(); // ensures output can be cached
                 afl_clang_lto.setEnvironmentVariable(
                     "AFL_LLVM_DENYLIST",
                     // TODO(zig): allow environment variable of lazy path
                     // At least paths seem to be relative to the build script
                     "./fuzz/denylist.txt",
                 );
+            }
+
+            {
+                var iter = b.graph.environ_map.iterator();
+                while (iter.next()) |entry| {
+                    if (std.mem.startsWith(u8, entry.key_ptr.*, "AFL_")) {
+                        afl_clang_lto.setEnvironmentVariable(entry.key_ptr.*, entry.value_ptr.*);
+                    }
+                }
             }
 
             afl_clang_lto.step.max_rss = byte_size.mib(268);
