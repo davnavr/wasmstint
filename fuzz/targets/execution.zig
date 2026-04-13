@@ -167,7 +167,7 @@ pub fn testOne(
     defer module.deinit(allocator);
 
     const exports = module.exports();
-    var func_exports = try std.ArrayList(wasmstint.runtime.ModuleInst.ExportVals.Export)
+    var func_exports = try std.ArrayList(wasmstint.runtime.ModuleInst.Export)
         .initCapacity(allocator, exports.len);
     defer func_exports.deinit(allocator);
     for (0..exports.len) |i| {

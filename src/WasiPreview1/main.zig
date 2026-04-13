@@ -740,7 +740,7 @@ fn realMain(init: std.process.Init.Minimal) Error!i32 {
                 all_exports,
                 struct {
                     fn printFollowupMessage(
-                        available_exports: wasmstint.runtime.ModuleInst.ExportVals,
+                        available_exports: wasmstint.runtime.ModuleInst.Export.List,
                         stderr: std.Io.Terminal,
                     ) Io.Writer.Error!void {
                         stderr.setColor(.bright_cyan) catch {};

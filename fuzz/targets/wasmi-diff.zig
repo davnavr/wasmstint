@@ -589,7 +589,7 @@ const Exports = struct {
             const wasm_exports = module.exports();
             _ = scratch.reset(.retain_capacity);
             const exports_buf = try scratch.allocator()
-                .alloc(wasmstint.runtime.ModuleInst.ExportVals.Export, wasm_exports.len);
+                .alloc(wasmstint.runtime.ModuleInst.Export, wasm_exports.len);
             for (0.., exports_buf) |i, *dst| {
                 dst.* = wasm_exports.at(i);
             }
@@ -597,15 +597,15 @@ const Exports = struct {
             const ExportSorter = struct {
                 fn lessThan(
                     _: @This(),
-                    a: wasmstint.runtime.ModuleInst.ExportVals.Export,
-                    b: wasmstint.runtime.ModuleInst.ExportVals.Export,
+                    a: wasmstint.runtime.ModuleInst.Export,
+                    b: wasmstint.runtime.ModuleInst.Export,
                 ) bool {
                     return std.mem.lessThan(u8, a.name.bytes(), b.name.bytes());
                 }
             };
 
             std.sort.pdq(
-                wasmstint.runtime.ModuleInst.ExportVals.Export,
+                wasmstint.runtime.ModuleInst.Export,
                 exports_buf,
                 ExportSorter{},
                 ExportSorter.lessThan,
