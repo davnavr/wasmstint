@@ -761,17 +761,12 @@ pub fn testOne(
             .alloc(wasmstint.runtime.TableInst.Allocated, defined_table_types.len);
         for (defined_table_types, defined_tables) |*table_type, *table| {
             const config_max = wasm_smith_config.max_max_table_elements;
-            if (table_type.limits.min > config_max) {
-                return error.OutOfMemory; // unreachable?
-            }
-
+            std.debug.assert(table_type.limits.min <= config_max);
             const min_elems: u32 = @intCast(table_type.limits.min);
-            const limit_max = @min(table_type.limits.max, config_max);
-            // TODO: shouldn't max always be the limit_max?
-            const chosen_max = input.uintInRangeInclusive(u32, min_elems, limit_max);
-            const initial_cap = input.uintInRangeInclusive(u32, min_elems, chosen_max);
+            const max_elems: u32 = @intCast(@min(table_type.limits.max, config_max));
+            const initial_cap = input.uintInRangeInclusive(u32, min_elems, max_elems);
             table.* = try wasmstint.runtime.TableInst.Allocated
-                .allocateFromType(allocator, table_type, null, initial_cap, chosen_max);
+                .allocateFromType(allocator, table_type, null, initial_cap, max_elems);
             definitions.tables.appendAssumeCapacity(&table.table);
         }
 
@@ -781,16 +776,12 @@ pub fn testOne(
             const page_size = wasmstint.runtime.MemInst.page_size;
             const min_bytes = mem_type.limits.min * page_size;
             const config_max = wasm_smith_config.max_max_memory_bytes;
-            if (min_bytes > config_max) {
-                return error.OutOfMemory; // unreachable?
-            }
+            std.debug.assert(min_bytes <= config_max);
 
-            const limit_max = @min(mem_type.limits.max * page_size, config_max);
-            // TODO: shouldn't max always be the limit_max?
-            const chosen_max = input.uintInRangeInclusive(usize, min_bytes, limit_max);
-            const initial_cap = input.uintInRangeInclusive(usize, min_bytes, chosen_max);
+            const max_bytes = @min(mem_type.limits.max * page_size, config_max);
+            const initial_cap = input.uintInRangeInclusive(usize, min_bytes, max_bytes);
             mem.* = try wasmstint.runtime.MemInst.Mapped
-                .allocateFromType(mem_type, initial_cap, chosen_max);
+                .allocateFromType(mem_type, initial_cap, max_bytes);
             definitions.memories.appendAssumeCapacity(&mem.memory);
         }
 
@@ -1296,9 +1287,7 @@ const ImportProvider = struct {
                     const page_size = wasmstint.runtime.MemInst.page_size;
                     const min_size = mem_type.limits.min * page_size;
                     const config_max = wasm_smith_config.max_max_memory_bytes;
-                    if (min_size > config_max) {
-                        return error.OutOfMemory; // memory min size too large
-                    }
+                    std.debug.assert(min_size <= config_max);
 
                     const max_size = @min(mem_type.limits.max * page_size, config_max);
                     const initial_cap = provider.input
@@ -1315,9 +1304,7 @@ const ImportProvider = struct {
                 .table = table: {
                     const limit_min: u32 = @intCast(table_type.limits.min);
                     const config_max = wasm_smith_config.max_max_table_elements;
-                    if (limit_min > config_max) {
-                        return error.OutOfMemory; // table min length too large
-                    }
+                    std.debug.assert(limit_min <= config_max);
 
                     const max_elems = @min(config_max, table_type.limits.max);
                     const initial_cap = provider.input
