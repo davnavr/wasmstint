@@ -762,13 +762,14 @@ pub fn testOne(
         for (defined_table_types, defined_tables) |*table_type, *table| {
             const config_max = wasm_smith_config.max_max_table_elements;
             if (table_type.limits.min > config_max) {
-                return error.OutOfMemory;
+                return error.OutOfMemory; // unreachable?
             }
 
             const min_elems: u32 = @intCast(table_type.limits.min);
             const limit_max = @min(table_type.limits.max, config_max);
-            const chosen_max = try input.uintInRangeInclusive(u32, min_elems, limit_max);
-            const initial_cap = try input.uintInRangeInclusive(u32, min_elems, chosen_max);
+            // TODO: shouldn't max always be the limit_max?
+            const chosen_max = input.uintInRangeInclusive(u32, min_elems, limit_max);
+            const initial_cap = input.uintInRangeInclusive(u32, min_elems, chosen_max);
             table.* = try wasmstint.runtime.TableInst.Allocated
                 .allocateFromType(allocator, table_type, null, initial_cap, chosen_max);
             definitions.tables.appendAssumeCapacity(&table.table);
@@ -781,12 +782,13 @@ pub fn testOne(
             const min_bytes = mem_type.limits.min * page_size;
             const config_max = wasm_smith_config.max_max_memory_bytes;
             if (min_bytes > config_max) {
-                return error.OutOfMemory;
+                return error.OutOfMemory; // unreachable?
             }
 
             const limit_max = @min(mem_type.limits.max * page_size, config_max);
-            const chosen_max = try input.uintInRangeInclusive(usize, min_bytes, limit_max);
-            const initial_cap = try input.uintInRangeInclusive(usize, min_bytes, chosen_max);
+            // TODO: shouldn't max always be the limit_max?
+            const chosen_max = input.uintInRangeInclusive(usize, min_bytes, limit_max);
+            const initial_cap = input.uintInRangeInclusive(usize, min_bytes, chosen_max);
             mem.* = try wasmstint.runtime.MemInst.Mapped
                 .allocateFromType(mem_type, initial_cap, chosen_max);
             definitions.memories.appendAssumeCapacity(&mem.memory);
@@ -1299,7 +1301,7 @@ const ImportProvider = struct {
                     }
 
                     const max_size = @min(mem_type.limits.max * page_size, config_max);
-                    const initial_cap = try provider.input
+                    const initial_cap = provider.input
                         .uintInRangeInclusive(usize, min_size, max_size);
                     const provided_mem = try wasmstint.runtime.MemInst.Mapped
                         .allocateFromType(mem_type, initial_cap, max_size);
@@ -1318,7 +1320,7 @@ const ImportProvider = struct {
                     }
 
                     const max_elems = @min(config_max, table_type.limits.max);
-                    const initial_cap = try provider.input
+                    const initial_cap = provider.input
                         .uintInRangeInclusive(u32, limit_min, max_elems);
                     const provided_table =
                         try wasmstint.runtime.TableInst.Allocated.allocateFromType(

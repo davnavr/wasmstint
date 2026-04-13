@@ -61,7 +61,7 @@ pub fn testOne(
 
     var interp: wasmstint.Interpreter = undefined;
     const initial_state = try interp.init(allocator, .{
-        .stack_reserve = try input.uintInRangeInclusive(u32, 0, max_interpreter_stack),
+        .stack_reserve = input.uintInRangeInclusive(u32, 0, max_interpreter_stack),
     });
     defer interp.deinit(allocator);
 
@@ -90,8 +90,8 @@ pub fn testOne(
 
                 const min_elems: u32 = @intCast(table_type.limits.min);
                 const limited_max = @min(table_type.limits.max, config_max);
-                const chosen_max = try input.uintInRangeInclusive(u32, min_elems, limited_max);
-                const initial_cap = try input.uintInRangeInclusive(u32, min_elems, chosen_max);
+                const chosen_max = input.uintInRangeInclusive(u32, min_elems, limited_max);
+                const initial_cap = input.uintInRangeInclusive(u32, min_elems, chosen_max);
                 table.* = try wasmstint.runtime.TableInst.Allocated.allocateFromType(
                     allocator,
                     table_type,
@@ -110,8 +110,8 @@ pub fn testOne(
                 }
 
                 const limited_max = @min(mem_type.limits.max * wasm_page_size, config_max);
-                const chosen_max = try input.uintInRangeInclusive(usize, min_bytes, limited_max);
-                const initial_cap = try input.uintInRangeInclusive(usize, min_bytes, chosen_max);
+                const chosen_max = input.uintInRangeInclusive(usize, min_bytes, limited_max);
+                const initial_cap = input.uintInRangeInclusive(usize, min_bytes, chosen_max);
                 mem.* = try wasmstint.runtime.MemInst.Mapped
                     .allocateFromType(mem_type, initial_cap, chosen_max);
                 definitions.memories.appendAssumeCapacity(&mem.memory);
@@ -153,7 +153,7 @@ pub fn testOne(
         ) catch |e| {
             std.log.warn("start function did not return: {t}", .{e});
             switch (e) {
-                error.BadInput, error.OutOfMemory => return e,
+                error.OutOfMemory => return e,
                 error.OutOfFuel, error.CallStackExhaustion, error.Trapped => return,
             }
         };
@@ -191,8 +191,7 @@ pub fn testOne(
             param_types.len,
         );
         for (param_types, params) |param_ty, *dst| {
-            dst.* =
-                try generateTaggedValue(input, param_ty, import_provider.functions.items);
+            dst.* = generateTaggedValue(input, param_ty, import_provider.functions.items);
         }
 
         std.log.info("parameters {f}", .{
@@ -204,12 +203,9 @@ pub fn testOne(
             &fuel,
             input,
             import_provider.functions.items,
-        ) catch |err| switch (err) {
-            error.BadInput => |fail| return fail,
-            else => {
-                std.log.info("function did not return: {t}", .{err});
-                continue;
-            },
+        ) catch |err| {
+            std.log.info("function did not return: {t}", .{err});
+            continue;
         };
 
         std.log.info("function returned {f}", .{
@@ -218,12 +214,13 @@ pub fn testOne(
     }
 }
 
-fn generateExternAddr(input: *fuzz_data.Input) fuzz_data.Input.Error!wasmstint.runtime.ExternAddr {
+fn generateExternAddr(input: *fuzz_data.Input) wasmstint.runtime.ExternAddr {
     const Bits = packed struct(u32) {
         high: u4,
         low: u28,
     };
-    const bits: Bits = @bitCast(try input.int(u32));
+
+    const bits: Bits = @bitCast(input.int(u32));
     return if (bits.high == 0)
         .null
     else
@@ -268,7 +265,7 @@ const ImportProvider = struct {
                         return error.OutOfMemory; // memory min size too large
                     }
 
-                    const max_size = try provider.input.uintInRangeInclusive(
+                    const max_size = provider.input.uintInRangeInclusive(
                         usize,
                         min_size,
                         @min(
@@ -278,7 +275,7 @@ const ImportProvider = struct {
                     );
                     const provided_mem = try wasmstint.runtime.MemInst.Mapped.allocateFromType(
                         mem_type,
-                        try provider.input.uintInRangeInclusive(usize, min_size, max_size),
+                        provider.input.uintInRangeInclusive(usize, min_size, max_size),
                         max_size,
                     );
 
@@ -294,14 +291,14 @@ const ImportProvider = struct {
                         return error.OutOfMemory; // table min length too large
                     }
 
-                    const max_elems = try provider.input.uintInRangeInclusive(
+                    const max_elems = provider.input.uintInRangeInclusive(
                         u32,
                         limit_min,
                         @min(wasm_smith_config.max_max_table_elements, table_type.limits.max),
                     );
                     //const table = provider.tables.addOneAssumeCapacity();
                     //errdefer provider.tables.pop().?;
-                    const initial_capacity = try provider.input
+                    const initial_capacity = provider.input
                         .uintInRangeInclusive(u32, limit_min, max_elems);
                     const provided_table =
                         try wasmstint.runtime.TableInst.Allocated.allocateFromType(
@@ -325,11 +322,11 @@ const ImportProvider = struct {
                             const Val = wasmstint.runtime.GlobalAddr.Pointee(val_type);
                             const val = try provider.arena.allocator().create(Val);
                             val.* = switch (val_type) {
-                                .i32, .i64 => try provider.input.int(Val),
-                                .f32, .f64 => try provider.input.floatFromBits(Val),
-                                .externref => try generateExternAddr(provider.input),
+                                .i32, .i64 => provider.input.int(Val),
+                                .f32, .f64 => provider.input.floatFromBits(Val),
+                                .externref => generateExternAddr(provider.input),
                                 .funcref => Val.null, // TODO: pick random funcref
-                                .v128 => .{ .u8x16 = (try provider.input.takeArray(16)).* },
+                                .v128 => .{ .u8x16 = provider.input.vector(@Vector(16, u8)) },
                                 // else => unreachable,
                             };
 
@@ -364,20 +361,20 @@ fn generateTaggedValue(
     input: *fuzz_data.Input,
     ty: wasmstint.Module.ValType,
     functions: []const wasmstint.runtime.FuncRef,
-) !wasmstint.Interpreter.TaggedValue {
+) wasmstint.Interpreter.TaggedValue {
     return switch (ty) {
-        .i32 => .{ .i32 = try input.int(i32) },
-        .i64 => .{ .i64 = try input.int(i64) },
-        .f32 => .{ .f32 = try input.floatFromBits(f32) },
-        .f64 => .{ .f64 = try input.floatFromBits(f64) },
-        .externref => .{ .externref = try generateExternAddr(input) },
+        .i32 => .{ .i32 = input.int(i32) },
+        .i64 => .{ .i64 = input.int(i64) },
+        .f32 => .{ .f32 = input.floatFromBits(f32) },
+        .f64 => .{ .f64 = input.floatFromBits(f64) },
+        .externref => .{ .externref = generateExternAddr(input) },
         .funcref => .{
-            .funcref = if (try input.boolean())
-                @bitCast(try input.choose(wasmstint.runtime.FuncRef, u32, functions))
+            .funcref = if (input.boolean())
+                @bitCast(input.choose(wasmstint.runtime.FuncRef, u32, functions))
             else
                 .null,
         },
-        .v128 => .{ .v128 = .{ .u8x16 = (try input.takeArray(16)).* } },
+        .v128 => .{ .v128 = .{ .u8x16 = input.vector(@Vector(16, u8)) } },
         // else => unreachable,
     };
 }
@@ -396,14 +393,14 @@ fn mainLoop(
         state = next: switch (state) {
             .awaiting_host => |*host| if (host.currentHostFunction()) |host_func| {
                 // 3/4 probability
-                if (try input.int(u8) & 0b1100_0000 == 0) {
+                if (input.int(u8) & 0b1100_0000 == 0) {
                     const result_types = host.hostSignature().results();
                     const results = try scratch.allocator().alloc(
                         wasmstint.Interpreter.TaggedValue,
                         result_types.len,
                     );
                     for (result_types, results) |result_ty, *dst| {
-                        dst.* = try generateTaggedValue(input, result_ty, functions);
+                        dst.* = generateTaggedValue(input, result_ty, functions);
                     }
 
                     std.log.info(
@@ -413,7 +410,7 @@ fn mainLoop(
                     break :next host.returnFromHost(results, fuel) catch
                         @panic("signature mismatch");
                 } else {
-                    const trap_code = try input.int(u31);
+                    const trap_code = input.int(u31);
                     host_trap_code = trap_code;
                     break :next host.trapWithHostCode(trap_code);
                 }
@@ -426,35 +423,29 @@ fn mainLoop(
                 switch (interrupt.cause().*) {
                     .out_of_fuel => return error.OutOfFuel,
                     .memory_grow => |grow_request| {
-                        const accepted =
-                            grow_request.new_size <= wasm_smith_config.max_max_memory_bytes and
-                            try input.boolean();
+                        const accepted = input.boolean() and // always consume input byte
+                            grow_request.new_size <= wasm_smith_config.max_max_memory_bytes;
 
-                        std.log.info(
-                            "memory.grow from {[old]d} to {[new]d} {[status]s}",
-                            .{
-                                .old = grow_request.old_size,
-                                .new = grow_request.new_size,
-                                .status = if (accepted) "accepted" else "denied",
-                            },
-                        );
+                        std.log.info("memory.grow from {[old]d} to {[new]d} {[status]s}", .{
+                            .old = grow_request.old_size,
+                            .new = grow_request.new_size,
+                            .status = if (accepted) "accepted" else "denied",
+                        });
+
                         if (accepted) {
                             try grow_request.grow();
                         }
                     },
                     .table_grow => |grow_request| {
-                        const accepted =
-                            grow_request.new_len <= wasm_smith_config.max_max_table_elements and
-                            try input.boolean();
+                        const accepted = input.boolean() and // always consume input byte
+                            grow_request.new_len <= wasm_smith_config.max_max_table_elements;
 
-                        std.log.info(
-                            "table.grow from {[old]d} to {[new]d} {[status]s}",
-                            .{
-                                .old = grow_request.old_len,
-                                .new = grow_request.new_len,
-                                .status = if (accepted) "accepted" else "denied",
-                            },
-                        );
+                        std.log.info("table.grow from {[old]d} to {[new]d} {[status]s}", .{
+                            .old = grow_request.old_len,
+                            .new = grow_request.new_len,
+                            .status = if (accepted) "accepted" else "denied",
+                        });
+
                         if (accepted) {
                             try grow_request.grow();
                         }

@@ -16,8 +16,8 @@ pub const ByteSlice = extern struct {
 
 /// Note that some functions may introduce a bias, assuming the input bytes are random.
 ///
-/// TODO: See if default values should be returned. Here's what Rust's `arbitrary` trait does:
-/// https://github.com/rust-fuzz/arbitrary/issues/92
+/// Where possible, functions choose a default value when the input bytes are exhausted. For
+/// more information, see <https://github.com/rust-fuzz/arbitrary/issues/92>.
 pub const Input = extern struct {
     bytes: ByteSlice,
 
@@ -49,25 +49,37 @@ pub const Input = extern struct {
         return (try input.take(count))[0..count];
     }
 
-    pub fn boolean(input: *Input) Error!bool {
-        return (try input.takeArray(1))[0] & 1 == 1;
+    pub fn boolean(input: *Input) bool {
+        return (input.takeArray(1) catch return false)[0] & 1 == 1;
     }
 
-    pub fn int(input: *Input, comptime T: type) Error!T {
+    pub fn int(input: *Input, comptime T: type) T {
         const ByteAligned = std.math.ByteAlignedInt(T);
-        return @truncate(std.mem.readInt(
-            ByteAligned,
-            try input.takeArray(@sizeOf(ByteAligned)),
-            .little,
-        ));
+        const bytes = input.takeArray(@sizeOf(ByteAligned)) catch return 0;
+        return @truncate(std.mem.readInt(ByteAligned, bytes, .little));
     }
 
-    pub fn uintLessThan(input: *Input, comptime T: type, max: T) Error!T {
+    pub fn vector(input: *Input, comptime V: type) V {
+        const T = @typeInfo(V).vector.child;
+        const len = @typeInfo(V).vector.len;
+        var lanes: [len]T = undefined;
+        for (&lanes) |*l| {
+            l.* = switch (@typeInfo(T)) {
+                .int => input.int(T),
+                .float => input.floatFromBits(T),
+                else => comptime unreachable,
+            };
+        }
+
+        return lanes;
+    }
+
+    pub fn uintLessThan(input: *Input, comptime T: type, max: T) T {
         comptime {
             std.debug.assert(@typeInfo(T).int.signedness == .unsigned);
         }
 
-        const value: T = try input.int(T);
+        const value: T = input.int(T);
         if (max != 0) {
             const clamped: T = value % max;
             std.debug.assert(clamped < max);
@@ -79,32 +91,32 @@ pub const Input = extern struct {
     }
 
     /// Asserts that `max >= min`.
-    pub fn uintInRangeExclusive(input: *Input, comptime T: type, min: T, max: T) Error!T {
-        const value: T = min + (try input.uintLessThan(T, max - min));
+    pub fn uintInRangeExclusive(input: *Input, comptime T: type, min: T, max: T) T {
+        const value: T = min + input.uintLessThan(T, max - min);
         std.debug.assert(value < max);
         return value;
     }
 
     /// Asserts that `max >= min`.
-    pub fn uintInRangeInclusive(input: *Input, comptime T: type, min: T, max: T) Error!T {
-        const value: T = min + (try input.uintLessThan(T, (max - min) +| 1));
+    pub fn uintInRangeInclusive(input: *Input, comptime T: type, min: T, max: T) T {
+        const value: T = min + input.uintLessThan(T, (max - min) +| 1);
         std.debug.assert(value <= max);
         return value;
     }
 
-    pub fn choose(input: *Input, comptime T: type, comptime I: type, choices: []const T) Error!T {
+    pub fn choose(input: *Input, comptime T: type, comptime I: type, choices: []const T) T {
         std.debug.assert(0 < choices.len);
         std.debug.assert(choices.len <= std.math.maxInt(I));
-        return choices[try input.uintLessThan(I, @intCast(choices.len))];
+        return choices[input.uintLessThan(I, @intCast(choices.len))];
     }
 
-    pub fn enumValue(input: *Input, comptime T: type, comptime I: type) Error!T {
+    pub fn enumValue(input: *Input, comptime T: type, comptime I: type) T {
         return input.choose(T, I, std.enums.values(T));
     }
 
-    pub fn floatFromBits(input: *Input, comptime T: type) Error!T {
+    pub fn floatFromBits(input: *Input, comptime T: type) T {
         const Int = std.meta.Int(.unsigned, @typeInfo(T).float.bits);
-        return @bitCast(try input.int(Int));
+        return @bitCast(input.int(Int));
     }
 };
 
@@ -112,7 +124,7 @@ const std = @import("std");
 const testing = std.testing;
 
 test Input {
-    const original = "helloworld\x34\x12\x00\x01\x02\x03\x04\x05\x07\x08\x00";
+    const original = "helloworld\x34\x12\x00\x01\x02\x03\x04\x05\x07\x08\x00\xAA\xBB\xCC\xDD";
     var input = Input.init(original);
     try testing.expectEqual(original[0..5], input.take(5));
     try testing.expectEqual(original[5..10], input.takeArray(5));
@@ -126,4 +138,5 @@ test Input {
     try testing.expectEqual(5, input.uintInRangeExclusive(u8, 2, 6));
     try testing.expectEqual(2, input.uintInRangeExclusive(u8, 2, 6));
     try testing.expectEqual(42, input.uintInRangeInclusive(u8, 42, 42));
+    try testing.expectEqual([4]u8{ 0xAA, 0xBB, 0xCC, 0xDD }, input.vector(@Vector(4, u8)));
 }

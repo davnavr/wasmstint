@@ -55,4 +55,3 @@ pub fn testOne(
 
 const std = @import("std");
 const wasmstint = @import("wasmstint");
-const fuzz_data = @import("fuzz_data");
