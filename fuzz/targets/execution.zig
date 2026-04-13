@@ -1,5 +1,5 @@
 const max_interpreter_stack = 200_000;
-const max_fuel = 400_000;
+const max_fuel = 20_000;
 
 pub const wasm_smith_config = ffi.wasm_smith.Configuration{};
 
@@ -403,10 +403,11 @@ fn mainLoop(
                         dst.* = generateTaggedValue(input, result_ty, functions);
                     }
 
-                    std.log.info(
-                        "host {f} returning {f}",
-                        .{ host_func, wasmstint.Interpreter.TaggedValue.sliceFormatter(results) },
-                    );
+                    std.log.info("fuel={d}, host {f} returning {f}", .{
+                        fuel.remaining,
+                        host_func,
+                        wasmstint.Interpreter.TaggedValue.sliceFormatter(results),
+                    });
                     break :next host.returnFromHost(results, fuel) catch
                         @panic("signature mismatch");
                 } else {
