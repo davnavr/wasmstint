@@ -485,6 +485,7 @@ pub fn parse(
         header.total_locals_count = local_names.len;
         var locals_dst = std.MultiArrayList(Local).empty;
         try locals_dst.setCapacity(arena.allocator(), local_names.len);
+        local_names.len = locals_dst.len;
 
         const locals_src_slices = local_names.slice();
         const locals_dst_slices = locals_dst.slice();
