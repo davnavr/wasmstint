@@ -27,11 +27,11 @@ pub fn testOne(
     ) catch |e| switch (e) {
         error.OutOfMemory => |oom| return oom,
         error.InvalidWasm, error.MalformedWasm => std.debug.panic(
-            "module validation error {t}: {s}",
+            "module {t}: {s}",
             .{ e, diagnostic_writer.written() },
         ),
         error.WasmImplementationLimit => {
-            std.log.warn("hit implementation limit", .{});
+            std.log.warn("hit implementation limit: {s}", .{diagnostic_writer.written()});
             return;
         },
     };
@@ -50,11 +50,11 @@ pub fn testOne(
     ) catch |e| switch (e) {
         error.OutOfMemory => |oom| return oom,
         error.InvalidWasm, error.MalformedWasm => std.debug.panic(
-            "code validation error {t}: {s}",
+            "code {t}: {s}",
             .{ e, diagnostic_writer.written() },
         ),
         error.WasmImplementationLimit => {
-            std.log.warn("hit implementation limit", .{});
+            std.log.warn("hit implementation limit: {s}", .{diagnostic_writer.written()});
             return;
         },
     };

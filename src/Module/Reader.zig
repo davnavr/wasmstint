@@ -8,7 +8,9 @@ pub const Error = error{
 };
 
 pub const LimitError = error{
-    /// See <https://webassembly.github.io/spec/core/appendix/implementation.html>.
+    /// A limit (e.g. a maximum allowed number of functions in a module) was exceeded.
+    ///
+    /// See <https://webassembly.github.io/spec/core/appendix/implementation.html> for more details.
     WasmImplementationLimit,
 };
 
@@ -29,11 +31,13 @@ pub const Diagnostics = struct {
     pub const Kind = enum {
         parse,
         validation,
+        implementation_limit,
 
         pub fn Error(comptime kind: Kind) type {
             return switch (kind) {
                 .parse => Reader.Error,
                 .validation => ValidationError,
+                .implementation_limit => LimitError,
             };
         }
 
@@ -41,6 +45,7 @@ pub const Diagnostics = struct {
             return switch (kind) {
                 .parse => Reader.Error.MalformedWasm,
                 .validation => ValidationError.InvalidWasm,
+                .implementation_limit => LimitError.WasmImplementationLimit,
             };
         }
     };
@@ -169,8 +174,9 @@ pub fn readUleb128Casted(
     desc: []const u8,
 ) (Error || LimitError)!U {
     comptime std.debug.assert(@bitSizeOf(U) < @bitSizeOf(T));
-    return std.math.cast(U, try reader.readUleb128(T, diag, desc)) orelse
-        LimitError.WasmImplementationLimit;
+    const value = try reader.readUleb128(T, diag, desc);
+    return std.math.cast(U, value) orelse
+        diag.print(.implementation_limit, "{s} {d} too large", .{ desc, value });
 }
 
 const SimdLaneCount = enum(u5) { @"1" = 1, @"16" = 16 };
@@ -302,11 +308,8 @@ pub fn readIdx(
     desc: *const [2][]const u8,
 ) !I {
     const idx = try reader.readUleb128(u32, diag, @typeName(I));
-    return if (idx < len)
-        @enumFromInt(
-            std.math.cast(@typeInfo(I).@"enum".tag_type, idx) orelse
-                return error.WasmImplementationLimit,
-        )
+    return if (idx < len and idx <= std.math.maxInt(@typeInfo(I).@"enum".tag_type))
+        @enumFromInt(idx)
     else
         diag.print(.validation, "unknown {s} {}, {s}", .{ desc[0], idx, desc[1] });
 }

@@ -508,15 +508,10 @@ fn realMain(init: std.process.Init.Minimal) Error!i32 {
                 "module {s} is invalid, {s}",
                 .{ fmt_wasm_path, parse_diagnostics.written() },
             ),
-            error.MalformedWasm => return fail.format(
+            error.MalformedWasm, error.WasmImplementationLimit => return fail.format(
                 error.GenericError,
                 "failed to parse module {s}: {s}",
                 .{ fmt_wasm_path, parse_diagnostics.written() },
-            ),
-            else => return fail.format(
-                error.GenericError,
-                "could not parse module {s}: {t}",
-                .{ fmt_wasm_path, e },
             ),
         };
     };

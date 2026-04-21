@@ -181,12 +181,15 @@ pub fn parse(
             else => return nonConstOpcode(opcode, diag, desc),
         }
 
+        const impl_limit_message = "constant expression too many instructions";
         max_stack = @max(
             max_stack,
-            std.math.cast(u16, val_stack.items.len) orelse return error.WasmImplementationLimit,
+            std.math.cast(u16, val_stack.items.len) orelse
+                return diag.writeAll(.implementation_limit, impl_limit_message),
         );
 
-        instr_count = std.math.add(u16, instr_count, 1) catch return error.WasmImplementationLimit;
+        instr_count = std.math.add(u16, instr_count, 1) catch
+            return diag.writeAll(.implementation_limit, impl_limit_message);
 
         if (reader.isEmpty()) {
             // Spec thinks reading into code section is ok!?

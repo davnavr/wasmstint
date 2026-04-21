@@ -181,7 +181,7 @@ pub const Name = packed struct(u48) {
     fn parse(reader: Reader, start: [*]const u8, diag: Reader.Diagnostics) Error!Name {
         const name = try reader.readName(diag);
         if (name.bytes.len > std.math.maxInt(Len)) {
-            return Error.WasmImplementationLimit; // name too long
+            return diag.writeAll(.implementation_limit, "name too long");
         }
 
         return Name{

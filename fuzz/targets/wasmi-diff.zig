@@ -714,7 +714,10 @@ pub fn testOne(
             "module validation error {t}: {s}",
             .{ e, diagnostic_writer.written() },
         ),
-        error.WasmImplementationLimit => return,
+        error.WasmImplementationLimit => {
+            std.log.warn("hit implementation limit: {s}", .{diagnostic_writer.written()});
+            return error.BadInput;
+        },
     };
     defer parsed_module.deinit(allocator, allocator);
     _ = scratch.reset(.retain_capacity);
@@ -728,7 +731,10 @@ pub fn testOne(
         error.InvalidWasm, error.MalformedWasm => {
             std.debug.panic("code validation error {t}: {s}", .{ e, diagnostic_writer.written() });
         },
-        error.WasmImplementationLimit => return,
+        error.WasmImplementationLimit => {
+            std.log.warn("hit implementation limit: {s}", .{diagnostic_writer.written()});
+            return error.BadInput;
+        },
     };
     _ = scratch.reset(.retain_capacity);
 

@@ -934,7 +934,7 @@ const Sections = struct {
 
                     if (options.keep_custom_sections) {
                         if (custom_sections.items.len >= std.math.maxInt(u32)) {
-                            return error.WasmImplementationLimit; // too many custom sections
+                            return diag.writeAll(.implementation_limit, "too many custom sections");
                         }
 
                         try custom_sections.append(
@@ -1019,6 +1019,11 @@ const Sections = struct {
     };
 };
 
+/// Parses a WebAssembly binary.
+///
+/// Validation of function bodies occurs as a separate step, to support lazy validation or to speed
+/// up validation using multiple threads. To validation all function bodies, one can also call
+/// `finishCodeValidation()`.
 pub fn parse(
     gpa: Allocator,
     /// Pointer refering to the WebAssembly binary module to parse.
@@ -1073,11 +1078,11 @@ pub fn parse(
     const counts = try Sections.Counts.parse(&sections.readers, diag);
 
     if (counts.elem > std.math.maxInt(@typeInfo(ElemIdx).@"enum".tag_type)) {
-        return error.WasmImplementationLimit; // too many element element segments
+        return diag.writeAll(.implementation_limit, "too many element element segments");
     }
 
     if (counts.data > std.math.maxInt(@typeInfo(DataIdx).@"enum".tag_type)) {
-        return error.WasmImplementationLimit; // too many data segments
+        return diag.writeAll(.implementation_limit, "too many data segments");
     }
 
     if (has_data_count_section and counts.data_count != counts.data) {
@@ -1476,16 +1481,16 @@ fn parseImportSec(
             .module_offset = std.math.cast(
                 u16,
                 @intFromPtr(mod.bytes.ptr) - @intFromPtr(imports_start),
-            ) orelse return error.WasmImplementationLimit, // too many imports
+            ) orelse return diag.writeAll(.implementation_limit, "too many imports"),
             .module_size = std.math.cast(u16, mod.bytes.len) orelse
-                return error.WasmImplementationLimit, // too many imports
+                return diag.writeAll(.implementation_limit, "too many imports"),
 
             .name_offset = std.math.cast(
                 u16,
                 @intFromPtr(name.bytes.ptr) - @intFromPtr(imports_start),
-            ) orelse return error.WasmImplementationLimit, // too many imports
+            ) orelse return diag.writeAll(.implementation_limit, "too many imports"),
             .name_size = std.math.cast(u16, name.bytes.len) orelse
-                return error.WasmImplementationLimit, // too many imports
+                return diag.writeAll(.implementation_limit, "too many imports"),
         };
 
         const tag = try import_reader.readByteTag(ImportExportDesc, diag, "malformed import kind");
@@ -1602,7 +1607,7 @@ fn parseFuncSec(
     const func_types = import_types.funcs;
 
     if (func_types.len > std.math.maxInt(@typeInfo(FuncIdx).@"enum".tag_type)) {
-        return error.WasmImplementationLimit; // too many funcs
+        return diag.writeAll(.implementation_limit, "too many funcs");
     }
 
     for (func_types[func_types.len - count ..], 0..count) |*func_ty, _| {
@@ -1629,7 +1634,7 @@ fn parseTableSec(
     const table_types = import_types.tables;
 
     if (table_types.len > std.math.maxInt(@typeInfo(TableIdx).@"enum".tag_type)) {
-        return error.WasmImplementationLimit; // too many tables
+        return diag.writeAll(.implementation_limit, "too many tables");
     }
 
     for (table_types[table_types.len - count ..], 0..count) |*tt, _| {
@@ -1654,7 +1659,7 @@ fn parseMemSec(
     const mem_types = import_types.mems;
 
     if (mem_types.len > std.math.maxInt(@typeInfo(MemIdx).@"enum".tag_type)) {
-        return error.WasmImplementationLimit; // too many mems
+        return diag.writeAll(.implementation_limit, "too many memories");
     }
 
     // check std.math.maxInt(@typeInfo(MemIdx).@"enum".tag_type)
@@ -1703,7 +1708,7 @@ fn parseGlobalSec(
     const global_exprs = try arena.allocator().alloc(GlobalExpr, count);
 
     if (global_types.len > std.math.maxInt(@typeInfo(GlobalIdx).@"enum".tag_type)) {
-        return error.WasmImplementationLimit; // too many globals
+        return diag.writeAll(.implementation_limit, "too many globals");
     }
 
     for (global_types[global_types.len - count ..], global_exprs) |*ty, *expr| {
@@ -1797,11 +1802,11 @@ fn parseExportSec(
 
         ex.* = Export{
             .name_size = std.math.cast(u15, name.bytes.len) orelse
-                return error.WasmImplementationLimit, // export name size
+                return diag.writeAll(.implementation_limit, "too many exports"),
             .name_offset = std.math.cast(
                 u16,
                 @intFromPtr(name.bytes.ptr) - @intFromPtr(exports_start),
-            ) orelse return error.WasmImplementationLimit, // export section size
+            ) orelse return diag.writeAll(.implementation_limit, "too many exports"),
             .desc_tag = switch (tag) {
                 inline else => |desc_tag| @field(
                     std.meta.FieldEnum(Export.Desc),
@@ -2049,7 +2054,10 @@ fn parseElemSec(
                     std.math.cast(
                         u15,
                         init_expr.max_stack,
-                    ) orelse return error.WasmImplementationLimit, // elem expr max stack too large
+                    ) orelse return diag.writeAll(
+                        .implementation_limit,
+                        "element expression too large",
+                    ),
                 );
                 instruction_count = std.math.add(
                     u15,
@@ -2057,8 +2065,11 @@ fn parseElemSec(
                     std.math.cast(
                         u15,
                         init_expr.instr_count,
-                    ) orelse return error.WasmImplementationLimit, // elem expr instr # too large
-                ) catch return error.WasmImplementationLimit; // too many element expressions
+                    ) orelse return diag.writeAll(
+                        .implementation_limit,
+                        "element expression too many instructions",
+                    ),
+                ) catch return diag.writeAll(.implementation_limit, "too many element expressions");
             }
 
             std.debug.assert(exprs.len <= instruction_count);
@@ -2356,50 +2367,4 @@ const wasm_features = @import("wasm_features");
 
 test {
     _ = Reader;
-}
-
-test parse {
-    const ParseFuzzer = struct {
-        fn parse(allocator: std.mem.Allocator, input: []const u8) !void {
-            var scratch = std.heap.ArenaAllocator.init(allocator);
-            defer scratch.deinit();
-
-            var diagnostic_writer = try std.Io.Writer.Allocating.initCapacity(allocator, 128);
-            defer diagnostic_writer.deinit();
-
-            var wasm = input;
-            const module = Module.parse(
-                allocator,
-                &wasm,
-                &scratch,
-                .{ .diagnostics = .init(&diagnostic_writer.writer) },
-            ) catch |e| switch (e) {
-                error.OutOfMemory => |oom| return oom,
-                error.InvalidWasm, error.MalformedWasm => {
-                    std.debug.assert(diagnostic_writer.written().len > 4);
-                    return;
-                },
-                error.WasmImplementationLimit => {
-                    std.debug.assert(diagnostic_writer.written().len == 0);
-                    return;
-                },
-            };
-            defer module.deinitLeakCodeEntries(allocator);
-
-            std.debug.assert(wasm.len == 0);
-        }
-
-        fn testOne(_: void, input: []const u8) !void {
-            try std.testing.checkAllAllocationFailures(
-                std.testing.allocator,
-                @This().parse,
-                .{input},
-            );
-        }
-    };
-
-    // TODO(zig): Fix crash in fuzz test runner
-    if (false) {
-        try std.testing.fuzz({}, ParseFuzzer.testOne, .{});
-    }
 }

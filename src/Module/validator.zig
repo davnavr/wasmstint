@@ -377,26 +377,47 @@ const ValStack = struct {
         return @intCast(val_stack.buf.items.len);
     }
 
-    const PushError = Allocator.Error || error{WasmImplementationLimit};
+    const PushError = Allocator.Error || Reader.LimitError;
 
-    fn pushAny(val_stack: *ValStack, arena: *ArenaAllocator, val: Val) PushError!void {
+    fn errorValueStackTooLarge(diag: Diagnostics) Reader.LimitError {
+        return diag.writeAll(.implementation_limit, "too many instructions, value stack too large");
+    }
+
+    fn pushAny(
+        val_stack: *ValStack,
+        arena: *ArenaAllocator,
+        val: Val,
+        diag: Diagnostics,
+    ) PushError!void {
         try val_stack.buf.append(arena.allocator(), val);
         // Note, if someone pushes a known value over an unknown, the max will grow anyway
         // TODO: check that current frame is reachable instead.
         // if (val != .unknown) {
-        val_stack.max = @max(val_stack.max, std.math.cast(u16, val_stack.buf.items.len) orelse
-            return error.WasmImplementationLimit);
+        val_stack.max = @max(
+            val_stack.max,
+            std.math.cast(u16, val_stack.buf.items.len) orelse return errorValueStackTooLarge(diag),
+        );
         // }
     }
 
-    fn push(val_stack: *ValStack, arena: *ArenaAllocator, val_type: ValType) PushError!void {
-        return val_stack.pushAny(arena, valTypeToVal(val_type));
+    fn push(
+        val_stack: *ValStack,
+        arena: *ArenaAllocator,
+        val_type: ValType,
+        diag: Diagnostics,
+    ) PushError!void {
+        return try val_stack.pushAny(arena, valTypeToVal(val_type), diag);
     }
 
     /// Asserts that `types.len() <= std.math.maxInt(u16)`.
-    fn pushMany(val_stack: *ValStack, arena: *ArenaAllocator, types: []const ValType) !void {
+    fn pushMany(
+        val_stack: *ValStack,
+        arena: *ArenaAllocator,
+        types: []const ValType,
+        diag: Diagnostics,
+    ) !void {
         const new_len = std.math.add(u16, val_stack.len(), @intCast(types.len)) catch
-            return Error.WasmImplementationLimit;
+            return errorValueStackTooLarge(diag);
 
         try val_stack.buf.ensureUnusedCapacity(arena.allocator(), new_len);
         for (types) |ty| {
@@ -465,7 +486,7 @@ const ValStack = struct {
 
             top.* = valTypeToVal(replacement);
         } else if (current_frame.info.@"unreachable") {
-            try val_stack.push(arena, replacement);
+            try val_stack.push(arena, replacement, diag);
         } else {
             return errorValueStackUnderflow(current_frame.info.height, diag);
         }
@@ -642,12 +663,17 @@ const Label = struct {
     copy_count: u8,
     pop_count: u8,
 
+    fn errorTooManyResults(diag: Diagnostics, count: usize) Module.LimitError {
+        return diag.print(.implementation_limit, "too many results ({d}) in block", .{count});
+    }
+
     fn calculatePopCount(
         current_height: u16,
         target_frame_height: u16,
+        diag: Diagnostics,
     ) Module.LimitError!u8 {
-        return std.math.cast(u8, current_height - target_frame_height) orelse
-            error.WasmImplementationLimit;
+        const pop_count = current_height - target_frame_height;
+        return std.math.cast(u8, pop_count) orelse errorTooManyResults(diag, pop_count);
     }
 
     fn init(
@@ -667,12 +693,13 @@ const Label = struct {
         //     .{ depth, frame.offset, @tagName(frame.info.opcode) },
         // );
 
+        const copy_count = frame.labelTypes(module).len;
         return Label{
             .frame = frame,
             .depth = depth,
-            .copy_count = std.math.cast(u8, frame.labelTypes(module).len) orelse
-                return Error.WasmImplementationLimit,
-            .pop_count = try calculatePopCount(current_height, frame.info.height),
+            .copy_count = std.math.cast(u8, copy_count) orelse
+                return errorTooManyResults(diag, copy_count),
+            .pop_count = try calculatePopCount(current_height, frame.info.height, diag),
         };
     }
 
@@ -697,6 +724,7 @@ fn pushCtrlFrame(
     offset: u32,
     block_type: BlockType,
     module: Module,
+    diag: Diagnostics,
 ) !void {
     try ctrl_stack.append(
         arena.allocator(),
@@ -707,12 +735,12 @@ fn pushCtrlFrame(
                 .height = val_stack.len(),
             },
             .offset = offset,
-            .side_table_idx = try side_table.nextEntryIdx(),
+            .side_table_idx = try side_table.nextEntryIdx(diag),
         },
     );
 
     // std.debug.print("pushed {s} parameters = {any}\n", .{ @tagName(opcode), block_type.funcType(module).parameters() });
-    try val_stack.pushMany(arena, block_type.funcType(module).parameters());
+    try val_stack.pushMany(arena, block_type.funcType(module).parameters(), diag);
 }
 
 fn popCtrlFrame(
@@ -869,8 +897,15 @@ const SideTableBuilder = struct {
     alternate: std.ArrayList(BranchFixup) = .empty,
     free: BranchFixup.List = .empty,
 
-    fn nextEntryIdx(table: *const SideTableBuilder) Module.LimitError!u32 {
-        return std.math.cast(u32, table.entries.items.len) orelse error.WasmImplementationLimit;
+    fn errorSideTableFull(diag: Diagnostics) Module.LimitError {
+        return diag.writeAll(
+            .implementation_limit,
+            "too many control instructions, side table full",
+        );
+    }
+
+    fn nextEntryIdx(table: *const SideTableBuilder, diag: Diagnostics) Module.LimitError!u32 {
+        return std.math.cast(u32, table.entries.items.len) orelse errorSideTableFull(diag);
     }
 
     fn pushFixupList(
@@ -907,8 +942,9 @@ const SideTableBuilder = struct {
         origin: u32,
         copy_count: u8,
         pop_count: u8,
+        diag: Diagnostics,
     ) (Module.LimitError || Allocator.Error)!void {
-        const idx = try table.nextEntryIdx();
+        const idx = try table.nextEntryIdx(diag);
         const entry = try table.entries.addOne(arena.allocator());
         errdefer _ = table.entries.pop().?;
         const fixup = try table.alternate.addOne(arena.allocator());
@@ -933,6 +969,21 @@ const SideTableBuilder = struct {
 
     const AppendError = Module.LimitError || Allocator.Error;
 
+    fn errorDeltaIpOutOfRange(diag: Diagnostics) Reader.LimitError {
+        return diag.writeAll(
+            .implementation_limit,
+            "too many instructions, branch target out of range",
+        );
+    }
+
+    fn errorDeltaStpOutOfRange(diag: Diagnostics, delta_stp: i33) Reader.LimitError {
+        return diag.print(
+            .implementation_limit,
+            "too many control instructions, side table target ({d}) out of range",
+            .{delta_stp},
+        );
+    }
+
     fn append(
         table: *SideTableBuilder,
         arena: *ArenaAllocator,
@@ -942,8 +993,9 @@ const SideTableBuilder = struct {
         pop_count: u8,
         block_offset: ActiveList.BlockOffset,
         target_depth: u32,
+        diag: Diagnostics,
     ) AppendError!u32 {
-        const idx = try table.nextEntryIdx();
+        const idx = try table.nextEntryIdx(diag);
         const entry = try table.entries.addOne(arena.allocator());
         errdefer _ = table.entries.pop().?;
         entry.inner.copy_count = copy_count;
@@ -954,7 +1006,7 @@ const SideTableBuilder = struct {
 
         if (known_target) |target| {
             const delta_ip = std.math.negateCast(origin - target.instr_offset) catch
-                return error.WasmImplementationLimit;
+                return errorDeltaIpOutOfRange(diag);
 
             entry.inner.delta_ip = .{ .done = delta_ip };
             if (Code.side_table_safety_checks) {
@@ -962,10 +1014,10 @@ const SideTableBuilder = struct {
             }
 
             const delta_stp = std.math.negateCast(idx - target.side_table_idx) catch
-                return error.WasmImplementationLimit;
+                return errorSideTableFull(diag);
 
             entry.inner.delta_stp = std.math.cast(i16, delta_stp) orelse
-                return error.WasmImplementationLimit;
+                return errorDeltaStpOutOfRange(diag, delta_stp);
         } else {
             // std.debug.print(
             //     " PLACED FIXUP #{} originating from 0x{X} corresponding to block 0x{X} (copy={}, pop={})\n",
@@ -989,6 +1041,7 @@ const SideTableBuilder = struct {
         fixup_entry: *const BranchFixup,
         target_side_table_idx: u32,
         end_offset: u32,
+        diag: Diagnostics,
     ) Module.LimitError!void {
         var coz_begin = coz.begin("wasmstint.validator.resolveFixupEntry");
         defer coz_begin.end();
@@ -998,17 +1051,16 @@ const SideTableBuilder = struct {
 
         entry.inner.delta_ip = .{
             .done = std.math.cast(i32, end_offset - origin) orelse
-                return error.WasmImplementationLimit,
+                return errorDeltaIpOutOfRange(diag),
         };
 
         if (Code.side_table_safety_checks) {
             entry.safety_flags.finished = true;
         }
 
-        entry.inner.delta_stp = std.math.cast(
-            i16,
-            target_side_table_idx - fixup_entry.entry_idx,
-        ) orelse return error.WasmImplementationLimit;
+        const delta_stp = target_side_table_idx - fixup_entry.entry_idx;
+        entry.inner.delta_stp = std.math.cast(i16, delta_stp) orelse
+            return errorDeltaStpOutOfRange(diag, delta_stp);
 
         // std.debug.print(
         //     "FIXUP #{} targeting 0x{X} originating from 0x{X} (dip = {}, dstp = {}, target STP={})\n",
@@ -1029,8 +1081,9 @@ const SideTableBuilder = struct {
         table: *SideTableBuilder,
         end_offset: u32,
         block_offset: ActiveList.BlockOffset,
+        diag: Diagnostics,
     ) Module.LimitError!void {
-        const target_side_table_idx = try table.nextEntryIdx();
+        const target_side_table_idx = try table.nextEntryIdx(diag);
 
         // std.debug.print(
         //     "RESOLVING FIXUPS targeting 0x{X} (introduced by 0x{X})\n",
@@ -1068,6 +1121,7 @@ const SideTableBuilder = struct {
                     fixup_entry,
                     target_side_table_idx,
                     end_offset,
+                    diag,
                 );
             }
 
@@ -1084,14 +1138,16 @@ const SideTableBuilder = struct {
     fn popAndResolveAlternate(
         table: *SideTableBuilder,
         end_offset: u32,
+        diag: Diagnostics,
     ) Module.LimitError!void {
-        const target_side_table_idx = try table.nextEntryIdx();
+        const target_side_table_idx = try table.nextEntryIdx(diag);
         const fixup: *const BranchFixup = &table.alternate.items[table.alternate.items.len - 1];
         defer _ = table.alternate.pop().?;
         try table.resolveFixupEntry(
             fixup,
             target_side_table_idx,
             end_offset,
+            diag,
         );
     }
 };
@@ -1101,6 +1157,7 @@ fn appendSideTableEntry(
     side_table: *SideTableBuilder,
     origin_offset: u32,
     target: Label,
+    diag: Diagnostics,
 ) SideTableBuilder.AppendError!void {
     const loop_target = target.frame.info.opcode == .loop;
     // if (loop_target)
@@ -1122,6 +1179,7 @@ fn appendSideTableEntry(
         target.pop_count,
         if (builtin.mode == .Debug) target.frame.offset,
         target.depth,
+        diag,
     );
 }
 
@@ -1235,7 +1293,7 @@ pub fn rawValidate(
         const local_group_count = try reader.readUleb128(u32, diag, "locals count");
         const max_local_count = std.math.maxInt(u16);
         if (local_group_count > max_local_count) {
-            return error.WasmImplementationLimit; // too many local groups
+            return diag.writeAll(.implementation_limit, "too many local groups");
         }
 
         const LocalGroup = struct { type: ValType, count: u32 };
@@ -1257,12 +1315,12 @@ pub fn rawValidate(
             }
 
             total_locals_count = std.math.add(u32, total_locals_count, local_count) catch
-                return diag.writeAll(.parse, "too many locals");
+                return diag.writeAll(.parse, "too many locals"); // not an implementation limit err
             group.* = .{ .type = local_type, .count = local_count };
         }
 
         if (total_locals_count > max_local_count) {
-            return error.WasmImplementationLimit; // too many locals
+            return diag.writeAll(.implementation_limit, "too many locals");
         }
 
         const locals_buf = try scratch.allocator().alloc(ValType, total_locals_count);
@@ -1350,6 +1408,7 @@ pub fn rawValidate(
                     instr_offset,
                     block_type,
                     module,
+                    diag,
                 );
 
                 // TODO: Skip branch fixup processing for unreachable code.
@@ -1375,6 +1434,7 @@ pub fn rawValidate(
                     instr_offset,
                     block_type,
                     module,
+                    diag,
                 );
 
                 // Destination of a branch to a loop is already known, so an empty fixup list is appended.
@@ -1402,6 +1462,7 @@ pub fn rawValidate(
                     instr_offset,
                     block_type,
                     module,
+                    diag,
                 );
 
                 // TODO: Skip branch fixup processing for unreachable code.
@@ -1410,6 +1471,7 @@ pub fn rawValidate(
                     instr_offset,
                     0,
                     0,
+                    diag,
                 );
 
                 try side_table.pushFixupList(
@@ -1439,6 +1501,7 @@ pub fn rawValidate(
                     instr_offset,
                     frame.types,
                     module,
+                    diag,
                 );
 
                 // going to 'end'
@@ -1447,15 +1510,18 @@ pub fn rawValidate(
                     scratch,
                     instr_offset,
                     null,
-                    std.math.cast(u8, block_type.result_count) orelse
-                        return error.WasmImplementationLimit,
-                    try Label.calculatePopCount(current_height, frame.info.height),
+                    std.math.cast(u8, block_type.result_count) orelse return diag.writeAll(
+                        .implementation_limit,
+                        "too many results in block type",
+                    ),
+                    try Label.calculatePopCount(current_height, frame.info.height, diag),
                     if (builtin.mode == .Debug) frame.offset,
                     0,
+                    diag,
                 );
 
                 // Interpreter's `else` handler jumps to the `end`, so failing branch in `if` should be redirected to `else` body.
-                try side_table.popAndResolveAlternate(instr_offset + 1);
+                try side_table.popAndResolveAlternate(instr_offset + 1, diag);
 
                 if (builtin.mode == .Debug) {
                     side_table.active.items[side_table.active.items.len - 1].block_offset =
@@ -1485,20 +1551,21 @@ pub fn rawValidate(
                 try side_table.popAndResolveFixups(
                     instr_offset,
                     if (builtin.mode == .Debug) frame.offset,
+                    diag,
                 );
 
                 const frame_types = frame.types.funcType(module);
                 const result_types = frame_types.results();
                 if (frame.info.opcode == .@"if") {
                     // Check that param types satisfy the results
-                    try val_stack.pushMany(scratch, frame_types.parameters());
+                    try val_stack.pushMany(scratch, frame_types.parameters(), diag);
                     try val_stack.popManyExpecting(&ctrl_stack, result_types, diag);
 
                     // No `else` branch exists, so there are no fixups for it
-                    try side_table.popAndResolveAlternate(instr_offset);
+                    try side_table.popAndResolveAlternate(instr_offset, diag);
                 }
 
-                try val_stack.pushMany(scratch, result_types);
+                try val_stack.pushMany(scratch, result_types, diag);
             },
             .br => {
                 const label = try Label.read(
@@ -1510,7 +1577,7 @@ pub fn rawValidate(
                 );
 
                 // TODO: Skip branch fixup processing for unreachable code.
-                try appendSideTableEntry(scratch, &side_table, instr_offset, label);
+                try appendSideTableEntry(scratch, &side_table, instr_offset, label, diag);
 
                 try val_stack.popManyExpecting(&ctrl_stack, label.frame.labelTypes(module), diag);
                 markUnreachable(&val_stack, &ctrl_stack);
@@ -1527,11 +1594,11 @@ pub fn rawValidate(
                 );
 
                 // TODO: Skip branch fixup processing for unreachable code.
-                try appendSideTableEntry(scratch, &side_table, instr_offset, label);
+                try appendSideTableEntry(scratch, &side_table, instr_offset, label, diag);
 
                 const label_types = label.frame.labelTypes(module);
                 try val_stack.popManyExpecting(&ctrl_stack, label_types, diag);
-                try val_stack.pushMany(scratch, label_types);
+                try val_stack.pushMany(scratch, label_types, diag);
             },
             .br_table => {
                 try val_stack.popExpecting(&ctrl_stack, .i32, diag);
@@ -1540,7 +1607,7 @@ pub fn rawValidate(
 
                 const label_count = try reader.readUleb128(u32, diag, "br_table label count");
                 if (label_count > 6_000_000) {
-                    return error.WasmImplementationLimit; // too many labels in br_table
+                    return diag.writeAll(.implementation_limit, "too many labels in br_table");
                 }
 
                 try side_table.entries.ensureUnusedCapacity(scratch.allocator(), label_count);
@@ -1583,6 +1650,7 @@ pub fn rawValidate(
                         &side_table,
                         instr_offset,
                         l,
+                        diag,
                     ) catch |e| switch (e) {
                         error.OutOfMemory => unreachable,
                         else => |err| return err,
@@ -1604,7 +1672,7 @@ pub fn rawValidate(
                     );
                 }
 
-                try appendSideTableEntry(scratch, &side_table, instr_offset, last_label);
+                try appendSideTableEntry(scratch, &side_table, instr_offset, last_label, diag);
 
                 // std.debug.print(
                 //     "END BR_TABLE (now {} side table entries)\n",
@@ -1628,7 +1696,7 @@ pub fn rawValidate(
                 const callee_signature = module.funcTypes()[@intFromEnum(callee)];
 
                 try val_stack.popManyExpecting(&ctrl_stack, callee_signature.parameters(), diag);
-                try val_stack.pushMany(scratch, callee_signature.results());
+                try val_stack.pushMany(scratch, callee_signature.results(), diag);
             },
             .call_indirect => {
                 const module_types = module.types();
@@ -1666,7 +1734,7 @@ pub fn rawValidate(
 
                 try val_stack.popExpecting(&ctrl_stack, .i32, diag);
                 try val_stack.popManyExpecting(&ctrl_stack, callee_signature.parameters(), diag);
-                try val_stack.pushMany(scratch, callee_signature.results());
+                try val_stack.pushMany(scratch, callee_signature.results(), diag);
             },
             // Introduced in [tail call proposal](https://github.com/WebAssembly/tail-call/)
             .return_call => {
@@ -1756,7 +1824,8 @@ pub fn rawValidate(
                     return diag.print(.validation, "type mismatch: {t} != {t}", .{ t_1, t_2 });
                 }
 
-                val_stack.pushAny(scratch, if (t_1 == .unknown) t_2 else t_1) catch unreachable;
+                val_stack.pushAny(scratch, if (t_1 == .unknown) t_2 else t_1, diag) catch
+                    unreachable; // value stack should have enough room
             },
             .@"select t" => {
                 const type_count = try reader.readUleb128(u32, diag, "select arity");
@@ -1770,7 +1839,7 @@ pub fn rawValidate(
 
                 const t = try ValType.parse(reader, diag);
                 try val_stack.popManyExpecting(&ctrl_stack, &.{ t, t, .i32 }, diag);
-                val_stack.push(scratch, t) catch |e| switch (e) {
+                val_stack.push(scratch, t, diag) catch |e| switch (e) {
                     error.OutOfMemory => unreachable,
                     else => |err| return err,
                 };
@@ -1778,7 +1847,7 @@ pub fn rawValidate(
 
             .@"local.get" => {
                 const local_type = try readLocalIdx(&reader, locals.types, diag);
-                try val_stack.push(scratch, local_type);
+                try val_stack.push(scratch, local_type, diag);
             },
             .@"local.set" => {
                 const local_type = try readLocalIdx(&reader, locals.types, diag);
@@ -1802,10 +1871,8 @@ pub fn rawValidate(
                     &.{ "global", "in global.get" },
                 );
 
-                try val_stack.push(
-                    scratch,
-                    module.globalTypes()[@intFromEnum(global_idx)].val_type,
-                );
+                const global_type = module.globalTypes()[@intFromEnum(global_idx)].val_type;
+                try val_stack.push(scratch, global_type, diag);
             },
             .@"global.set" => {
                 const global_idx = try reader.readIdx(
@@ -1963,7 +2030,7 @@ pub fn rawValidate(
             },
             .@"memory.size" => {
                 try readMemIdx(&reader, module, diag);
-                try val_stack.push(scratch, .i32);
+                try val_stack.push(scratch, .i32, diag);
             },
             .@"memory.grow" => {
                 try readMemIdx(&reader, module, diag);
@@ -1972,19 +2039,19 @@ pub fn rawValidate(
 
             .@"i32.const" => {
                 _ = try reader.readIleb128(i32, diag, "i32.const");
-                try val_stack.push(scratch, .i32);
+                try val_stack.push(scratch, .i32, diag);
             },
             .@"i64.const" => {
                 _ = try reader.readIleb128(i64, diag, "i64.const");
-                try val_stack.push(scratch, .i64);
+                try val_stack.push(scratch, .i64, diag);
             },
             .@"f32.const" => {
                 _ = try reader.readArray(4, diag, "f32.const");
-                try val_stack.push(scratch, .f32);
+                try val_stack.push(scratch, .f32, diag);
             },
             .@"f64.const" => {
                 _ = try reader.readArray(8, diag, "f64.const");
-                try val_stack.push(scratch, .f64);
+                try val_stack.push(scratch, .f64, diag);
             },
             .@"i32.eqz",
             .@"i32.clz",
@@ -2154,7 +2221,7 @@ pub fn rawValidate(
                     return diag.writeAll(.parse, "malformed reference type in ref.null");
                 }
 
-                try val_stack.push(scratch, ref_type);
+                try val_stack.push(scratch, ref_type, diag);
             },
             .@"ref.is_null" => {
                 const ref_type = try val_stack.popAny(&ctrl_stack, diag);
@@ -2166,7 +2233,7 @@ pub fn rawValidate(
                     );
                 }
 
-                try val_stack.push(scratch, .i32);
+                try val_stack.push(scratch, .i32, diag);
             },
             .@"ref.func" => {
                 const func_idx = try reader.readIdx(
@@ -2184,7 +2251,7 @@ pub fn rawValidate(
                     );
                 }
 
-                try val_stack.push(scratch, ValType.funcref);
+                try val_stack.push(scratch, ValType.funcref, diag);
             },
 
             .@"0xFC" => switch (try reader.readUleb128Enum(
@@ -2256,7 +2323,7 @@ pub fn rawValidate(
                             u16,
                             @intCast(val_stack.buf.items.len),
                             elem_segment.header.elem_max_stack,
-                        ) catch return error.WasmImplementationLimit, // out of stack space
+                        ) catch return ValStack.errorValueStackTooLarge(diag),
                     );
                 },
                 .@"elem.drop" => _ = try readElemIdx(&reader, module, diag),
@@ -2287,7 +2354,7 @@ pub fn rawValidate(
                 },
                 .@"table.size" => {
                     _ = try readTableIdx(&reader, module, diag);
-                    try val_stack.push(scratch, .i32);
+                    try val_stack.push(scratch, .i32, diag);
                 },
                 .@"table.fill" => {
                     const elem_type = try readTableIdx(&reader, module, diag);
@@ -2384,7 +2451,7 @@ pub fn rawValidate(
                 ),
                 .@"v128.const" => {
                     _ = try reader.readArray(16, diag, "v128.const immediate");
-                    try val_stack.push(scratch, .v128);
+                    try val_stack.push(scratch, .v128, diag);
                 },
                 .@"i8x16.shuffle" => {
                     _ = try reader.readSimdLaneArray(.@"32", .@"16", diag);
