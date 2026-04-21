@@ -1,5 +1,5 @@
 const max_interpreter_stack = 200_000;
-const max_fuel = 20_000;
+const max_fuel = 10_000;
 
 pub const wasm_smith_config = ffi.wasm_smith.Configuration{};
 
