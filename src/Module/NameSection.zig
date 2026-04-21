@@ -330,6 +330,7 @@ pub fn parse(
             diag,
             "section size mismatch, expected end of module name subsection",
         );
+        sections.buffers.module = undefined;
         break :name Name.Optional.init(name);
     } else Name.Optional.none;
 
@@ -339,7 +340,7 @@ pub fn parse(
         0;
 
     const local_count = if (sections.present.contains(.local))
-        try sections.readers.function.readUleb128(u32, diag, "local name map count")
+        try sections.readers.local.readUleb128(u32, diag, "local name map count")
     else
         0;
 
@@ -364,7 +365,7 @@ pub fn parse(
     header.first_byte = contents.ptr;
     header.module_name = module_name;
     header.func_count = func_count;
-    {
+    if (sections.present.contains(.function)) {
         const func_indices = main_allocator.alloc(FuncIdx, func_count) catch unreachable;
         const name_offsets = main_allocator.alloc(Name.Offset, func_count) catch unreachable;
         const name_lens = main_allocator.alloc(Name.Len, func_count) catch unreachable;
@@ -390,11 +391,11 @@ pub fn parse(
             name_l.* = name.len;
         }
 
-        try sections.readers.module.expectEnd(
+        try sections.readers.function.expectEnd(
             diag,
             "section size mismatch, expected end of function name subsection",
         );
-        sections.buffers.module = undefined;
+        sections.buffers.function = undefined;
 
         header.func_indices_ptr = func_indices.ptr;
         header.func_name_offsets_ptr = name_offsets.ptr;
@@ -407,7 +408,7 @@ pub fn parse(
         name_len: Name.Len,
     };
 
-    if (local_count > 0) {
+    if (sections.present.contains(.local)) {
         _ = scratch.reset(.retain_capacity);
         var local_names = try std.MultiArrayList(Local).initCapacity(
             scratch.allocator(),
@@ -422,7 +423,7 @@ pub fn parse(
             local_starts,
             0..local_count,
         ) |*func_idx, *loc_count, *loc_start, i| {
-            const reader: Reader = sections.readers.function;
+            const reader: Reader = sections.readers.local;
             func_idx.* = try reader.readIdx(
                 FuncIdx,
                 counts.func,
@@ -470,6 +471,12 @@ pub fn parse(
                 });
             }
         }
+
+        try sections.readers.local.expectEnd(
+            diag,
+            "section size mismatch, expected end of local name subsection",
+        );
+        sections.buffers.local = undefined;
 
         header.local_funcs_ptr = func_indices.ptr;
         header.local_counts_ptr = func_local_counts.ptr;
