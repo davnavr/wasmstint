@@ -15,7 +15,7 @@ pub fn main() !void {
 
     var wasm: []const u8 = coremark_wasm;
     const module = try wasmstint.Module.parse(arena.allocator(), &wasm, &scratch, .{});
-    std.debug.assert(try module.finishCodeValidation(arena.allocator(), &scratch, .none));
+    std.debug.assert(try module.finishCodeValidation(arena.allocator(), &scratch, null));
 
     const mem_type = &module.memDefinedTypes()[0];
     var memory = try runtime.MemInst.Mapped.allocateFromType(

@@ -19,55 +19,75 @@ pub const ValidationError = error{
     InvalidWasm,
 };
 
+/// Stores a description of an error encountered during the parsing or validation of a module.
 pub const Diagnostics = struct {
-    output: ?*std.Io.Writer,
+    arena: *ArenaAllocator,
+    /// Either allocated in `arena`, or is a string literal.
+    ///
+    /// If `null`, then there was no error.
+    message: ?[]const u8,
 
-    pub const none = Diagnostics{ .output = null };
-
-    pub fn init(output: *std.Io.Writer) Diagnostics {
-        return .{ .output = output };
-    }
-
-    pub const Kind = enum {
-        parse,
-        validation,
-        implementation_limit,
-
-        pub fn Error(comptime kind: Kind) type {
-            return switch (kind) {
-                .parse => Reader.Error,
-                .validation => ValidationError,
-                .implementation_limit => LimitError,
-            };
-        }
-
-        pub fn value(comptime kind: Kind) kind.Error() {
-            return switch (kind) {
-                .parse => Reader.Error.MalformedWasm,
-                .validation => ValidationError.InvalidWasm,
-                .implementation_limit => LimitError.WasmImplementationLimit,
-            };
-        }
-    };
-
-    pub fn writeAll(diag: Diagnostics, comptime kind: Kind, message: []const u8) kind.Error() {
-        @branchHint(.cold);
-        if (diag.output) |output| output.writeAll(message) catch {};
-        return kind.value();
-    }
-
-    pub fn print(
-        diag: Diagnostics,
-        comptime kind: Kind,
-        comptime fmt: []const u8,
-        args: anytype,
-    ) kind.Error() {
-        @branchHint(.cold);
-        if (diag.output) |output| output.print(fmt, args) catch {};
-        return kind.value();
+    pub fn init(arena: *ArenaAllocator) Diagnostics {
+        return .{ .arena = arena, .message = null };
     }
 };
 
+pub const DiagnosticKind = enum {
+    parse,
+    validation,
+    implementation_limit,
+
+    pub fn Error(comptime kind: DiagnosticKind) type {
+        return switch (kind) {
+            .parse => Reader.Error,
+            .validation => ValidationError,
+            .implementation_limit => LimitError,
+        };
+    }
+
+    pub fn value(comptime kind: DiagnosticKind) kind.Error() {
+        return switch (kind) {
+            .parse => Reader.Error.MalformedWasm,
+            .validation => ValidationError.InvalidWasm,
+            .implementation_limit => LimitError.WasmImplementationLimit,
+        };
+    }
+};
+
+pub fn fail(
+    diag: ?*Diagnostics,
+    comptime kind: DiagnosticKind,
+    /// Must outlive the call to the parser function.
+    message: []const u8,
+) kind.Error() {
+    @branchHint(.cold);
+    if (diag) |d| {
+        if (d.message == null) {
+            d.message = message;
+        }
+    }
+
+    return kind.value();
+}
+
+pub fn failPrint(
+    diag: ?*Diagnostics,
+    comptime kind: DiagnosticKind,
+    comptime fmt: []const u8,
+    args: anytype,
+) kind.Error() {
+    @branchHint(.cold);
+    if (diag) |d| {
+        if (d.message == null) {
+            d.message = std.fmt.allocPrint(d.arena.allocator(), fmt, args) catch
+                "out of memory allocating error message";
+        }
+    }
+
+    return kind.value();
+}
+
+/// Used in `Diagnostics` when support for the `simd` proposal was disabled at compile time.
 pub const no_simd_message = "SIMD support disabled";
 
 pub fn init(bytes: *[]const u8) Reader {
@@ -78,9 +98,10 @@ pub fn isEmpty(reader: Reader) bool {
     return reader.bytes.len == 0;
 }
 
-pub fn expectEnd(reader: Reader, diag: Diagnostics, desc: []const u8) Error!void {
+pub fn expectEnd(reader: Reader, diag: ?*Diagnostics, desc: []const u8) Error!void {
     if (!reader.isEmpty()) {
-        return diag.print(
+        return failPrint(
+            diag,
             .parse,
             "{} bytes were remaining: {s}",
             .{ reader.bytes.len, desc },
@@ -94,9 +115,10 @@ pub fn readAssumeLength(reader: Reader, len: usize) []const u8 {
     return skipped;
 }
 
-pub fn read(reader: Reader, len: usize, diag: Diagnostics, desc: []const u8) Error![]const u8 {
+pub fn read(reader: Reader, len: usize, diag: ?*Diagnostics, desc: []const u8) Error![]const u8 {
     if (reader.bytes.len < len) {
-        return diag.print(
+        return failPrint(
+            diag,
             .parse,
             "length out of bounds: expected {} bytes for {s}, but {} bytes were remaining",
             .{ len, desc, reader.bytes.len },
@@ -109,21 +131,21 @@ pub fn read(reader: Reader, len: usize, diag: Diagnostics, desc: []const u8) Err
 pub fn readArray(
     reader: Reader,
     comptime len: usize,
-    diag: Diagnostics,
+    diag: ?*Diagnostics,
     desc: []const u8,
 ) Error!*const [len]u8 {
     const s = try reader.read(len, diag, desc);
     return s[0..len];
 }
 
-pub fn readByte(reader: Reader, diag: Diagnostics, desc: []const u8) Error!u8 {
+pub fn readByte(reader: Reader, diag: ?*Diagnostics, desc: []const u8) Error!u8 {
     return (try reader.readArray(1, diag, desc))[0];
 }
 
 pub fn readByteTag(
     reader: Reader,
     comptime Tag: type,
-    diag: Diagnostics,
+    diag: ?*Diagnostics,
     desc: []const u8,
 ) Error!Tag {
     comptime {
@@ -132,12 +154,12 @@ pub fn readByteTag(
 
     const byte = try reader.readByte(diag, desc);
     return std.enums.fromInt(Tag, byte) orelse (if (byte & 0x80 != 0)
-        diag.print(.parse, "invalid {s}: integer representation too long", .{desc})
+        failPrint(diag, .parse, "invalid {s}: integer representation too long", .{desc})
     else
-        diag.print(.parse, "invalid {s}: 0x{X:0>2}", .{ desc, byte }));
+        failPrint(diag, .parse, "invalid {s}: 0x{X:0>2}", .{ desc, byte }));
 }
 
-pub fn readUleb128(reader: Reader, comptime T: type, diag: Diagnostics, desc: []const u8) Error!T {
+pub fn readUleb128(reader: Reader, comptime T: type, diag: ?*Diagnostics, desc: []const u8) Error!T {
     const max_byte_len = comptime std.math.divCeil(u16, @typeInfo(T).int.bits, 7) catch unreachable;
     const Value = std.meta.Int(
         .unsigned,
@@ -149,7 +171,7 @@ pub fn readUleb128(reader: Reader, comptime T: type, diag: Diagnostics, desc: []
     var value: Value = 0;
     for (0..max_byte_len) |i| {
         if (reader.isEmpty()) {
-            return diag.print(.parse, "unexpected end of" ++ suffix, .{desc});
+            return failPrint(diag, .parse, "unexpected end of" ++ suffix, .{desc});
         }
 
         const byte = reader.readAssumeLength(1)[0];
@@ -160,23 +182,25 @@ pub fn readUleb128(reader: Reader, comptime T: type, diag: Diagnostics, desc: []
         );
 
         if (byte & 0x80 == 0) break;
-    } else return diag.print(.parse, "integer representation too long for" ++ suffix, .{desc});
+    } else {
+        return failPrint(diag, .parse, "integer representation too long for" ++ suffix, .{desc});
+    }
 
     return std.math.cast(T, value) orelse
-        diag.print(.parse, "integer too large for" ++ suffix, .{desc});
+        failPrint(diag, .parse, "integer too large for" ++ suffix, .{desc});
 }
 
 pub fn readUleb128Casted(
     reader: Reader,
     comptime T: type,
     comptime U: type,
-    diag: Diagnostics,
+    diag: ?*Diagnostics,
     desc: []const u8,
 ) (Error || LimitError)!U {
     comptime std.debug.assert(@bitSizeOf(U) < @bitSizeOf(T));
     const value = try reader.readUleb128(T, diag, desc);
     return std.math.cast(U, value) orelse
-        diag.print(.implementation_limit, "{s} {d} too large", .{ desc, value });
+        failPrint(diag, .implementation_limit, "{s} {d} too large", .{ desc, value });
 }
 
 const SimdLaneCount = enum(u5) { @"1" = 1, @"16" = 16 };
@@ -185,7 +209,7 @@ pub fn readSimdLaneArray(
     reader: Reader,
     comptime lane_size: V128.LaneIdxSize,
     comptime count: SimdLaneCount,
-    diag: Diagnostics,
+    diag: ?*Diagnostics,
 ) (Error || ValidationError)!void {
     const LaneIdx = V128.LaneIdx(lane_size);
     const max = comptime std.math.maxInt(LaneIdx);
@@ -197,7 +221,8 @@ pub fn readSimdLaneArray(
 
     for (bytes) |b| {
         if (b > max) {
-            return diag.print(
+            return failPrint(
+                diag,
                 .validation,
                 "invalid lane index {d}, must be less than {d}",
                 .{ b, max },
@@ -209,7 +234,7 @@ pub fn readSimdLaneArray(
 pub fn readSimdLane(
     reader: Reader,
     comptime lane_size: V128.LaneIdxSize,
-    diag: Diagnostics,
+    diag: ?*Diagnostics,
 ) (Error || ValidationError)!void {
     try reader.readSimdLaneArray(lane_size, .@"1", diag);
 }
@@ -218,27 +243,29 @@ pub fn readUleb128Enum(
     reader: Reader,
     comptime T: type,
     comptime E: type,
-    diag: Diagnostics,
+    diag: ?*Diagnostics,
     desc: []const u8,
 ) Error!E {
     const value = try reader.readUleb128(T, diag, desc);
     return std.enums.fromInt(E, value) orelse
-        diag.print(.parse, "invalid {s}: {}", .{ desc, value });
+        failPrint(diag, .parse, "invalid {s}: {}", .{ desc, value });
 }
 
-pub fn readIleb128(reader: Reader, comptime T: type, diag: Diagnostics, desc: []const u8) Error!T {
+pub fn readIleb128(
+    reader: Reader,
+    comptime T: type,
+    diag: ?*Diagnostics,
+    desc: []const u8,
+) Error!T {
     const max_byte_len = comptime std.math.divCeil(u16, @typeInfo(T).int.bits, 7) catch unreachable;
-    const Value = std.meta.Int(
-        .signed,
-        7 * max_byte_len,
-    );
+    const Value = std.meta.Int(.signed, 7 * max_byte_len);
 
     const suffix = " LEB128 encoded " ++ @typeName(T) ++ ": {s}";
 
     var value: Value = 0;
     for (0..max_byte_len) |i| {
         if (reader.isEmpty()) {
-            return diag.print(.parse, "unexpected end of" ++ suffix, .{desc});
+            return failPrint(diag, .parse, "unexpected end of" ++ suffix, .{desc});
         }
 
         const byte = reader.readAssumeLength(1)[0];
@@ -256,21 +283,22 @@ pub fn readIleb128(reader: Reader, comptime T: type, diag: Diagnostics, desc: []
 
             break;
         }
-    } else return diag.print(.parse, "integer representation too long for" ++ suffix, .{desc});
+    } else return failPrint(diag, .parse, "integer representation too long for" ++ suffix, .{desc});
 
     return std.math.cast(T, value) orelse
-        return diag.print(.parse, "integer too large for" ++ suffix, .{desc});
+        failPrint(diag, .parse, "integer too large for" ++ suffix, .{desc});
 }
 
 fn testReadIleb128(comptime T: type, input_bytes: []const u8, expected: T) !void {
     var input = input_bytes;
     var reader = Reader.init(&input);
     const actual = value: {
-        var diag_buffer: [128]u8 = undefined;
-        const stderr = std.debug.lockStderr(&diag_buffer).terminal();
-        const diag = Diagnostics.init(stderr.writer);
-        defer std.debug.unlockStderr();
-        break :value try reader.readIleb128(T, diag, @typeName(T));
+        var diag_arena = ArenaAllocator.init(std.testing.allocator);
+        defer diag_arena.deinit();
+        var diag = Diagnostics.init(&diag_arena);
+        break :value reader.readIleb128(T, &diag, @typeName(T)) catch |e| {
+            std.debug.panic("{t}: {s}", .{ e, diag.message.? });
+        };
     };
     try std.testing.expectEqual(expected, actual);
 }
@@ -286,34 +314,35 @@ test readIleb128 {
     try testReadIleb128(i32, "\xff\xff\xff\xff\x7f", -1);
 }
 
-pub fn readByteVec(reader: Reader, diag: Diagnostics, desc: []const u8) Error![]const u8 {
+pub fn readByteVec(reader: Reader, diag: ?*Diagnostics, desc: []const u8) Error![]const u8 {
     const len = try reader.readUleb128(u32, diag, "bytes length");
     const contents = try reader.read(len, diag, desc);
     return contents;
 }
 
-pub fn readName(reader: Reader, diag: Diagnostics) Error!std.unicode.Utf8View {
+pub fn readName(reader: Reader, diag: ?*Diagnostics) Error!std.unicode.Utf8View {
     const contents = try reader.readByteVec(diag, "name");
     return if (std.unicode.utf8ValidateSlice(contents))
         .{ .bytes = contents }
     else
-        diag.writeAll(.parse, "malformed UTF-8 encoding");
+        fail(diag, .parse, "malformed UTF-8 encoding");
 }
 
 pub fn readIdx(
     reader: Reader,
     comptime I: type,
     len: usize,
-    diag: Diagnostics,
+    diag: ?*Diagnostics,
     desc: *const [2][]const u8,
 ) !I {
     const idx = try reader.readUleb128(u32, diag, @typeName(I));
     return if (idx < len and idx <= std.math.maxInt(@typeInfo(I).@"enum".tag_type))
         @enumFromInt(idx)
     else
-        diag.print(.validation, "unknown {s} {}, {s}", .{ desc[0], idx, desc[1] });
+        failPrint(diag, .validation, "unknown {s} {}, {s}", .{ desc[0], idx, desc[1] });
 }
 
 const std = @import("std");
+const ArenaAllocator = std.heap.ArenaAllocator;
 const ValType = @import("val_type.zig").ValType;
 const V128 = @import("../v128.zig").V128;

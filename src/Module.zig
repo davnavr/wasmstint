@@ -276,7 +276,7 @@ pub const Start = packed struct(u32) {
     fn parse(
         readers: *Sections.Readers,
         functions: []const *const FuncType,
-        diag: ParseDiagnostics,
+        diag: ?*ParseDiagnostics,
     ) !Start {
         const start_reader = readers.start;
         if (start_reader.isEmpty()) {
@@ -298,15 +298,14 @@ pub const Start = packed struct(u32) {
             readers.start = undefined;
 
             const signature = functions[@intFromEnum(func_idx)];
-            if (signature.param_count != 0 or signature.result_count != 0) {
-                return diag.print(
-                    .validation,
-                    "start function must not have {s}",
-                    .{if (signature.param_count != 0) "parameters" else "results"},
-                );
+            const error_prefix = "start function must not have ";
+            if (signature.param_count != 0) {
+                return Reader.fail(diag, .validation, error_prefix ++ "parameters");
+            } else if (signature.result_count != 0) {
+                return Reader.fail(diag, .validation, error_prefix ++ "results");
+            } else {
+                return .init(func_idx);
             }
-
-            return .init(func_idx);
         }
     }
 };
@@ -529,8 +528,11 @@ pub const Limits = extern struct {
         default_maximum: u32,
         /// For memories, spec test assumes limits do not exceed bounds before comparing `min` and
         /// `max`.
-        comptime checkLimitsBounds: fn (Limits, diag: ParseDiagnostics) Reader.ValidationError!void,
-        diag: ParseDiagnostics,
+        comptime checkLimitsBounds: fn (
+            Limits,
+            diag: ?*ParseDiagnostics,
+        ) Reader.ValidationError!void,
+        diag: ?*ParseDiagnostics,
     ) !Limits {
         const LimitsFlag = enum(u2) {
             no_maximum = 0x00,
@@ -541,13 +543,16 @@ pub const Limits = extern struct {
         // For some reason, spec test checks that the flag is a LEB128, despite the spec not
         // mentioning this.
         if (flag_byte & 0x80 != 0) {
-            return diag.writeAll(.parse, "limits flag integer representation too long");
+            return Reader.fail(diag, .parse, "limits flag integer representation too long");
         }
 
         // If 64-bit memory and/or shared memory is used, limits is a LEB128 u32?
         // const flag = try reader.readUleb128Enum(u32, LimitsFlag, diag, "limits flag");
-        const flag = std.enums.fromInt(LimitsFlag, flag_byte) orelse
-            return diag.print(.parse, "limits flag integer too large: 0x{X:0>2}", .{flag_byte});
+        const flag = std.enums.fromInt(LimitsFlag, flag_byte) orelse {
+            return Reader.failPrint(diag, .parse, "limits flag integer too large: 0x{X:0>2}", .{
+                flag_byte,
+            });
+        };
 
         // When 64-bit memories are supported, parsed type needs to conditionally change to u64.
         const min = try reader.readUleb128(u32, diag, "limits minimum");
@@ -563,7 +568,8 @@ pub const Limits = extern struct {
         return if (min <= max)
             limits
         else
-            diag.print(
+            Reader.failPrint(
+                diag,
                 .validation,
                 "size minimum must not be greater than maximum ({} > {})",
                 .{ min, max },
@@ -586,18 +592,17 @@ pub const TableType = extern struct {
         try writer.print("{f} {t}", .{ table_type.limits, table_type.elem_type });
     }
 
-    fn noLimitsBounds(_: Limits, _: ParseDiagnostics) Reader.ValidationError!void {}
+    fn noLimitsBounds(_: Limits, _: ?*ParseDiagnostics) Reader.ValidationError!void {}
 
-    fn parse(reader: Reader, diag: ParseDiagnostics) !TableType {
+    fn parse(reader: Reader, diag: ?*ParseDiagnostics) !TableType {
         const elem_type = try ValType.parse(reader, diag);
-        if (!elem_type.isRefType()) {
-            return diag.print(.parse, "{} must be a reference type", .{elem_type});
-        }
-
-        return .{
-            .elem_type = elem_type,
-            .limits = try Limits.parse(reader, std.math.maxInt(u32), noLimitsBounds, diag),
-        };
+        return if (!elem_type.isRefType())
+            Reader.failPrint(diag, .parse, "{} must be a reference type", .{elem_type})
+        else
+            TableType{
+                .elem_type = elem_type,
+                .limits = try Limits.parse(reader, std.math.maxInt(u32), noLimitsBounds, diag),
+            };
     }
 };
 
@@ -621,9 +626,10 @@ pub const MemType = extern struct {
         try mem_type.limits.format(writer);
     }
 
-    fn checkMemoryLimits(limits: Limits, diag: ParseDiagnostics) Reader.ValidationError!void {
+    fn checkMemoryLimits(limits: Limits, diag: ?*ParseDiagnostics) Reader.ValidationError!void {
         if (limits.min > 65536 or limits.max > 65536) {
-            return diag.print(
+            return Reader.failPrint(
+                diag,
                 .validation,
                 "memory size must be at most 65536 pages (4GiB), got {}",
                 .{if (limits.min > 65536) limits.min else limits.max},
@@ -631,7 +637,7 @@ pub const MemType = extern struct {
         }
     }
 
-    fn parse(reader: Reader, diag: ParseDiagnostics) !MemType {
+    fn parse(reader: Reader, diag: ?*ParseDiagnostics) !MemType {
         const limits = try Limits.parse(reader, 65536, checkMemoryLimits, diag);
         return .{ .limits = limits };
     }
@@ -664,10 +670,10 @@ pub const GlobalType = extern struct {
         }
     }
 
-    fn parse(reader: Reader, diag: ParseDiagnostics) Reader.Error!GlobalType {
+    fn parse(reader: Reader, diag: ?*ParseDiagnostics) Reader.Error!GlobalType {
         const val_type = try ValType.parse(reader, diag);
         return if (val_type == .v128 and !wasm_features.simd128)
-            diag.writeAll(.parse, "invalid global type, " ++ Reader.no_simd_message)
+            Reader.fail(diag, .parse, "invalid global type, " ++ Reader.no_simd_message)
         else
             GlobalType{
                 .val_type = val_type,
@@ -800,7 +806,8 @@ pub const ParseOptions = struct {
     /// Random seed provided to hash maps, such as the one used for ensuring all exports have unique
     /// names.
     random_seed: u64 = 42,
-    diagnostics: ParseDiagnostics = .none,
+    /// Stores a description describing why parsing or validation of the `Module` failed.
+    diagnostics: ?*ParseDiagnostics = null,
     /// Whether or not to parse the custom `name` section, if it exists in the parsed module.
     parse_names: Metadata = .parse_without_diagnostics,
     // /// Whether or not to parse embedded DWARF debug information, if it exists in the parsed module.
@@ -809,9 +816,10 @@ pub const ParseOptions = struct {
     /// Indicates whether custom sections containing metadata should be parsed.
     pub const Metadata = union(enum) {
         ignore,
-        parse: ParseDiagnostics,
+        parse: ?*ParseDiagnostics,
 
-        pub const parse_without_diagnostics = Metadata{ .parse = .none };
+        /// The custom section should be parsed without any `ParseDiagnostics`.
+        pub const parse_without_diagnostics = Metadata{ .parse = null };
     };
 };
 
@@ -934,7 +942,11 @@ const Sections = struct {
 
                     if (options.keep_custom_sections) {
                         if (custom_sections.items.len >= std.math.maxInt(u32)) {
-                            return diag.writeAll(.implementation_limit, "too many custom sections");
+                            return Reader.fail(
+                                diag,
+                                .implementation_limit,
+                                "too many custom sections",
+                            );
                         }
 
                         try custom_sections.append(
@@ -950,7 +962,8 @@ const Sections = struct {
                 inline else => |known_id| {
                     const this_order = @field(Order, @tagName(known_id));
                     if (@intFromEnum(section_order) > @intFromEnum(this_order)) {
-                        return diag.print(
+                        return Reader.failPrint(
+                            diag,
                             .parse,
                             "unexpected content after last section: '{t}' was placed after {t}",
                             .{ known_id, section_order },
@@ -959,7 +972,8 @@ const Sections = struct {
 
                     const this_key = @field(std.meta.FieldEnum(Known), @tagName(known_id));
                     if (encountered.contains(this_key)) {
-                        return diag.print(
+                        return Reader.failPrint(
+                            diag,
                             .parse,
                             "unexpected content after last section: duplicate '{t}' section",
                             .{known_id},
@@ -996,7 +1010,7 @@ const Sections = struct {
         data: u32,
         custom: u32,
 
-        fn parse(readers: *const Readers, diag: ParseDiagnostics) !Counts {
+        fn parse(readers: *const Readers, diag: ?*ParseDiagnostics) !Counts {
             var counts = std.mem.zeroes(Counts);
             inline for (@typeInfo(Readers).@"struct".fields) |f| {
                 if (!@hasField(Counts, f.name)) {
@@ -1042,7 +1056,8 @@ pub fn parse(
     const original_wasm = wasm.*;
 
     if (!std.mem.startsWith(u8, wasm.*, wasm_preamble)) {
-        return diag.writeAll(
+        return Reader.fail(
+            diag,
             .parse,
             if (wasm.len < 4)
                 "unexpected end of magic header"
@@ -1078,15 +1093,15 @@ pub fn parse(
     const counts = try Sections.Counts.parse(&sections.readers, diag);
 
     if (counts.elem > std.math.maxInt(@typeInfo(ElemIdx).@"enum".tag_type)) {
-        return diag.writeAll(.implementation_limit, "too many element element segments");
+        return Reader.fail(diag, .implementation_limit, "too many element element segments");
     }
 
     if (counts.data > std.math.maxInt(@typeInfo(DataIdx).@"enum".tag_type)) {
-        return diag.writeAll(.implementation_limit, "too many data segments");
+        return Reader.fail(diag, .implementation_limit, "too many data segments");
     }
 
     if (has_data_count_section and counts.data_count != counts.data) {
-        return diag.writeAll(.parse, "data count and data section have inconsistent lengths");
+        return Reader.fail(diag, .parse, "data count and data section have inconsistent lengths");
     }
 
     try sections.readers.data_count.expectEnd(diag, "data count section size mismatch");
@@ -1224,7 +1239,7 @@ pub fn parse(
 
     // Because of spectests, checked after any errors in the element section occurs
     if (counts.code != counts.func) {
-        return diag.writeAll(.parse, "function and code section have inconsistent lengths");
+        return Reader.fail(diag, .parse, "function and code section have inconsistent lengths");
     }
 
     const code_sec = code: {
@@ -1341,7 +1356,7 @@ fn parseTypeSec(
     arena: *ArenaFallbackAllocator,
     count: u32,
     readers: *const Sections.Readers,
-    diag: ParseDiagnostics,
+    diag: ?*ParseDiagnostics,
 ) ![]const FuncType {
     const type_reader = readers.type;
     const type_sec = try arena.allocator().alloc(FuncType, count);
@@ -1363,7 +1378,8 @@ fn parseTypeSec(
         for (param_types) |*ty| {
             ty.* = try ValType.parse(type_reader, diag);
             if (ty.* == .v128 and !wasm_features.simd128) {
-                return diag.writeAll(
+                return Reader.fail(
+                    diag,
                     .parse,
                     "expected valid param type, " ++ Reader.no_simd_message,
                 );
@@ -1379,7 +1395,8 @@ fn parseTypeSec(
         for (result_types) |*ty| {
             ty.* = try ValType.parse(type_reader, diag);
             if (ty.* == .v128 and !wasm_features.simd128) {
-                return diag.writeAll(
+                return Reader.fail(
+                    diag,
                     .parse,
                     "expected valid result type, " ++ Reader.no_simd_message,
                 );
@@ -1439,7 +1456,7 @@ fn parseImportSec(
     counts: *const Sections.Counts,
     readers: *const Sections.Readers,
     scratch: *ArenaAllocator,
-    diag: ParseDiagnostics,
+    diag: ?*ParseDiagnostics,
 ) !ImportSec {
     defer _ = scratch.reset(.retain_capacity);
 
@@ -1472,7 +1489,11 @@ fn parseImportSec(
 
     for (0..counts.import) |_| {
         if (import_reader.isEmpty()) {
-            return diag.writeAll(.parse, "unexpected end of section or function, expected import");
+            return Reader.fail(
+                diag,
+                .parse,
+                "unexpected end of section or function, expected import",
+            );
         }
 
         const mod = try import_reader.readName(diag);
@@ -1481,16 +1502,16 @@ fn parseImportSec(
             .module_offset = std.math.cast(
                 u16,
                 @intFromPtr(mod.bytes.ptr) - @intFromPtr(imports_start),
-            ) orelse return diag.writeAll(.implementation_limit, "too many imports"),
+            ) orelse return Reader.fail(diag, .implementation_limit, "too many imports"),
             .module_size = std.math.cast(u16, mod.bytes.len) orelse
-                return diag.writeAll(.implementation_limit, "too many imports"),
+                return Reader.fail(diag, .implementation_limit, "too many imports"),
 
             .name_offset = std.math.cast(
                 u16,
                 @intFromPtr(name.bytes.ptr) - @intFromPtr(imports_start),
-            ) orelse return diag.writeAll(.implementation_limit, "too many imports"),
+            ) orelse return Reader.fail(diag, .implementation_limit, "too many imports"),
             .name_size = std.math.cast(u16, name.bytes.len) orelse
-                return diag.writeAll(.implementation_limit, "too many imports"),
+                return Reader.fail(diag, .implementation_limit, "too many imports"),
         };
 
         const tag = try import_reader.readByteTag(ImportExportDesc, diag, "malformed import kind");
@@ -1524,7 +1545,7 @@ fn parseImportSec(
     }
 
     if (counts.mem + @as(u32, @intCast(names.mems.items.len)) > 1) {
-        return diag.writeAll(.validation, "multiple memories are not yet supported");
+        return Reader.fail(diag, .validation, "multiple memories are not yet supported");
     }
 
     try import_reader.expectEnd(diag, "import section size mismatch");
@@ -1554,7 +1575,7 @@ fn parseImportSec(
                         u32,
                         @field(counts, f.name[0 .. f.name.len - 1]),
                         @intCast(@field(names, f.name).items.len),
-                    ) catch return diag.writeAll(.parse, "too many " ++ f.name),
+                    ) catch return Reader.fail(diag, .parse, "too many " ++ f.name),
                 );
             }
 
@@ -1601,13 +1622,13 @@ fn parseFuncSec(
     import_types: *const ImportSec.Types,
     count: u32,
     readers: *const Sections.Readers,
-    diag: ParseDiagnostics,
+    diag: ?*ParseDiagnostics,
 ) !void {
     const func_reader = readers.func;
     const func_types = import_types.funcs;
 
     if (func_types.len > std.math.maxInt(@typeInfo(FuncIdx).@"enum".tag_type)) {
-        return diag.writeAll(.implementation_limit, "too many funcs");
+        return Reader.fail(diag, .implementation_limit, "too many funcs");
     }
 
     for (func_types[func_types.len - count ..], 0..count) |*func_ty, _| {
@@ -1628,18 +1649,22 @@ fn parseTableSec(
     import_types: *const ImportSec.Types,
     count: u32,
     readers: *const Sections.Readers,
-    diag: ParseDiagnostics,
+    diag: ?*ParseDiagnostics,
 ) !void {
     const table_reader = readers.table;
     const table_types = import_types.tables;
 
     if (table_types.len > std.math.maxInt(@typeInfo(TableIdx).@"enum".tag_type)) {
-        return diag.writeAll(.implementation_limit, "too many tables");
+        return Reader.fail(diag, .implementation_limit, "too many tables");
     }
 
     for (table_types[table_types.len - count ..], 0..count) |*tt, _| {
         if (table_reader.isEmpty()) {
-            return diag.writeAll(.parse, "unexpected end of section or function, expected table");
+            return Reader.fail(
+                diag,
+                .parse,
+                "unexpected end of section or function, expected table",
+            );
         }
 
         tt.* = try TableType.parse(table_reader, diag);
@@ -1653,20 +1678,24 @@ fn parseMemSec(
     import_types: *const ImportSec.Types,
     count: u32,
     readers: *const Sections.Readers,
-    diag: ParseDiagnostics,
+    diag: ?*ParseDiagnostics,
 ) !void {
     const mem_reader = readers.mem;
     const mem_types = import_types.mems;
 
     if (mem_types.len > std.math.maxInt(@typeInfo(MemIdx).@"enum".tag_type)) {
-        return diag.writeAll(.implementation_limit, "too many memories");
+        return Reader.fail(diag, .implementation_limit, "too many memories");
     }
 
     // check std.math.maxInt(@typeInfo(MemIdx).@"enum".tag_type)
 
     for (import_types.mems[import_types.mems.len - count ..], 0..count) |*mem, _| {
         if (mem_reader.isEmpty()) {
-            return diag.writeAll(.parse, "unexpected end of section or function, expected memory");
+            return Reader.fail(
+                diag,
+                .parse,
+                "unexpected end of section or function, expected memory",
+            );
         }
 
         mem.* = try MemType.parse(mem_reader, diag);
@@ -1695,7 +1724,7 @@ fn parseGlobalSec(
     count: u32,
     readers: *const Sections.Readers,
     func_refs: *FuncRefs,
-    diag: ParseDiagnostics,
+    diag: ?*ParseDiagnostics,
     scratch: *ArenaAllocator,
     init_max_stack: *u16,
 ) !GlobalSec {
@@ -1708,12 +1737,16 @@ fn parseGlobalSec(
     const global_exprs = try arena.allocator().alloc(GlobalExpr, count);
 
     if (global_types.len > std.math.maxInt(@typeInfo(GlobalIdx).@"enum".tag_type)) {
-        return diag.writeAll(.implementation_limit, "too many globals");
+        return Reader.fail(diag, .implementation_limit, "too many globals");
     }
 
     for (global_types[global_types.len - count ..], global_exprs) |*ty, *expr| {
         if (global_reader.isEmpty()) {
-            return diag.writeAll(.parse, "unexpected end of section or function, expected global");
+            return Reader.fail(
+                diag,
+                .parse,
+                "unexpected end of section or function, expected global",
+            );
         }
 
         ty.* = try GlobalType.parse(global_reader, diag);
@@ -1754,7 +1787,7 @@ fn parseExportSec(
     rng_seed: u64,
     func_refs: *FuncRefs,
     scratch: *ArenaAllocator,
-    diag: ParseDiagnostics,
+    diag: ?*ParseDiagnostics,
 ) ParseError!ExportSec {
     const export_reader: Reader = readers.@"export";
 
@@ -1788,25 +1821,27 @@ fn parseExportSec(
     const exports_start = export_reader.bytes.*.ptr;
     for (descs) |*ex| {
         if (export_reader.isEmpty()) {
-            return diag.writeAll(.parse, "length out of bounds, expected export");
+            return Reader.fail(diag, .parse, "length out of bounds, expected export");
         }
 
         const name = try export_reader.readName(diag);
         if (export_dedup.getOrPutAssumeCapacityContext(name.bytes, export_dedup_context)
             .found_existing)
         {
-            return diag.print(.validation, "duplicate export name {f}", .{Name.init(name.bytes)});
+            return Reader.failPrint(diag, .validation, "duplicate export name {f}", .{
+                Name.init(name.bytes),
+            });
         }
 
         const tag = try export_reader.readByteTag(ImportExportDesc, diag, "export tag");
 
         ex.* = Export{
             .name_size = std.math.cast(u15, name.bytes.len) orelse
-                return diag.writeAll(.implementation_limit, "too many exports"),
+                return Reader.fail(diag, .implementation_limit, "too many exports"),
             .name_offset = std.math.cast(
                 u16,
                 @intFromPtr(name.bytes.ptr) - @intFromPtr(exports_start),
-            ) orelse return diag.writeAll(.implementation_limit, "too many exports"),
+            ) orelse return Reader.fail(diag, .implementation_limit, "too many exports"),
             .desc_tag = switch (tag) {
                 inline else => |desc_tag| @field(
                     std.meta.FieldEnum(Export.Desc),
@@ -1878,7 +1913,7 @@ fn parseElemSec(
     import_sec: *const ImportSec,
     func_refs: *FuncRefs,
     scratch: *ArenaAllocator,
-    diag: ParseDiagnostics,
+    diag: ?*ParseDiagnostics,
     init_max_stack: *u16,
 ) !ElemSec {
     const elems_reader: Reader = readers.elem;
@@ -1915,7 +1950,8 @@ fn parseElemSec(
 
         const tag_value = try elems_reader.readUleb128(u32, diag, "element segment tag");
         const tag: Tag = @bitCast(
-            std.math.cast(u3, tag_value) orelse return diag.writeAll(
+            std.math.cast(u3, tag_value) orelse return Reader.fail(
+                diag,
                 .parse,
                 "malformed element segment tag",
             ),
@@ -1933,7 +1969,7 @@ fn parseElemSec(
                     &.{ "table", "in element section" },
                 )
             else if (import_sec.types.tables.len == 0)
-                return diag.writeAll(.validation, "unknown table 0 in element section")
+                return Reader.fail(diag, .validation, "unknown table 0 in element section")
             else
                 TableIdx.default;
 
@@ -2010,7 +2046,8 @@ fn parseElemSec(
         };
 
         if (!ref_type.isRefType()) {
-            return diag.print(
+            return Reader.failPrint(
+                diag,
                 .parse,
                 "malformed reference type {t} in element segment",
                 .{ref_type},
@@ -2019,7 +2056,8 @@ fn parseElemSec(
 
         if (expected_ref_type) |expected_ty| {
             if (!expected_ty.eql(ref_type)) {
-                return diag.print(
+                return Reader.failPrint(
+                    diag,
                     .validation,
                     "type mismatch at elem segment: got {t}, expected {t}",
                     .{ ref_type, expected_ty },
@@ -2054,7 +2092,8 @@ fn parseElemSec(
                     std.math.cast(
                         u15,
                         init_expr.max_stack,
-                    ) orelse return diag.writeAll(
+                    ) orelse return Reader.fail(
+                        diag,
                         .implementation_limit,
                         "element expression too large",
                     ),
@@ -2065,11 +2104,16 @@ fn parseElemSec(
                     std.math.cast(
                         u15,
                         init_expr.instr_count,
-                    ) orelse return diag.writeAll(
+                    ) orelse return Reader.fail(
+                        diag,
                         .implementation_limit,
                         "element expression too many instructions",
                     ),
-                ) catch return diag.writeAll(.implementation_limit, "too many element expressions");
+                ) catch return Reader.fail(
+                    diag,
+                    .implementation_limit,
+                    "too many element expressions",
+                );
             }
 
             std.debug.assert(exprs.len <= instruction_count);
@@ -2144,7 +2188,7 @@ pub fn parseCodeSec(
     arena: *ArenaFallbackAllocator,
     readers: *const Sections.Readers,
     count: u32,
-    diag: ParseDiagnostics,
+    diag: ?*ParseDiagnostics,
 ) !CodeSec {
     const code_reader = readers.code;
 
@@ -2186,7 +2230,7 @@ fn parseDataSec(
     count: u32,
     import_sec: *const ImportSec,
     scratch: *ArenaAllocator,
-    diag: ParseDiagnostics,
+    diag: ?*ParseDiagnostics,
     init_max_stack: *u16,
 ) !DataSec {
     const datas_reader: Reader = readers.data;
@@ -2201,7 +2245,8 @@ fn parseDataSec(
 
     for (data_ptrs, data_lens, 0..count) |*ptr, *len, i| {
         if (datas_reader.isEmpty()) {
-            return diag.writeAll(
+            return Reader.fail(
+                diag,
                 .parse,
                 "unexpected end of section or function, expected data segment",
             );
@@ -2218,7 +2263,7 @@ fn parseDataSec(
 
         const flags_int = try datas_reader.readUleb128Casted(u32, u2, diag, "data segment flag");
         if (flags_int > 2) {
-            return diag.writeAll(.parse, "malformed data segment flag");
+            return Reader.fail(diag, .parse, "malformed data segment flag");
         }
 
         const flags: Flags = @bitCast(flags_int);
@@ -2231,7 +2276,7 @@ fn parseDataSec(
                     &.{ "memory", "data segment" },
                 )
             else if (import_sec.types.mems.len == 0)
-                return diag.writeAll(.validation, "unknown memory 0 in data segment")
+                return Reader.fail(diag, .validation, "unknown memory 0 in data segment")
             else
                 MemIdx.default;
 
@@ -2263,7 +2308,8 @@ fn parseDataSec(
 
         const contents_len = try datas_reader.readUleb128(u32, diag, "data segment length");
         if (datas_reader.bytes.len < contents_len) {
-            return diag.print(
+            return Reader.failPrint(
+                diag,
                 .parse,
                 "unexpected end of section or function, data segment has length {}, but {}" ++
                     " bytes were remaining",
@@ -2291,7 +2337,7 @@ pub fn finishCodeValidation(
     module: Module,
     allocator: Allocator,
     scratch: *ArenaAllocator,
-    diag: ParseDiagnostics,
+    diag: ?*ParseDiagnostics,
 ) validator.Error!bool {
     var all_validated = true;
     var initialized: u32 = 0;

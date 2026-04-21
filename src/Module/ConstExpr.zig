@@ -19,16 +19,18 @@ pub fn bytes(
 fn popVal(
     stack: *std.ArrayList(ValType),
     expecting: ValType,
-    diag: Reader.Diagnostics,
+    diag: ?*Reader.Diagnostics,
     desc: []const u8,
 ) Reader.ValidationError!void {
-    const actual = stack.pop() orelse return diag.print(
+    const actual = stack.pop() orelse return Reader.failPrint(
+        diag,
         .validation,
         "expected type {t}, but stack was empty in {s}",
         .{ expecting, desc },
     );
 
-    if (actual != expecting) return diag.print(
+    if (actual != expecting) return Reader.failPrint(
+        diag,
         .validation,
         "expected type {t}, but got {t} in {s}",
         .{ expecting, actual, desc },
@@ -38,7 +40,7 @@ fn popVal(
 fn binOp(
     stack: *std.ArrayList(ValType),
     operand_type: ValType,
-    diag: Reader.Diagnostics,
+    diag: ?*Reader.Diagnostics,
     desc: []const u8,
 ) Reader.ValidationError!void {
     try popVal(stack, operand_type, diag, desc);
@@ -56,10 +58,11 @@ const Parsed = struct {
 
 fn nonConstOpcode(
     opcode: anytype,
-    diag: Reader.Diagnostics,
+    diag: ?*Reader.Diagnostics,
     desc: []const u8,
 ) Reader.ValidationError {
-    return diag.print(
+    return Reader.failPrint(
+        diag,
         .validation,
         "constant expression required: got opcode {t} in {s}",
         .{ opcode, desc },
@@ -74,7 +77,7 @@ pub fn parse(
     /// Should refer to global imports only.
     global_types: []const Module.GlobalType,
     func_refs: *FuncRefs,
-    diag: Reader.Diagnostics,
+    diag: ?*Reader.Diagnostics,
     desc: []const u8,
     scratch: *std.heap.ArenaAllocator,
 ) Module.ParseError!Parsed {
@@ -107,7 +110,8 @@ pub fn parse(
             },
             .@"ref.null" => {
                 const ref_type = try ValType.parse(reader, diag);
-                if (!ref_type.isRefType()) return diag.print(
+                if (!ref_type.isRefType()) return Reader.failPrint(
+                    diag,
                     .validation,
                     "type mismatch: expected reference type for ref.null, but got {t} in {s}",
                     .{ ref_type, desc },
@@ -137,7 +141,8 @@ pub fn parse(
                 const global_type: *const Module.GlobalType =
                     &global_types[@intFromEnum(global_idx)];
 
-                if (global_type.mut == .@"var") return diag.print(
+                if (global_type.mut == .@"var") return Reader.failPrint(
+                    diag,
                     .validation,
                     "constant expression required: global.get {} in {s} must be const",
                     .{ @intFromEnum(global_idx), desc },
@@ -185,20 +190,23 @@ pub fn parse(
         max_stack = @max(
             max_stack,
             std.math.cast(u16, val_stack.items.len) orelse
-                return diag.writeAll(.implementation_limit, impl_limit_message),
+                return Reader.fail(diag, .implementation_limit, impl_limit_message),
         );
 
         instr_count = std.math.add(u16, instr_count, 1) catch
-            return diag.writeAll(.implementation_limit, impl_limit_message);
+            return Reader.fail(diag, .implementation_limit, impl_limit_message);
 
         if (reader.isEmpty()) {
             // Spec thinks reading into code section is ok!?
-            return diag.print(.parse, "illegal opcode or unexpected end in {s}", .{desc});
+            return Reader.failPrint(diag, .parse, "illegal opcode or unexpected end in {s}", .{
+                desc,
+            });
         }
     };
 
     return switch (val_stack.items.len) {
-        0 => diag.print(
+        0 => Reader.failPrint(
+            diag,
             .validation,
             "type mismatch: expected {t}, but got opcode END at end of {s}",
             .{ expected_type, desc },
@@ -212,12 +220,14 @@ pub fn parse(
             },
             .max_stack = max_stack,
             .instr_count = instr_count,
-        } else diag.print(
+        } else Reader.failPrint(
+            diag,
             .validation,
             "type mismatch: expected {t}, but got {t} in {s}",
             .{ expected_type, val_stack.items[0], desc },
         ),
-        else => |too_many| diag.print(
+        else => |too_many| Reader.failPrint(
+            diag,
             .validation,
             "type mismatch: expected {t}, but got {d} values in {s}",
             .{ expected_type, too_many, desc },

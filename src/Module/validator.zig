@@ -156,7 +156,7 @@ pub const Code = extern struct {
         allocator: Allocator,
         module: Module,
         scratch: *ArenaAllocator,
-        diag: Diagnostics,
+        diag: ?*Diagnostics,
     ) Error!bool {
         check: {
             // TODO: Should this be cmpxchgStrong? or maybe fetchMax should be used instead?
@@ -296,7 +296,7 @@ const BlockType = union(enum) {
         }
     }
 
-    fn parse(reader: Reader, module: Module, diag: Diagnostics) Error!BlockType {
+    fn parse(reader: Reader, module: Module, diag: ?*Diagnostics) Error!BlockType {
         var int_bytes = reader.bytes.*;
         const int_reader = Reader{ .bytes = &int_bytes };
         const tag_int = try int_reader.readIleb128(i33, diag, "block type");
@@ -322,16 +322,15 @@ const BlockType = union(enum) {
                     },
                 }
             else
-                diag.print(.validation, "unknown type {} in block type", .{tag_int});
+                Reader.failPrint(diag, .validation, "unknown type {} in block type", .{tag_int});
         } else {
             reader.bytes.* = byte_bytes;
-            return BlockType{
-                .single_result = std.enums.fromInt(ValType, byte_tag) orelse return diag.print(
-                    .parse,
-                    "malformed valtype in block type 0x{X:0>2}",
-                    .{byte_tag},
-                ),
-            };
+            return if (std.enums.fromInt(ValType, byte_tag)) |ty|
+                BlockType{ .single_result = ty }
+            else
+                Reader.failPrint(diag, .parse, "malformed valtype in block type 0x{X:0>2}", .{
+                    byte_tag,
+                });
         }
     }
 
@@ -379,15 +378,19 @@ const ValStack = struct {
 
     const PushError = Allocator.Error || Reader.LimitError;
 
-    fn errorValueStackTooLarge(diag: Diagnostics) Reader.LimitError {
-        return diag.writeAll(.implementation_limit, "too many instructions, value stack too large");
+    fn errorValueStackTooLarge(diag: ?*Diagnostics) Reader.LimitError {
+        return Reader.fail(
+            diag,
+            .implementation_limit,
+            "too many instructions, value stack too large",
+        );
     }
 
     fn pushAny(
         val_stack: *ValStack,
         arena: *ArenaAllocator,
         val: Val,
-        diag: Diagnostics,
+        diag: ?*Diagnostics,
     ) PushError!void {
         try val_stack.buf.append(arena.allocator(), val);
         // Note, if someone pushes a known value over an unknown, the max will grow anyway
@@ -404,7 +407,7 @@ const ValStack = struct {
         val_stack: *ValStack,
         arena: *ArenaAllocator,
         val_type: ValType,
-        diag: Diagnostics,
+        diag: ?*Diagnostics,
     ) PushError!void {
         return try val_stack.pushAny(arena, valTypeToVal(val_type), diag);
     }
@@ -414,7 +417,7 @@ const ValStack = struct {
         val_stack: *ValStack,
         arena: *ArenaAllocator,
         types: []const ValType,
-        diag: Diagnostics,
+        diag: ?*Diagnostics,
     ) !void {
         const new_len = std.math.add(u16, val_stack.len(), @intCast(types.len)) catch
             return errorValueStackTooLarge(diag);
@@ -428,15 +431,16 @@ const ValStack = struct {
         val_stack.max = @max(new_len, val_stack.max);
     }
 
-    fn errorValueStackUnderflow(height: u16, diag: Diagnostics) Reader.ValidationError {
-        return diag.print(
+    fn errorValueStackUnderflow(height: u16, diag: ?*Diagnostics) Reader.ValidationError {
+        return Reader.failPrint(
+            diag,
             .validation,
             "type mismatch: value stack underflows at height {}",
             .{height},
         );
     }
 
-    fn popAny(val_stack: *ValStack, ctrl_stack: *const CtrlStack, diag: Diagnostics) !Val {
+    fn popAny(val_stack: *ValStack, ctrl_stack: *const CtrlStack, diag: ?*Diagnostics) !Val {
         const current_frame: *const CtrlFrame = &ctrl_stack.items[ctrl_stack.items.len - 1];
         return if (val_stack.len() == current_frame.info.height)
             if (current_frame.info.@"unreachable")
@@ -451,12 +455,13 @@ const ValStack = struct {
         val_stack: *ValStack,
         ctrl_stack: *const CtrlStack,
         expected: ValType,
-        diag: Diagnostics,
+        diag: ?*Diagnostics,
     ) Error!void {
         const popped = try val_stack.popAny(ctrl_stack, diag);
         // std.debug.print("wanted {}, got {}\n", .{ expected, popped });
         if (popped != valTypeToVal(expected) and popped != .unknown) {
-            return diag.print(
+            return Reader.failPrint(
+                diag,
                 .validation,
                 "type mismatch, expected {t} but got {t}",
                 .{ expected, popped },
@@ -470,14 +475,15 @@ const ValStack = struct {
         ctrl_stack: *const CtrlStack,
         expected: ValType,
         replacement: ValType,
-        diag: Diagnostics,
+        diag: ?*Diagnostics,
     ) !void {
         const current_frame: *const CtrlFrame = &ctrl_stack.items[ctrl_stack.items.len - 1];
         if (val_stack.len() > current_frame.info.height) {
             const top: *Val = &val_stack.buf.items[val_stack.len() - 1];
 
             if (top.* != valTypeToVal(expected) and top.* != .unknown) {
-                return diag.print(
+                return Reader.failPrint(
+                    diag,
                     .validation,
                     "type mismatch, expected {t} but got {t}",
                     .{ expected, top.* },
@@ -496,7 +502,7 @@ const ValStack = struct {
         val_stack: *ValStack,
         ctrl_stack: *const CtrlStack,
         expected: []const ValType,
-        diag: Diagnostics,
+        diag: ?*Diagnostics,
     ) !void {
         // std.debug.print("current height = {}, want to pop = {any}\n", .{ val_stack.len(), expected });
         for (0..expected.len) |i| {
@@ -509,7 +515,7 @@ const ValStack = struct {
         val_stack: *ValStack,
         ctrl_stack: *const CtrlStack,
         expected: []const ValType,
-        diag: Diagnostics,
+        diag: ?*Diagnostics,
     ) !void {
         const current_frame: *const CtrlFrame = &ctrl_stack.items[ctrl_stack.items.len - 1];
         for (0..expected.len) |i| {
@@ -527,7 +533,8 @@ const ValStack = struct {
             };
 
             if (actual_type != expected_type and actual_type != .unknown) {
-                return diag.print(
+                return Reader.failPrint(
+                    diag,
                     .validation,
                     "type mismatch, expected {t} but got {t}",
                     .{ expected_type, actual_type },
@@ -541,7 +548,7 @@ const ValStack = struct {
         scratch: *ArenaAllocator,
         ctrl_stack: *const CtrlStack,
         ty: ValType,
-        diag: Reader.Diagnostics,
+        diag: ?*Reader.Diagnostics,
     ) Error!void {
         try val_stack.popExpecting(ctrl_stack, ty, diag);
         try val_stack.popThenPushExpecting(scratch, ctrl_stack, ty, ty, diag);
@@ -552,22 +559,22 @@ const ValStack = struct {
         scratch: *ArenaAllocator,
         ctrl_stack: *const CtrlStack,
         ty: ValType,
-        diag: Reader.Diagnostics,
+        diag: ?*Reader.Diagnostics,
     ) Error!void {
         try val_stack.popExpecting(ctrl_stack, ty, diag);
         try val_stack.popThenPushExpecting(scratch, ctrl_stack, ty, .i32, diag);
     }
 };
 
-fn readMemIdx(reader: *Reader, module: Module, diag: Diagnostics) !void {
-    const msg = "memory index zero byte expected";
-    const idx = try reader.readByte(diag, msg);
+fn readMemIdx(reader: *Reader, module: Module, diag: ?*Diagnostics) !void {
+    const expected_zero_byte_msg = "memory index zero byte expected";
+    const idx = try reader.readByte(diag, expected_zero_byte_msg);
     if (idx != 0) {
-        return diag.writeAll(.parse, msg);
+        return Reader.fail(diag, .parse, expected_zero_byte_msg);
     }
 
     if (module.inner.mem_count == 0) {
-        return diag.print(.validation, "unknown memory {}", .{idx});
+        return Reader.failPrint(diag, .validation, "unknown memory {}", .{idx});
     }
 }
 
@@ -583,25 +590,25 @@ fn readMemArg(
     reader: *Reader,
     natural_alignment: Alignment,
     module: Module,
-    diag: Diagnostics,
+    diag: ?*Diagnostics,
 ) !void {
     const a = try reader.readUleb128(u32, diag, "memarg alignment");
 
     if (a > @intFromEnum(natural_alignment)) {
         return if (a < 32)
-            diag.writeAll(.validation, "alignment must not be larger than natural")
+            Reader.fail(diag, .validation, "alignment must not be larger than natural")
         else
-            diag.writeAll(.parse, "malformed memop flags, alignment overflow");
+            Reader.fail(diag, .parse, "malformed memop flags, alignment overflow");
     }
 
     if (module.inner.mem_count == 0) {
-        return diag.writeAll(.validation, "unknown memory in memarg");
+        return Reader.fail(diag, .validation, "unknown memory in memarg");
     }
 
     _ = try reader.readUleb128(u32, diag, "memarg offset");
 }
 
-fn readTableIdx(reader: *Reader, module: Module, diag: Diagnostics) !ValType {
+fn readTableIdx(reader: *Reader, module: Module, diag: ?*Diagnostics) !ValType {
     const table_types = module.tableTypes();
     const idx = try reader.readIdx(
         Module.TableIdx,
@@ -615,7 +622,7 @@ fn readTableIdx(reader: *Reader, module: Module, diag: Diagnostics) !ValType {
 const ReadDataIdx = struct {
     idx: u32,
 
-    fn begin(reader: *Reader, diag: Diagnostics) !ReadDataIdx {
+    fn begin(reader: *Reader, diag: ?*Diagnostics) !ReadDataIdx {
         return .{
             .idx = try reader.readUleb128Casted(
                 u32,
@@ -626,19 +633,21 @@ const ReadDataIdx = struct {
         };
     }
 
-    fn boundsCheck(self: ReadDataIdx, module: Module, diag: Diagnostics) !void {
+    fn boundsCheck(self: ReadDataIdx, module: Module, diag: ?*Diagnostics) !void {
         // spec first checks OOB index
         if (self.idx >= module.inner.datas_count) {
-            return diag.print(.validation, "unknown data segment {}, in code", .{self.idx});
+            return Reader.failPrint(diag, .validation, "unknown data segment {}, in code", .{
+                self.idx,
+            });
         }
 
         if (!module.inner.has_data_count_section) {
-            return diag.writeAll(.parse, "data count section required");
+            return Reader.fail(diag, .parse, "data count section required");
         }
     }
 };
 
-fn readElemIdx(reader: *Reader, module: Module, diag: Diagnostics) !ValType {
+fn readElemIdx(reader: *Reader, module: Module, diag: ?*Diagnostics) !ValType {
     const idx = try reader.readIdx(
         Module.ElemIdx,
         module.inner.elems_count,
@@ -648,13 +657,12 @@ fn readElemIdx(reader: *Reader, module: Module, diag: Diagnostics) !ValType {
     return module.elementSegments()[@intFromEnum(idx)].elementType();
 }
 
-fn readLocalIdx(reader: *Reader, locals: []const ValType, diag: Diagnostics) !ValType {
+fn readLocalIdx(reader: *Reader, locals: []const ValType, diag: ?*Diagnostics) !ValType {
     const idx = try reader.readUleb128(u32, diag, "local index");
-    return if (idx < locals.len) locals[idx] else diag.print(
-        .validation,
-        "unknown local {}",
-        .{idx},
-    );
+    return if (idx < locals.len)
+        locals[idx]
+    else
+        Reader.failPrint(diag, .validation, "unknown local {}", .{idx});
 }
 
 const Label = struct {
@@ -663,14 +671,16 @@ const Label = struct {
     copy_count: u8,
     pop_count: u8,
 
-    fn errorTooManyResults(diag: Diagnostics, count: usize) Module.LimitError {
-        return diag.print(.implementation_limit, "too many results ({d}) in block", .{count});
+    fn errorTooManyResults(diag: ?*Diagnostics, count: usize) Module.LimitError {
+        return Reader.failPrint(diag, .implementation_limit, "too many results ({d}) in block", .{
+            count,
+        });
     }
 
     fn calculatePopCount(
         current_height: u16,
         target_frame_height: u16,
-        diag: Diagnostics,
+        diag: ?*Diagnostics,
     ) Module.LimitError!u8 {
         const pop_count = current_height - target_frame_height;
         return std.math.cast(u8, pop_count) orelse errorTooManyResults(diag, pop_count);
@@ -681,12 +691,12 @@ const Label = struct {
         ctrl_stack: *const CtrlStack,
         current_height: u16,
         module: Module,
-        diag: Diagnostics,
+        diag: ?*Diagnostics,
     ) !Label {
         const frame: *const CtrlFrame = if (depth < ctrl_stack.items.len)
             &ctrl_stack.items[ctrl_stack.items.len - 1 - depth]
         else
-            return diag.print(.validation, "unknown label {}", .{depth});
+            return Reader.failPrint(diag, .validation, "unknown label {}", .{depth});
 
         // std.debug.print(
         //     " ? label at depth {} targets 0x{X} ({s})\n",
@@ -708,7 +718,7 @@ const Label = struct {
         ctrl_stack: *const CtrlStack,
         current_height: u16,
         module: Module,
-        diag: Diagnostics,
+        diag: ?*Diagnostics,
     ) !Label {
         const depth = try reader.readUleb128(u32, diag, "label depth");
         return Label.init(depth, ctrl_stack, current_height, module, diag);
@@ -724,7 +734,7 @@ fn pushCtrlFrame(
     offset: u32,
     block_type: BlockType,
     module: Module,
-    diag: Diagnostics,
+    diag: ?*Diagnostics,
 ) !void {
     try ctrl_stack.append(
         arena.allocator(),
@@ -747,10 +757,10 @@ fn popCtrlFrame(
     ctrl_stack: *CtrlStack,
     val_stack: *ValStack,
     module: Module,
-    diag: Diagnostics,
+    diag: ?*Diagnostics,
 ) !CtrlFrame {
     if (ctrl_stack.items.len == 0) {
-        return diag.writeAll(.validation, "control stack underflow");
+        return Reader.fail(diag, .validation, "control stack underflow");
     }
 
     const frame: CtrlFrame = ctrl_stack.items[ctrl_stack.items.len - 1];
@@ -759,7 +769,8 @@ fn popCtrlFrame(
 
     try val_stack.popManyExpecting(ctrl_stack, result_types, diag);
     if (val_stack.len() != frame.info.height) {
-        return diag.print(
+        return Reader.failPrint(
+            diag,
             .validation,
             "type mismatch: expected value stack height to be {}, was {}",
             .{ frame.info.height, val_stack.len() },
@@ -897,14 +908,15 @@ const SideTableBuilder = struct {
     alternate: std.ArrayList(BranchFixup) = .empty,
     free: BranchFixup.List = .empty,
 
-    fn errorSideTableFull(diag: Diagnostics) Module.LimitError {
-        return diag.writeAll(
+    fn errorSideTableFull(diag: ?*Diagnostics) Module.LimitError {
+        return Reader.fail(
+            diag,
             .implementation_limit,
             "too many control instructions, side table full",
         );
     }
 
-    fn nextEntryIdx(table: *const SideTableBuilder, diag: Diagnostics) Module.LimitError!u32 {
+    fn nextEntryIdx(table: *const SideTableBuilder, diag: ?*Diagnostics) Module.LimitError!u32 {
         return std.math.cast(u32, table.entries.items.len) orelse errorSideTableFull(diag);
     }
 
@@ -942,7 +954,7 @@ const SideTableBuilder = struct {
         origin: u32,
         copy_count: u8,
         pop_count: u8,
-        diag: Diagnostics,
+        diag: ?*Diagnostics,
     ) (Module.LimitError || Allocator.Error)!void {
         const idx = try table.nextEntryIdx(diag);
         const entry = try table.entries.addOne(arena.allocator());
@@ -969,15 +981,17 @@ const SideTableBuilder = struct {
 
     const AppendError = Module.LimitError || Allocator.Error;
 
-    fn errorDeltaIpOutOfRange(diag: Diagnostics) Reader.LimitError {
-        return diag.writeAll(
+    fn errorDeltaIpOutOfRange(diag: ?*Diagnostics) Reader.LimitError {
+        return Reader.fail(
+            diag,
             .implementation_limit,
             "too many instructions, branch target out of range",
         );
     }
 
-    fn errorDeltaStpOutOfRange(diag: Diagnostics, delta_stp: i33) Reader.LimitError {
-        return diag.print(
+    fn errorDeltaStpOutOfRange(diag: ?*Diagnostics, delta_stp: i33) Reader.LimitError {
+        return Reader.failPrint(
+            diag,
             .implementation_limit,
             "too many control instructions, side table target ({d}) out of range",
             .{delta_stp},
@@ -993,7 +1007,7 @@ const SideTableBuilder = struct {
         pop_count: u8,
         block_offset: ActiveList.BlockOffset,
         target_depth: u32,
-        diag: Diagnostics,
+        diag: ?*Diagnostics,
     ) AppendError!u32 {
         const idx = try table.nextEntryIdx(diag);
         const entry = try table.entries.addOne(arena.allocator());
@@ -1041,7 +1055,7 @@ const SideTableBuilder = struct {
         fixup_entry: *const BranchFixup,
         target_side_table_idx: u32,
         end_offset: u32,
-        diag: Diagnostics,
+        diag: ?*Diagnostics,
     ) Module.LimitError!void {
         var coz_begin = coz.begin("wasmstint.validator.resolveFixupEntry");
         defer coz_begin.end();
@@ -1081,7 +1095,7 @@ const SideTableBuilder = struct {
         table: *SideTableBuilder,
         end_offset: u32,
         block_offset: ActiveList.BlockOffset,
-        diag: Diagnostics,
+        diag: ?*Diagnostics,
     ) Module.LimitError!void {
         const target_side_table_idx = try table.nextEntryIdx(diag);
 
@@ -1138,7 +1152,7 @@ const SideTableBuilder = struct {
     fn popAndResolveAlternate(
         table: *SideTableBuilder,
         end_offset: u32,
-        diag: Diagnostics,
+        diag: ?*Diagnostics,
     ) Module.LimitError!void {
         const target_side_table_idx = try table.nextEntryIdx(diag);
         const fixup: *const BranchFixup = &table.alternate.items[table.alternate.items.len - 1];
@@ -1157,7 +1171,7 @@ fn appendSideTableEntry(
     side_table: *SideTableBuilder,
     origin_offset: u32,
     target: Label,
-    diag: Diagnostics,
+    diag: ?*Diagnostics,
 ) SideTableBuilder.AppendError!void {
     const loop_target = target.frame.info.opcode == .loop;
     // if (loop_target)
@@ -1191,7 +1205,7 @@ fn validateLoadInstr(
     loaded: ValType,
     module: Module,
     arena: *ArenaAllocator,
-    diag: Diagnostics,
+    diag: ?*Diagnostics,
 ) Error!void {
     // Pop index, push loaded value.
     try val_stack.popThenPushExpecting(arena, ctrl_stack, .i32, loaded, diag);
@@ -1206,7 +1220,7 @@ fn validateLoadLaneInstr(
     comptime lane_size: V128.LaneIdxSize,
     module: Module,
     arena: *ArenaAllocator,
-    diag: Diagnostics,
+    diag: ?*Diagnostics,
 ) Error!void {
     try val_stack.popExpecting(ctrl_stack, .v128, diag);
     try val_stack.popThenPushExpecting(arena, ctrl_stack, .i32, .v128, diag);
@@ -1221,7 +1235,7 @@ fn validateStoreInstr(
     natural_alignment: Alignment,
     stored: ValType,
     module: Module,
-    diag: Diagnostics,
+    diag: ?*Diagnostics,
 ) Error!void {
     try val_stack.popManyExpecting(ctrl_stack, &[_]ValType{ .i32, stored }, diag);
     try readMemArg(reader, natural_alignment, module, diag);
@@ -1234,7 +1248,7 @@ fn validateStoreLaneInstr(
     ctrl_stack: *const CtrlStack,
     comptime lane_size: V128.LaneIdxSize,
     module: Module,
-    diag: Diagnostics,
+    diag: ?*Diagnostics,
 ) Error!void {
     try val_stack.popManyExpecting(ctrl_stack, &.{ .i32, .v128 }, diag);
     try readMemArg(reader, natural_alignment, module, diag);
@@ -1244,11 +1258,12 @@ fn validateStoreLaneInstr(
 fn validateTailCallSignature(
     func_type: *const Module.FuncType,
     callee_signature: *const Module.FuncType,
-    diag: Diagnostics,
+    diag: ?*Diagnostics,
     opcode: opcodes.ByteOpcode,
 ) Reader.ValidationError!void {
     if (callee_signature.result_count != func_type.result_count) {
-        return diag.print(
+        return Reader.failPrint(
+            diag,
             .validation,
             "type mismatch: {[opcode]t} expected {[expected]d} results, but got {[actual]d}",
             .{
@@ -1261,7 +1276,8 @@ fn validateTailCallSignature(
 
     for (callee_signature.results(), func_type.results()) |expected, actual| {
         if (!expected.eql(actual)) {
-            return diag.print(
+            return Reader.failPrint(
+                diag,
                 .validation,
                 "type mismatch: {[opcode]t} expected {[expected]t}, but got {[actual]t}",
                 .{ .opcode = opcode, .expected = expected, .actual = actual },
@@ -1276,7 +1292,7 @@ pub fn rawValidate(
     signature: Module.TypeIdx,
     code: []const u8,
     scratch: *ArenaAllocator,
-    diag: Reader.Diagnostics,
+    diag: ?*Reader.Diagnostics,
 ) Error!Code.Inner {
     _ = scratch.reset(.retain_capacity);
     var per_instr_arena = ArenaAllocator.init(scratch.allocator());
@@ -1293,7 +1309,7 @@ pub fn rawValidate(
         const local_group_count = try reader.readUleb128(u32, diag, "locals count");
         const max_local_count = std.math.maxInt(u16);
         if (local_group_count > max_local_count) {
-            return diag.writeAll(.implementation_limit, "too many local groups");
+            return Reader.fail(diag, .implementation_limit, "too many local groups");
         }
 
         const LocalGroup = struct { type: ValType, count: u32 };
@@ -1308,19 +1324,21 @@ pub fn rawValidate(
             const local_type = try ValType.parse(reader, diag);
 
             if (local_type == .v128 and !wasm_features.simd128) {
-                return diag.writeAll(
+                return Reader.fail(
+                    diag,
                     .parse,
                     "expected valid local type, " ++ Reader.no_simd_message,
                 );
             }
 
             total_locals_count = std.math.add(u32, total_locals_count, local_count) catch
-                return diag.writeAll(.parse, "too many locals"); // not an implementation limit err
+                // not an implementation limit error, grammar requires # of locals fits in a `u32`
+                return Reader.fail(diag, .parse, "too many locals");
             group.* = .{ .type = local_type, .count = local_count };
         }
 
         if (total_locals_count > max_local_count) {
-            return diag.writeAll(.implementation_limit, "too many locals");
+            return Reader.fail(diag, .implementation_limit, "too many locals");
         }
 
         const locals_buf = try scratch.allocator().alloc(ValType, total_locals_count);
@@ -1378,15 +1396,17 @@ pub fn rawValidate(
             // Spec test is based on spec interpreter, which does weird things like
             // start consuming the data section even when the length of the code section says
             // to stop
-            return diag.writeAll(
+            return Reader.fail(
+                diag,
                 .parse,
-                "unexpected end of section or function: END opcode expected or section size mismatch",
+                "unexpected end of section or function: " ++
+                    "END opcode expected or section size mismatch",
             );
         }
 
         const opcode_byte = reader.readAssumeLength(1)[0];
         const opcode_tag = std.enums.fromInt(opcodes.ByteOpcode, opcode_byte) orelse
-            return diag.print(.parse, "illegal opcode 0x{X:0>2}", .{opcode_byte});
+            return Reader.failPrint(diag, .parse, "illegal opcode 0x{X:0>2}", .{opcode_byte});
 
         // std.log.debug("validate: {t} 0x{X:0>2}", .{ opcode_tag, opcode_byte });
         switch (opcode_tag) {
@@ -1485,7 +1505,8 @@ pub fn rawValidate(
 
                 const frame = try popCtrlFrame(&ctrl_stack, &val_stack, module, diag);
                 if (frame.info.opcode != .@"if") {
-                    return diag.print(
+                    return Reader.failPrint(
+                        diag,
                         .validation,
                         "expected 'if' opcode, got '{t}'",
                         .{frame.info.opcode},
@@ -1510,7 +1531,8 @@ pub fn rawValidate(
                     scratch,
                     instr_offset,
                     null,
-                    std.math.cast(u8, block_type.result_count) orelse return diag.writeAll(
+                    std.math.cast(u8, block_type.result_count) orelse return Reader.fail(
+                        diag,
                         .implementation_limit,
                         "too many results in block type",
                     ),
@@ -1607,7 +1629,7 @@ pub fn rawValidate(
 
                 const label_count = try reader.readUleb128(u32, diag, "br_table label count");
                 if (label_count > 6_000_000) {
-                    return diag.writeAll(.implementation_limit, "too many labels in br_table");
+                    return Reader.fail(diag, .implementation_limit, "too many labels in br_table");
                 }
 
                 try side_table.entries.ensureUnusedCapacity(scratch.allocator(), label_count);
@@ -1658,7 +1680,8 @@ pub fn rawValidate(
 
                     const l_types = l.frame.labelTypes(module);
                     if (l_types.len != arity) {
-                        return diag.print(
+                        return Reader.failPrint(
+                            diag,
                             .validation,
                             "type mismatch, br_table label has arity {}, expected {}",
                             .{ l_types.len, arity },
@@ -1725,7 +1748,8 @@ pub fn rawValidate(
                 const table_type: *const Module.TableType = &table_types[@intFromEnum(table_idx)];
 
                 if (table_type.elem_type != .funcref) {
-                    return diag.print(
+                    return Reader.failPrint(
+                        diag,
                         .validation,
                         "type mismatch: call_indirect expects funcref, but type of table {} is {f}",
                         .{ @intFromEnum(table_idx), table_type },
@@ -1772,7 +1796,8 @@ pub fn rawValidate(
                 const table_type: *const Module.TableType = &table_types[@intFromEnum(table_idx)];
 
                 if (table_type.elem_type != .funcref) {
-                    return diag.print(
+                    return Reader.failPrint(
+                        diag,
                         .validation,
                         "type mismatch: return_call_indirect expects funcref, but type of table " ++
                             "{} is {f}",
@@ -1799,7 +1824,8 @@ pub fn rawValidate(
                 if (val_stack.len() == current_frame.info.height and
                     !current_frame.info.@"unreachable")
                 {
-                    return diag.print(
+                    return Reader.failPrint(
+                        diag,
                         .validation,
                         "type mismatch or invalid result arity: value stack underflows at height {}",
                         .{current_frame.info.height},
@@ -1813,7 +1839,8 @@ pub fn rawValidate(
                 const both_num_types = isNumVal(t_1) and isNumVal(t_2);
                 const both_vec_types = isVecVal(t_1) and isVecVal(t_2);
                 if (!(both_num_types or both_vec_types)) {
-                    return diag.print(
+                    return Reader.failPrint(
+                        diag,
                         .validation,
                         "type mismatch: expected matching numeric/vector types, got {t} vs {t}",
                         .{ t_1, t_2 },
@@ -1821,7 +1848,10 @@ pub fn rawValidate(
                 }
 
                 if (t_1 != t_2 and t_1 != .unknown and t_2 != .unknown) {
-                    return diag.print(.validation, "type mismatch: {t} != {t}", .{ t_1, t_2 });
+                    return Reader.failPrint(diag, .validation, "type mismatch: {t} != {t}", .{
+                        t_1,
+                        t_2,
+                    });
                 }
 
                 val_stack.pushAny(scratch, if (t_1 == .unknown) t_2 else t_1, diag) catch
@@ -1830,7 +1860,8 @@ pub fn rawValidate(
             .@"select t" => {
                 const type_count = try reader.readUleb128(u32, diag, "select arity");
                 if (type_count != 1) {
-                    return diag.print(
+                    return Reader.failPrint(
+                        diag,
                         .validation,
                         "invalid result arity, expected 1 but got {}",
                         .{type_count},
@@ -1886,7 +1917,7 @@ pub fn rawValidate(
                     &module.globalTypes()[@intFromEnum(global_idx)];
 
                 if (global_type.mut != .@"var") {
-                    return diag.writeAll(.validation, "global is immutable");
+                    return Reader.fail(diag, .validation, "global is immutable");
                 }
 
                 try val_stack.popExpecting(&ctrl_stack, global_type.val_type, diag);
@@ -2218,7 +2249,7 @@ pub fn rawValidate(
             .@"ref.null" => {
                 const ref_type = try ValType.parse(reader, diag);
                 if (!ref_type.isRefType()) {
-                    return diag.writeAll(.parse, "malformed reference type in ref.null");
+                    return Reader.fail(diag, .parse, "malformed reference type in ref.null");
                 }
 
                 try val_stack.push(scratch, ref_type, diag);
@@ -2226,7 +2257,8 @@ pub fn rawValidate(
             .@"ref.is_null" => {
                 const ref_type = try val_stack.popAny(&ctrl_stack, diag);
                 if (!isRefVal(ref_type)) {
-                    return diag.print(
+                    return Reader.failPrint(
+                        diag,
                         .validation,
                         "type mismatch: ref.is_null expected reference type, got {t}",
                         .{ref_type},
@@ -2244,7 +2276,8 @@ pub fn rawValidate(
                 );
 
                 if (!module.funcIsReferencable(func_idx)) {
-                    return diag.print(
+                    return Reader.failPrint(
+                        diag,
                         .validation,
                         "undeclared function reference {} in ref.func",
                         .{@intFromEnum(func_idx)},
@@ -2300,7 +2333,8 @@ pub fn rawValidate(
                     const elem_segment = if (elem_idx < module.elementSegments().len)
                         module.elementSegments()[elem_idx]
                     else {
-                        return diag.print(
+                        return Reader.failPrint(
+                            diag,
                             .validation,
                             "unknown element segment {} in table.init",
                             .{elem_idx},
@@ -2309,7 +2343,8 @@ pub fn rawValidate(
                     const elem_type = elem_segment.elementType();
 
                     if (elem_type != table_type) {
-                        return diag.print(
+                        return Reader.failPrint(
+                            diag,
                             .validation,
                             "type mismatch: element segment has type {t}, but table has type {t}",
                             .{ elem_type, table_type },
@@ -2331,7 +2366,8 @@ pub fn rawValidate(
                     const dst_type = try readTableIdx(&reader, module, diag);
                     const src_type = try readTableIdx(&reader, module, diag);
                     if (dst_type != src_type) {
-                        return diag.print(
+                        return Reader.failPrint(
+                            diag,
                             .validation,
                             "type mismatch: source table type {t} does not match destination " ++
                                 "table type {t}",
@@ -2369,7 +2405,8 @@ pub fn rawValidate(
             // SIMD proposal (https://github.com/WebAssembly/simd)
             .@"0xFD" => switch (opcode: {
                 if (!wasm_features.simd128) {
-                    return diag.writeAll(
+                    return Reader.fail(
+                        diag,
                         .parse,
                         "unexpected opcode: 0xFD, " ++ Reader.no_simd_message,
                     );
@@ -2816,7 +2853,7 @@ pub fn rawValidate(
     try reader.expectEnd(diag, "END opcode expected as last byte");
 
     if (ctrl_stack.items.len != 0) {
-        return diag.writeAll(.parse, "END opcode expected, but control stack was not empty");
+        return Reader.fail(diag, .parse, "END opcode expected, but control stack was not empty");
     }
 
     std.debug.assert(val_stack.len() == func_type.result_count);

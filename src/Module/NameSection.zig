@@ -178,10 +178,10 @@ pub const Name = packed struct(u48) {
         }
     };
 
-    fn parse(reader: Reader, start: [*]const u8, diag: Reader.Diagnostics) Error!Name {
+    fn parse(reader: Reader, start: [*]const u8, diag: ?*Reader.Diagnostics) Error!Name {
         const name = try reader.readName(diag);
         if (name.bytes.len > std.math.maxInt(Len)) {
-            return diag.writeAll(.implementation_limit, "name too long");
+            return Reader.fail(diag, .implementation_limit, "name too long");
         }
 
         return Name{
@@ -256,7 +256,7 @@ const Sections = struct {
         // tag = 11,
     };
 
-    fn parse(reader: Reader, buffers: *Buffers, diag: Reader.Diagnostics) Error!Sections {
+    fn parse(reader: Reader, buffers: *Buffers, diag: ?*Reader.Diagnostics) Error!Sections {
         var last: ?Id = null;
         var readers: Readers = undefined;
         var present = std.EnumSet(Id).initEmpty();
@@ -276,13 +276,15 @@ const Sections = struct {
             const id = std.enums.fromInt(Id, id_byte) orelse continue;
             if (last) |prev| {
                 if (prev == id) {
-                    return diag.print(
+                    return Reader.failPrint(
+                        diag,
                         .parse,
                         "unexpected content after last section: duplicate '{t}' section",
                         .{id},
                     );
                 } else if (@intFromEnum(id) < @intFromEnum(prev)) {
-                    return diag.print(
+                    return Reader.failPrint(
+                        diag,
                         .parse,
                         "unexpected content after last section: '{t}' was placed after {t}",
                         .{ id, prev },
@@ -311,7 +313,7 @@ pub fn parse(
     arena: *std.heap.ArenaAllocator,
     contents: []const u8,
     scratch: *std.heap.ArenaAllocator,
-    diag: Reader.Diagnostics,
+    diag: ?*Reader.Diagnostics,
     counts: struct {
         func: u32,
     },
@@ -379,7 +381,8 @@ pub fn parse(
             );
 
             if (i > 0 and @intFromEnum(func_idx.*) <= @intFromEnum(func_indices[i - 1])) {
-                return diag.print(
+                return Reader.failPrint(
+                    diag,
                     .parse,
                     "out-of-order or duplicate funcidx {d} in function name subsection",
                     .{@intFromEnum(func_idx.*)},
@@ -432,7 +435,8 @@ pub fn parse(
             );
 
             if (i > 0 and @intFromEnum(func_idx.*) <= @intFromEnum(func_indices[i - 1])) {
-                return diag.print(
+                return Reader.failPrint(
+                    diag,
                     .parse,
                     "out-of-order or duplicate funcidx {d} in local name subsection",
                     .{@intFromEnum(func_idx.*)},
@@ -452,7 +456,8 @@ pub fn parse(
                 );
                 if (last_local_idx) |prev_idx| {
                     if (@intFromEnum(local_idx) <= @intFromEnum(prev_idx)) {
-                        return diag.print(
+                        return Reader.failPrint(
+                            diag,
                             .parse,
                             "out-of-order or duplicate localidx {d} for function {d} in local " ++
                                 "name subsection",

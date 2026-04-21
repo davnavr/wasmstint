@@ -9,23 +9,25 @@ pub fn testOne(
     scratch: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
 ) !void {
-    var diagnostic_writer = std.Io.Writer.Allocating.init(allocator);
-    defer diagnostic_writer.deinit();
+    var diag_arena = std.heap.ArenaAllocator.init(allocator);
+    defer diag_arena.deinit();
 
+    var diag = wasmstint.Module.ParseDiagnostics.init(&diag_arena);
     var wasm: []const u8 = wasm_module;
     const parsed_module = wasmstint.Module.parse(
         allocator,
         &wasm,
         scratch,
-        .{ .diagnostics = .init(&diagnostic_writer.writer) },
+        .{ .diagnostics = &diag },
     ) catch |e| switch (e) {
         error.OutOfMemory => |oom| return oom,
-        error.InvalidWasm, error.MalformedWasm => std.debug.panic(
-            "module {t}: {s}",
-            .{ e, diagnostic_writer.written() },
-        ),
+        error.InvalidWasm, error.MalformedWasm => {
+            std.debug.assert(diag.message.?.len > 0);
+            std.debug.panic("module {t}: {s}", .{ e, diag.message.? });
+        },
         error.WasmImplementationLimit => {
-            std.log.warn("hit implementation limit: {s}", .{diagnostic_writer.written()});
+            std.debug.assert(diag.message.?.len > 0);
+            std.log.warn("hit implementation limit: {s}", .{diag.message.?});
             return;
         },
     };
@@ -34,15 +36,16 @@ pub fn testOne(
     const finished = parsed_module.finishCodeValidation(
         allocator,
         scratch,
-        .init(&diagnostic_writer.writer),
+        &diag,
     ) catch |e| switch (e) {
         error.OutOfMemory => |oom| return oom,
-        error.InvalidWasm, error.MalformedWasm => std.debug.panic(
-            "code {t}: {s}",
-            .{ e, diagnostic_writer.written() },
-        ),
+        error.InvalidWasm, error.MalformedWasm => {
+            std.debug.assert(diag.message.?.len > 0);
+            std.debug.panic("code {t}: {s}", .{ e, diag.message.? });
+        },
         error.WasmImplementationLimit => {
-            std.log.warn("hit implementation limit: {s}", .{diagnostic_writer.written()});
+            std.debug.assert(diag.message.?.len > 0);
+            std.log.warn("hit implementation limit: {s}", .{diag.message.?});
             return;
         },
     };

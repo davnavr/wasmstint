@@ -737,7 +737,7 @@ pub fn build(b: *Build) void {
                         .target = wasm_target,
                         .optimize = optimize,
                     }),
-                    .max_rss = byte_size.mib(242),
+                    .max_rss = byte_size.mib(256),
                 });
             }
 

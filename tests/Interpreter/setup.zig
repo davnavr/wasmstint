@@ -4,21 +4,28 @@ pub const WasmModule = struct {
     pub fn init(wasm: []const u8, scratch: *ArenaAllocator) !WasmModule {
         var reader = wasm;
 
-        var diag_buf: [256]u8 = undefined;
-        var diag_writer = std.Io.Writer.fixed(&diag_buf);
-        const diag = wasmstint.Module.ParseDiagnostics.init(&diag_writer);
-        errdefer {
-            if (diag_writer.buffered().len > 0) {
-                std.log.err("{s}", .{diag_writer.buffered()});
-            }
-        }
+        var diag_arena = ArenaAllocator.init(std.testing.allocator);
+        defer diag_arena.deinit();
 
-        const module = try wasmstint.Module.parse(testing.allocator, &reader, scratch, .{
+        var diag = wasmstint.Module.ParseDiagnostics.init(&diag_arena);
+        const module = wasmstint.Module.parse(testing.allocator, &reader, scratch, .{
             .random_seed = std.testing.random_seed,
-            .diagnostics = diag,
-        });
+            .diagnostics = &diag,
+        }) catch |e| switch (e) {
+            error.OutOfMemory => |oom| return oom,
+            else => std.debug.panic("{t}: {s}", .{ e, diag.message.? }),
+        };
         errdefer module.deinit(testing.allocator, testing.allocator);
-        try testing.expect(try module.finishCodeValidation(testing.allocator, scratch, diag));
+        const validated = module.finishCodeValidation(
+            testing.allocator,
+            scratch,
+            &diag,
+        ) catch |e| switch (e) {
+            error.OutOfMemory => |oom| return oom,
+            else => std.debug.panic("{t}: {s}", .{ e, diag.message.? }),
+        };
+
+        try testing.expect(validated);
 
         return .{ .inner = module };
     }

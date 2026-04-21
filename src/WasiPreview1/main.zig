@@ -485,8 +485,8 @@ fn realMain(init: std.process.Init.Minimal) Error!i32 {
     const rt_rng_seeds: [2]u64 = .{ @truncate(rt_rng_num), @truncate(rt_rng_num >> 64) };
 
     _ = scratch.reset(.retain_capacity);
-    var parse_diagnostics = Io.Writer.Allocating.init(arena.allocator());
-    var parse_names_diagnostics = Io.Writer.Allocating.init(arena.allocator());
+    var parse_diagnostics = wasmstint.Module.ParseDiagnostics.init(&arena);
+    var parse_names_diagnostics = wasmstint.Module.ParseDiagnostics.init(&arena);
     const parsed_module = module: {
         var wasm: []const u8 = wasm_binary.contents();
         break :module wasmstint.Module.parse(
@@ -494,10 +494,10 @@ fn realMain(init: std.process.Init.Minimal) Error!i32 {
             &wasm,
             &scratch,
             wasmstint.Module.ParseOptions{
-                .diagnostics = .init(&parse_diagnostics.writer),
+                .diagnostics = &parse_diagnostics,
                 .random_seed = rt_rng_seeds[0],
                 .parse_names = if (builtin.mode == .Debug)
-                    .{ .parse = .init(&parse_names_diagnostics.writer) }
+                    .{ .parse = &parse_names_diagnostics }
                 else
                     .parse_without_diagnostics,
             },
@@ -506,43 +506,37 @@ fn realMain(init: std.process.Init.Minimal) Error!i32 {
             error.InvalidWasm => return fail.format(
                 error.GenericError,
                 "module {s} is invalid, {s}",
-                .{ fmt_wasm_path, parse_diagnostics.written() },
+                .{ fmt_wasm_path, parse_diagnostics.message.? },
             ),
             error.MalformedWasm, error.WasmImplementationLimit => return fail.format(
                 error.GenericError,
                 "failed to parse module {s}: {s}",
-                .{ fmt_wasm_path, parse_diagnostics.written() },
+                .{ fmt_wasm_path, parse_diagnostics.message.? },
             ),
         };
     };
     _ = scratch.reset(.retain_capacity);
 
-    if (builtin.mode == .Debug and parse_names_diagnostics.written().len > 0) {
-        std.debug.print("\nmalformed name section: {s}\n", .{parse_names_diagnostics.written()});
+    if (builtin.mode == .Debug and parse_names_diagnostics.message != null) {
+        std.debug.print("\nmalformed name section: {s}\n", .{parse_names_diagnostics.message.?});
     }
 
-    std.debug.assert(parse_diagnostics.written().len == 0);
     // TODO: switch to enable lazy validation, also helper thread to validate in background
     const validation_finished = parsed_module.finishCodeValidation(
         arena.allocator(),
         &scratch,
-        .init(&parse_diagnostics.writer),
+        &parse_diagnostics,
     ) catch |e| switch (e) {
         error.OutOfMemory => oom("module code entries"),
         error.InvalidWasm => return fail.format(
             error.GenericError,
             "invalid function in module {s}, {s}",
-            .{ fmt_wasm_path, parse_diagnostics.written() },
+            .{ fmt_wasm_path, parse_diagnostics.message.? },
         ),
-        error.MalformedWasm => return fail.format(
+        error.MalformedWasm, error.WasmImplementationLimit => return fail.format(
             error.GenericError,
             "malformed function in module {s}, {s}",
-            .{ fmt_wasm_path, parse_diagnostics.written() },
-        ),
-        else => return fail.format(
-            error.GenericError,
-            "failed to parse function in module {s}: {t}",
-            .{ fmt_wasm_path, e },
+            .{ fmt_wasm_path, parse_diagnostics.message.? },
         ),
     };
     _ = scratch.reset(.retain_capacity);
