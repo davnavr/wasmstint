@@ -223,14 +223,14 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
             error.BadInput => if (arguments.@"skip-bad-input") {
                 std.log.warn("test case rejected", .{});
                 if (@errorReturnTrace()) |t| {
-                    std.debug.dumpStackTrace(t);
+                    std.debug.dumpErrorReturnTrace(t);
                 }
                 break :err;
             },
             error.OutOfMemory => if (arguments.@"skip-out-of-memory") {
                 std.log.warn("test case out-of-memory", .{});
                 if (@errorReturnTrace()) |t| {
-                    std.debug.dumpStackTrace(t);
+                    std.debug.dumpErrorReturnTrace(t);
                 }
                 break :err;
             },
