@@ -161,10 +161,7 @@ pub fn readByteTag(
 
 pub fn readUleb128(reader: Reader, comptime T: type, diag: ?*Diagnostics, desc: []const u8) Error!T {
     const max_byte_len = comptime std.math.divCeil(u16, @typeInfo(T).int.bits, 7) catch unreachable;
-    const Value = std.meta.Int(
-        .unsigned,
-        7 * max_byte_len,
-    );
+    const Value = @Int(.unsigned, 7 * max_byte_len);
 
     const suffix = " LEB128 encoded " ++ @typeName(T) ++ ": {s}";
 
@@ -258,7 +255,7 @@ pub fn readIleb128(
     desc: []const u8,
 ) Error!T {
     const max_byte_len = comptime std.math.divCeil(u16, @typeInfo(T).int.bits, 7) catch unreachable;
-    const Value = std.meta.Int(.signed, 7 * max_byte_len);
+    const Value = @Int(.signed, 7 * max_byte_len);
 
     const suffix = " LEB128 encoded " ++ @typeName(T) ++ ": {s}";
 
@@ -271,9 +268,7 @@ pub fn readIleb128(
         const byte = reader.readAssumeLength(1)[0];
 
         const shift: std.math.Log2Int(Value) = @intCast(i * 7);
-        value |= @bitCast(
-            @shlExact(@as(std.meta.Int(.unsigned, 7 * max_byte_len), byte & 0x7F), shift),
-        );
+        value |= @bitCast(@shlExact(@as(@Int(.unsigned, 7 * max_byte_len), byte & 0x7F), shift));
 
         if (byte & 0x80 == 0) {
             if (i < max_byte_len - 1 and (byte & 0x40) != 0) {

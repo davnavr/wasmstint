@@ -422,7 +422,7 @@ fn failInterpreterInterrupted(
 
 fn resultIntegerMatches(
     expected: anytype,
-    actual: std.meta.Int(.signed, @typeInfo(@TypeOf(expected)).int.bits),
+    actual: @Int(.signed, @typeInfo(@TypeOf(expected)).int.bits),
     index: usize,
     output: Output,
 ) Error!void {
@@ -474,9 +474,9 @@ pub fn resultFloatMatchesNan(
 ) Error!void {
     const print_width = @sizeOf(@TypeOf(actual)) * 2;
 
-    const Bits = std.meta.Int(.unsigned, @typeInfo(@TypeOf(actual)).float.bits);
+    const Bits = @Int(.unsigned, @typeInfo(@TypeOf(actual)).float.bits);
 
-    const PayloadInt = std.meta.Int(.unsigned, std.math.floatMantissaBits(@TypeOf(actual)));
+    const PayloadInt = @Int(.unsigned, std.math.floatMantissaBits(@TypeOf(actual)));
     const nan_payload_mask = std.math.maxInt(PayloadInt);
     const canonical_nan_payload: PayloadInt = 1 << (@bitSizeOf(PayloadInt) - 1);
 

@@ -223,7 +223,7 @@ func_import_count: u32,
 table_import_count: u32,
 mem_import_count: u32,
 
-exports: std.ArrayHashMapUnmanaged(String, ExportDesc, ExportDesc.LookupContext, true),
+exports: std.array_hash_map.Custom(String, ExportDesc, ExportDesc.LookupContext, true),
 
 code: std.MultiArrayList(Code),
 

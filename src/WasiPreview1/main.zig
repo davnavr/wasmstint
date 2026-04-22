@@ -445,7 +445,7 @@ fn realMain(init: std.process.Init.Minimal) Error!i32 {
         var forwarded = all_arguments.forwarded;
         const program_name = arena.allocator().dupe(
             u8,
-            std.fs.path.basename(arguments.module),
+            std.Io.Dir.path.basename(arguments.module),
         ) catch oom("program name");
 
         _ = forwarded.replaceAt(

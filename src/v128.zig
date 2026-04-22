@@ -33,7 +33,7 @@ pub const V128 = extern union {
     };
 
     pub fn LaneIdx(comptime size: LaneIdxSize) type {
-        return std.meta.Int(.unsigned, @intFromEnum(size));
+        return @Int(.unsigned, @intFromEnum(size));
     }
 
     pub const LaneWidth = enum(u2) {
@@ -167,7 +167,7 @@ pub const V128 = extern union {
                         switch (interp) {
                             .u8 => try writer.print(" 0x{X:0>2}", .{v}),
                             else => {
-                                const Hex = std.meta.Int(.unsigned, @bitSizeOf(LaneType));
+                                const Hex = @Int(.unsigned, @bitSizeOf(LaneType));
                                 try writer.print(
                                     " {[value]} (;0x{[hex]X:0>[width]};)",
                                     .{

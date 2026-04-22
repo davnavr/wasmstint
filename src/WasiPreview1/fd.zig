@@ -32,7 +32,7 @@ pub const Fd = packed struct(u32) {
 
 const FdTable = struct {
     // Is https://github.com/ziglang/zig/issues/17851 a concern here?
-    const Entries = std.ArrayHashMapUnmanaged(Fd, File, EntryContext, false);
+    const Entries = std.array_hash_map.Custom(Fd, File, EntryContext, false);
 
     entries: Entries,
     /// Used to generate new `Fd` numbers.

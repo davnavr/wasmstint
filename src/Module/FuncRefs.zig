@@ -1,6 +1,6 @@
 //! Tracks which functions were referenced in global and element segment initializer expressions.
 
-pub const Lookup = std.ArrayHashMapUnmanaged(FuncIdx, void, Context, false);
+pub const Lookup = std.array_hash_map.Custom(FuncIdx, void, Context, false);
 
 // Could exclude import functions from this set to save space, but current approach is simple
 lookup: Lookup,

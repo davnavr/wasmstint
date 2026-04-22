@@ -443,7 +443,7 @@ const Execution = struct {
             return result.tag.toValType() == value.valueType() and switch (result.tagged()) {
                 inline .i32, .i64 => |i, tag| @field(value, @tagName(tag)) == i,
                 inline .f32, .f64 => |z, tag| eq: {
-                    const Bits = std.meta.Int(.unsigned, @typeInfo(@TypeOf(z)).float.bits);
+                    const Bits = @Int(.unsigned, @typeInfo(@TypeOf(z)).float.bits);
                     const result_bits: Bits = @bitCast(@field(value, @tagName(tag)));
                     break :eq result_bits == @as(Bits, @bitCast(z));
                 },

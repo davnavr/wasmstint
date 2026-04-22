@@ -1103,7 +1103,7 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
 
             /// https://webassembly.github.io/spec/core/exec/numerics.html#op-iavgr
             fn avgr_u(i_1: Signed, i_2: Signed) Signed {
-                const Avgr = @Vector(lane_count, std.meta.Int(.unsigned, lane_width.toBits() + 1));
+                const Avgr = @Vector(lane_count, @Int(.unsigned, lane_width.toBits() + 1));
                 const v_1: Avgr = @as(Unsigned, @bitCast(i_1));
                 const v_2: Avgr = @as(Unsigned, @bitCast(i_2));
                 const j: Avgr = v_1 + v_2 + @as(Avgr, @splat(1));
@@ -1149,7 +1149,7 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
             var vals = Stack.Values.init(sp, &interp.stack, 1, 1);
 
             const result = V128.bitmask(vals.popTyped(&(.{.v128}))[0], lane_width);
-            const result_int: std.meta.Int(.unsigned, lane_width.count()) = @bitCast(result);
+            const result_int: @Int(.unsigned, lane_width.count()) = @bitCast(result);
             vals.assertRemainingCountIs(0);
             vals.pushTyped(&.{.i32}, .{@bitCast(@as(u32, result_int))});
 
@@ -1307,7 +1307,7 @@ fn floatOpcodeHandlers(comptime F: type) type {
         const interpretation = V128.Interpretation.fromLaneType(F);
         const Floats = interpretation.Type();
         const lane_count = interpretation.laneCount();
-        const I = std.meta.Int(.unsigned, @typeInfo(F).float.bits);
+        const I = @Int(.unsigned, @typeInfo(F).float.bits);
         const Ints = @Vector(interpretation.laneCount(), I);
 
         const operators = struct {

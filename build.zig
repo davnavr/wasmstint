@@ -306,7 +306,7 @@ pub fn build(b: *Build) void {
                     .optimize = .ReleaseFast,
                     .strip = true,
                 }),
-                .max_rss = byte_size.mib(88),
+                .max_rss = byte_size.mib(90),
             }).getEmittedLlvmIr();
 
             const target_info = info: {
@@ -319,7 +319,7 @@ pub fn build(b: *Build) void {
                         .single_threaded = true,
                         .pic = false,
                     }),
-                    .max_rss = byte_size.mib(127),
+                    .max_rss = byte_size.mib(131),
                 });
 
                 const extract_target_info = b.addRunArtifact(extract_target_info_exe);
@@ -388,7 +388,7 @@ pub fn build(b: *Build) void {
                         .single_threaded = true,
                         .pic = false,
                     }),
-                    .max_rss = byte_size.mib(128),
+                    .max_rss = byte_size.mib(130),
                 });
 
                 const intrinsic_detection = b.addRunArtifact(intrinsic_detection_exe);
@@ -497,7 +497,7 @@ pub fn build(b: *Build) void {
             }
 
             const run_tests = &b.addRunArtifact(tests).step;
-            run_tests.max_rss = byte_size.mib(25);
+            run_tests.max_rss = byte_size.mib(27);
             unit_tests_step.dependOn(run_tests);
         }
         {
@@ -519,7 +519,7 @@ pub fn build(b: *Build) void {
             }
 
             const run_tests = &b.addRunArtifact(tests).step;
-            run_tests.max_rss = byte_size.mib(25);
+            run_tests.max_rss = byte_size.mib(27);
             unit_tests_step.dependOn(run_tests);
         }
 
@@ -720,7 +720,7 @@ pub fn build(b: *Build) void {
         const bad_test_entry = "bad entry in tests directory";
         while (tests_iter.next(b.graph.io) catch @panic(bad_test_entry)) |tests_entry| {
             if (tests_entry.kind != .file or
-                !std.mem.eql(u8, ".zig", std.fs.path.extension(tests_entry.name)))
+                !std.mem.eql(u8, ".zig", std.Io.Dir.path.extension(tests_entry.name)))
             {
                 continue;
             }
@@ -1127,6 +1127,10 @@ pub fn build(b: *Build) void {
                 .max_rss = byte_size.mib(498),
                 .use_llvm = true,
                 // .use_lld = options.project.use_llvm.interpreter,
+            });
+            libfuzzer_harness_lib.root_module.addCSourceFile(.{
+                .file = b.path("fuzz/sancov.c"),
+                .flags = &.{"-std=c11"},
             });
             libfuzzer_harness_lib.sanitize_coverage_trace_pc_guard = true; // required for AFL++
             libfuzzer_harness_lib.lto = .full;

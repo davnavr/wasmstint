@@ -275,7 +275,7 @@ fn IoVecList(comptime GuestVec: type, comptime HostVec: type) type {
             list_allocator: *ListAllocator,
         ) InitIovsError!List {
             const iovs = try pointer.ConstSlice(GuestVec).init(mem, ptr, len);
-            var list = std.ArrayListUnmanaged(HostVec).empty;
+            var list = std.ArrayList(HostVec).empty;
             const allocator = list_allocator.get();
             list.ensureTotalCapacityPrecise(allocator, iovs.items.len) catch {};
             var total_len: u32 = 0;

@@ -52,7 +52,7 @@ pub const MemoryAccessOutOfBounds = struct {
         access: Access,
 
         pub const Access = packed struct {
-            address: std.meta.Int(.unsigned, @typeInfo(usize).int.bits),
+            address: @Int(.unsigned, @typeInfo(usize).int.bits),
             size: std.mem.Alignment,
             maximum: usize,
         };

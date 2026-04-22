@@ -100,7 +100,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 
     var json_dir = cwd.openDir(
         io,
-        std.fs.path.dirname(arguments.run).?,
+        std.Io.Dir.path.dirname(arguments.run).?,
         .{ .access_sub_paths = true },
     ) catch |e| {
         stderr.writeErrorPreamble();
@@ -170,7 +170,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
             error.ScriptError => {
                 if (builtin.mode == .Debug) {
                     if (@errorReturnTrace()) |trace| {
-                        std.debug.writeStackTrace(trace, stderr.terminal) catch {};
+                        std.debug.writeErrorReturnTrace(trace, stderr.terminal) catch {};
                     }
                 }
                 break 1;
@@ -208,7 +208,7 @@ fn handleJsonError(
 
             if (builtin.mode == .Debug) {
                 if (@errorReturnTrace()) |trace| {
-                    std.debug.writeStackTrace(trace, stderr.terminal) catch {};
+                    std.debug.writeErrorReturnTrace(trace, stderr.terminal) catch {};
                 }
             }
         },

@@ -179,13 +179,13 @@ fn free(mem: *MemInst) void {
 
 inline fn unexpectedError(e: anyerror) void {
     @branchHint(.cold);
-    if (std.posix.unexpected_error_tracing) {
+    if (std.options.unexpected_error_tracing) {
         var stderr_buf: [512]u8 align(16) = undefined;
         const stderr = std.debug.lockStderr(&stderr_buf).terminal();
         defer std.debug.unlockStderr();
         stderr.writer.print("unexpected error: {t}\n", .{e}) catch {};
         if (@errorReturnTrace()) |trace| {
-            std.debug.writeStackTrace(trace, stderr) catch {};
+            std.debug.writeErrorReturnTrace(trace, stderr) catch {};
         }
     }
 }

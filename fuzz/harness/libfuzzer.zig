@@ -8,11 +8,6 @@ const Status = enum(c_int) {
     _,
 };
 
-/// Defined here to avoid "undefined symbol" linker errors.
-///
-/// https://clang.llvm.org/docs/SanitizerCoverage.html#tracing-stack-depth
-pub export threadlocal var __sancov_lowest_stack: usize = 0;
-
 pub const std_options: std.Options = .{
     // https://github.com/AFLplusplus/AFLplusplus/blob/stable/docs/fuzzing_in_depth.md#k-known-limitations--areas-for-improvement
     .enable_segfault_handler = false,

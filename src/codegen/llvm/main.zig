@@ -3434,10 +3434,11 @@ fn buildGlobalOpcodeHandlers(b: *Builder) Oom!void {
         .default,
     );
     {
-        block_jmp_lookup.setLinkage(.internal, &b.module);
-        block_jmp_lookup.setUnnamedAddr(.local_unnamed_addr, &b.module);
         block_jmp_lookup.setMutability(.constant, &b.module);
-        block_jmp_lookup.ptrConst(&b.module).global.ptr(&b.module).preemption = .dso_local;
+        const block_jmp_lookup_global = block_jmp_lookup.ptrConst(&b.module).global.ptr(&b.module);
+        block_jmp_lookup_global.unnamed_addr = .local_unnamed_addr;
+        block_jmp_lookup_global.preemption = .dso_local;
+        block_jmp_lookup_global.linkage = .internal;
         const size_undef = try b.module.undefConst(i3_ty);
         var entries: [block_jmp_lookup_len]llvm.Builder.Constant = @splat(size_undef);
         const size_4 = try b.module.intConst(i3_ty, 0);
@@ -3527,10 +3528,11 @@ fn buildGlobalOpcodeHandlers(b: *Builder) Oom!void {
             try b.module.arrayType(3, .ptr),
             .default,
         );
-        block_array.setLinkage(.internal, &b.module);
-        block_array.setUnnamedAddr(.local_unnamed_addr, &b.module);
         block_array.setMutability(.constant, &b.module);
-        block_array.ptrConst(&b.module).global.ptr(&b.module).preemption = .dso_local;
+        const block_array_global = block_array.ptrConst(&b.module).global.ptr(&b.module);
+        block_array_global.unnamed_addr = .local_unnamed_addr;
+        block_array_global.preemption = .dso_local;
+        block_array_global.linkage = .internal;
 
         _ = try wip.indirectbr(
             try wip.load(

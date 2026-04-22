@@ -233,7 +233,7 @@ pub const Values = struct {
             dst.* = ty.Type();
         }
 
-        return std.meta.Tuple(&fields);
+        return @Tuple(&fields);
     }
 
     /// Pops values using `popArray` and copies them to a tuple.

@@ -199,7 +199,7 @@ pub const FuncRef = packed struct(usize) {
     pub const Tag = enum(u1) { wasm = 0, host = 1 };
 
     const high_bits_size = @bitSizeOf(*anyopaque) - @bitSizeOf(Tag);
-    const HighBits = std.meta.Int(.unsigned, high_bits_size);
+    const HighBits = @Int(.unsigned, high_bits_size);
 
     tag: Tag,
     high_bits: packed union {
@@ -214,7 +214,7 @@ pub const FuncRef = packed struct(usize) {
         pub const IdxBits = u3;
 
         idx_bits: IdxBits,
-        block_addr: std.meta.Int(.unsigned, high_bits_size - @bitSizeOf(IdxBits)),
+        block_addr: @Int(.unsigned, high_bits_size - @bitSizeOf(IdxBits)),
 
         /// Allows for a compact representation of `FuncRef`s referring to functions defined
         /// within a `ModuleInst`.

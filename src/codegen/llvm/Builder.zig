@@ -470,11 +470,12 @@ pub fn addDispatchTable(b: *Builder, name: []const u8, len: u16, options: struct
     const ty = try b.module.arrayType(len, .ptr);
     const variable = try b.module.addVariable(name_str, ty, .default);
     variable.setAlignment(.fromByteUnits(b.cache_line_size), &b.module);
-    variable.setUnnamedAddr(.local_unnamed_addr, &b.module);
     variable.setMutability(.constant, &b.module);
-    variable.setLinkage(options.linkage, &b.module);
     const global = variable.ptrConst(&b.module).global;
-    global.ptr(&b.module).preemption = .dso_local;
+    const global_ptr = global.ptr(&b.module);
+    global_ptr.unnamed_addr = .local_unnamed_addr;
+    global_ptr.preemption = .dso_local;
+    global_ptr.linkage = options.linkage;
     return global;
 }
 

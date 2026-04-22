@@ -82,10 +82,10 @@ pub inline fn readIleb128(reader: *Instr, comptime I: type) I {
         std.debug.assert(@typeInfo(I).int.signedness == .signed);
     }
 
-    const U = std.meta.Int(.unsigned, @typeInfo(I).int.bits);
+    const U = @Int(.unsigned, @typeInfo(I).int.bits);
     const max_byte_len =
         comptime std.math.divCeil(u16, @typeInfo(I).int.bits, 7) catch unreachable;
-    const Result = std.meta.Int(.unsigned, max_byte_len * 8);
+    const Result = @Int(.unsigned, max_byte_len * 8);
 
     var result: Result = 0;
     for (0..max_byte_len) |i| {
@@ -98,11 +98,7 @@ pub inline fn readIleb128(reader: *Instr, comptime I: type) I {
             if (i < max_byte_len - 1 and byte & 0x40 != 0) {
                 // value is signed, sign extension is needed
                 result |= @bitCast(
-                    std.math.shl(
-                        std.meta.Int(.signed, @typeInfo(Result).int.bits),
-                        -1,
-                        shift + 7,
-                    ),
+                    std.math.shl(@Int(.signed, @typeInfo(Result).int.bits), -1, shift + 7),
                 );
             }
 

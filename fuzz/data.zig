@@ -115,7 +115,7 @@ pub const Input = extern struct {
     }
 
     pub fn floatFromBits(input: *Input, comptime T: type) T {
-        const Int = std.meta.Int(.unsigned, @typeInfo(T).float.bits);
+        const Int = @Int(.unsigned, @typeInfo(T).float.bits);
         return @bitCast(input.int(Int));
     }
 };

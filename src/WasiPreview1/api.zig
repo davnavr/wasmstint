@@ -147,7 +147,7 @@ pub const Api = enum {
             dst.* = ValTypeType(ty);
         }
 
-        return std.meta.Tuple(&field_types);
+        return @Tuple(&field_types);
     }
 
     pub fn taggedValuesToParamTuple(

@@ -39,7 +39,7 @@ pub const Value = extern union {
 
     pub fn formatBytes(value: *const Value, writer: *Writer) Writer.Error!void {
         const bytes: *align(@alignOf(Value)) const [@sizeOf(Value)]u8 = std.mem.asBytes(value);
-        var tuple: std.meta.Tuple(&(.{u8} ** bytes.len)) = undefined;
+        var tuple: @Tuple(&(.{u8} ** bytes.len)) = undefined;
         inline for (bytes, 0..) |src, i| tuple[i] = src;
         try writer.print(
             ("{X:0>2}" ** 4) ++ ((" " ++ ("{X:0>2}" ** 4)) ** (@divExact(bytes.len, 4) - 1)),
@@ -128,7 +128,7 @@ pub const TaggedValue = union(enum) {
             const value = self.value;
             switch (value.*) {
                 inline .i32, .i64 => |i, tag| {
-                    const Unsigned = std.meta.Int(.unsigned, @typeInfo(@TypeOf(i)).int.bits);
+                    const Unsigned = @Int(.unsigned, @typeInfo(@TypeOf(i)).int.bits);
                     const u: Unsigned = @bitCast(i);
 
                     try writer.writeAll("(" ++ @tagName(tag));
@@ -157,12 +157,7 @@ pub const TaggedValue = union(enum) {
                     if (self.options.float.hex) {
                         try writer.print(
                             " (; 0x{X} ;)",
-                            .{
-                                @as(
-                                    std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(z))),
-                                    @bitCast(z),
-                                ),
-                            },
+                            .{@as(@Int(.unsigned, @bitSizeOf(@TypeOf(z))), @bitCast(z))},
                         );
                     }
                     try writer.writeByte(')');

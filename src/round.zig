@@ -20,8 +20,8 @@ pub fn operations(comptime F: type) type {
         const vector_len = if (is_vector) @typeInfo(F).vector.len else 1;
 
         const bit_width = @typeInfo(Scalar).float.bits;
-        const SignedInt = std.meta.Int(.signed, bit_width);
-        const BitInt = std.meta.Int(.unsigned, bit_width);
+        const SignedInt = @Int(.signed, bit_width);
+        const BitInt = @Int(.unsigned, bit_width);
         const ExponentInt = std.math.FloatRepr(Scalar).Exponent;
 
         const canonical_nan_bit_pattern: BitInt = 1 << (std.math.floatMantissaBits(Scalar) - 1);
@@ -147,7 +147,7 @@ pub fn operations(comptime F: type) type {
                             @Vector(vector_len, CandidateInt),
                             away_from_0_as_int: {
                                 @setRuntimeSafety(false);
-                                break :away_from_0_as_int @intFromFloat(int_away_from_0);
+                                break :away_from_0_as_int @trunc(int_away_from_0);
                             },
                         ),
                         splat(CandidateInt, 2),

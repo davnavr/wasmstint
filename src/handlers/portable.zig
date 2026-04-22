@@ -547,7 +547,7 @@ fn narrowingLinearMemoryStore(
 ) OpcodeHandler {
     return struct {
         const T = field.Type();
-        const S = std.meta.Int(.signed, access_size.toByteUnits() * 8);
+        const S = @Int(.signed, access_size.toByteUnits() * 8);
 
         comptime {
             std.debug.assert(std.meta.hasUniqueRepresentation(S));
@@ -773,7 +773,7 @@ pub fn trapIntegerOperation(e: error{ Overflow, DivisionByZero, NotANumber }) Tr
 
 fn integerOpcodeHandlers(comptime Signed: type) type {
     return struct {
-        const Unsigned = std.meta.Int(.unsigned, @typeInfo(Signed).int.bits);
+        const Unsigned = @Int(.unsigned, @typeInfo(Signed).int.bits);
         const value_field = @field(Value.Tag, @typeName(Signed));
 
         const operators = struct {
@@ -927,10 +927,7 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
                 else
                     std.math.cast(
                         Signed,
-                        @as(
-                            std.meta.Int(.signed, @typeInfo(Signed).int.bits + 1),
-                            @intFromFloat(tr),
-                        ),
+                        @as(@Int(.signed, @typeInfo(Signed).int.bits + 1), @trunc(tr)),
                     ) orelse error.Overflow;
             }
 
@@ -944,13 +941,7 @@ fn integerOpcodeHandlers(comptime Signed: type) type {
                     @bitCast(
                         std.math.cast(
                             Unsigned,
-                            @as(
-                                std.meta.Int(
-                                    .unsigned,
-                                    @typeInfo(Signed).int.bits + 1,
-                                ),
-                                @intFromFloat(tr),
-                            ),
+                            @as(@Int(.unsigned, @typeInfo(Signed).int.bits + 1), @trunc(tr)),
                         ) orelse return error.Overflow,
                     );
             }
@@ -1076,7 +1067,7 @@ fn floatOpcodeHandlers(comptime F: type) type {
 
             fn convert_u(i: anytype) !F {
                 comptime std.debug.assert(@typeInfo(@TypeOf(i)).int.signedness == .signed);
-                const Unsigned = std.meta.Int(.unsigned, @typeInfo(@TypeOf(i)).int.bits);
+                const Unsigned = @Int(.unsigned, @typeInfo(@TypeOf(i)).int.bits);
                 return @floatFromInt(@as(Unsigned, @bitCast(i)));
             }
 
@@ -1112,7 +1103,7 @@ fn floatOpcodeHandlers(comptime F: type) type {
 
             /// https://webassembly.github.io/spec/core/exec/numerics.html#op-fneg
             fn neg(z: F) F {
-                // const Int = std.meta.Int(.unsigned, @bitSizeOf(F));
+                // const Int = @Int(.unsigned, @bitSizeOf(F));
                 // return @bitCast(@as(Int, @bitCast(z)) ^ std.math.minInt(Int));
                 return -z;
             }
@@ -1189,7 +1180,7 @@ fn floatOpcodeHandlers(comptime F: type) type {
             var vals = Stack.Values.init(sp, &interp.stack, 0, 1);
 
             const z = std.mem.readInt(
-                std.meta.Int(.unsigned, @bitSizeOf(F)),
+                @Int(.unsigned, @bitSizeOf(F)),
                 instr.readByteArray(@sizeOf(F)),
                 .little,
             );

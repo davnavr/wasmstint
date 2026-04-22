@@ -13,7 +13,7 @@ info: packed struct(usize) {
 const PageAllocation = @This();
 
 /// LLVM disallows objects with size overflowing `isize` anyways.
-const Len = std.meta.Int(.unsigned, @typeInfo(usize).int.bits - 1);
+const Len = @Int(.unsigned, @typeInfo(usize).int.bits - 1);
 
 // const has_mremap = posix.MREMAP != void;
 

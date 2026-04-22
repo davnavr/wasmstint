@@ -456,7 +456,7 @@ pub const Export = packed struct(u64) {
         fn PackedIdx(comptime Idx: type) type {
             return packed struct(u31) {
                 idx: Idx,
-                padding: std.meta.Int(.unsigned, 31 - @bitSizeOf(Idx)) = 0,
+                padding: @Int(.unsigned, 31 - @bitSizeOf(Idx)) = 0,
             };
         }
     };
