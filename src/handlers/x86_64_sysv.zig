@@ -31,8 +31,8 @@ comptime {
     const ModuleInner = @typeInfo(@FieldType(Module, "inner")).pointer.child;
     std.debug.assert(@offsetOf(ModuleInner, "types") == 0);
     std.debug.assert(@offsetOf(ModuleInner, "global_types") == 80);
-    std.debug.assert(@offsetOf(ModuleInner, "datas_ptrs") == 232);
-    std.debug.assert(@offsetOf(ModuleInner, "datas_lens") == 240);
+    std.debug.assert(@offsetOf(ModuleInner, "datas_ptrs") == 224);
+    std.debug.assert(@offsetOf(ModuleInner, "datas_lens") == 232);
     std.debug.assert(@offsetOf(runtime.ModuleInst.Header, "tables") == 40);
     std.debug.assert(@offsetOf(runtime.ModuleInst.Header, "globals") == 48);
     std.debug.assert(@offsetOf(runtime.ModuleInst.Header, "datas_drop_mask") == 56);

@@ -49,6 +49,9 @@ const Module = @This();
 //
 // Slices are also manually split into length and ptr fields to shave a few bytes
 // off the size.
+//
+// Deleting or reordering fields requires updating the code generation for the x86-64 assembly
+// and LLVM IR interpreter backends.
 const RawInner = extern struct {
     types: [*]const FuncType,
     types_count: u32,
@@ -88,12 +91,11 @@ const RawInner = extern struct {
     table_imports: [*]const ImportName,
     mem_imports: [*]const ImportName,
     global_imports: [*]const ImportName,
-
     export_section: [*]const u8,
-    exports: [*]const Export,
-    export_count: u32,
+
     init_max_stack: u16,
     has_data_count_section: bool,
+    // vacant [5]u8
 
     elem_section: [*]const u8,
     elems: [*]const ElemSegment,
@@ -124,7 +126,8 @@ const RawInner = extern struct {
 const Inner = struct {
     raw: RawInner,
     wasm: []const u8,
-    // export_lookups: Export.Lookups,
+    exports: Export.Lookup,
+    exports_hash_seed: u64,
     arena: ArenaAllocator.State,
     runtime_shape: @import("runtime.zig").ModuleInst.Shape,
     /// Set of functions that are allowed to be used with `ref.func` in function bodies.
@@ -253,7 +256,27 @@ pub inline fn elementSegments(module: Module) []const ElemSegment {
 }
 
 pub inline fn exports(module: Module) []const Export {
-    return module.inner.exports[0..module.inner.export_count];
+    return module.inner.parent().exports.keys();
+}
+
+fn hashExportName(seed: u64, name: []const u8) u32 {
+    return @truncate(std.hash.Wyhash.hash(seed, name));
+}
+
+pub inline fn findExport(module: Module, name: []const u8) ?Export {
+    const LookupContext = struct {
+        module: Module,
+
+        pub fn eql(ctx: @This(), a: []const u8, b: Export, _: usize) bool {
+            return std.mem.eql(u8, a, b.name(ctx.module).bytes());
+        }
+
+        pub fn hash(ctx: @This(), n: []const u8) u32 {
+            return hashExportName(ctx.module.inner.parent().exports_hash_seed, n);
+        }
+    };
+
+    return module.inner.parent().exports.getKeyAdapted(name, LookupContext{ .module = module });
 }
 
 pub const Start = packed struct(u32) {
@@ -441,17 +464,23 @@ pub const ImportName = struct {
 
 const FuncRefs = @import("Module/FuncRefs.zig");
 
-pub const Export = packed struct(u64) {
+pub const Export = packed struct(u63) {
     desc: Desc,
-    desc_tag: std.meta.FieldEnum(Desc),
-    name_size: u15,
+    desc_tag: Desc.Tag,
+    name_size: u14,
     name_offset: u16,
+
+    // Could store name bits in key, but since `Desc.Tag` is two bits and `Desc` is 31, then
+    // value would be 33 bits, which would negate any space savings.
+    const Lookup = std.array_hash_map.Custom(Export, void, void, true);
 
     pub const Desc = packed union {
         func: PackedIdx(FuncIdx),
         table: PackedIdx(TableIdx),
         mem: PackedIdx(MemIdx),
         global: PackedIdx(GlobalIdx),
+
+        pub const Tag = std.meta.FieldEnum(Desc);
 
         fn PackedIdx(comptime Idx: type) type {
             return packed struct(u31) {
@@ -461,14 +490,15 @@ pub const Export = packed struct(u64) {
         }
     };
 
-    pub inline fn name(self: Export, module: Module) Module.Name {
-        const name_slice = WasmSlice{ .offset = self.name_offset, .size = self.name_size };
-        const bytes = name_slice.slice(module.inner.export_section, module.wasmBytes());
+    fn nameWithinSection(ex: Export, export_section: [*]const u8, wasm: []const u8) Module.Name {
+        const name_slice = WasmSlice{ .offset = ex.name_offset, .size = ex.name_size };
+        const bytes = name_slice.slice(export_section, wasm);
         return .init(bytes);
     }
 
-    // /// Numeric identifier referring to an `Export`.
-    // pub const Id = enum(u32) { _ };
+    pub inline fn name(ex: Export, module: Module) Module.Name {
+        return ex.nameWithinSection(module.inner.export_section, module.wasmBytes());
+    }
 
     pub const DescIdx = t: {
         const src_fields = @typeInfo(Desc).@"union".fields;
@@ -493,22 +523,15 @@ pub const Export = packed struct(u64) {
         );
     };
 
-    pub fn descIdx(self: Export) DescIdx {
-        return switch (self.desc_tag) {
+    pub fn descIdx(ex: Export) DescIdx {
+        return switch (ex.desc_tag) {
             inline else => |tag| @unionInit(
                 DescIdx,
                 @tagName(tag),
-                @field(self.desc, @tagName(tag)).idx,
+                @field(ex.desc, @tagName(tag)).idx,
             ),
         };
     }
-
-    // pub const Lookups = struct {
-    // descs: std.hash_map.HashMapUnmanaged(void, void, DoThingWithExportKey, std.hash_map.default_max_load_percentage),
-    // ^ module_inst findExport() should search this first
-    // names: std.hash_map.HashMapUnmanaged(void, LinkedListToIds, DoThingWithDescIdx, std.hash_map.default_max_load_percentage),
-    // ^ maybe struct { SinglyLinkedList.Node, Export (actually smaller on 32-bit with *const Export) }
-    // };
 };
 
 pub const Limits = extern struct {
@@ -1127,8 +1150,7 @@ pub fn parse(
         try calc.reserve(MemType, @max(@min(1, counts.mem), counts.mem));
         try calc.reserve(GlobalType, counts.global);
         try calc.reserve(ConstExpr, counts.global);
-        // try allocator.reserve(u16, counts.global); // global_value_offsets
-        try calc.reserve(Export, counts.@"export");
+        // Can't guess how many bytes for `Export.Lookup` for large number of exports
         try calc.reserve(
             u32,
             std.math.divCeil(u32, @intCast(counts.elem), 32) catch unreachable,
@@ -1197,21 +1219,24 @@ pub fn parse(
             &init_max_stack,
         );
     };
-    // const global_value_offsets = try module.alloc.allocator().alloc(u16, counts.global);
 
-    const export_sec = exports: {
+    var export_sec = exports: {
         errdefer wasm.* = sections.known.@"export";
         break :exports try parseExportSec(
             &import_sec.types,
-            &module.alloc,
+            gpa,
             counts.@"export",
             &sections.readers,
             options.random_seed,
             &func_refs,
-            &scratch,
+            original_wasm,
             diag,
         );
     };
+    errdefer {
+        export_sec.lookup.unlockPointers();
+        export_sec.lookup.deinit(gpa);
+    }
 
     const custom_sections = try module.alloc.allocator().dupe(
         CustomSection,
@@ -1318,10 +1343,8 @@ pub fn parse(
             .table_imports = import_sec.names.tables.ptr,
             .mem_imports = import_sec.names.mems.ptr,
             .global_imports = import_sec.names.globals.ptr,
-
             .export_section = export_sec.start,
-            .exports = export_sec.descs.ptr,
-            .export_count = @intCast(export_sec.descs.len),
+
             .init_max_stack = init_max_stack,
             .has_data_count_section = has_data_count_section,
 
@@ -1343,6 +1366,8 @@ pub fn parse(
         },
         .arena = module_arena.state,
         .wasm = original_wasm,
+        .exports = export_sec.lookup,
+        .exports_hash_seed = options.random_seed,
         .runtime_shape = undefined,
         .func_refs = func_refs_finished,
     };
@@ -1776,58 +1801,54 @@ fn parseGlobalSec(
 
 const ExportSec = struct {
     start: [*]const u8,
-    descs: []const Export,
+    lookup: Export.Lookup,
 };
 
 fn parseExportSec(
     import_types: *const ImportSec.Types,
-    arena: *ArenaFallbackAllocator,
+    gpa: Allocator,
     count: u32,
     readers: *const Sections.Readers,
-    rng_seed: u64,
+    hasher_seed: u64,
     func_refs: *FuncRefs,
-    scratch: *ArenaAllocator,
+    wasm: []const u8,
     diag: ?*ParseDiagnostics,
 ) ParseError!ExportSec {
     const export_reader: Reader = readers.@"export";
 
-    const ExportDedupContext = struct {
+    const LookupContext = struct {
         seed: u64,
+        exports_start: [*]const u8,
+        wasm: []const u8,
 
-        pub fn eql(_: @This(), a: []const u8, b: []const u8) bool {
-            return std.mem.eql(u8, a, b);
+        pub fn eql(ctx: @This(), a: []const u8, b: Export, _: usize) bool {
+            return std.mem.eql(u8, a, b.nameWithinSection(ctx.exports_start, ctx.wasm).bytes());
         }
 
-        pub fn hash(ctx: @This(), name: []const u8) u64 {
-            return std.hash.Wyhash.hash(ctx.seed, name);
+        pub fn hash(ctx: @This(), name: []const u8) u32 {
+            return hashExportName(ctx.seed, name);
         }
     };
 
-    const descs = try arena.allocator().alloc(Export, count);
-
-    var export_dedup = std.HashMapUnmanaged(
-        []const u8,
-        void,
-        ExportDedupContext,
-        std.hash_map.default_max_load_percentage,
-    ).empty;
-
-    const export_dedup_context = ExportDedupContext{ .seed = rng_seed };
-
-    _ = scratch.reset(.retain_capacity);
-    try export_dedup.ensureTotalCapacityContext(scratch.allocator(), count, export_dedup_context);
-    defer _ = scratch.reset(.retain_capacity);
+    var lookup = Export.Lookup.empty;
+    errdefer lookup.deinit(gpa);
+    try lookup.entries.setCapacity(gpa, count);
+    try lookup.ensureTotalCapacity(gpa, count); // allows allocating header for large # of exports
 
     const exports_start = export_reader.bytes.*.ptr;
-    for (descs) |*ex| {
+    const lookup_context = LookupContext{
+        .seed = hasher_seed,
+        .exports_start = exports_start,
+        .wasm = wasm,
+    };
+    for (0..count) |_| {
         if (export_reader.isEmpty()) {
             return Reader.fail(diag, .parse, "length out of bounds, expected export");
         }
 
         const name = try export_reader.readName(diag);
-        if (export_dedup.getOrPutAssumeCapacityContext(name.bytes, export_dedup_context)
-            .found_existing)
-        {
+        const entry = lookup.getOrPutAssumeCapacityAdapted(name.bytes, lookup_context);
+        if (entry.found_existing) {
             return Reader.failPrint(diag, .validation, "duplicate export name {f}", .{
                 Name.init(name.bytes),
             });
@@ -1835,8 +1856,8 @@ fn parseExportSec(
 
         const tag = try export_reader.readByteTag(ImportExportDesc, diag, "export tag");
 
-        ex.* = Export{
-            .name_size = std.math.cast(u15, name.bytes.len) orelse
+        entry.key_ptr.* = Export{
+            .name_size = std.math.cast(u14, name.bytes.len) orelse
                 return Reader.fail(diag, .implementation_limit, "too many exports"),
             .name_offset = std.math.cast(
                 u16,
@@ -1896,7 +1917,8 @@ fn parseExportSec(
 
     try export_reader.expectEnd(diag, "'export' section size mismatch");
     readers.@"export".bytes.* = undefined;
-    return .{ .start = exports_start, .descs = descs };
+    lookup.lockPointers();
+    return ExportSec{ .start = exports_start, .lookup = lookup };
 }
 
 const ElemSec = struct {
@@ -2362,10 +2384,10 @@ pub fn finishCodeValidation(
 }
 
 pub fn deinitLeakCodeEntries(module: Module, gpa: Allocator) void {
-    (ArenaAllocator{
-        .child_allocator = gpa,
-        .state = module.inner.parent().arena,
-    }).deinit();
+    const parent: *Inner = @fieldParentPtr("raw", @constCast(module.inner));
+    parent.exports.unlockPointers();
+    parent.exports.deinit(gpa);
+    parent.arena.promote(gpa).deinit();
 }
 
 pub fn deinitWithContext(

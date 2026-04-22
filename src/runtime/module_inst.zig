@@ -277,7 +277,7 @@ pub const ModuleInst = extern struct {
         return inst.inner; // might become &inst.inner.header in the future
     }
 
-    fn exportVal(inst: ModuleInst, exp: *const Module.Export) ExternVal {
+    fn exportVal(inst: ModuleInst, exp: Module.Export) ExternVal {
         const instance = inst.header();
         return switch (exp.desc_tag) {
             .func => .{ .func = inst.inner.funcRef(exp.desc.func.idx) },
@@ -295,13 +295,10 @@ pub const ModuleInst = extern struct {
     pub fn findExport(inst: ModuleInst, name: []const u8) FindExportError!ExternVal {
         const instance = inst.header();
 
-        for (instance.module.exports()) |*exp| {
-            if (std.mem.eql(u8, name, exp.name(instance.module).bytes())) {
-                return inst.exportVal(exp);
-            }
-        }
-
-        return error.ExportNotFound;
+        return if (instance.module.findExport(name)) |exp|
+            inst.exportVal(exp)
+        else
+            error.ExportNotFound;
     }
 
     // pub fn findExportNames(inst: ModuleInst, idx: Module.Export.DescIdx) []const Module.Export.Id {}
@@ -324,7 +321,7 @@ pub const ModuleInst = extern struct {
             /// Retrieves the module's *i*th exported value.
             pub fn at(list: List, i: usize) Export {
                 const module = list.inst.header().module;
-                const exp = &module.exports()[i];
+                const exp = module.exports()[i];
                 return Export{
                     .val = list.inst.exportVal(exp),
                     .name = exp.name(module),

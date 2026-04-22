@@ -2641,8 +2641,8 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter) void {
             .module = Gpr.module,
             .module_info_off = 8,
             .module_datas_drop_mask_off = 56,
-            .info_datas_ptrs_off = 232, // Assumes offset of RawInner in Module.Inner is 0
-            .info_datas_lens_off = 240, // Assumes offset of RawInner in Module.Inner is 0
+            .info_datas_ptrs_off = 224, // Assumes offset of RawInner in Module.Inner is 0
+            .info_datas_lens_off = 232, // Assumes offset of RawInner in Module.Inner is 0
             .size_field_off = 8,
             .vsp = Gpr.vsp,
             .oob = oob,

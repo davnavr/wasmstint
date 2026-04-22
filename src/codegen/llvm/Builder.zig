@@ -290,8 +290,6 @@ pub fn init(
         .ptr, // mem_imports
         .ptr, // global_imports
         .ptr, // export_section
-        .ptr, // exports
-        .i32, // export_count
         .i16, // init_max_stack
         .i8, // has_data_count_section
         .ptr, // elem_section
