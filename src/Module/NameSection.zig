@@ -336,15 +336,29 @@ pub fn parse(
         break :name Name.Optional.init(name);
     } else Name.Optional.none;
 
-    const func_count = if (sections.present.contains(.function))
+    const func_count: u32 = if (sections.present.contains(.function))
         try sections.readers.function.readUleb128(u32, diag, "function name count")
     else
         0;
 
-    const local_count = if (sections.present.contains(.local))
+    if (func_count > counts.func) {
+        // Prevents OOMs
+        return Reader.failPrint(diag, .parse, "too many function names, expected {d}, got {d}", .{
+            counts.func,
+            func_count,
+        });
+    }
+
+    const local_count: u32 = if (sections.present.contains(.local))
         try sections.readers.local.readUleb128(u32, diag, "local name map count")
     else
         0;
+
+    const max_locals = @as(u64, func_count) * std.math.maxInt(u17);
+    if (local_count > max_locals) {
+        // Prevents OOMs
+        return Reader.fail(diag, .parse, "too many local names");
+    }
 
     var main_layout = allocators.Reservation{};
     try main_layout.reserve(NameSection, 1);
