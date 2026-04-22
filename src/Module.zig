@@ -1830,6 +1830,10 @@ fn parseExportSec(
         }
     };
 
+    if (count > std.math.maxInt(u15)) {
+        return Reader.fail(diag, .implementation_limit, "too many exports");
+    }
+
     var lookup = Export.Lookup.empty;
     errdefer lookup.deinit(gpa);
     try lookup.entries.setCapacity(gpa, count);
