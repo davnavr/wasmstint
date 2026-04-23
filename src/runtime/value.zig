@@ -64,6 +64,7 @@ pub const FuncInst = extern struct {
     payload: packed struct(u32) {
         tag: Tag,
         wasm: Module.FuncIdx,
+        padding: enum(u10) { padding = 0 } = .padding,
     },
 
     pub const Tag = enum(u1) { wasm = 0, host = 1 };

@@ -270,7 +270,7 @@ inline fn valTypeToVal(val_type: ValType) Val {
 }
 
 const BlockType = union(enum) {
-    type: packed struct(u32) {
+    type: packed struct {
         results_only: bool = false,
         idx: Module.TypeIdx,
     },

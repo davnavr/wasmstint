@@ -1,7 +1,11 @@
 pub const ValType = @import("Module/val_type.zig").ValType;
 pub const FuncType = @import("Module/func_type.zig").FuncType;
 
-pub const TypeIdx = enum(u31) {
+fn enumMaxValue(comptime E: type) @typeInfo(E).@"enum".tag_type {
+    return std.math.maxInt(@typeInfo(E).@"enum".tag_type);
+}
+
+pub const TypeIdx = enum(u21) {
     _,
 
     pub fn funcType(idx: TypeIdx, module: Module) *const FuncType {
@@ -9,7 +13,7 @@ pub const TypeIdx = enum(u31) {
     }
 };
 
-pub const FuncIdx = enum(u31) {
+pub const FuncIdx = enum(u21) {
     _,
 
     pub inline fn signature(idx: FuncIdx, module: Module) *const FuncType {
@@ -24,7 +28,9 @@ pub const FuncIdx = enum(u31) {
     }
 };
 
-pub const GlobalIdx = enum(u31) { _ };
+pub const GlobalIdx = enum(u21) {
+    _,
+};
 
 // A 7-bit index allows parsing a byte instead of a LEB128 index.
 pub const TableIdx = enum(u7) {
@@ -280,8 +286,9 @@ pub inline fn findExport(module: Module, name: []const u8) ?Export {
 }
 
 pub const Start = packed struct(u32) {
-    exists: bool = false,
-    idx: FuncIdx = undefined,
+    exists: bool,
+    idx: FuncIdx,
+    padding: enum(u10) { padding = 0 } = .padding,
 
     pub const none = Start{ .exists = false, .idx = @enumFromInt(0) };
 
@@ -1115,11 +1122,19 @@ pub fn parse(
 
     const counts = try Sections.Counts.parse(&sections.readers, diag);
 
-    if (counts.elem > std.math.maxInt(@typeInfo(ElemIdx).@"enum".tag_type)) {
+    if (counts.type > enumMaxValue(TypeIdx)) {
+        return Reader.fail(diag, .implementation_limit, "too many types");
+    }
+
+    if (counts.import > max_import_count) {
+        return Reader.fail(diag, .implementation_limit, "too many imports");
+    }
+
+    if (counts.elem > enumMaxValue(ElemIdx)) {
         return Reader.fail(diag, .implementation_limit, "too many element element segments");
     }
 
-    if (counts.data > std.math.maxInt(@typeInfo(DataIdx).@"enum".tag_type)) {
+    if (counts.data > enumMaxValue(DataIdx)) {
         return Reader.fail(diag, .implementation_limit, "too many data segments");
     }
 
@@ -1135,6 +1150,8 @@ pub fn parse(
         try calc.reserve(FuncType, counts.type);
         try calc.reserve(ValType, sections.readers.type.bytes.len -| counts.type);
         try calc.reserve(ImportName, counts.import);
+
+        // TODO: Consider removing this estimate
         // Assume most imports are functions
         const func_estimate: u32 = counts.func +| (counts.import / 2);
         try calc.reserve(*const FuncType, func_estimate);
@@ -1146,6 +1163,7 @@ pub fn parse(
                 @typeInfo(std.DynamicBitSetUnmanaged.MaskInt).int.bits,
             ) catch unreachable,
         );
+
         try calc.reserve(TableType, @max(@min(1, counts.import), counts.table));
         try calc.reserve(MemType, @max(@min(1, counts.mem), counts.mem));
         try calc.reserve(GlobalType, counts.global);
@@ -1172,7 +1190,12 @@ pub fn parse(
 
     const type_sec = types: {
         errdefer wasm.* = sections.known.type;
-        break :types try parseTypeSec(&module.alloc, counts.type, &sections.readers, diag);
+        break :types try parseTypeSec(
+            &module.alloc,
+            @intCast(counts.type),
+            &sections.readers,
+            diag,
+        );
     };
 
     var scratch = ArenaAllocator.init(alloca.allocator());
@@ -1379,7 +1402,7 @@ pub fn parse(
 
 fn parseTypeSec(
     arena: *ArenaFallbackAllocator,
-    count: u32,
+    count: @typeInfo(TypeIdx).@"enum".tag_type,
     readers: *const Sections.Readers,
     diag: ?*ParseDiagnostics,
 ) ![]const FuncType {
@@ -1475,6 +1498,8 @@ const ImportSec = struct {
     };
 };
 
+const max_import_count = 1_000_000;
+
 fn parseImportSec(
     arena: *ArenaFallbackAllocator,
     type_sec: []const FuncType,
@@ -1512,6 +1537,7 @@ fn parseImportSec(
 
     _ = scratch.reset(.retain_capacity);
 
+    std.debug.assert(counts.import <= max_import_count);
     for (0..counts.import) |_| {
         if (import_reader.isEmpty()) {
             return Reader.fail(
@@ -1545,27 +1571,43 @@ fn parseImportSec(
         }).* = import_name;
 
         switch (tag) {
-            .func => try import_types.funcs.append(
-                scratch.allocator(),
-                try import_reader.readIdx(
+            .func => {
+                if (import_types.funcs.items.len == enumMaxValue(FuncIdx)) {
+                    return Reader.fail(diag, .implementation_limit, "too many functions");
+                }
+
+                const type_idx = try import_reader.readIdx(
                     TypeIdx,
                     type_sec.len,
                     diag,
                     &.{ "type", "for function import" },
-                ),
-            ),
-            .table => try import_types.tables.append(
-                scratch.allocator(),
-                try TableType.parse(import_reader, diag),
-            ),
-            .mem => try import_types.mems.append(
-                scratch.allocator(),
-                try MemType.parse(import_reader, diag),
-            ),
-            .global => try import_types.globals.append(
-                scratch.allocator(),
-                try GlobalType.parse(import_reader, diag),
-            ),
+                );
+                try import_types.funcs.append(scratch.allocator(), type_idx);
+            },
+            .table => {
+                if (import_types.tables.items.len == enumMaxValue(TableIdx)) {
+                    return Reader.fail(diag, .implementation_limit, "too many tables");
+                }
+
+                const table_type = try TableType.parse(import_reader, diag);
+                try import_types.tables.append(scratch.allocator(), table_type);
+            },
+            .mem => {
+                if (import_types.mems.items.len == enumMaxValue(MemIdx)) {
+                    return Reader.fail(diag, .implementation_limit, "too many memories");
+                }
+
+                const mem_type = try MemType.parse(import_reader, diag);
+                try import_types.mems.append(scratch.allocator(), mem_type);
+            },
+            .global => {
+                if (import_types.globals.items.len == enumMaxValue(GlobalIdx)) {
+                    return Reader.fail(diag, .implementation_limit, "too many globals");
+                }
+
+                const global_type = try GlobalType.parse(import_reader, diag);
+                try import_types.globals.append(scratch.allocator(), global_type);
+            },
         }
     }
 
@@ -1652,8 +1694,8 @@ fn parseFuncSec(
     const func_reader = readers.func;
     const func_types = import_types.funcs;
 
-    if (func_types.len > std.math.maxInt(@typeInfo(FuncIdx).@"enum".tag_type)) {
-        return Reader.fail(diag, .implementation_limit, "too many funcs");
+    if (func_types.len > enumMaxValue(FuncIdx)) {
+        return Reader.fail(diag, .implementation_limit, "too many functions");
     }
 
     for (func_types[func_types.len - count ..], 0..count) |*func_ty, _| {
@@ -1679,7 +1721,7 @@ fn parseTableSec(
     const table_reader = readers.table;
     const table_types = import_types.tables;
 
-    if (table_types.len > std.math.maxInt(@typeInfo(TableIdx).@"enum".tag_type)) {
+    if (table_types.len > enumMaxValue(TableIdx)) {
         return Reader.fail(diag, .implementation_limit, "too many tables");
     }
 
@@ -1708,11 +1750,9 @@ fn parseMemSec(
     const mem_reader = readers.mem;
     const mem_types = import_types.mems;
 
-    if (mem_types.len > std.math.maxInt(@typeInfo(MemIdx).@"enum".tag_type)) {
+    if (mem_types.len > enumMaxValue(MemIdx)) {
         return Reader.fail(diag, .implementation_limit, "too many memories");
     }
-
-    // check std.math.maxInt(@typeInfo(MemIdx).@"enum".tag_type)
 
     for (import_types.mems[import_types.mems.len - count ..], 0..count) |*mem, _| {
         if (mem_reader.isEmpty()) {
@@ -1761,7 +1801,7 @@ fn parseGlobalSec(
 
     const global_exprs = try arena.allocator().alloc(GlobalExpr, count);
 
-    if (global_types.len > std.math.maxInt(@typeInfo(GlobalIdx).@"enum".tag_type)) {
+    if (global_types.len > enumMaxValue(GlobalIdx)) {
         return Reader.fail(diag, .implementation_limit, "too many globals");
     }
 
@@ -2425,7 +2465,6 @@ pub fn deinit(module: Module, module_allocator: Allocator, code_allocator: Alloc
 }
 
 const std = @import("std");
-const Type = std.builtin.Type;
 const Writer = std.Io.Writer;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
