@@ -2,7 +2,6 @@
 
 pub const LimitedAllocator = @import("allocators/LimitedAllocator.zig");
 pub const Reservation = @import("allocators/Reservation.zig");
-pub const ArenaFallbackAllocator = @import("allocators/ArenaFallbackAllocator.zig");
 pub const virtual_memory = @import("allocators/virtual_memory.zig");
 pub const PageAllocation = @import("allocators/PageAllocation.zig");
 
@@ -22,7 +21,6 @@ pub fn allocBytes(
 
 test {
     _ = LimitedAllocator;
-    _ = ArenaFallbackAllocator;
     _ = virtual_memory;
     _ = PageAllocation;
 }

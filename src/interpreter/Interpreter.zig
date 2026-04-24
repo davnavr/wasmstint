@@ -553,18 +553,16 @@ pub const State = union(Tag) {
                 try interp.stack.reserveFrame(&interp.stack_top, alloca, .preallocated, start);
             }
 
-            errdefer unreachable;
+            const const_expr_buf = try interp.stack.allocateScratchSpace(
+                &interp.stack_top,
+                alloca,
+                module.requiring_instantiation.inner.module.inner.init_max_stack,
+            );
+
+            errdefer unreachable; // should be comptime
 
             var instantiation_error: instantiation.SetupError = undefined;
-            instantiation.setupModule(
-                module,
-                &instantiation_error,
-                try interp.stack.allocateScratchSpace(
-                    &interp.stack_top,
-                    alloca,
-                    module.requiring_instantiation.inner.module.inner.init_max_stack,
-                ),
-            ) catch {
+            instantiation.setupModule(module, &instantiation_error, const_expr_buf) catch {
                 const trap = switch (instantiation_error) {
                     inline else => |info, tag| Trap.init(@field(Trap.Code, @tagName(tag)), info),
                 };

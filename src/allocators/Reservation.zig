@@ -61,45 +61,8 @@ pub inline fn bufferAllocator(
     backing_allocator: Allocator,
 ) Oom!FixedBufferAllocator {
     return FixedBufferAllocator.init(
-        try allocators.allocBytes(
-            backing_allocator,
-            reservation.size,
-            reservation.alignment,
-        ),
+        try allocators.allocBytes(backing_allocator, reservation.size, reservation.alignment),
     );
-}
-
-pub fn arenaFallbackAllocator(
-    reservation: Reservation,
-    arena: *ArenaAllocator,
-) Oom!ArenaFallbackAllocator {
-    return .{
-        .buffer = try reservation.bufferAllocator(arena.allocator()),
-        .arena = arena,
-    };
-}
-
-pub fn arenaFallbackAllocatorWithHeaderAligned(
-    reservation: Reservation,
-    arena: *ArenaAllocator,
-    comptime Header: type,
-    comptime header_alignment: Alignment,
-) Oom!struct {
-    inner: *align(header_alignment.toByteUnits()) Header,
-    alloc: ArenaFallbackAllocator,
-} {
-    var new_reservation = Reservation{ .size = @sizeOf(Header), .alignment = header_alignment };
-    try new_reservation.append(reservation);
-
-    const buffer = try new_reservation.bufferAllocator(arena.allocator());
-
-    errdefer comptime unreachable;
-
-    var allocator = ArenaFallbackAllocator{ .buffer = buffer, .arena = arena };
-    const inner = allocator.buffer.allocator().alignedAlloc(Header, header_alignment, 1) catch
-        unreachable;
-
-    return .{ .inner = &inner[0], .alloc = allocator };
 }
 
 const std = @import("std");
@@ -109,4 +72,3 @@ const Oom = Allocator.Error;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const FixedBufferAllocator = std.heap.FixedBufferAllocator;
 const allocators = @import("../allocators.zig");
-const ArenaFallbackAllocator = @import("ArenaFallbackAllocator.zig");

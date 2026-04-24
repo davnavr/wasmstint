@@ -71,11 +71,11 @@ fn nonConstOpcode(
 
 pub fn parse(
     reader: Reader,
+    module: Module,
+    /// First byte of the section containing the constant expression.
     base: [*]const u8,
     expected_type: ValType,
     func_count: u32,
-    /// Should refer to global imports only.
-    global_types: []const Module.GlobalType,
     func_refs: *FuncRefs,
     diag: ?*Reader.Diagnostics,
     desc: []const u8,
@@ -85,6 +85,8 @@ pub fn parse(
     var val_stack = std.ArrayList(ValType).empty;
     var max_stack: u16 = 0;
     var instr_count: u16 = 0;
+
+    const global_types = module.globalImportTypes();
 
     const expr_ptr = reader.bytes.ptr;
     std.debug.assert(expr_ptr - base <= std.math.maxInt(u32));
@@ -121,22 +123,14 @@ pub fn parse(
             },
             .@"ref.func" => {
                 try val_stack.append(scratch.allocator(), .funcref);
-                const func_idx = try reader.readIdx(
-                    Module.FuncIdx,
-                    func_count,
-                    diag,
-                    &.{ "function", desc },
-                );
+                const func_idx = try reader
+                    .readIdx(Module.FuncIdx, func_count, diag, &.{ "function", desc });
 
                 try func_refs.insert(func_idx);
             },
             .@"global.get" => {
-                const global_idx = try reader.readIdx(
-                    Module.GlobalIdx,
-                    global_types.len,
-                    diag,
-                    &.{ "global", desc },
-                );
+                const global_idx = try reader
+                    .readIdx(Module.GlobalIdx, global_types.len, diag, &.{ "global", desc });
 
                 const global_type: *const Module.GlobalType =
                     &global_types[@intFromEnum(global_idx)];

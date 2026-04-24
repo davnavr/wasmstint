@@ -15,7 +15,8 @@ pub const Code = extern struct {
     pub const Entry = extern struct {
         /// The contents of the WASM function body, including its local variable declarations.
         ///
-        /// The offset is relative to the first byte of the `Module`'s *code* section.
+        /// The offset is relative to the first byte of the `Module`'s *code* section after the
+        /// count.
         ///
         /// This field must never be mutated.
         contents: Module.WasmSlice,
