@@ -454,7 +454,7 @@ fn defineCallOpcodeHandlers(as: *AsmWriter) void {
             .vsp = Gpr.vsp,
             .module = Gpr.module,
             .module_info_off = 8,
-            .info_types_off = 0, // Assumes offset of RawInner in Module.Inner is 0
+            .info_types_off = 0,
             .module_tables_off = 40,
             .table_len_off = 12,
             .oob = oob,
@@ -675,7 +675,7 @@ fn defineGlobalOpcodeHandlers(as: *AsmWriter) void {
             .module = Gpr.module,
             .module_info_off = 8,
             .module_globals_off = 48,
-            .info_types_off = 80, // Assumes offset of RawInner in Module.Inner is 0
+            .info_types_off = 8,
             .global_type_size = 2,
             .jump_table = jump_table,
         });
@@ -755,7 +755,7 @@ fn defineGlobalOpcodeHandlers(as: *AsmWriter) void {
             .module = Gpr.module,
             .module_info_off = 8,
             .module_globals_off = 48,
-            .info_types_off = 80, // Assumes offset of RawInner in Module.Inner is 0
+            .info_types_off = 8,
             .global_type_size = 2,
             .jump_table = jump_table,
         });
@@ -2641,8 +2641,8 @@ fn defineBulkMemoryOpcodeHandlers(as: *AsmWriter) void {
             .module = Gpr.module,
             .module_info_off = 8,
             .module_datas_drop_mask_off = 56,
-            .info_datas_ptrs_off = 224, // Assumes offset of RawInner in Module.Inner is 0
-            .info_datas_lens_off = 232, // Assumes offset of RawInner in Module.Inner is 0
+            .info_datas_ptrs_off = 16,
+            .info_datas_lens_off = 24,
             .size_field_off = 8,
             .vsp = Gpr.vsp,
             .oob = oob,
