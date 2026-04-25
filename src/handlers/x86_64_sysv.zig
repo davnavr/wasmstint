@@ -27,22 +27,32 @@ pub const OpcodeHandler = fn () callconv(.naked) Transition;
 const sysvcc = std.builtin.CallingConvention{ .x86_64_sysv = .{} };
 
 comptime {
-    // TODO: Move these checks to generated Zig
-    const ModuleInner = @typeInfo(@FieldType(Module, "inner")).pointer.child;
-    std.debug.assert(@offsetOf(ModuleInner, "types") == 0);
-    std.debug.assert(@offsetOf(ModuleInner, "global_types") == 8);
-    std.debug.assert(@offsetOf(ModuleInner, "datas_ptrs") == 16);
-    std.debug.assert(@offsetOf(ModuleInner, "datas_lens") == 24);
-    std.debug.assert(@offsetOf(runtime.ModuleInst.Header, "tables") == 40);
-    std.debug.assert(@offsetOf(runtime.ModuleInst.Header, "globals") == 48);
-    std.debug.assert(@offsetOf(runtime.ModuleInst.Header, "datas_drop_mask") == 56);
-    std.debug.assert(@offsetOf(runtime.ModuleInst.Header, "elems_drop_mask") == 64);
+    // TODO: How to keep this check in sync with ASM code?
     std.debug.assert(@sizeOf(Module.GlobalType) == 2);
-    std.debug.assert(@offsetOf(Module.GlobalType, "val_type") == 0);
-    std.debug.assert(@offsetOf(runtime.TableInst, "base") == 0);
-    std.debug.assert(@offsetOf(runtime.TableInst, "len") == 12);
-    std.debug.assert(@offsetOf(runtime.TableInst, "capacity") == 16);
-    std.debug.assert(@offsetOf(runtime.TableInst, "limit") == 20);
+
+    for (@typeInfo(offsets).@"struct".decls) |decl| {
+        const spec: type = @field(offsets, decl.name);
+
+        const T = switch (spec) {
+            offsets.module_inst => runtime.ModuleInst.Header,
+            offsets.module => @typeInfo(@FieldType(Module, "inner")).pointer.child,
+            offsets.mem_inst => runtime.MemInst,
+            offsets.table_inst => runtime.TableInst,
+            offsets.global_type => Module.GlobalType,
+            else => @compileError("type for " ++ decl.name),
+        };
+
+        for (@typeInfo(spec).@"struct".decls) |offset_decl| {
+            const expected: comptime_int = @field(spec, offset_decl.name);
+            const actual = @offsetOf(T, offset_decl.name);
+            if (expected != actual) {
+                @compileError(std.fmt.comptimePrint(
+                    "expected offset {d} for field {s} in {s}, but got {d}",
+                    .{ expected, offset_decl.name, @typeName(T), actual },
+                ));
+            }
+        }
+    }
 }
 
 const symbol_prefix = @import("options").symbol_prefix;
@@ -1081,6 +1091,7 @@ comptime {
 const std = @import("std");
 const builtin = @import("builtin");
 const opcodes = @import("opcodes");
+const offsets = @import("offsets");
 const wasm_features = @import("wasm_features");
 
 const wasmstint = @import("wasmstint");

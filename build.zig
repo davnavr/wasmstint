@@ -271,6 +271,10 @@ pub fn build(b: *Build) void {
                 .wasm_features = wasm_features,
             };
 
+            const offsets_module = b.createModule(.{
+                .root_source_file = b.path("src/codegen/x86_64/offsets.zig"),
+            });
+
             const codegen_exe = b.addExecutable(.{
                 .name = "wasmstint-codegen-x86_64_sysv",
                 .root_module = b.createModule(.{
@@ -283,18 +287,19 @@ pub fn build(b: *Build) void {
                 }),
                 .max_rss = byte_size.mib(184),
             });
-            codegen_exe.root_module.addImport("opcodes", opcodes_module);
-            codegen_exe.root_module.addImport("enum_set", enum_set_module);
+            for (&[3]struct { []const u8, *Build.Module }{
+                .{ "opcodes", opcodes_module },
+                .{ "enum_set", enum_set_module },
+                .{ "offsets", offsets_module },
+            }) |info| {
+                codegen_exe.root_module.addImport(info.@"0", info.@"1");
+            }
 
             const run_codegen = b.addRunArtifact(codegen_exe);
             run_codegen.step.max_rss = byte_size.mib(3);
             run_codegen.addArg(stringifyZon(b, options, 512));
             handlers_module.addAssemblyFile(run_codegen.addOutputFileArg("x86_64_sysv.s"));
-            // root_module.addAnonymousImport("asm_generated", .{
-            //     .root_source_file = run_codegen.addOutputFileArg("x86_64_sys_decls.zig"),
-            //     .target = options.target,
-            //     .optimize = options.optimize_interpreter,
-            // });
+            handlers_module.addImport("offsets", offsets_module);
 
             module_options.addOption([]const u8, "symbol_prefix", symbol_prefix);
         } else if (interpreter_backend == .@"llvm-ir") {
