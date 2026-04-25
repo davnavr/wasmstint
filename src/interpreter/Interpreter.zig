@@ -556,7 +556,7 @@ pub const State = union(Tag) {
             const const_expr_buf = try interp.stack.allocateScratchSpace(
                 &interp.stack_top,
                 alloca,
-                module.requiring_instantiation.inner.module.inner.init_max_stack,
+                module.requiring_instantiation.inner.module.inner.parent().init_max_stack,
             );
 
             errdefer unreachable; // should be comptime

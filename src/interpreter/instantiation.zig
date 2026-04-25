@@ -13,13 +13,13 @@ pub fn setupModule(
     const module_inst = module.requiring_instantiation.header();
     const wasm = module_inst.module;
 
-    std.debug.assert(const_expr_buf.len <= wasm.inner.init_max_stack);
+    std.debug.assert(const_expr_buf.len <= wasm.inner.parent().init_max_stack);
 
     // TODO: Fuel check against `wasm.init_fuel`, error.InsufficientFuel
 
-    const global_types = wasm.globalTypes()[wasm.inner.global_import_count..];
+    const global_types = wasm.globalTypes()[wasm.inner.parent().global_import_count..];
     for (
-        wasm.inner.global_exprs[0..global_types.len],
+        wasm.inner.parent().global_exprs[0..global_types.len],
         module_inst.definedGlobalValues(),
         global_types,
     ) |*init_expr, global_value, *global_type| {
@@ -38,7 +38,9 @@ pub fn setupModule(
         }
     }
 
-    for (wasm.inner.active_elems[0..wasm.inner.active_elems_count]) |*active_elem| {
+    for (
+        wasm.inner.parent().active_elems[0..wasm.inner.parent().active_elems_count],
+    ) |*active_elem| {
         const offset: u32 = @bitCast(@as(
             i32,
             const_eval.calculate(
@@ -72,7 +74,9 @@ pub fn setupModule(
         module_inst.elemSegmentDropFlag(active_elem.elements).drop();
     }
 
-    for (wasm.inner.active_datas[0..wasm.inner.active_datas_count]) |*active_data| {
+    for (
+        wasm.inner.parent().active_datas[0..wasm.inner.parent().active_datas_count],
+    ) |*active_data| {
         const mem = module_inst.memAddr(active_data.memory);
 
         const offset: u32 = @bitCast(@as(

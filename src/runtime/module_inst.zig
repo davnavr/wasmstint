@@ -40,18 +40,24 @@ pub const ModuleInst = extern struct {
                 .fromByteUnits(@sizeOf(FuncRef.Wasm.Block)),
                 Header.funcBlockCount(module),
             );
-            try size.reserve(FuncRef, info.func_import_count);
-            try size.reserve(*TableInst, info.table_count);
-            try size.reserve(*MemInst, info.mem_count);
-            try size.reserve(*anyopaque, info.global_count);
+            try size.reserve(FuncRef, info.parent().func_import_count);
+            try size.reserve(*TableInst, info.parent().table_count);
+            try size.reserve(*MemInst, info.parent().mem_count);
+            try size.reserve(*anyopaque, info.parent().global_count);
 
-            try size.reserve(u32, std.math.divCeil(u32, info.datas_count, 32) catch unreachable);
-            try size.reserve(u32, std.math.divCeil(u32, info.elems_count, 32) catch unreachable);
+            try size.reserve(
+                u32,
+                std.math.divCeil(u32, info.parent().datas_count, 32) catch unreachable,
+            );
+            try size.reserve(
+                u32,
+                std.math.divCeil(u32, info.parent().elems_count, 32) catch unreachable,
+            );
 
             try size.reserve(u64, module.globalInitializers().len);
 
             // More efficient packing of global values is possible
-            const defined_global_types = module.globalTypes()[info.global_import_count..];
+            const defined_global_types = module.globalTypes()[info.parent().global_import_count..];
             for (defined_global_types) |*global_type| {
                 switch (global_type.val_type) {
                     inline else => |ty| try size.reserve(GlobalAddr.Pointee(ty), 1),
@@ -93,7 +99,7 @@ pub const ModuleInst = extern struct {
             return std.math.divCeil(
                 u32,
                 @as(u32, @intCast(module.inner.parent().func_refs.count())) -
-                    module.inner.func_import_count,
+                    module.inner.parent().func_import_count,
                 FuncRef.Wasm.Block.funcs_per_block,
             ) catch unreachable;
         }
@@ -110,7 +116,7 @@ pub const ModuleInst = extern struct {
             idx: Module.FuncIdx,
         ) FuncInst {
             const i: u32 = @intFromEnum(idx);
-            const import_count = inst.module.inner.func_import_count;
+            const import_count = inst.module.inner.parent().func_import_count;
             std.debug.assert(i < inst.module.funcCount());
             return if (i < import_count)
                 inst.func_imports[i].funcInst()
@@ -123,7 +129,7 @@ pub const ModuleInst = extern struct {
         pub fn funcRef(inst: *const Header, idx: Module.FuncIdx) FuncRef {
             const idx_as_int: u32 = @intFromEnum(idx);
             const wasm_module = inst.module.inner;
-            const import_count = wasm_module.func_import_count;
+            const import_count = wasm_module.parent().func_import_count;
             std.debug.assert(idx_as_int < inst.module.funcCount());
             if (idx_as_int < import_count) {
                 return inst.func_imports[idx_as_int];
@@ -161,18 +167,18 @@ pub const ModuleInst = extern struct {
         }
 
         pub fn startFuncInst(inst: *align(std.atomic.cache_line) const Header) ?FuncInst {
-            return if (inst.module.inner.start.get()) |start_idx|
+            return if (inst.module.inner.parent().start.get()) |start_idx|
                 inst.funcInst(start_idx)
             else
                 null;
         }
 
         pub inline fn tableInsts(inst: *const Header) []const *TableInst {
-            return inst.tables[0..inst.module.inner.table_count];
+            return inst.tables[0..inst.module.inner.parent().table_count];
         }
 
         pub inline fn definedTableInsts(inst: *const Header) []const *TableInst {
-            return inst.tableInsts()[inst.module.inner.table_import_count..];
+            return inst.tableInsts()[inst.module.inner.parent().table_import_count..];
         }
 
         /// Internal API.
@@ -181,11 +187,11 @@ pub const ModuleInst = extern struct {
         }
 
         pub inline fn memInsts(inst: *const Header) []const *MemInst {
-            return inst.mems[0..inst.module.inner.mem_count];
+            return inst.mems[0..inst.module.inner.parent().mem_count];
         }
 
         pub inline fn definedMemInsts(inst: *const Header) []const *MemInst {
-            return inst.memInsts()[inst.module.inner.mem_import_count..];
+            return inst.memInsts()[inst.module.inner.parent().mem_import_count..];
         }
 
         /// Internal API.
@@ -194,11 +200,11 @@ pub const ModuleInst = extern struct {
         }
 
         pub inline fn globalValues(inst: *const Header) []const *anyopaque {
-            return inst.globals[0..inst.module.inner.global_count];
+            return inst.globals[0..inst.module.inner.parent().global_count];
         }
 
         pub inline fn definedGlobalValues(inst: *const Header) []const *anyopaque {
-            return inst.globalValues()[inst.module.inner.global_import_count..];
+            return inst.globalValues()[inst.module.inner.parent().global_import_count..];
         }
 
         pub fn globalAddr(inst: *const Header, idx: Module.GlobalIdx) GlobalAddr {
@@ -239,8 +245,11 @@ pub const ModuleInst = extern struct {
         };
 
         pub fn dataSegmentDropFlag(inst: *const Header, idx: Module.DataIdx) DropFlag {
-            const drop_mask_len = std.math.divCeil(u32, inst.module.inner.datas_count, 32) catch
-                unreachable;
+            const drop_mask_len = std.math.divCeil(
+                u32,
+                inst.module.inner.parent().datas_count,
+                32,
+            ) catch unreachable;
 
             return DropFlag.init(inst.datas_drop_mask[0..drop_mask_len], @intFromEnum(idx));
         }
@@ -252,8 +261,11 @@ pub const ModuleInst = extern struct {
         }
 
         pub fn elemSegmentDropFlag(inst: *const Header, idx: Module.ElemIdx) DropFlag {
-            const drop_mask_len = std.math.divCeil(u32, inst.module.inner.elems_count, 32) catch
-                unreachable;
+            const drop_mask_len = std.math.divCeil(
+                u32,
+                inst.module.inner.parent().elems_count,
+                32,
+            ) catch unreachable;
 
             return DropFlag.init(inst.elems_drop_mask[0..drop_mask_len], @intFromEnum(idx));
         }
