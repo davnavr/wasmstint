@@ -261,50 +261,7 @@ pub fn init(
         .ptr,
     });
     b.side_table_entry = try b.module.structType(.@"packed", &.{ .i32, .i16, .i8, .i8 });
-    b.module_info = try b.module.structType(.normal, &.{
-        .ptr, // types
-        .i32, // types_count
-        .i32, // custom_sections_count
-        .ptr, // custom_sections
-        .ptr, // func_types
-        .i32, // func_import_count
-        .i32, // code_count
-        .ptr, // code_section
-        .ptr, // code_entries
-        .ptr, // code
-        .ptr, // global_section
-        .ptr, // global_exprs
-        .ptr, // global_types
-        .ptr, // table_types
-        .ptr, // mem_types
-        .i32, // start
-        .i8, // table_count
-        .i8, // table_import_count
-        .i8, // mem_count
-        .i8, // mem_import_count
-        .i32, // global_count
-        .i32, // global_import_count
-        .ptr, // import_section
-        .ptr, // func_imports
-        .ptr, // table_imports
-        .ptr, // mem_imports
-        .ptr, // global_imports
-        .ptr, // export_section
-        .i16, // init_max_stack
-        .i8, // has_data_count_section
-        .ptr, // elem_section
-        .ptr, // elems
-        .ptr, // active_elems
-        .ptr, // non_declarative_elems_mask
-        .i16, // elems_count
-        .i16, // active_elems_count
-        .i16, // active_datas_count
-        .i16, // datas_count
-        .ptr, // data_section
-        .ptr, // datas_ptrs
-        .ptr, // datas_lens
-        .ptr, // active_datas
-    });
+    b.module_info = try b.module.structType(.normal, &@as([4]Type, @splat(.ptr)));
     b.module_inst = try b.module.structType(.normal, &.{
         b.size_type, // buffer_len
         .ptr, // module
