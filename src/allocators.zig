@@ -13,10 +13,14 @@ pub fn allocBytes(
     size: usize,
     alignment: std.mem.Alignment,
 ) Allocator.Error![]u8 {
-    const base = allocator.rawAlloc(size, alignment, @returnAddress()) orelse
-        return error.OutOfMemory;
+    if (size == 0) {
+        return @as([*]u8, @ptrFromInt(alignment.backward(std.math.maxInt(usize))))[0..0];
+    } else {
+        const base = allocator.rawAlloc(size, alignment, @returnAddress()) orelse
+            return error.OutOfMemory;
 
-    return base[0..size];
+        return base[0..size];
+    }
 }
 
 test {
