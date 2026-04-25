@@ -1449,7 +1449,7 @@ fn parseImportSec(
 
         switch (tag) {
             .func => {
-                if (import_types.funcs.items.len == enumMaxValue(FuncIdx)) {
+                if (import_types.funcs.items.len + counts.func >= enumMaxValue(FuncIdx)) {
                     return Reader.fail(diag, .implementation_limit, "too many functions");
                 }
 
@@ -1460,10 +1460,13 @@ fn parseImportSec(
                     diag,
                     &.{ "type", "for function import" },
                 );
-                try import_types.funcs.append(scratch.allocator(), &type_sec[@intFromEnum(type_idx)]);
+                try import_types.funcs.append(
+                    scratch.allocator(),
+                    &type_sec[@intFromEnum(type_idx)],
+                );
             },
             .table => {
-                if (import_types.tables.items.len == enumMaxValue(TableIdx)) {
+                if (import_types.tables.items.len + counts.table >= enumMaxValue(TableIdx)) {
                     return Reader.fail(diag, .implementation_limit, "too many tables");
                 }
 
@@ -1471,7 +1474,7 @@ fn parseImportSec(
                 try import_types.tables.append(scratch.allocator(), table_type);
             },
             .mem => {
-                if (@as(usize, counts.mem) + import_types.mems.items.len > 1) {
+                if (import_types.mems.items.len + counts.mem >= 1) {
                     return Reader.fail(diag, .validation, multi_memory_not_supported);
                 }
 
@@ -1482,7 +1485,7 @@ fn parseImportSec(
                 try import_types.mems.append(scratch.allocator(), mem_type);
             },
             .global => {
-                if (import_types.globals.items.len == enumMaxValue(GlobalIdx)) {
+                if (import_types.globals.items.len + counts.global >= enumMaxValue(GlobalIdx)) {
                     return Reader.fail(diag, .implementation_limit, "too many globals");
                 }
 
