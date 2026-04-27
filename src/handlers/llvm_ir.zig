@@ -3,6 +3,40 @@
 /// Opcode handlers may use a calling convention not supported in Zig.
 pub const OpcodeHandler = fn () callconv(.naked) Transition;
 
+comptime {
+    // TODO: How to keep this check in sync with LLVM IR code?
+    std.debug.assert(@sizeOf(Module.GlobalType) == 2);
+    std.debug.assert(@offsetOf(Module.GlobalType, "val_type") == 0);
+
+    for (@typeInfo(structs.fields).@"struct".decls) |decl| {
+        const Field: type = @field(structs.fields, decl.name);
+        const Type = switch (Field) {
+            structs.fields.ModuleInst => runtime.ModuleInst.Header,
+            structs.fields.Module => @typeInfo(@FieldType(Module, "inner")).pointer.child,
+            structs.fields.MemInst => runtime.MemInst,
+            structs.fields.TableInst => runtime.TableInst,
+            structs.fields.SideTableEntry => Module.Code.SideTableEntry.Inner,
+            else => @compileError("type for " ++ decl.name),
+        };
+
+        const expected_fields = std.enums.values(Field);
+        const actual_fields = @typeInfo(Type).@"struct".fields;
+
+        if (actual_fields.len < expected_fields.len) {
+            @compileError(std.fmt.comptimePrint("expected at least {d} fields for {s}, got {d}", .{
+                expected_fields.len,
+                @typeName(Type),
+                actual_fields.len,
+            }));
+        }
+
+        for (expected_fields, actual_fields[0..expected_fields.len]) |expected, actual| {
+            const expected_type: structs.FieldType = Field.typeOf(expected);
+            expected_type.assertMatchesType(actual.type);
+        }
+    }
+}
+
 const symbol_prefix = @import("options").symbol_prefix;
 
 /// Sets up a stack frame for the assembly opcode handler, before invoking it.
@@ -867,6 +901,7 @@ const builtin = @import("builtin");
 const opcodes = @import("opcodes");
 const wasm_features = @import("wasm_features");
 const detected_intrinsics = @import("detected_intrinsics");
+const structs = @import("structs");
 
 const wasmstint = @import("wasmstint");
 const Module = wasmstint.Module;

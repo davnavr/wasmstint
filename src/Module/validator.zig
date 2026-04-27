@@ -66,6 +66,8 @@ pub const Code = extern struct {
             padding: enum(u31) { padding } = .padding,
         } = .{},
 
+        pub const Inner = SideTableEntryInner;
+
         fn init(inner: SideTableEntryInner, origin: u32) DebugSideTableEntry {
             return .{ .inner = inner, .origin = origin };
         }
@@ -73,6 +75,8 @@ pub const Code = extern struct {
 
     const ReleaseSideTableEntry = packed struct(u64) {
         inner: SideTableEntryInner,
+
+        pub const Inner = SideTableEntryInner;
 
         fn init(inner: SideTableEntryInner, origin: u32) ReleaseSideTableEntry {
             _ = origin;

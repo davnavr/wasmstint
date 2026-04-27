@@ -124,53 +124,6 @@ pub fn jmpToNextHandler(
     );
 }
 
-pub const ModuleInstField = enum(u4) {
-    buffer_len,
-    module,
-    func_imports,
-    func_blocks,
-    mems,
-    tables,
-    globals,
-    datas_drop_mask,
-    elems_drop_mask,
-
-    /// Obtains a `ptr` to a field within the `ModuleInst`.
-    pub fn gep(field: ModuleInstField, wip: *WipFunction, b: *const Builder) Oom!Value {
-        return try wip.gepStruct(
-            b.module_inst,
-            OpcodeHandlerParam.module.arg(wip),
-            @intFromEnum(field),
-            @tagName(field),
-        );
-    }
-
-    pub fn typeOf(field: ModuleInstField, b: *const Builder) Type {
-        return switch (field) {
-            .buffer_len => b.size_type,
-            .module,
-            .func_imports,
-            .func_blocks,
-            .mems,
-            .tables,
-            .globals,
-            .datas_drop_mask,
-            .elems_drop_mask,
-            => .ptr,
-        };
-    }
-
-    pub fn load(field: ModuleInstField, wip: *WipFunction, b: *const Builder) Oom!Value {
-        return try wip.load(
-            .normal,
-            field.typeOf(b),
-            try field.gep(wip, b),
-            .default,
-            @tagName(field),
-        );
-    }
-};
-
 /// Cursor of `wip` should be in the same basic block as the call to the helper function
 /// that produced the `wasm_frame`.
 pub fn jmpToHostOrNextHandler(
@@ -222,11 +175,12 @@ pub fn jmpToHostOrNextHandler(
         .memories = try handler.wip.load(
             .normal,
             .ptr,
-            try handler.wip.gepStruct(
+            try fields.gepField(
+                field_enums.ModuleInst.mems,
+                &handler.wip,
+                b,
                 b.module_inst,
                 new_module,
-                @intFromEnum(ModuleInstField.mems),
-                "",
             ),
             .default,
             "mems",
@@ -399,7 +353,7 @@ pub fn tableInstPtr(handler: *OpcodeHandler, b: *Builder, table_idx: Value) Oom!
     const table_ptr_ptr = try wip.gep(
         .inbounds,
         .ptr,
-        try ModuleInstField.tables.load(wip, b),
+        try fields.module_inst.load(.tables, wip, b),
         &.{table_idx},
         "",
     );
@@ -412,39 +366,6 @@ pub const LinearMemoryAccess = struct {
     ptr: Value,
     /// Refers to the first byte after the `memarg`
     vip: Value,
-};
-
-pub const MemInstField = enum(u8) {
-    base,
-    size,
-    capacity,
-    limit,
-    vtable,
-
-    /// Obtains a `ptr` to a field of a `ptr` to a `MemInst`.
-    pub fn gep(field: MemInstField, wip: *WipFunction, b: *Builder, ptr: Value) Oom!Value {
-        std.debug.assert(ptr.typeOfWip(wip) == .ptr);
-        const field_ptr = try wip.gep(
-            .inbounds,
-            b.mem_inst,
-            ptr,
-            &.{ .@"0", try b.module.intValue(.i32, @intFromEnum(field)) },
-            "",
-        );
-        return field_ptr;
-    }
-
-    pub fn typeOf(field: MemInstField, b: *const Builder) Type {
-        return switch (field) {
-            .base, .vtable => .ptr,
-            .size, .capacity, .limit => b.size_type,
-        };
-    }
-
-    /// Loads a field given a `ptr` to a `MemInst`.
-    pub fn load(field: MemInstField, wip: *WipFunction, b: *Builder, ptr: Value) Oom!Value {
-        return try wip.load(.normal, field.typeOf(b), try field.gep(wip, b, ptr), .default, "");
-    }
 };
 
 /// Assumes that the `memarg` is located at `OpcodeHandlerParam.vip`
@@ -500,7 +421,7 @@ pub fn linearMemoryAccess(
         "",
     );
     const oob = try wip.block(1, "MemoryAccessOob");
-    const mem_size = try MemInstField.size.load(wip, b, mem_inst_ptr);
+    const mem_size = try fields.mem_inst.load(.size, wip, b, mem_inst_ptr);
     _ = try wip.brCond(
         try wip.icmp(
             .ule,
@@ -557,44 +478,13 @@ pub fn linearMemoryAccess(
     const final_ptr = try wip.gep(
         .inbounds,
         .i8,
-        try MemInstField.base.load(wip, b, mem_inst_ptr),
+        try fields.mem_inst.load(.base, wip, b, mem_inst_ptr),
         &.{final_offset},
         "",
     );
     std.debug.assert(final_ptr.typeOfWip(wip) == .ptr);
     return .{ .ptr = final_ptr, .vip = vip_after_offset };
 }
-
-pub const SideTableEntryField = enum(u2) {
-    delta_ip,
-    delta_stp,
-    copy_count,
-    pop_count,
-
-    pub fn typeOf(field: SideTableEntryField) Type {
-        return switch (field) {
-            .delta_ip => .i32,
-            .delta_stp => .i16,
-            .copy_count, .pop_count => .i8,
-        };
-    }
-
-    pub fn load(
-        field: SideTableEntryField,
-        handler: *OpcodeHandler,
-        b: *Builder,
-        stp: Value,
-    ) Oom!Value {
-        const field_idx = try b.module.intValue(.i32, @intFromEnum(field));
-        return try handler.wip.load(
-            .normal,
-            field.typeOf(),
-            try handler.wip.gep(.inbounds, b.side_table_entry, stp, &.{ .@"0", field_idx }, ""),
-            .default,
-            "",
-        );
-    }
-};
 
 const TakeBranch = struct {
     vip: Value,
@@ -612,8 +502,8 @@ pub fn takeBranch(handler: *OpcodeHandler, b: *Builder, info: struct {
     const wip = &handler.wip;
     const stp = if (info.stp == .none) OpcodeHandlerParam.stp.arg(wip) else info.stp;
 
-    const delta_ip = try SideTableEntryField.delta_ip.load(handler, b, stp);
-    const copy_count_in_values = try SideTableEntryField.copy_count.load(handler, b, stp);
+    const delta_ip = try fields.side_table_entry.load(.delta_ip, wip, b, stp);
+    const copy_count_in_values = try fields.side_table_entry.load(.copy_count, wip, b, stp);
     const copy_count_in_values_ext = try wip.cast(
         .zext,
         copy_count_in_values,
@@ -622,11 +512,11 @@ pub fn takeBranch(handler: *OpcodeHandler, b: *Builder, info: struct {
     );
     const pop_count_in_values = try wip.cast(
         .zext,
-        try SideTableEntryField.pop_count.load(handler, b, stp),
+        try fields.side_table_entry.load(.pop_count, wip, b, stp),
         b.size_type,
         "pop_count",
     );
-    const delta_stp = try SideTableEntryField.delta_stp.load(handler, b, stp);
+    const delta_stp = try fields.side_table_entry.load(.delta_stp, wip, b, stp);
 
     // These GEPs must perform signed subtraction
     const new_vip = try wip.gep(.inbounds, .i8, info.branch_ip, &.{delta_ip}, "");
@@ -687,6 +577,8 @@ const Builder = @import("Builder.zig");
 const value_stack_alignment = Builder.value_stack_alignment;
 const Opcode = @import("opcode.zig").Opcode;
 const OpcodeHandlerParam = @import("opcode_handler_param.zig").OpcodeHandlerParam;
+const fields = @import("fields.zig");
+const field_enums = @import("structs").fields;
 
 const Type = llvm.Builder.Type;
 const Value = llvm.Builder.Value;

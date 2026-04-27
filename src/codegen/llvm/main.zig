@@ -128,75 +128,6 @@ pub fn main(init: std.process.Init.Minimal) Oom!void {
 const byte_alignment = llvm.Builder.Alignment.fromByteUnits(1);
 const value_stack_alignment = Builder.value_stack_alignment;
 
-const TableInstField = enum {
-    base,
-    elem_type,
-    len,
-    capacity,
-    limit,
-
-    fn gep(field: TableInstField, wip: *WipFunction, b: *Builder, table: Value) Oom!Value {
-        std.debug.assert(table.typeOfWip(wip) == .ptr);
-        const field_ptr = try wip.gep(
-            .inbounds,
-            b.table_inst,
-            table,
-            &.{ .@"0", try b.module.intValue(.i32, @intFromEnum(field)) },
-            "",
-        );
-        return field_ptr;
-    }
-
-    fn typeOf(field: TableInstField) Type {
-        return switch (field) {
-            .base => .ptr,
-            .elem_type => .i8,
-            .len, .capacity, .limit => .i32,
-        };
-    }
-
-    fn load(field: TableInstField, wip: *WipFunction, b: *Builder, table: Value) Oom!Value {
-        return try wip.load(.normal, field.typeOf(), try field.gep(wip, b, table), .default, "");
-    }
-};
-
-const ModuleInfoField = enum(u6) {
-    types,
-    global_types,
-    datas_ptrs,
-    datas_lens,
-
-    /// Obtains a `ptr` to a field within the `ModuleInst`.
-    fn gep(field: ModuleInfoField, wip: *WipFunction, b: *const Builder) Oom!Value {
-        return try wip.gepStruct(
-            b.module_info,
-            try ModuleInstField.module.load(wip, b),
-            @intFromEnum(field),
-            @tagName(field),
-        );
-    }
-
-    fn typeOf(field: ModuleInfoField) Type {
-        return switch (field) {
-            .types,
-            .global_types,
-            .datas_ptrs,
-            .datas_lens,
-            => .ptr,
-        };
-    }
-
-    fn load(field: ModuleInfoField, wip: *WipFunction, b: *const Builder) Oom!Value {
-        return try wip.load(
-            .normal,
-            field.typeOf(),
-            try field.gep(wip, b),
-            .default,
-            @tagName(field),
-        );
-    }
-};
-
 fn enumFieldCount(comptime E: type) comptime_int {
     return @typeInfo(E).@"enum".fields.len;
 }
@@ -266,12 +197,12 @@ fn buildLlvmModule(b: *Builder) Oom!void {
         defer wip.deinit();
 
         wip.cursor = .{ .block = try wip.block(0, "Entry") };
-        const memories = try wip.load(
-            .normal,
-            .ptr,
-            try wip.gepStruct(b.module_inst, wip.arg(2), @intFromEnum(ModuleInstField.mems), ""),
-            .default,
-            "memories",
+        const memories = try fields.loadField(
+            field_enums.ModuleInst.mems,
+            &wip,
+            b,
+            b.module_inst,
+            wip.arg(2),
         );
         const call_params = [10]Value{
             wip.arg(0), // locals
@@ -1317,7 +1248,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         const table_idx = try call.wip.extractValue(decode_table_idx, &.{0}, "table_idx");
 
         const table_ptr = try call.tableInstPtr(b, table_idx);
-        const table_len = try TableInstField.len.load(&call.wip, b, table_ptr);
+        const table_len = try fields.table_inst.load(.len, &call.wip, b, table_ptr);
 
         const elem_idx = try call.loadOperandAt(b, .i32, 0, "elem_idx");
         const in_bounds = try call.wip.block(1, "InBounds");
@@ -1333,7 +1264,7 @@ fn buildControlOpcodeHandlers(b: *Builder) Oom!void {
         const expected_signature_ptr = try call.wip.gep(
             .inbounds,
             b.func_type,
-            try ModuleInfoField.types.load(&call.wip, b),
+            try fields.module.load(.types, &call.wip, b),
             &.{type_idx},
             "",
         );
@@ -1727,7 +1658,12 @@ fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
             .default,
             "",
         );
-        const mem_size = try wip.cast(.trunc, try MemInstField.size.load(wip, b, mem_ptr), .i32, "");
+        const mem_size = try wip.cast(
+            .trunc,
+            try fields.mem_inst.load(.size, wip, b, mem_ptr),
+            .i32,
+            "size_trunc",
+        );
         _ = try wip.store(
             .normal,
             try wip.bin(.@"udiv exact", mem_size, page_size, ""),
@@ -1794,11 +1730,11 @@ fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
             .default,
             "",
         );
-        const old_mem_size = try MemInstField.size.load(wip, b, mem_ptr);
-        const old_mem_size_ext = try wip.cast(.zext, old_mem_size, size_ty, "");
+        const old_mem_size = try fields.mem_inst.load(.size, wip, b, mem_ptr);
+        const old_mem_size_ext = try wip.cast(.zext, old_mem_size, size_ty, "old_mem_size");
         const mem_limit_ext = try wip.cast(
             .zext,
-            try MemInstField.limit.load(wip, b, mem_ptr),
+            try fields.mem_inst.load(.limit, wip, b, mem_ptr),
             size_ty,
             "",
         );
@@ -1822,9 +1758,9 @@ fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
         wip.cursor = .{ .block = within_limit };
         const mem_capacity_ext = try wip.cast(
             .zext,
-            try MemInstField.capacity.load(wip, b, mem_ptr),
+            try fields.mem_inst.load(.capacity, wip, b, mem_ptr),
             size_ty,
-            "",
+            "mem_capacity",
         );
 
         const within_capacity = try wip.block(1, "WithinCapacity");
@@ -1853,7 +1789,7 @@ fn buildMemoryManagementOpcodeHandlers(b: *Builder) Oom!void {
         _ = try wip.store(
             .normal,
             try wip.cast(.trunc, desired_size_ext, b.size_type, "desired_size"),
-            try MemInstField.size.gep(wip, b, mem_ptr),
+            try fields.mem_inst.gep(.size, wip, b, mem_ptr),
             .default,
         );
         const jmp_to_next = try wip.block(2, "JumpToNextOpcode");
@@ -1988,7 +1924,7 @@ fn buildTableAccessOpcodeHandlers(b: *Builder) Oom!void {
             try wip.icmp(
                 .ult,
                 index,
-                try TableInstField.len.load(wip, b, table_ptr),
+                try fields.table_inst.load(.len, wip, b, table_ptr),
                 "bounds_check",
             ),
             in_bounds,
@@ -2001,7 +1937,7 @@ fn buildTableAccessOpcodeHandlers(b: *Builder) Oom!void {
             const src_ptr = try wip.gep(
                 .inbounds,
                 .ptr,
-                try TableInstField.base.load(wip, b, table_ptr),
+                try fields.table_inst.load(.base, wip, b, table_ptr),
                 &.{try wip.cast(.zext, index, gep_index_ty, "")},
                 "src_ptr",
             );
@@ -2069,7 +2005,7 @@ fn buildTableAccessOpcodeHandlers(b: *Builder) Oom!void {
             try wip.icmp(
                 .ult,
                 index,
-                try TableInstField.len.load(wip, b, table_ptr),
+                try fields.table_inst.load(.len, wip, b, table_ptr),
                 "bounds_check",
             ),
             in_bounds,
@@ -2082,7 +2018,7 @@ fn buildTableAccessOpcodeHandlers(b: *Builder) Oom!void {
             const dst_ptr = try wip.gep(
                 .inbounds,
                 .ptr,
-                try TableInstField.base.load(wip, b, table_ptr),
+                try fields.table_inst.load(.base, wip, b, table_ptr),
                 &.{try wip.cast(.zext, index, gep_index_ty, "")},
                 "dst_ptr",
             );
@@ -2151,7 +2087,7 @@ fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
         const table_ptr = try size.tableInstPtr(b, table_idx);
         _ = try wip.store(
             .normal,
-            try TableInstField.len.load(wip, b, table_ptr),
+            try fields.table_inst.load(.len, wip, b, table_ptr),
             try size.gepOperandAt(b, -1),
             value_stack_alignment,
         );
@@ -2197,7 +2133,7 @@ fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
             "elem",
         );
 
-        const old_size = try TableInstField.len.load(wip, b, table_ptr);
+        const old_size = try fields.table_inst.load(.len, wip, b, table_ptr);
         const new_size_extended = try wip.bin(
             .@"add nuw",
             try wip.cast(.zext, old_size, idx_ty, ""),
@@ -2213,7 +2149,7 @@ fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
                 new_size_extended,
                 try wip.cast(
                     .zext,
-                    try TableInstField.limit.load(wip, b, table_ptr),
+                    try fields.table_inst.load(.limit, wip, b, table_ptr),
                     idx_ty,
                     "limit",
                 ),
@@ -2233,7 +2169,7 @@ fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
             try wip.icmp(
                 .ule,
                 new_size,
-                try TableInstField.capacity.load(wip, b, table_ptr),
+                try fields.table_inst.load(.capacity, wip, b, table_ptr),
                 "within_capacity",
             ),
             within_capacity,
@@ -2254,7 +2190,7 @@ fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
                     try wip.gep(
                         .inbounds,
                         b.size_type,
-                        try TableInstField.base.load(wip, b, table_ptr),
+                        try fields.table_inst.load(.base, wip, b, table_ptr),
                         &.{try wip.cast(.zext, old_size, b.size_type, "old_size")},
                         "",
                     ),
@@ -2267,7 +2203,7 @@ fn buildTableManagementOpcodeHandlers(b: *Builder) Oom!void {
             _ = try wip.store(
                 .normal,
                 new_size,
-                try TableInstField.len.gep(wip, b, table_ptr),
+                try fields.table_inst.gep(.len, wip, b, table_ptr),
                 .default,
             );
 
@@ -2363,9 +2299,9 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
         );
         const mem_size = try wip.cast(
             .zext,
-            try MemInstField.size.load(wip, b, mem_ptr),
+            try fields.mem_inst.load(.size, wip, b, mem_ptr),
             addr_ty,
-            "",
+            "mem_size",
         );
 
         const n = try fill.loadOperandAt(b, .i32, 0, "n");
@@ -2396,8 +2332,8 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
             const dst_ptr = try wip.gep(
                 .inbounds,
                 .i8,
-                try MemInstField.base.load(wip, b, mem_ptr),
-                &.{try wip.cast(.zext, offset, b.size_type, "")},
+                try fields.mem_inst.load(.base, wip, b, mem_ptr),
+                &.{try wip.cast(.zext, offset, b.size_type, "offset_zext")},
                 "dst_ptr",
             );
             _ = try wip.callIntrinsic(
@@ -2503,9 +2439,9 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
         {
             const src_size = try wip.cast(
                 .zext,
-                try MemInstField.size.load(wip, b, src_mem),
+                try fields.mem_inst.load(.size, wip, b, src_mem),
                 addr_ty,
-                "",
+                "src_size",
             );
             const dst_size = src_size;
 
@@ -2545,14 +2481,14 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
             const dst_ptr = try wip.gep(
                 .inbounds,
                 .i8,
-                try MemInstField.base.load(wip, b, dst_mem),
+                try fields.mem_inst.load(.base, wip, b, dst_mem),
                 &.{try wip.cast(.zext, dst_offset, b.size_type, "")},
                 "dst_ptr",
             );
             const src_ptr = try wip.gep(
                 .inbounds,
                 .i8,
-                try MemInstField.base.load(wip, b, src_mem),
+                try fields.mem_inst.load(.base, wip, b, src_mem),
                 &.{try wip.cast(.zext, src_offset, b.size_type, "")},
                 "src_ptr",
             );
@@ -2668,7 +2604,7 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
                 try wip.gep(
                     .inbounds,
                     .i32,
-                    try ModuleInfoField.datas_lens.load(wip, b),
+                    try fields.module.load(.datas_lens, wip, b),
                     &.{data_idx},
                     "",
                 ),
@@ -2682,10 +2618,10 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
                 try wip.gep(
                     .inbounds,
                     .i32,
-                    try ModuleInstField.datas_drop_mask.load(wip, b),
+                    try fields.module_inst.load(.datas_drop_mask, wip, b),
                     &.{try wip.cast(
                         .zext,
-                        try wip.bin(.udiv, data_idx, drop_flag_size, ""),
+                        try wip.bin(.udiv, data_idx, drop_flag_size, "flag_index"),
                         b.size_type,
                         "",
                     )},
@@ -2718,13 +2654,13 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
         const copy_blk = try wip.block(1, "Copy");
         const oob_blk = try wip.block(1, "OutOfBounds");
         {
-            const len = try wip.cast(.zext, n, addr_ty, "");
-            const src_size = try wip.cast(.zext, data_len, addr_ty, "");
+            const len = try wip.cast(.zext, n, addr_ty, "len");
+            const src_size = try wip.cast(.zext, data_len, addr_ty, "src_size");
             const dst_size = try wip.cast(
                 .zext,
-                try MemInstField.size.load(wip, b, mem_ptr),
+                try fields.mem_inst.load(.size, wip, b, mem_ptr),
                 addr_ty,
-                "",
+                "dst_size",
             );
 
             const src_in_bounds = try wip.icmp(
@@ -2756,7 +2692,7 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
                 try wip.gep(
                     .inbounds,
                     .ptr,
-                    try ModuleInfoField.datas_ptrs.load(wip, b),
+                    try fields.module.load(.datas_ptrs, wip, b),
                     &.{data_idx},
                     "",
                 ),
@@ -2775,7 +2711,7 @@ fn buildBulkMemoryOpcodeHandlers(b: *Builder) Oom!void {
             const dst_ptr = try wip.gep(
                 .inbounds,
                 .i8,
-                try MemInstField.base.load(wip, b, mem_ptr),
+                try fields.mem_inst.load(.base, wip, b, mem_ptr),
                 &.{try wip.cast(.zext, dst_offset, b.size_type, "")},
                 "",
             );
@@ -3016,13 +2952,13 @@ fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
         {
             const src_len = try wip.cast(
                 .zext,
-                try TableInstField.len.load(wip, b, src_table),
+                try fields.table_inst.load(.len, wip, b, src_table),
                 addr_ty,
                 "src_len",
             );
             const dst_len = try wip.cast(
                 .zext,
-                try TableInstField.len.load(wip, b, dst_table),
+                try fields.table_inst.load(.len, wip, b, dst_table),
                 addr_ty,
                 "dst_len",
             );
@@ -3063,14 +2999,14 @@ fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
             const dst_ptr = try wip.gep(
                 .inbounds,
                 .ptr,
-                try TableInstField.base.load(wip, b, dst_table),
+                try fields.table_inst.load(.base, wip, b, dst_table),
                 &.{try wip.cast(.zext, dst_offset, b.size_type, "")},
                 "dst_ptr",
             );
             const src_ptr = try wip.gep(
                 .inbounds,
                 .ptr,
-                try TableInstField.base.load(wip, b, src_table),
+                try fields.table_inst.load(.base, wip, b, src_table),
                 &.{try wip.cast(.zext, src_offset, b.size_type, "")},
                 "src_ptr",
             );
@@ -3192,7 +3128,7 @@ fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
             );
             const table_len = try wip.cast(
                 .zext,
-                try TableInstField.len.load(wip, b, table_ptr),
+                try fields.table_inst.load(.len, wip, b, table_ptr),
                 addr_ty,
                 "len",
             );
@@ -3209,7 +3145,7 @@ fn buildBulkTableOpcodeHandlers(b: *Builder) Oom!void {
             const dst_ptr = try wip.gep(
                 .inbounds,
                 .ptr,
-                try TableInstField.base.load(wip, b, table_ptr),
+                try fields.table_inst.load(.base, wip, b, table_ptr),
                 &.{try wip.cast(.zext, offset, b.size_type, "")},
                 "dst_ptr",
             );
@@ -3391,7 +3327,7 @@ fn buildGlobalOpcodeHandlers(b: *Builder) Oom!void {
             try wip.gep(
                 .inbounds,
                 .ptr,
-                try ModuleInstField.globals.load(wip, b),
+                try fields.module_inst.load(.globals, wip, b),
                 &.{global_idx},
                 "",
             ),
@@ -3404,7 +3340,7 @@ fn buildGlobalOpcodeHandlers(b: *Builder) Oom!void {
             try wip.gep(
                 .inbounds,
                 global_type,
-                try ModuleInfoField.global_types.load(wip, b),
+                try fields.module.load(.global_types, wip, b),
                 &.{ global_idx, global_val_type_field_idx },
                 "",
             ),
@@ -3493,7 +3429,7 @@ fn buildBulkDropOpcodeHandlers(b: *Builder) Oom!void {
     const one_to_shift = try b.module.intValue(.i32, 1);
     for (
         &[2]opcodes.FCPrefixOpcode{ .@"data.drop", .@"elem.drop" },
-        &[2]ModuleInstField{ .datas_drop_mask, .elems_drop_mask },
+        &[2]field_enums.ModuleInst{ .datas_drop_mask, .elems_drop_mask },
     ) |opcode, drop_flags_field| {
         var drop = try b.opcodeHandler(.{ .fc = opcode });
         const wip = &drop.wip;
@@ -3506,7 +3442,7 @@ fn buildBulkDropOpcodeHandlers(b: *Builder) Oom!void {
         const flag_word_ptr = try wip.gep(
             .inbounds,
             .i32,
-            try drop_flags_field.load(wip, b),
+            try fields.module_inst.load(drop_flags_field, wip, b),
             &.{try wip.cast(.zext, try wip.bin(.udiv, idx, drop_flag_size, ""), b.size_type, "")},
             "",
         );
@@ -4691,17 +4627,20 @@ fn buildPrefixOpcodeHandlers(b: *Builder) Oom!void {
 }
 
 const std = @import("std");
-const EnumSet = @import("enum_set").EnumSet;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Oom = std.mem.Allocator.Error;
+
+const EnumSet = @import("enum_set").EnumSet;
+
 const opcodes = @import("opcodes");
 const ByteOpcode = opcodes.ByteOpcode;
+const Opcode = @import("opcode.zig").Opcode;
+
 const Builder = @import("Builder.zig");
 const FloatInfo = @import("FloatInfo.zig");
-const Opcode = @import("opcode.zig").Opcode;
+const fields = @import("fields.zig");
+const field_enums = @import("structs").fields;
 const OpcodeHandler = @import("OpcodeHandler.zig");
-const ModuleInstField = OpcodeHandler.ModuleInstField;
-const MemInstField = OpcodeHandler.MemInstField;
 const OpcodeHandlerParam = @import("opcode_handler_param.zig").OpcodeHandlerParam;
 
 const llvm = std.zig.llvm;

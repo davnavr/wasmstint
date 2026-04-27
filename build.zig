@@ -410,6 +410,10 @@ pub fn build(b: *Build) void {
                 });
             }
 
+            const structs_module = b.createModule(.{
+                .root_source_file = b.path("src/codegen/llvm/structs.zig"),
+            });
+
             const codegen_exe = b.addExecutable(.{
                 .name = "wasmstint-codegen-llvm",
                 .root_module = b.createModule(.{
@@ -422,8 +426,13 @@ pub fn build(b: *Build) void {
                 }),
                 .max_rss = byte_size.mib(213),
             });
-            codegen_exe.root_module.addImport("opcodes", opcodes_module);
-            codegen_exe.root_module.addImport("enum_set", enum_set_module);
+            for (&[3]struct { []const u8, *Build.Module }{
+                .{ "opcodes", opcodes_module },
+                .{ "enum_set", enum_set_module },
+                .{ "structs", structs_module },
+            }) |info| {
+                codegen_exe.root_module.addImport(info.@"0", info.@"1");
+            }
 
             const symbol_prefix = "wasmstint.interpreter.";
 
@@ -455,6 +464,7 @@ pub fn build(b: *Build) void {
             run_codegen.addFileArg(target_info);
             run_codegen.addFileArg(detected_intrinsics);
             handlers_module.addObjectFile(run_codegen.addOutputFileArg("wasmstint-interpreter.bc"));
+            handlers_module.addImport("structs", structs_module);
 
             module_options.addOption([]const u8, "symbol_prefix", symbol_prefix);
         }
