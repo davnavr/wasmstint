@@ -285,7 +285,7 @@ pub fn build(b: *Build) void {
                     .pic = false,
                     // .code_model = .small, // Forces usage of LLVM backend
                 }),
-                .max_rss = byte_size.mib(184),
+                .max_rss = byte_size.mib(187),
             });
             for (&[3]struct { []const u8, *Build.Module }{
                 .{ "opcodes", opcodes_module },

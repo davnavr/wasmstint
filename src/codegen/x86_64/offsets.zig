@@ -30,3 +30,11 @@ pub const global_type = struct {
     // currently not explicitly used in generated ASM, just an assumption
     pub const val_type = 0;
 };
+
+pub const side_table_entry = struct {
+    // currently not explicitly used in generated ASM, just an assumption
+    pub const delta_ip = 0;
+    pub const delta_stp = 4;
+    pub const copy_count = 6;
+    pub const pop_count = 7;
+};

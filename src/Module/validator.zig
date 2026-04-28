@@ -47,13 +47,6 @@ pub const Code = extern struct {
         delta_stp: i16,
         copy_count: u8,
         pop_count: u8,
-
-        comptime {
-            std.debug.assert(@offsetOf(SideTableEntryInner, "delta_ip") == 0);
-            std.debug.assert(@offsetOf(SideTableEntryInner, "delta_stp") == 4);
-            std.debug.assert(@offsetOf(SideTableEntryInner, "copy_count") == 6);
-            std.debug.assert(@offsetOf(SideTableEntryInner, "pop_count") == 7);
-        }
     };
 
     // Zig x86-64 backend currently hates zero-sized types (e.g. `u0`)

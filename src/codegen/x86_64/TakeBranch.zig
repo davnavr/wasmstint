@@ -29,8 +29,8 @@ pub fn fastPath(as: *AsmWriter) TakeBranch {
         .stp = Gpr.stp,
         .vsp = Gpr.vsp,
         .vip = Gpr.vip,
-        .copy_count_off = 6,
-        .pop_count_off = 7,
+        .copy_count_off = offsets.side_table_entry.copy_count,
+        .pop_count_off = offsets.side_table_entry.pop_count,
         .finish = take.finish,
         .copy_results = take.copy_results,
     });
@@ -40,7 +40,7 @@ pub fn fastPath(as: *AsmWriter) TakeBranch {
         "movsx r11, word ptr [{[stp]f} + {[delta_stp_off]d}] # delta_stp",
         "shl r11, 3",
         "add {[stp]f}, r11",
-    }, .{ .delta_stp_off = 4, .vsp = Gpr.vsp, .stp = Gpr.stp });
+    }, .{ .delta_stp_off = offsets.side_table_entry.delta_stp, .vsp = Gpr.vsp, .stp = Gpr.stp });
     return take;
 }
 
@@ -70,3 +70,4 @@ pub fn writeSlowPath(take: *TakeBranch, as: *AsmWriter) void {
 
 const AsmWriter = @import("AsmWriter.zig");
 const Gpr = AsmWriter.Gpr;
+const offsets = @import("offsets");

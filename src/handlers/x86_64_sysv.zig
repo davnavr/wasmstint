@@ -39,6 +39,7 @@ comptime {
             offsets.mem_inst => runtime.MemInst,
             offsets.table_inst => runtime.TableInst,
             offsets.global_type => Module.GlobalType,
+            offsets.side_table_entry => Module.Code.SideTableEntry.Inner,
             else => @compileError("type for " ++ decl.name),
         };
 
