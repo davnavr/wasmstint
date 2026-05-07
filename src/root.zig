@@ -25,7 +25,7 @@ pub fn waitForDebugger(io: std.Io) void {
             pub extern "kernel32" fn IsDebuggerPresent() callconv(.winapi) std.os.windows.BOOL;
         };
 
-        while (debugapi.IsDebuggerPresent() == 0) {
+        while (debugapi.IsDebuggerPresent() == .FALSE) {
             io.sleep(.fromMilliseconds(100), .awake) catch continue;
         }
     } else {

@@ -163,7 +163,7 @@ fn fd_fdstat_get(ctx: Ctx) Error!types.FdStat.File {
 
         return types.FdStat.File{
             // Zig checks `BasicInformation.FileAttributes` instead.
-            .type = if (info.StandardInformation.Directory != 0) .directory else .regular_file,
+            .type = if (info.StandardInformation.Directory.toBool()) .directory else .regular_file,
             .flags = types.FdFlags{ .valid = fd_flags },
         };
     } else return .{

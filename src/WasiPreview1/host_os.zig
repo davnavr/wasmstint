@@ -60,7 +60,7 @@ pub fn fileStat(
                 inode_hash_seed,
                 @bitCast(all_info.InternalInformation.IndexNumber),
             ),
-            .type = if (all_info.StandardInformation.Directory != 0)
+            .type = if (all_info.StandardInformation.Directory.toBool())
                 .directory
             else
                 .regular_file,

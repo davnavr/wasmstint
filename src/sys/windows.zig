@@ -158,7 +158,7 @@ pub fn queryDirectoryFile(
     io_status_block: *std.os.windows.IO_STATUS_BLOCK,
     file_information: []u8,
     file_information_class: std.os.windows.FILE.INFORMATION_CLASS,
-    scan: enum(u1) { restart = std.os.windows.TRUE, @"resume" = 0 },
+    scan: enum(u1) { restart = 1, @"resume" = 0 },
 ) Status {
     return std.os.windows.ntdll.NtQueryDirectoryFile(
         handle,
@@ -170,9 +170,12 @@ pub fn queryDirectoryFile(
         std.math.cast(std.os.windows.ULONG, file_information.len) orelse
             std.math.maxInt(std.os.windows.ULONG),
         file_information_class,
-        std.os.windows.FALSE,
+        .FALSE,
         null,
-        @intFromEnum(scan),
+        switch (scan) {
+            .restart => .TRUE,
+            .@"resume" => .FALSE,
+        },
     );
 }
 
