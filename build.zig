@@ -142,7 +142,7 @@ pub fn build(b: *Build) void {
             .use_llvm = use_llvm.ifPreferred(),
             .max_rss = byte_size.mib(480),
         })).step;
-        tests.max_rss = byte_size.mib(19);
+        tests.max_rss = byte_size.mib(34);
         unit_tests_step.dependOn(tests);
     }
 
@@ -160,9 +160,9 @@ pub fn build(b: *Build) void {
             .name = "WasmBuilder",
             .root_module = wasm_builder_module,
             .use_llvm = use_llvm.ifPreferred(),
-            .max_rss = byte_size.mib(475),
+            .max_rss = byte_size.mib(483),
         })).step;
-        tests.max_rss = byte_size.mib(20); // arbitrary amount
+        tests.max_rss = byte_size.mib(34);
         unit_tests_step.dependOn(tests);
     }
 
@@ -516,7 +516,7 @@ pub fn build(b: *Build) void {
                     .optimize = optimize,
                 }),
                 .use_llvm = use_llvm.ifPreferred(),
-                .max_rss = byte_size.mib(270), // arbitrary amount
+                .max_rss = byte_size.mib(450),
             });
 
             const run_tests = &b.addRunArtifact(tests).step;
@@ -549,7 +549,7 @@ pub fn build(b: *Build) void {
             tests.root_module.addImport("module", test_module_module);
 
             const run_tests = &b.addRunArtifact(tests).step;
-            run_tests.max_rss = byte_size.mib(27);
+            run_tests.max_rss = byte_size.mib(30);
             unit_tests_step.dependOn(run_tests);
         }
         {
@@ -593,7 +593,7 @@ pub fn build(b: *Build) void {
                 .optimize = optimize,
             }),
             .use_llvm = use_llvm.ifPreferred(),
-            .max_rss = byte_size.mib(681),
+            .max_rss = byte_size.mib(694),
         });
         for (&[3]struct { []const u8, *Build.Module }{
             .{ "wasm_features", wasm_options },
@@ -712,7 +712,7 @@ pub fn build(b: *Build) void {
                 e.* = b.addExecutable(.{
                     .name = "wasmstint-wasip1",
                     .root_module = module,
-                    .max_rss = byte_size.mib(755),
+                    .max_rss = byte_size.mib(776),
                 });
             }
 
@@ -1041,7 +1041,7 @@ pub fn build(b: *Build) void {
                 .use_llvm = use_llvm.ifPreferred(),
             });
             const ffi_tests_run = &b.addRunArtifact(ffi_test).step;
-            ffi_tests_run.max_rss = byte_size.mib(16);
+            ffi_tests_run.max_rss = byte_size.mib(33);
             unit_tests_step.dependOn(ffi_tests_run);
         }
 
