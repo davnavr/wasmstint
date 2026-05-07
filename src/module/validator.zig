@@ -196,7 +196,7 @@ pub const Code = extern struct {
             mod,
             mod.funcTypeIdx(func_idx),
             mod.codeEntries()[@intFromEnum(func_idx) - mod.funcImportCount()]
-                .contents.slice(module.Inner.ofModule(mod).code_section, mod.wasmBytes()),
+                .contents.slice(mod.codeSection().?, mod.wasmBytes()),
             scratch,
             diag,
         );

@@ -66,17 +66,18 @@ pub fn testOne(
         @panic("validation was not finished!");
     }
 
-    for (module.funcImportTypes().len..module.funcTypes().len) |i| {
+    const code_section = module.codeSection();
+    for (module.funcImportCount()..module.funcCount()) |i| {
         const code = @as(wasmstint.Module.FuncIdx, @enumFromInt(i)).code(module).?;
         if (code.status.load(.monotonic) != .finished) {
             std.debug.panic("validation did not finish for function #{d}", .{i});
         }
 
         const inner = &code.inner;
-        if (@intFromPtr(module.inner.parent().code_section) >= @intFromPtr(inner.instructions_start)) {
+        if (@intFromPtr(code_section.?) >= @intFromPtr(inner.instructions_start)) {
             std.debug.panic(
                 "instruction start {*} out of bounds of code section {*}",
-                .{ inner.instructions_start, module.inner.parent().code_section },
+                .{ inner.instructions_start, code_section.? },
             );
         }
 

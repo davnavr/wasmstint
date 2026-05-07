@@ -360,6 +360,13 @@ pub const Module = extern struct {
         return module.internal().code[0..module.funcDefinedCount()];
     }
 
+    /// Gets a pointer to the first byte of the `code` section. This is useful for calculating
+    /// offsets to function bodies in the WASM binary (e.g. for stack traces and DWARF debug
+    /// information).
+    pub fn codeSection(module: *const Module) ?[*]const u8 {
+        return if (module.internal().code_count > 0) module.internal().code_section else null;
+    }
+
     pub inline fn dataSegmentCount(module: *const Module) u32 {
         return module.internal().datas_count;
     }
