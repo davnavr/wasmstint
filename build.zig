@@ -1048,6 +1048,11 @@ pub fn build(b: *Build) void {
         var rust_include_paths_buf: [2]Build.LazyPath = undefined;
         var rust_include_paths = std.ArrayList(Build.LazyPath).initBuffer(&rust_include_paths_buf);
 
+        const install_standalone_fuzzers_step = b.step(
+            "install-fuzz-standalone",
+            "Build standalone fuzz test executables",
+        );
+
         // Currently, this does not invoke `cargo build release`
         const rust_target_dir = b.path("fuzz/ffi/target");
         const native_target = b.graph.host.result;
@@ -1282,6 +1287,9 @@ pub fn build(b: *Build) void {
             }) |info| {
                 standalone_exe.root_module.addImport(info.@"0", info.@"1");
             }
+
+            install_standalone_fuzzers_step
+                .dependOn(&b.addInstallArtifact(standalone_exe, .{}).step);
 
             const runner_step: *Step.Run = switch (chosen_fuzz_runner) {
                 .afl => afl: {
