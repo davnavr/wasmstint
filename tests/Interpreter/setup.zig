@@ -1,5 +1,5 @@
 pub const WasmModule = struct {
-    inner: wasmstint.Module,
+    inner: *wasmstint.Module,
 
     pub fn init(wasm: []const u8, scratch: *ArenaAllocator) !WasmModule {
         var reader = wasm;

@@ -355,7 +355,7 @@ const builtin = @import("builtin");
 const Oom = std.mem.Allocator.Error;
 const FuncRef = @import("value.zig").FuncRef;
 const ExternAddr = @import("value.zig").ExternAddr;
-const Module = @import("../Module.zig");
+const Module = @import("module").Module;
 const ModuleInst = @import("module_inst.zig").ModuleInst;
 
 const interpreter = @import("interpreter");

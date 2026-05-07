@@ -214,7 +214,7 @@ const Stack = @import("Stack.zig");
 const Value = @import("value.zig").Value;
 const SideTable = @import("side_table.zig").SideTable;
 const handlers = @import("handlers");
+const Module = @import("module").Module;
 
 const wasmstint = @import("wasmstint");
-const Module = wasmstint.Module;
 const runtime = wasmstint.runtime;

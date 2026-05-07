@@ -155,5 +155,5 @@ pub const none = ImportProvider{
 
 const std = @import("std");
 const Writer = std.Io.Writer;
-const Module = @import("../Module.zig");
+const Module = @import("module").Module;
 const ExternVal = @import("value.zig").ExternVal;

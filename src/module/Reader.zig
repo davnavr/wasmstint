@@ -340,4 +340,4 @@ pub fn readIdx(
 const std = @import("std");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const ValType = @import("val_type.zig").ValType;
-const V128 = @import("../v128.zig").V128;
+const V128 = @import("wasmstint").V128;

@@ -9,7 +9,7 @@ const ConstExpr = @This();
 pub fn bytes(
     expr: ConstExpr,
     base: [*]const u8,
-    module: Module,
+    module: *const Module,
 ) [:@intFromEnum(opcodes.ByteOpcode.end)]const u8 {
     const b = expr.slice.slice(base, module.wasmBytes());
     std.debug.assert(b.len >= 2);
@@ -71,7 +71,7 @@ fn nonConstOpcode(
 
 pub fn parse(
     reader: Reader,
-    module: Module,
+    module: *const Module,
     /// First byte of the section containing the constant expression.
     base: [*]const u8,
     expected_type: ValType,
@@ -235,4 +235,4 @@ const opcodes = @import("opcodes");
 const ValType = @import("val_type.zig").ValType;
 const Reader = @import("Reader.zig");
 const FuncRefs = @import("FuncRefs.zig");
-const Module = @import("../Module.zig");
+const Module = @import("../module.zig").Module;

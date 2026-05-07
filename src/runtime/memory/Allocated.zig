@@ -114,5 +114,5 @@ const vtable = MemInst.VTable{
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Oom = Allocator.Error;
-const MemType = @import("../../Module.zig").MemType;
+const MemType = @import("module").Module.MemType;
 const MemInst = @import("../memory.zig").MemInst;

@@ -159,7 +159,7 @@ fn openModuleContents(
 
 fn allocateModuleDefinitions(
     state: *State,
-    module: wasmstint.Module,
+    module: *const wasmstint.Module,
     arena: *ArenaAllocator,
 ) wasmstint.runtime.ModuleAlloc.Definitions {
     const defined_table_types = module.tableDefinedTypes();
@@ -215,7 +215,7 @@ fn allocateModuleDefinitions(
 
 fn allocateModule(
     state: *State,
-    module: wasmstint.Module,
+    module: *wasmstint.Module,
     output: Output,
     scratch: *ArenaAllocator,
 ) Error!wasmstint.runtime.ModuleAlloc {
@@ -1469,7 +1469,7 @@ fn processAssertUnlinkable(
     var scratch = std.heap.ArenaAllocator.init(arena.allocator());
     var wasm: []const u8 = module_binary.contents();
     var parse_diagnostics = wasmstint.Module.ParseDiagnostics.init(arena);
-    var module = wasmstint.Module.parse(
+    const module = wasmstint.Module.parse(
         arena.allocator(),
         &wasm,
         &scratch,

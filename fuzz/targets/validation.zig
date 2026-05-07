@@ -67,7 +67,7 @@ pub fn testOne(
     }
 
     for (module.funcImportTypes().len..module.funcTypes().len) |i| {
-        const code = module.code(@enumFromInt(i));
+        const code = @as(wasmstint.Module.FuncIdx, @enumFromInt(i)).code(module).?;
         if (code.status.load(.monotonic) != .finished) {
             std.debug.panic("validation did not finish for function #{d}", .{i});
         }

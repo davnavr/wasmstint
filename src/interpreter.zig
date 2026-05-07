@@ -16,5 +16,6 @@ comptime {
 }
 
 test {
+    _ = Instr;
     _ = Interpreter;
 }

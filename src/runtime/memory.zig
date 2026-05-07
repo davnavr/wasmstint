@@ -132,7 +132,7 @@ pub const MemInst = extern struct {
     ///
     /// This does not use any original minimum limit as part of the memory type. For more information, see
     /// <https://webassembly.github.io/spec/core/appendix/properties.html#store-validity>.
-    pub fn memType(inst: *const MemInst) @import("../Module.zig").MemType {
+    pub fn memType(inst: *const MemInst) @import("module").Module.MemType {
         inst.checkInvariants();
         return .{
             .limits = .{

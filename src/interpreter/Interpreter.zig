@@ -531,7 +531,7 @@ pub const State = union(Tag) {
         pub fn instantiateModule(
             state: *const AwaitingHost,
             alloca: Allocator,
-            module: *runtime.ModuleAlloc,
+            mod: *runtime.ModuleAlloc,
             fuel: *Fuel,
         ) Allocator.Error!State {
             var coz_begin = coz.begin("wasmstint.Interpreter.AwaitingHost.instantiateModule");
@@ -539,12 +539,12 @@ pub const State = union(Tag) {
 
             state.clearResultsOnStack();
 
-            if (module.instantiated) {
+            if (mod.instantiated) {
                 return state.inner.transition(Status{ .awaiting_host = .{} });
             }
 
             const interp: *Interpreter = state.inner.interpreter();
-            const start_func = module.requiring_instantiation.inner.startFuncInst();
+            const start_func = mod.requiring_instantiation.inner.startFuncInst();
 
             if (start_func) |start| {
                 const signature = start.signature();
@@ -556,13 +556,13 @@ pub const State = union(Tag) {
             const const_expr_buf = try interp.stack.allocateScratchSpace(
                 &interp.stack_top,
                 alloca,
-                module.requiring_instantiation.inner.module.inner.parent().init_max_stack,
+                module.Inner.ofModule(mod.requiring_instantiation.inner.module).init_max_stack,
             );
 
             errdefer unreachable; // should be comptime
 
             var instantiation_error: instantiation.SetupError = undefined;
-            instantiation.setupModule(module, &instantiation_error, const_expr_buf) catch {
+            instantiation.setupModule(mod, &instantiation_error, const_expr_buf) catch {
                 const trap = switch (instantiation_error) {
                     inline else => |info, tag| Trap.init(@field(Trap.Code, @tagName(tag)), info),
                 };
@@ -575,7 +575,7 @@ pub const State = union(Tag) {
             if (start_func) |start| {
                 const start_frame = interp.stack.pushFrameWithinCapacity(
                     interp.stack_top,
-                    &module.instantiated,
+                    &mod.instantiated,
                     .preallocated, // no parameters
                     start,
                 ) catch unreachable; // bad reserve for module start function
@@ -587,7 +587,7 @@ pub const State = union(Tag) {
                     .wasm => state.inner.enterMainLoop(fuel),
                 };
             } else {
-                module.instantiated = true;
+                mod.instantiated = true;
                 return state.inner.transition(Status{ .awaiting_host = .{} });
             }
         }
@@ -882,10 +882,9 @@ const builtin = @import("builtin");
 const coz = @import("coz");
 const Allocator = std.mem.Allocator;
 const handlers = @import("handlers");
-
-const wasmstint = @import("wasmstint");
-const Module = wasmstint.Module;
-const runtime = wasmstint.runtime;
+const module = @import("module");
+const Module = module.Module;
+const runtime = @import("wasmstint").runtime;
 
 const Value = @import("value.zig").Value;
 const Stack = @import("Stack.zig");
@@ -893,7 +892,3 @@ const SideTable = @import("side_table.zig").SideTable;
 const Instr = @import("Instr.zig");
 const instantiation = @import("instantiation.zig");
 const Version = @import("version.zig").Version;
-
-test {
-    _ = Instr;
-}

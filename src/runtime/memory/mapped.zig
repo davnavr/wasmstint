@@ -237,5 +237,5 @@ const pageSize = std.heap.pageSize;
 const page_size_min = std.heap.page_size_min;
 const Oom = std.mem.Allocator.Error;
 const virtual_memory = @import("allocators").virtual_memory;
-const MemType = @import("../../Module.zig").MemType;
+const MemType = @import("module").Module.MemType;
 const MemInst = @import("../memory.zig").MemInst;

@@ -35,7 +35,7 @@ comptime {
 
         const T = switch (spec) {
             offsets.module_inst => runtime.ModuleInst.Header,
-            offsets.module => @typeInfo(@FieldType(Module, "inner")).pointer.child,
+            offsets.module => @FieldType(Module, "inner"),
             offsets.mem_inst => runtime.MemInst,
             offsets.table_inst => runtime.TableInst,
             offsets.global_type => Module.GlobalType,

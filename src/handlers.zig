@@ -549,6 +549,7 @@ const Oom = std.mem.Allocator.Error;
 const builtin = @import("builtin");
 const coz = @import("coz");
 const opcodes = @import("opcodes");
+const Module = @import("module").Module;
 
 const interpreter = @import("interpreter");
 const Instr = interpreter.Instr;
@@ -561,4 +562,3 @@ const SideTable = interpreter.SideTable;
 
 const wasmstint = @import("wasmstint");
 const runtime = wasmstint.runtime;
-const Module = wasmstint.Module;

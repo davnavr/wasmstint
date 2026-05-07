@@ -519,7 +519,7 @@ pub fn parse(
 const std = @import("std");
 const Order = std.math.Order;
 const allocators = @import("allocators");
-const Module = @import("../Module.zig");
+const Module = @import("../module.zig").Module;
 const Error = Module.ParseError;
 const FuncIdx = Module.FuncIdx;
 const Reader = @import("Reader.zig");

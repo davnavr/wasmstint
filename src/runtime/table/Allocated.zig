@@ -114,6 +114,6 @@ fn free(inst: *TableInst) void {
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const Module = @import("../../Module.zig");
+const Module = @import("module").Module;
 const Oom = Allocator.Error;
 const TableInst = @import("../table.zig").TableInst;

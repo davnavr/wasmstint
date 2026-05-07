@@ -12,7 +12,7 @@ comptime {
         const Field: type = @field(structs.fields, decl.name);
         const Type = switch (Field) {
             structs.fields.ModuleInst => runtime.ModuleInst.Header,
-            structs.fields.Module => @typeInfo(@FieldType(Module, "inner")).pointer.child,
+            structs.fields.Module => @FieldType(Module, "inner"),
             structs.fields.MemInst => runtime.MemInst,
             structs.fields.TableInst => runtime.TableInst,
             structs.fields.SideTableEntry => Module.Code.SideTableEntry.Inner,

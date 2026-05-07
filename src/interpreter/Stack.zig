@@ -1082,7 +1082,7 @@ pub const Walker = struct {
                     var buf: [9]u8 = undefined;
                     var buf_writer = Writer.fixed(&buf);
                     buf_writer.writeAll("0x") catch unreachable;
-                    const ip = frame.wasm.ip - wasm.module.header().module.inner.parent().wasm.ptr;
+                    const ip = frame.wasm.ip - wasm.module.header().module.wasmBytes().ptr;
                     buf_writer.print("{X}", .{ip}) catch unreachable;
                     try writer.print("{s: >9}", .{buf_writer.buffered()});
                 },

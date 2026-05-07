@@ -152,7 +152,7 @@ pub const Code = extern struct {
     pub fn validate(
         code: *Code,
         allocator: Allocator,
-        module: Module,
+        mod: *Module,
         scratch: *ArenaAllocator,
         diag: ?*Diagnostics,
     ) Error!bool {
@@ -176,14 +176,14 @@ pub const Code = extern struct {
         defer coz_transaction.end();
 
         const code_addr = @intFromPtr(code);
-        const code_sec_ptr = module.inner.parent().code;
+        const code_sec_ptr = module.Inner.ofModule(mod).code;
         std.debug.assert(@intFromPtr(code_sec_ptr) <= code_addr);
-        std.debug.assert(code_addr < @intFromPtr(code_sec_ptr + module.inner.parent().code_count));
+        std.debug.assert(code_addr < @intFromPtr(code_sec_ptr + mod.funcDefinedCount()));
 
         const func_idx: Module.FuncIdx = @enumFromInt(@as(
             @typeInfo(Module.FuncIdx).@"enum".tag_type,
             @intCast(
-                module.inner.parent().func_import_count +
+                mod.funcImportCount() +
                     @divExact(code_addr - @intFromPtr(code_sec_ptr), @sizeOf(Code)),
             ),
         ));
@@ -193,10 +193,10 @@ pub const Code = extern struct {
         defer code.status.store(.finished, .release);
         const result = rawValidate(
             allocator,
-            module,
-            module.funcTypeIdx(func_idx),
-            module.codeEntries()[@intFromEnum(func_idx) - module.inner.parent().func_import_count]
-                .contents.slice(module.inner.parent().code_section, module.wasmBytes()),
+            mod,
+            mod.funcTypeIdx(func_idx),
+            mod.codeEntries()[@intFromEnum(func_idx) - mod.funcImportCount()]
+                .contents.slice(module.Inner.ofModule(mod).code_section, mod.wasmBytes()),
             scratch,
             diag,
         );
@@ -273,10 +273,10 @@ const BlockType = union(enum) {
     single_result: ValType,
     void,
 
-    fn funcType(block_type: *const BlockType, module: Module) Module.FuncType {
+    fn funcType(block_type: *const BlockType, mod: *const Module) Module.FuncType {
         switch (block_type.*) {
             .type => |@"type"| {
-                const copied = @"type".idx.funcType(module).*;
+                const copied = @"type".idx.funcType(mod).*;
                 return if (!@"type".results_only) copied else .{
                     .param_count = 0,
                     .result_count = copied.result_count,
@@ -292,7 +292,7 @@ const BlockType = union(enum) {
         }
     }
 
-    fn parse(reader: Reader, module: Module, diag: ?*Diagnostics) Error!BlockType {
+    fn parse(reader: Reader, mod: *const Module, diag: ?*Diagnostics) Error!BlockType {
         var int_bytes = reader.bytes.*;
         const int_reader = Reader{ .bytes = &int_bytes };
         const tag_int = try int_reader.readIleb128(i33, diag, "block type");
@@ -306,7 +306,7 @@ const BlockType = union(enum) {
             return BlockType.void;
         } else if (tag_int >= 0) {
             reader.bytes.* = int_bytes;
-            return if (tag_int < module.inner.parent().types_count)
+            return if (tag_int < mod.typeCount())
                 BlockType{
                     .type = .{
                         .idx = @enumFromInt(
@@ -356,8 +356,8 @@ const CtrlFrame = struct {
         //@"catch",
     };
 
-    fn labelTypes(frame: *const CtrlFrame, module: Module) []const ValType {
-        const types = frame.types.funcType(module);
+    fn labelTypes(frame: *const CtrlFrame, mod: *const Module) []const ValType {
+        const types = frame.types.funcType(mod);
         return if (frame.info.opcode != .loop) types.results() else types.parameters();
     }
 };
@@ -562,14 +562,14 @@ const ValStack = struct {
     }
 };
 
-fn readMemIdx(reader: *Reader, module: Module, diag: ?*Diagnostics) !void {
+fn readMemIdx(reader: *Reader, mod: *const Module, diag: ?*Diagnostics) !void {
     const expected_zero_byte_msg = "memory index zero byte expected";
     const idx = try reader.readByte(diag, expected_zero_byte_msg);
     if (idx != 0) {
         return Reader.fail(diag, .parse, expected_zero_byte_msg);
     }
 
-    if (module.inner.parent().mem_count == 0) {
+    if (mod.memCount() == 0) {
         return Reader.failPrint(diag, .validation, "unknown memory {}", .{idx});
     }
 }
@@ -585,7 +585,7 @@ const Alignment = enum(u3) {
 fn readMemArg(
     reader: *Reader,
     natural_alignment: Alignment,
-    module: Module,
+    mod: *const Module,
     diag: ?*Diagnostics,
 ) !void {
     const a = try reader.readUleb128(u32, diag, "memarg alignment");
@@ -597,22 +597,17 @@ fn readMemArg(
             Reader.fail(diag, .parse, "malformed memop flags, alignment overflow");
     }
 
-    if (module.inner.parent().mem_count == 0) {
+    if (mod.memCount() == 0) {
         return Reader.fail(diag, .validation, "unknown memory in memarg");
     }
 
     _ = try reader.readUleb128(u32, diag, "memarg offset");
 }
 
-fn readTableIdx(reader: *Reader, module: Module, diag: ?*Diagnostics) !ValType {
-    const table_types = module.tableTypes();
-    const idx = try reader.readIdx(
-        Module.TableIdx,
-        table_types.len,
-        diag,
-        &.{ "table", "in code" },
-    );
-    return module.tableTypes()[@intFromEnum(idx)].elem_type;
+fn readTableIdx(reader: *Reader, mod: *const Module, diag: ?*Diagnostics) !ValType {
+    const idx =
+        try reader.readIdx(Module.TableIdx, mod.tableCount(), diag, &.{ "table", "in code" });
+    return mod.tableTypes()[@intFromEnum(idx)].elem_type;
 }
 
 const ReadDataIdx = struct {
@@ -629,28 +624,28 @@ const ReadDataIdx = struct {
         };
     }
 
-    fn boundsCheck(self: ReadDataIdx, module: Module, diag: ?*Diagnostics) !void {
+    fn boundsCheck(self: ReadDataIdx, mod: *const Module, diag: ?*Diagnostics) !void {
         // spec first checks OOB index
-        if (self.idx >= module.inner.parent().datas_count) {
+        if (self.idx >= mod.dataSegmentCount()) {
             return Reader.failPrint(diag, .validation, "unknown data segment {}, in code", .{
                 self.idx,
             });
         }
 
-        if (!module.inner.parent().has_data_count_section) {
+        if (!module.Inner.ofModule(mod).has_data_count_section) {
             return Reader.fail(diag, .parse, "data count section required");
         }
     }
 };
 
-fn readElemIdx(reader: *Reader, module: Module, diag: ?*Diagnostics) !ValType {
+fn readElemIdx(reader: *Reader, mod: *const Module, diag: ?*Diagnostics) !ValType {
     const idx = try reader.readIdx(
         Module.ElemIdx,
-        module.inner.parent().elems_count,
+        mod.elementSegmentCount(),
         diag,
         &.{ "elem segment", "in code" },
     );
-    return module.elementSegments()[@intFromEnum(idx)].elementType();
+    return mod.elementSegments()[@intFromEnum(idx)].elementType();
 }
 
 fn readLocalIdx(reader: *Reader, locals: []const ValType, diag: ?*Diagnostics) !ValType {
@@ -686,7 +681,7 @@ const Label = struct {
         depth: u32,
         ctrl_stack: *const CtrlStack,
         current_height: u16,
-        module: Module,
+        mod: *const Module,
         diag: ?*Diagnostics,
     ) !Label {
         const frame: *const CtrlFrame = if (depth < ctrl_stack.items.len)
@@ -699,7 +694,7 @@ const Label = struct {
         //     .{ depth, frame.offset, @tagName(frame.info.opcode) },
         // );
 
-        const copy_count = frame.labelTypes(module).len;
+        const copy_count = frame.labelTypes(mod).len;
         return Label{
             .frame = frame,
             .depth = depth,
@@ -713,11 +708,11 @@ const Label = struct {
         reader: *Reader,
         ctrl_stack: *const CtrlStack,
         current_height: u16,
-        module: Module,
+        mod: *const Module,
         diag: ?*Diagnostics,
     ) !Label {
         const depth = try reader.readUleb128(u32, diag, "label depth");
-        return Label.init(depth, ctrl_stack, current_height, module, diag);
+        return Label.init(depth, ctrl_stack, current_height, mod, diag);
     }
 };
 
@@ -729,7 +724,7 @@ fn pushCtrlFrame(
     opcode: CtrlFrame.Opcode,
     offset: u32,
     block_type: BlockType,
-    module: Module,
+    mod: *const Module,
     diag: ?*Diagnostics,
 ) !void {
     try ctrl_stack.append(
@@ -746,13 +741,13 @@ fn pushCtrlFrame(
     );
 
     // std.debug.print("pushed {s} parameters = {any}\n", .{ @tagName(opcode), block_type.funcType(module).parameters() });
-    try val_stack.pushMany(arena, block_type.funcType(module).parameters(), diag);
+    try val_stack.pushMany(arena, block_type.funcType(mod).parameters(), diag);
 }
 
 fn popCtrlFrame(
     ctrl_stack: *CtrlStack,
     val_stack: *ValStack,
-    module: Module,
+    mod: *const Module,
     diag: ?*Diagnostics,
 ) !CtrlFrame {
     if (ctrl_stack.items.len == 0) {
@@ -760,7 +755,7 @@ fn popCtrlFrame(
     }
 
     const frame: CtrlFrame = ctrl_stack.items[ctrl_stack.items.len - 1];
-    const result_types = frame.types.funcType(module).results();
+    const result_types = frame.types.funcType(mod).results();
     // std.debug.print("processing {t} {any}\n", .{ frame.info.opcode, result_types });
 
     try val_stack.popManyExpecting(ctrl_stack, result_types, diag);
@@ -1199,13 +1194,13 @@ fn validateLoadInstr(
     ctrl_stack: *const CtrlStack,
     natural_alignment: Alignment,
     loaded: ValType,
-    module: Module,
+    mod: *const Module,
     arena: *ArenaAllocator,
     diag: ?*Diagnostics,
 ) Error!void {
     // Pop index, push loaded value.
     try val_stack.popThenPushExpecting(arena, ctrl_stack, .i32, loaded, diag);
-    try readMemArg(reader, natural_alignment, module, diag);
+    try readMemArg(reader, natural_alignment, mod, diag);
 }
 
 fn validateLoadLaneInstr(
@@ -1214,13 +1209,13 @@ fn validateLoadLaneInstr(
     val_stack: *ValStack,
     ctrl_stack: *const CtrlStack,
     comptime lane_size: V128.LaneIdxSize,
-    module: Module,
+    mod: *const Module,
     arena: *ArenaAllocator,
     diag: ?*Diagnostics,
 ) Error!void {
     try val_stack.popExpecting(ctrl_stack, .v128, diag);
     try val_stack.popThenPushExpecting(arena, ctrl_stack, .i32, .v128, diag);
-    try readMemArg(reader, natural_alignment, module, diag);
+    try readMemArg(reader, natural_alignment, mod, diag);
     try reader.readSimdLane(lane_size, diag);
 }
 
@@ -1230,11 +1225,11 @@ fn validateStoreInstr(
     ctrl_stack: *const CtrlStack,
     natural_alignment: Alignment,
     stored: ValType,
-    module: Module,
+    mod: *const Module,
     diag: ?*Diagnostics,
 ) Error!void {
     try val_stack.popManyExpecting(ctrl_stack, &[_]ValType{ .i32, stored }, diag);
-    try readMemArg(reader, natural_alignment, module, diag);
+    try readMemArg(reader, natural_alignment, mod, diag);
 }
 
 fn validateStoreLaneInstr(
@@ -1243,11 +1238,11 @@ fn validateStoreLaneInstr(
     val_stack: *ValStack,
     ctrl_stack: *const CtrlStack,
     comptime lane_size: V128.LaneIdxSize,
-    module: Module,
+    mod: *const Module,
     diag: ?*Diagnostics,
 ) Error!void {
     try val_stack.popManyExpecting(ctrl_stack, &.{ .i32, .v128 }, diag);
-    try readMemArg(reader, natural_alignment, module, diag);
+    try readMemArg(reader, natural_alignment, mod, diag);
     try reader.readSimdLane(lane_size, diag);
 }
 
@@ -1284,7 +1279,7 @@ fn validateTailCallSignature(
 
 pub fn rawValidate(
     allocator: Allocator,
-    module: Module,
+    mod: *const Module,
     signature: Module.TypeIdx,
     code: []const u8,
     scratch: *ArenaAllocator,
@@ -1296,7 +1291,7 @@ pub fn rawValidate(
     var code_ptr = code;
     var reader = Reader.init(&code_ptr);
 
-    const func_type = signature.funcType(module);
+    const func_type = signature.funcType(mod);
 
     const locals: struct { types: []const ValType, count: u16 } = locals: {
         var coz_all_locals = coz.begin("wasmstint.validator.locals");
@@ -1409,10 +1404,10 @@ pub fn rawValidate(
             .@"unreachable" => markUnreachable(&val_stack, &ctrl_stack),
             .nop => {},
             .block => {
-                const block_type = try BlockType.parse(reader, module, diag);
+                const block_type = try BlockType.parse(reader, mod, diag);
                 try val_stack.popManyExpecting(
                     &ctrl_stack,
-                    block_type.funcType(module).parameters(),
+                    block_type.funcType(mod).parameters(),
                     diag,
                 );
                 try pushCtrlFrame(
@@ -1423,7 +1418,7 @@ pub fn rawValidate(
                     .block,
                     instr_offset,
                     block_type,
-                    module,
+                    mod,
                     diag,
                 );
 
@@ -1435,10 +1430,10 @@ pub fn rawValidate(
                 );
             },
             .loop => {
-                const block_type = try BlockType.parse(reader, module, diag);
+                const block_type = try BlockType.parse(reader, mod, diag);
                 try val_stack.popManyExpecting(
                     &ctrl_stack,
-                    block_type.funcType(module).parameters(),
+                    block_type.funcType(mod).parameters(),
                     diag,
                 );
                 try pushCtrlFrame(
@@ -1449,7 +1444,7 @@ pub fn rawValidate(
                     .loop,
                     instr_offset,
                     block_type,
-                    module,
+                    mod,
                     diag,
                 );
 
@@ -1462,11 +1457,11 @@ pub fn rawValidate(
                 );
             },
             .@"if" => {
-                const block_type = try BlockType.parse(reader, module, diag);
+                const block_type = try BlockType.parse(reader, mod, diag);
                 try val_stack.popExpecting(&ctrl_stack, .i32, diag);
                 try val_stack.popManyExpecting(
                     &ctrl_stack,
-                    block_type.funcType(module).parameters(),
+                    block_type.funcType(mod).parameters(),
                     diag,
                 );
                 try pushCtrlFrame(
@@ -1477,7 +1472,7 @@ pub fn rawValidate(
                     .@"if",
                     instr_offset,
                     block_type,
-                    module,
+                    mod,
                     diag,
                 );
 
@@ -1499,7 +1494,7 @@ pub fn rawValidate(
             .@"else" => {
                 const current_height = val_stack.len();
 
-                const frame = try popCtrlFrame(&ctrl_stack, &val_stack, module, diag);
+                const frame = try popCtrlFrame(&ctrl_stack, &val_stack, mod, diag);
                 if (frame.info.opcode != .@"if") {
                     return Reader.failPrint(
                         diag,
@@ -1517,12 +1512,12 @@ pub fn rawValidate(
                     .@"else",
                     instr_offset,
                     frame.types,
-                    module,
+                    mod,
                     diag,
                 );
 
                 // going to 'end'
-                const block_type = frame.types.funcType(module);
+                const block_type = frame.types.funcType(mod);
                 _ = try side_table.append(
                     scratch,
                     instr_offset,
@@ -1551,7 +1546,7 @@ pub fn rawValidate(
                 defer coz_opcode_end.end();
 
                 // std.debug.print("PROCESSING END\n", .{});
-                const frame = try popCtrlFrame(&ctrl_stack, &val_stack, module, diag);
+                const frame = try popCtrlFrame(&ctrl_stack, &val_stack, mod, diag);
 
                 // TODO: Skip branch fixup processing for unreachable code.
 
@@ -1572,7 +1567,7 @@ pub fn rawValidate(
                     diag,
                 );
 
-                const frame_types = frame.types.funcType(module);
+                const frame_types = frame.types.funcType(mod);
                 const result_types = frame_types.results();
                 if (frame.info.opcode == .@"if") {
                     // Check that param types satisfy the results
@@ -1590,14 +1585,14 @@ pub fn rawValidate(
                     &reader,
                     &ctrl_stack,
                     val_stack.len(),
-                    module,
+                    mod,
                     diag,
                 );
 
                 // TODO: Skip branch fixup processing for unreachable code.
                 try appendSideTableEntry(scratch, &side_table, instr_offset, label, diag);
 
-                try val_stack.popManyExpecting(&ctrl_stack, label.frame.labelTypes(module), diag);
+                try val_stack.popManyExpecting(&ctrl_stack, label.frame.labelTypes(mod), diag);
                 markUnreachable(&val_stack, &ctrl_stack);
             },
             .br_if => {
@@ -1607,14 +1602,14 @@ pub fn rawValidate(
                     &reader,
                     &ctrl_stack,
                     val_stack.len(),
-                    module,
+                    mod,
                     diag,
                 );
 
                 // TODO: Skip branch fixup processing for unreachable code.
                 try appendSideTableEntry(scratch, &side_table, instr_offset, label, diag);
 
-                const label_types = label.frame.labelTypes(module);
+                const label_types = label.frame.labelTypes(mod);
                 try val_stack.popManyExpecting(&ctrl_stack, label_types, diag);
                 try val_stack.pushMany(scratch, label_types, diag);
             },
@@ -1642,11 +1637,11 @@ pub fn rawValidate(
                     &reader,
                     &ctrl_stack,
                     current_height,
-                    module,
+                    mod,
                     diag,
                 );
 
-                const last_label_types = last_label.frame.labelTypes(module);
+                const last_label_types = last_label.frame.labelTypes(mod);
                 const arity: u32 = @intCast(last_label_types.len);
 
                 // std.debug.print(
@@ -1659,7 +1654,7 @@ pub fn rawValidate(
                         n,
                         &ctrl_stack,
                         current_height,
-                        module,
+                        mod,
                         diag,
                     );
 
@@ -1674,7 +1669,7 @@ pub fn rawValidate(
                         else => |err| return err,
                     };
 
-                    const l_types = l.frame.labelTypes(module);
+                    const l_types = l.frame.labelTypes(mod);
                     if (l_types.len != arity) {
                         return Reader.failPrint(
                             diag,
@@ -1708,17 +1703,17 @@ pub fn rawValidate(
             .call => {
                 const callee = try reader.readIdx(
                     Module.FuncIdx,
-                    module.funcTypes().len,
+                    mod.funcTypes().len,
                     diag,
                     &.{ "function", "in call" },
                 );
-                const callee_signature = module.funcTypes()[@intFromEnum(callee)];
+                const callee_signature = mod.funcTypes()[@intFromEnum(callee)];
 
                 try val_stack.popManyExpecting(&ctrl_stack, callee_signature.parameters(), diag);
                 try val_stack.pushMany(scratch, callee_signature.results(), diag);
             },
             .call_indirect => {
-                const module_types = module.types();
+                const module_types = mod.types();
                 const type_idx = try reader.readIdx(
                     Module.TypeIdx,
                     module_types.len,
@@ -1734,7 +1729,7 @@ pub fn rawValidate(
                 //     .{ type_idx, callee_signature.parameters(), callee_signature.results() },
                 // );
 
-                const table_types = module.tableTypes();
+                const table_types = mod.tableTypes();
                 const table_idx = try reader.readIdx(
                     Module.TableIdx,
                     table_types.len,
@@ -1760,18 +1755,18 @@ pub fn rawValidate(
             .return_call => {
                 const callee = try reader.readIdx(
                     Module.FuncIdx,
-                    module.funcTypes().len,
+                    mod.funcTypes().len,
                     diag,
                     &.{ "function", "in return_call" },
                 );
-                const callee_signature = module.funcTypes()[@intFromEnum(callee)];
+                const callee_signature = mod.funcTypes()[@intFromEnum(callee)];
 
                 try validateTailCallSignature(func_type, callee_signature, diag, .return_call);
                 try val_stack.popManyExpecting(&ctrl_stack, callee_signature.parameters(), diag);
                 markUnreachable(&val_stack, &ctrl_stack);
             },
             .return_call_indirect => {
-                const module_types = module.types();
+                const module_types = mod.types();
                 const type_idx = try reader.readIdx(
                     Module.TypeIdx,
                     module_types.len,
@@ -1782,7 +1777,7 @@ pub fn rawValidate(
                 const callee_signature: *const Module.FuncType =
                     &module_types[@intFromEnum(type_idx)];
 
-                const table_types = module.tableTypes();
+                const table_types = mod.tableTypes();
                 const table_idx = try reader.readIdx(
                     Module.TableIdx,
                     table_types.len,
@@ -1893,24 +1888,24 @@ pub fn rawValidate(
             .@"global.get" => {
                 const global_idx = try reader.readIdx(
                     Module.GlobalIdx,
-                    module.globalTypes().len,
+                    mod.globalTypes().len,
                     diag,
                     &.{ "global", "in global.get" },
                 );
 
-                const global_type = module.globalTypes()[@intFromEnum(global_idx)].val_type;
+                const global_type = mod.globalTypes()[@intFromEnum(global_idx)].val_type;
                 try val_stack.push(scratch, global_type, diag);
             },
             .@"global.set" => {
                 const global_idx = try reader.readIdx(
                     Module.GlobalIdx,
-                    module.globalTypes().len,
+                    mod.globalTypes().len,
                     diag,
                     &.{ "global", "in global.get" },
                 );
 
                 const global_type: *const Module.GlobalType =
-                    &module.globalTypes()[@intFromEnum(global_idx)];
+                    &mod.globalTypes()[@intFromEnum(global_idx)];
 
                 if (global_type.mut != .@"var") {
                     return Reader.fail(diag, .validation, "global is immutable");
@@ -1920,7 +1915,7 @@ pub fn rawValidate(
             },
 
             .@"table.get" => {
-                const table_type = try readTableIdx(&reader, module, diag);
+                const table_type = try readTableIdx(&reader, mod, diag);
                 try val_stack.popThenPushExpecting(
                     scratch,
                     &ctrl_stack,
@@ -1930,7 +1925,7 @@ pub fn rawValidate(
                 );
             },
             .@"table.set" => {
-                const table_type = try readTableIdx(&reader, module, diag);
+                const table_type = try readTableIdx(&reader, mod, diag);
                 try val_stack.popManyExpecting(
                     &ctrl_stack,
                     &[_]ValType{ .i32, table_type },
@@ -1944,7 +1939,7 @@ pub fn rawValidate(
                 &ctrl_stack,
                 .@"4",
                 .i32,
-                module,
+                mod,
                 scratch,
                 diag,
             ),
@@ -1954,7 +1949,7 @@ pub fn rawValidate(
                 &ctrl_stack,
                 .@"8",
                 .i64,
-                module,
+                mod,
                 scratch,
                 diag,
             ),
@@ -1964,7 +1959,7 @@ pub fn rawValidate(
                 &ctrl_stack,
                 .@"4",
                 .f32,
-                module,
+                mod,
                 scratch,
                 diag,
             ),
@@ -1974,7 +1969,7 @@ pub fn rawValidate(
                 &ctrl_stack,
                 .@"8",
                 .f64,
-                module,
+                mod,
                 scratch,
                 diag,
             ),
@@ -1984,7 +1979,7 @@ pub fn rawValidate(
                 &ctrl_stack,
                 .@"1",
                 .i32,
-                module,
+                mod,
                 scratch,
                 diag,
             ),
@@ -1994,7 +1989,7 @@ pub fn rawValidate(
                 &ctrl_stack,
                 .@"2",
                 .i32,
-                module,
+                mod,
                 scratch,
                 diag,
             ),
@@ -2004,7 +1999,7 @@ pub fn rawValidate(
                 &ctrl_stack,
                 .@"1",
                 .i64,
-                module,
+                mod,
                 scratch,
                 diag,
             ),
@@ -2014,7 +2009,7 @@ pub fn rawValidate(
                 &ctrl_stack,
                 .@"2",
                 .i64,
-                module,
+                mod,
                 scratch,
                 diag,
             ),
@@ -2024,43 +2019,43 @@ pub fn rawValidate(
                 &ctrl_stack,
                 .@"4",
                 .i64,
-                module,
+                mod,
                 scratch,
                 diag,
             ),
             .@"i32.store" => {
-                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"4", .i32, module, diag);
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"4", .i32, mod, diag);
             },
             .@"i64.store" => {
-                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"8", .i64, module, diag);
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"8", .i64, mod, diag);
             },
             .@"f32.store" => {
-                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"4", .f32, module, diag);
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"4", .f32, mod, diag);
             },
             .@"f64.store" => {
-                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"8", .f64, module, diag);
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"8", .f64, mod, diag);
             },
             .@"i32.store8" => {
-                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"1", .i32, module, diag);
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"1", .i32, mod, diag);
             },
             .@"i32.store16" => {
-                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"2", .i32, module, diag);
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"2", .i32, mod, diag);
             },
             .@"i64.store8" => {
-                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"1", .i64, module, diag);
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"1", .i64, mod, diag);
             },
             .@"i64.store16" => {
-                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"2", .i64, module, diag);
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"2", .i64, mod, diag);
             },
             .@"i64.store32" => {
-                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"4", .i64, module, diag);
+                try validateStoreInstr(&reader, &val_stack, &ctrl_stack, .@"4", .i64, mod, diag);
             },
             .@"memory.size" => {
-                try readMemIdx(&reader, module, diag);
+                try readMemIdx(&reader, mod, diag);
                 try val_stack.push(scratch, .i32, diag);
             },
             .@"memory.grow" => {
-                try readMemIdx(&reader, module, diag);
+                try readMemIdx(&reader, mod, diag);
                 try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i32, .i32, diag);
             },
 
@@ -2266,12 +2261,12 @@ pub fn rawValidate(
             .@"ref.func" => {
                 const func_idx = try reader.readIdx(
                     Module.FuncIdx,
-                    module.funcTypes().len,
+                    mod.funcTypes().len,
                     diag,
                     &.{ "function", "in ref.func" },
                 );
 
-                if (!module.funcIsReferencable(func_idx)) {
+                if (!mod.funcIsReferencable(func_idx)) {
                     return Reader.failPrint(
                         diag,
                         .validation,
@@ -2304,20 +2299,20 @@ pub fn rawValidate(
 
                 .@"memory.init" => {
                     const data_idx = try ReadDataIdx.begin(&reader, diag);
-                    try readMemIdx(&reader, module, diag);
-                    try data_idx.boundsCheck(module, diag);
+                    try readMemIdx(&reader, mod, diag);
+                    try data_idx.boundsCheck(mod, diag);
                     try val_stack.popManyExpecting(&ctrl_stack, &[_]ValType{.i32} ** 3, diag);
                 },
                 .@"data.drop" => {
-                    try (try ReadDataIdx.begin(&reader, diag)).boundsCheck(module, diag);
+                    try (try ReadDataIdx.begin(&reader, diag)).boundsCheck(mod, diag);
                 },
                 .@"memory.copy" => {
-                    try readMemIdx(&reader, module, diag);
-                    try readMemIdx(&reader, module, diag);
+                    try readMemIdx(&reader, mod, diag);
+                    try readMemIdx(&reader, mod, diag);
                     try val_stack.popManyExpecting(&ctrl_stack, &[_]ValType{.i32} ** 3, diag);
                 },
                 .@"memory.fill" => {
-                    try readMemIdx(&reader, module, diag);
+                    try readMemIdx(&reader, mod, diag);
                     try val_stack.popManyExpecting(&ctrl_stack, &[_]ValType{.i32} ** 3, diag);
                 },
 
@@ -2325,9 +2320,9 @@ pub fn rawValidate(
                     // const elem_type = try readElemIdx(&reader, module, diag);
                     // Spectests require first checking the table index
                     const elem_idx = try reader.readUleb128(u32, diag, "elemidx in table.init");
-                    const table_type = try readTableIdx(&reader, module, diag);
-                    const elem_segment = if (elem_idx < module.elementSegments().len)
-                        module.elementSegments()[elem_idx]
+                    const table_type = try readTableIdx(&reader, mod, diag);
+                    const elem_segment = if (elem_idx < mod.elementSegments().len)
+                        mod.elementSegments()[elem_idx]
                     else {
                         return Reader.failPrint(
                             diag,
@@ -2357,10 +2352,10 @@ pub fn rawValidate(
                         ) catch return ValStack.errorValueStackTooLarge(diag),
                     );
                 },
-                .@"elem.drop" => _ = try readElemIdx(&reader, module, diag),
+                .@"elem.drop" => _ = try readElemIdx(&reader, mod, diag),
                 .@"table.copy" => {
-                    const dst_type = try readTableIdx(&reader, module, diag);
-                    const src_type = try readTableIdx(&reader, module, diag);
+                    const dst_type = try readTableIdx(&reader, mod, diag);
+                    const src_type = try readTableIdx(&reader, mod, diag);
                     if (dst_type != src_type) {
                         return Reader.failPrint(
                             diag,
@@ -2374,7 +2369,7 @@ pub fn rawValidate(
                     try val_stack.popManyExpecting(&ctrl_stack, &[_]ValType{.i32} ** 3, diag);
                 },
                 .@"table.grow" => {
-                    const elem_type = try readTableIdx(&reader, module, diag);
+                    const elem_type = try readTableIdx(&reader, mod, diag);
                     try val_stack.popExpecting(&ctrl_stack, .i32, diag);
                     try val_stack.popThenPushExpecting(
                         scratch,
@@ -2385,11 +2380,11 @@ pub fn rawValidate(
                     );
                 },
                 .@"table.size" => {
-                    _ = try readTableIdx(&reader, module, diag);
+                    _ = try readTableIdx(&reader, mod, diag);
                     try val_stack.push(scratch, .i32, diag);
                 },
                 .@"table.fill" => {
-                    const elem_type = try readTableIdx(&reader, module, diag);
+                    const elem_type = try readTableIdx(&reader, mod, diag);
                     try val_stack.popManyExpecting(
                         &ctrl_stack,
                         &[3]ValType{ .i32, elem_type, .i32 },
@@ -2421,7 +2416,7 @@ pub fn rawValidate(
                     &ctrl_stack,
                     .@"16",
                     .v128,
-                    module,
+                    mod,
                     scratch,
                     diag,
                 ),
@@ -2432,7 +2427,7 @@ pub fn rawValidate(
                     &ctrl_stack,
                     .@"1",
                     .v128,
-                    module,
+                    mod,
                     scratch,
                     diag,
                 ),
@@ -2442,7 +2437,7 @@ pub fn rawValidate(
                     &ctrl_stack,
                     .@"2",
                     .v128,
-                    module,
+                    mod,
                     scratch,
                     diag,
                 ),
@@ -2452,7 +2447,7 @@ pub fn rawValidate(
                     &ctrl_stack,
                     .@"4",
                     .v128,
-                    module,
+                    mod,
                     scratch,
                     diag,
                 ),
@@ -2469,7 +2464,7 @@ pub fn rawValidate(
                     &ctrl_stack,
                     .@"8",
                     .v128,
-                    module,
+                    mod,
                     scratch,
                     diag,
                 ),
@@ -2479,7 +2474,7 @@ pub fn rawValidate(
                     &ctrl_stack,
                     .@"16",
                     .v128,
-                    module,
+                    mod,
                     diag,
                 ),
                 .@"v128.const" => {
@@ -2752,7 +2747,7 @@ pub fn rawValidate(
                     &val_stack,
                     &ctrl_stack,
                     .@"16",
-                    module,
+                    mod,
                     scratch,
                     diag,
                 ),
@@ -2762,7 +2757,7 @@ pub fn rawValidate(
                     &val_stack,
                     &ctrl_stack,
                     .@"8",
-                    module,
+                    mod,
                     scratch,
                     diag,
                 ),
@@ -2772,7 +2767,7 @@ pub fn rawValidate(
                     &val_stack,
                     &ctrl_stack,
                     .@"4",
-                    module,
+                    mod,
                     scratch,
                     diag,
                 ),
@@ -2782,7 +2777,7 @@ pub fn rawValidate(
                     &val_stack,
                     &ctrl_stack,
                     .@"2",
-                    module,
+                    mod,
                     scratch,
                     diag,
                 ),
@@ -2792,7 +2787,7 @@ pub fn rawValidate(
                     &val_stack,
                     &ctrl_stack,
                     .@"16",
-                    module,
+                    mod,
                     diag,
                 ),
                 .@"v128.store16_lane" => try validateStoreLaneInstr(
@@ -2801,7 +2796,7 @@ pub fn rawValidate(
                     &val_stack,
                     &ctrl_stack,
                     .@"8",
-                    module,
+                    mod,
                     diag,
                 ),
                 .@"v128.store32_lane" => try validateStoreLaneInstr(
@@ -2810,7 +2805,7 @@ pub fn rawValidate(
                     &val_stack,
                     &ctrl_stack,
                     .@"4",
-                    module,
+                    mod,
                     diag,
                 ),
                 .@"v128.store64_lane" => try validateStoreLaneInstr(
@@ -2819,12 +2814,12 @@ pub fn rawValidate(
                     &val_stack,
                     &ctrl_stack,
                     .@"2",
-                    module,
+                    mod,
                     diag,
                 ),
                 .@"v128.load32_zero", .@"v128.load64_zero" => {
                     try val_stack.popThenPushExpecting(scratch, &ctrl_stack, .i32, .v128, diag);
-                    try readMemArg(&reader, .@"16", module, diag);
+                    try readMemArg(&reader, .@"16", mod, diag);
                 },
                 .@"i8x16.shl",
                 .@"i8x16.shr_s",
@@ -2895,11 +2890,12 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
-const Module = @import("../Module.zig");
+const module = @import("../module.zig");
+const Module = module.Module;
 const Reader = @import("Reader.zig");
 const Diagnostics = Reader.Diagnostics;
 const ValType = Module.ValType;
-const V128 = @import("../v128.zig").V128;
+const V128 = @import("wasmstint").V128;
 const opcodes = @import("opcodes");
 const wasm_features = @import("wasm_features");
 const coz = @import("coz");

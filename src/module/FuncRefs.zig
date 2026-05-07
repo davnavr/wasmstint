@@ -68,4 +68,4 @@ pub fn finish(refs: *FuncRefs, allocator: Allocator) Allocator.Error!Lookup {
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const FuncIdx = @import("../Module.zig").FuncIdx;
+const FuncIdx = @import("../module.zig").Module.FuncIdx;

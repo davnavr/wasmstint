@@ -200,6 +200,11 @@ pub fn build(b: *Build) void {
             .optimize = optimize,
             // .link_libc = link_libc,
         });
+        const module_module = b.createModule(.{
+            .root_source_file = b.path("src/module.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
         const handlers_module = b.createModule(.{
             .root_source_file = b.path("src/handlers.zig"),
             .target = target,
@@ -223,17 +228,26 @@ pub fn build(b: *Build) void {
             .{ "wasm_features", wasm_options },
             .{ "options", module_options_import },
         }) |info| {
-            for (&[3]*Build.Module{ root_module, handlers_module, interpreter_module }) |m| {
+            for (&[4]*Build.Module{
+                root_module,
+                module_module,
+                handlers_module,
+                interpreter_module,
+            }) |m| {
                 m.addImport(info.@"0", info.@"1");
             }
         }
 
-        for (&[2]*Build.Module{ handlers_module, interpreter_module }) |m| {
+        for (&[3]*Build.Module{ handlers_module, module_module, interpreter_module }) |m| {
             m.addImport("wasmstint", root_module);
         }
 
         for (&[2]*Build.Module{ root_module, handlers_module }) |m| {
             m.addImport("interpreter", interpreter_module);
+        }
+
+        for (&[3]*Build.Module{ root_module, handlers_module, interpreter_module }) |m| {
+            m.addImport("module", module_module);
         }
 
         const enum_set_module = b.createModule(.{
@@ -479,7 +493,7 @@ pub fn build(b: *Build) void {
                 .name = "wasmstint",
                 .root_module = test_wasmstint_module,
                 .use_llvm = use_llvm.ifPreferred(),
-                .max_rss = byte_size.mib(470),
+                .max_rss = byte_size.mib(450), // arbitrary amount
             });
             for (&[3]struct { []const u8, *Build.Module }{
                 .{ "coz", coz_module },
@@ -488,6 +502,22 @@ pub fn build(b: *Build) void {
             }) |info| {
                 tests.root_module.addImport(info.@"0", info.@"1");
             }
+
+            const run_tests = &b.addRunArtifact(tests).step;
+            run_tests.max_rss = byte_size.mib(43);
+            unit_tests_step.dependOn(run_tests);
+        }
+        {
+            const tests = b.addTest(.{
+                .name = "wasmstint.module",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/module.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                }),
+                .use_llvm = use_llvm.ifPreferred(),
+                .max_rss = byte_size.mib(270), // arbitrary amount
+            });
 
             const run_tests = &b.addRunArtifact(tests).step;
             run_tests.max_rss = byte_size.mib(43);
@@ -510,6 +540,13 @@ pub fn build(b: *Build) void {
             }) |info| {
                 tests.root_module.addImport(info.@"0", info.@"1");
             }
+            const test_module_module = b.createModule(.{
+                .root_source_file = b.path("src/module.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            test_module_module.addImport("opcodes", opcodes_module);
+            tests.root_module.addImport("module", test_module_module);
 
             const run_tests = &b.addRunArtifact(tests).step;
             run_tests.max_rss = byte_size.mib(27);
@@ -532,6 +569,13 @@ pub fn build(b: *Build) void {
             }) |info| {
                 tests.root_module.addImport(info.@"0", info.@"1");
             }
+            const test_module_module = b.createModule(.{
+                .root_source_file = b.path("src/module.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            test_module_module.addImport("opcodes", opcodes_module);
+            tests.root_module.addImport("module", test_module_module);
 
             const run_tests = &b.addRunArtifact(tests).step;
             run_tests.max_rss = byte_size.mib(27);

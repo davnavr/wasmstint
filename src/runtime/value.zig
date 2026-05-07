@@ -113,19 +113,19 @@ pub const FuncInst = extern struct {
             try writer.writeAll("(func ");
             switch (func.*) {
                 .wasm => |wasm| {
-                    const module = wasm.module.header().module;
-                    if (module.nameSection().functionName(wasm.idx).get()) |func_id| {
-                        try func_id.formatIdentifier(module.nameSection(), writer);
+                    const mod = wasm.module.header().module;
+                    if (mod.nameSection().functionName(wasm.idx).get()) |func_id| {
+                        try func_id.formatIdentifier(mod.nameSection(), writer);
                     } else {
                         try writer.print("(;{d};)", .{@intFromEnum(wasm.idx)});
                     }
 
                     // for (wasm.module.findExportNames(.{ .func = wasm.idx })) |name| {
 
-                    for (module.exports()) |exp| {
+                    for (mod.exports()) |exp| {
                         const desc = exp.descIdx();
                         if (desc == .func and desc.func == wasm.idx) {
-                            try writer.print(" (export {f})", .{exp.name(module)});
+                            try writer.print(" (export {f})", .{exp.name(mod)});
                         }
                     }
 
@@ -157,12 +157,9 @@ pub const FuncInst = extern struct {
         idx: Module.FuncIdx,
 
         /// Asserts that `idx` does **not** refer to a function import.
-        pub fn init(module: ModuleInst, idx: Module.FuncIdx) Wasm {
-            std.debug.assert( // function import not allowed
-                module.header().module.inner.parent().func_import_count <= @intFromEnum(idx),
-            );
-
-            return Wasm{ .module = module, .idx = idx };
+        pub fn init(mod: ModuleInst, idx: Module.FuncIdx) Wasm {
+            std.debug.assert(mod.header().module.funcImportCount() <= @intFromEnum(idx));
+            return Wasm{ .module = mod, .idx = idx };
         }
 
         pub fn code(wasm: Wasm) *Module.Code {
@@ -248,10 +245,11 @@ pub const FuncRef = packed struct(usize) {
 
         /// Never refers to a function import.
         pub fn funcIdx(wasm: Wasm) Module.FuncIdx {
-            const wasm_module = wasm.module().header().module.inner;
+            const wasm_module: *const Module = wasm.module().header().module;
             const lookup_idx = wasm.lookupIdx();
-            const import_count = wasm_module.parent().func_import_count;
-            const idx: Module.FuncIdx = wasm_module.parent().func_refs.keys()[lookup_idx];
+            const import_count = wasm_module.funcImportCount();
+            const idx: Module.FuncIdx =
+                @import("module").Inner.ofModule(wasm_module).func_refs.keys()[lookup_idx];
 
             if (builtin.mode == .Debug) {
                 std.debug.assert(import_count <= lookup_idx);
@@ -446,6 +444,6 @@ pub const ExternAddr = extern union {
 const std = @import("std");
 const builtin = @import("builtin");
 const Writer = std.Io.Writer;
-const Module = @import("../Module.zig");
+const Module = @import("module").Module;
 const ModuleInst = @import("module_inst.zig").ModuleInst;
 const V128 = @import("../v128.zig").V128;

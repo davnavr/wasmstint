@@ -55,7 +55,7 @@ pub const Definitions = struct {
 ///
 /// Asserts that the types and number of `Definitions` exactly match those listed in the `Module`.
 pub fn allocateWithDefinitions(
-    module: Module,
+    mod: *Module,
     /// Used to allocate the `ModuleInst` itself.
     allocator: Allocator,
     import_provider: ImportProvider,
@@ -66,8 +66,8 @@ pub fn allocateWithDefinitions(
     /// On success, ownership of the definitions is transferred to the allocated `ModuleInst`.
     definitions: Definitions,
 ) AllocationError!ModuleAlloc {
-    const defined_table_types = module.tableDefinedTypes();
-    const defined_mem_types = module.memDefinedTypes();
+    const defined_table_types = mod.tableDefinedTypes();
+    const defined_mem_types = mod.memDefinedTypes();
     std.debug.assert(definitions.tables.len == defined_table_types.len);
     std.debug.assert(definitions.memories.len == defined_mem_types.len);
 
@@ -88,7 +88,7 @@ pub fn allocateWithDefinitions(
     };
 
     const final_layout = layout: {
-        var layout = module.inner.parent().runtime_shape.size;
+        var layout = module.Inner.ofModule(mod).runtime_shape.size;
         try layout.append(definitions_layout);
         break :layout layout;
     };
@@ -110,25 +110,22 @@ pub fn allocateWithDefinitions(
     const func_blocks = arena.allocator().alignedAlloc(
         value.FuncRef.Wasm.Block,
         .fromByteUnits(@sizeOf(value.FuncRef.Wasm.Block)),
-        ModuleInst.Header.funcBlockCount(module),
+        ModuleInst.Header.funcBlockCount(mod),
     ) catch unreachable;
-    const func_imports = arena.allocator()
-        .alloc(value.FuncRef, module.inner.parent().func_import_count) catch unreachable;
-    const tables =
-        arena.allocator().alloc(*TableInst, module.inner.parent().table_count) catch unreachable;
-    const mems = arena.allocator().alloc(*MemInst, module.inner.parent().mem_count) catch
+    const func_imports = arena.allocator().alloc(value.FuncRef, mod.funcImportCount()) catch
         unreachable;
-    const globals = arena.allocator().alloc(*anyopaque, module.inner.parent().global_count) catch
-        unreachable;
+    const tables = arena.allocator().alloc(*TableInst, mod.tableCount()) catch unreachable;
+    const mems = arena.allocator().alloc(*MemInst, mod.memCount()) catch unreachable;
+    const globals = arena.allocator().alloc(*anyopaque, mod.globalCount()) catch unreachable;
     const datas_drop_mask = arena.allocator().alloc(
         u32,
-        std.math.divCeil(u32, module.inner.parent().datas_count, 32) catch unreachable,
+        std.math.divCeil(u32, mod.dataSegmentCount(), 32) catch unreachable,
     ) catch unreachable;
     const elems_drop_mask = arena.allocator().dupe(
         u32,
-        module.inner.parent().non_declarative_elems_mask[0 .. std.math.divCeil(
+        module.Inner.ofModule(mod).non_declarative_elems_mask[0 .. std.math.divCeil(
             u32,
-            module.inner.parent().elems_count,
+            mod.elementSegmentCount(),
             32,
         ) catch unreachable],
     ) catch unreachable;
@@ -136,12 +133,12 @@ pub fn allocateWithDefinitions(
     // Initialize imports ASAP so any errors happen before any more code can run.
     for (
         func_imports,
-        module.funcImportNames(),
-        module.funcImportTypes(),
+        mod.funcImportNames(),
+        mod.funcImportTypes(),
     ) |*import, name, func_type| {
         import.* = try import_provider.resolveTyped(
-            name.module_name(module),
-            name.desc_name(module),
+            name.module(mod),
+            name.desc(mod),
             .func,
             func_type,
             import_failure,
@@ -149,13 +146,13 @@ pub fn allocateWithDefinitions(
     }
 
     for (
-        tables[0..module.inner.parent().table_import_count],
-        module.tableImportNames(),
-        module.tableImportTypes(),
+        tables[0..mod.tableImportCount()],
+        mod.tableImportNames(),
+        mod.tableImportTypes(),
     ) |*import, name, *table_type| {
         import.* = try import_provider.resolveTyped(
-            name.module_name(module),
-            name.desc_name(module),
+            name.module(mod),
+            name.desc(mod),
             .table,
             table_type,
             import_failure,
@@ -163,13 +160,13 @@ pub fn allocateWithDefinitions(
     }
 
     for (
-        mems[0..module.inner.parent().mem_import_count],
-        module.memImportNames(),
-        module.memImportTypes(),
+        mems[0..mod.memImportCount()],
+        mod.memImportNames(),
+        mod.memImportTypes(),
     ) |*import, name, *mem_type| {
         import.* = try import_provider.resolveTyped(
-            name.module_name(module),
-            name.desc_name(module),
+            name.module(mod),
+            name.desc(mod),
             .mem,
             mem_type,
             import_failure,
@@ -177,13 +174,13 @@ pub fn allocateWithDefinitions(
     }
 
     for (
-        globals[0..module.inner.parent().global_import_count],
-        module.globalImportNames(),
-        module.globalImportTypes(),
+        globals[0..mod.globalImportCount()],
+        mod.globalImportNames(),
+        mod.globalImportTypes(),
     ) |*import, name, *global_type| {
         import.* = (try import_provider.resolveTyped(
-            name.module_name(module),
-            name.desc_name(module),
+            name.module(mod),
+            name.desc(mod),
             .global,
             global_type,
             import_failure,
@@ -195,15 +192,15 @@ pub fn allocateWithDefinitions(
     for (func_blocks, 0..) |*block, i| {
         block.* = value.FuncRef.Wasm.Block{
             .module = module_inst,
-            .starting_idx = module.inner.parent().func_import_count +
+            .starting_idx = mod.funcImportCount() +
                 (@as(u32, @intCast(i)) * value.FuncRef.Wasm.Block.funcs_per_block),
         };
     }
 
     // Initialize definitions
     for (
-        globals[module.inner.parent().global_import_count..],
-        module.globalTypes()[module.inner.parent().global_import_count..],
+        globals[mod.globalImportCount()..],
+        mod.globalTypes()[mod.globalImportCount()..],
     ) |*value_ptr, *global_type| {
         value_ptr.* = switch (global_type.val_type) {
             inline else => |val_type| value: {
@@ -227,7 +224,7 @@ pub fn allocateWithDefinitions(
     }
 
     for (
-        tables[module.inner.parent().table_import_count..],
+        tables[mod.tableImportCount()..],
         defined_table_types,
         definitions.tables,
     ) |*table_addr, *table_type, table_inst| {
@@ -238,7 +235,7 @@ pub fn allocateWithDefinitions(
     }
 
     for (
-        mems[module.inner.parent().mem_import_count..],
+        mems[mod.memImportCount()..],
         defined_mem_types,
         definitions.memories,
     ) |*mem_addr, *mem_type, src_mem| {
@@ -251,7 +248,7 @@ pub fn allocateWithDefinitions(
 
     header.* = ModuleInst.Header{
         .buffer_len = arena.buffer.len,
-        .module = module,
+        .module = mod,
         .func_imports = func_imports.ptr,
         .func_blocks = func_blocks.ptr,
         .mems = mems.ptr,
@@ -277,15 +274,19 @@ pub fn assumeInstantiated(alloc: *ModuleAlloc) ModuleInst {
 }
 
 /// Deinitializes the underlying `ModuleInst`, usually because initialization needs to be canceled.
-pub fn deinit(module: *ModuleAlloc, allocator: Allocator) void {
-    module.requiring_instantiation.deinit(allocator);
-    module.* = undefined;
+pub fn deinit(mod: *ModuleAlloc, allocator: Allocator) void {
+    mod.requiring_instantiation.deinit(allocator);
+    mod.* = undefined;
 }
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+
 const allocators = @import("allocators");
-const Module = @import("../Module.zig");
+
+const module = @import("module");
+const Module = module.Module;
+
 const ModuleInst = @import("module_inst.zig").ModuleInst;
 const value = @import("value.zig");
 const MemInst = @import("memory.zig").MemInst;

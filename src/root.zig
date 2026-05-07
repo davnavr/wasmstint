@@ -2,7 +2,7 @@
 //!
 //! [WebAssembly]: https://webassembly.org/
 
-pub const Module = @import("Module.zig");
+pub const Module = @import("module").Module;
 pub const runtime = @import("runtime.zig");
 pub const Interpreter = @import("interpreter").Interpreter;
 
@@ -50,6 +50,5 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 test {
-    _ = Module;
     _ = pointer;
 }
