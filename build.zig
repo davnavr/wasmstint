@@ -1272,7 +1272,7 @@ pub fn build(b: *Build) void {
                     .optimize = optimize,
                     .pic = pic,
                 }),
-                .max_rss = byte_size.mib(436),
+                .max_rss = byte_size.mib(470),
                 .use_llvm = use_llvm.ifPreferred(),
             });
             if (fail_no_rust_include) |fail| {

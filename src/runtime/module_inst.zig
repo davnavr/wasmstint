@@ -63,11 +63,10 @@ pub const ModuleInst = extern struct {
 
     /// Internal API.
     ///
-    /// Contains fields accessed from assembly or LLVM IR code.
-    ///
-    /// Deleting or reordering fields requires updating the code generation for the x86-64 assembly
-    /// and LLVM IR interpreter backends.
-    pub const Header = struct { // extern
+    /// Contains fields accessed from assembly or LLVM IR code. Deleting or reordering fields
+    /// requires updating the code generation for the x86-64 assembly and LLVM IR interpreter
+    /// backends.
+    pub const Header = extern struct {
         buffer_size: usize,
         module: *Module,
         // /// Used to detect multi-threaded usage of a module instance.
