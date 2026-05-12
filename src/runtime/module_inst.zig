@@ -5,13 +5,10 @@
 ///
 /// Marked `extern`, as it is intended to have the same ABI as a pointer.
 pub const ModuleInst = extern struct {
-    // Packed struct to workaround a codegen bug in Zig 0.15.1
-    // ^ ModuleInst parameter's lower 16-bits get cloberred in `i32/64.const` handler
-
     /// Internal API.
     ///
-    /// Makes calculating the layout of a `ModuleInst` a single cost when a `Module` is parsed,
-    /// rather than recalculating it every time a module is instantiated.
+    /// Allows calculating the layout of a `ModuleInst` once when a `Module` is parsed, rather than
+    /// recalculating it every time a module is instantiated.
     pub const Shape = struct {
         size: allocators.Reservation,
         // /// Stores the offsets of the values of defined globals.
@@ -65,8 +62,13 @@ pub const ModuleInst = extern struct {
     };
 
     /// Internal API.
+    ///
+    /// Contains fields accessed from assembly or LLVM IR code.
+    ///
+    /// Deleting or reordering fields requires updating the code generation for the x86-64 assembly
+    /// and LLVM IR interpreter backends.
     pub const Header = struct { // extern
-        buffer_len: usize,
+        buffer_size: usize,
         module: *Module,
         // /// Used to detect multi-threaded usage of a module instance.
         // ///
@@ -362,7 +364,7 @@ pub const ModuleInst = extern struct {
         const buffer: []align(std.atomic.cache_line) u8 = @as(
             [*]align(std.atomic.cache_line) u8,
             @ptrCast(@constCast(inst.inner)),
-        )[0..inst.inner.buffer_len];
+        )[0..inst.inner.buffer_size];
 
         allocator.free(buffer);
         inst.* = undefined;

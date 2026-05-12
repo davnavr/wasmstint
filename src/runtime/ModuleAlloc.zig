@@ -247,7 +247,7 @@ pub fn allocateWithDefinitions(
     @memset(datas_drop_mask, std.math.maxInt(u32));
 
     header.* = ModuleInst.Header{
-        .buffer_len = arena.buffer.len,
+        .buffer_size = arena.buffer.len,
         .module = mod,
         .func_imports = func_imports.ptr,
         .func_blocks = func_blocks.ptr,
