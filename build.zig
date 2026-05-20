@@ -89,6 +89,16 @@ pub fn build(b: *Build) void {
         .target = target,
         .optimize = optimize,
     });
+    {
+        const tests = &b.addRunArtifact(b.addTest(.{
+            .name = "sys",
+            .root_module = sys_module,
+            .max_rss = byte_size.mib(364),
+            .use_llvm = use_llvm.ifPreferred(),
+        })).step;
+        tests.max_rss = byte_size.mib(15); // arbitrary value
+        unit_tests_step.dependOn(tests);
+    }
 
     const allocators_module = b.createModule(.{
         .root_source_file = b.path("src/allocators.zig"),
@@ -593,7 +603,7 @@ pub fn build(b: *Build) void {
                 .optimize = optimize,
             }),
             .use_llvm = use_llvm.ifPreferred(),
-            .max_rss = byte_size.mib(694),
+            .max_rss = byte_size.mib(771),
         });
         for (&[3]struct { []const u8, *Build.Module }{
             .{ "wasm_features", wasm_options },
